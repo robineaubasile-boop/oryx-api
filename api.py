@@ -1,0 +1,85 @@
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from core.scoring import compute_score, get_verdict
+from core.pedagogie import generate_analysis
+from core.valuation import compute_valuation, valuation_verdict
+
+app = FastAPI()
+
+class StockInput(BaseModel):
+	revenue_growth: float
+	operating_margin: float
+	roe: float
+	net_cash: float
+	fcf_per_share: float
+	growth: float
+	current_price: float
+
+class TickerInput(BaseModel):
+	ticker: str
+
+@app.post("/analyze")
+def analyze_stock(data: StockInput):
+
+	data_dict = data.dict()
+
+	# --- QUALITÉ ---
+	score = compute_score(data_dict)
+	verdict = get_verdict(score)
+	analysis = generate_analysis(data_dict, score)
+
+	# --- VALORISATION ---
+	fair_value, upside, multiple = compute_valuation(data_dict)
+	valo = valuation_verdict(upside)
+
+	return {
+		"score": score,
+		"verdict": verdict,
+		"analysis": analysis,
+		"multiple": multiple,
+		"fair_value": round(fair_value, 2),
+		"current_price": data_dict["current_price"],
+		"upside_percent": round(upside, 1),
+		"valuation_verdict": valo
+	}
+
+from core.data_fetcher import fetch_financial_data
+@app.post("/analyze-ticker")
+def analyze_from_ticker(input: TickerInput):
+
+	ticker = input.ticker.upper()
+	data_dict = fetch_financial_data(ticker)
+
+	# --- QUALITÉ ---
+	score = compute_score(data_dict)
+	verdict = get_verdict(score)
+	analysis = "test analysis"
+
+	# --- VALORISATION ---
+	fair_value, upside, multiple = compute_valuation(data_dict)
+	valo = valuation_verdict(upside)
+
+	return {
+		"ticker": str(ticker),
+		"score": float(score),
+		"verdict": str(verdict),
+		"analysis": str(analysis),
+		"multiple": float(multiple),
+		"fair_value": float(round(fair_value, 2)),
+		"current_price": float(data_dict["current_price"]),
+		"upside_percent": float(round(upside, 1)),
+		"valuation_verdict": str(valo),
+		"revenue_growth": float(data_dict["revenue_growth"]),
+		"operating_margin": float(data_dict["operating_margin"]),
+		"roe": float(data_dict["roe"]),
+		"fcf_per_share": float(data_dict["fcf_per_share"]),
+		"net_cash": float(data_dict["net_cash"])
+	}
+
+	import os
+	import uvicorn
+
+	if __name__ == "__main":
+			port = int(os.environ.get("PORT", 10000))
+			uvicorn.run(app, host="0.0.0.0",port=port)
