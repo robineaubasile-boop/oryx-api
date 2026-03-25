@@ -1,6 +1,6 @@
 fastapi==0.110.0
 uvicorn==0.27.0
 yfinance
-pytdantic==2.0
+pytdantic>=2.6,<3.0
 requests
 python-dotenv
