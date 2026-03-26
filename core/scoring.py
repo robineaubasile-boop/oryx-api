@@ -1,7 +1,7 @@
 # ========================= # 1️⃣ Score Croissance # =========================
 
 def growth_score(data):
-
+	# Max: 4 pts
 	score = 0
 
 	revenue_growth = data.get("revenue_growth", 0)
@@ -20,10 +20,12 @@ def growth_score(data):
 
 	return score
 
+GROWTH_SCORE_MAX = 4
+
 # ========================= # 2️⃣ Score Qualité # =========================
 
 def quality_score(data):
-
+	# Max: 5 pts
 	score = 0
 
 	margin = data.get("operating_margin", 0)
@@ -45,64 +47,110 @@ def quality_score(data):
 
 	return score
 
-# ========================= # 3️⃣ Détection MOAT # =========================
+QUALITY_SCORE_MAX = 5
 
-def detect_moat(data):
+# ========================= # 3️⃣ Score MOAT # =========================
 
+def moat_score(data):
+	# Max: 2 pts
 	roic = data.get("roic", 0)
 	margin = data.get("operating_margin", 0)
 
 	if roic > 20 and margin > 25:
-		return "fort"
+		return 2
 	elif roic > 12:
-		return "modéré"
+		return 1
 	else:
-		return "faible"
+		return 0
 
-# ========================= # 4️⃣ Stabilité business # =========================
+MOAT_SCORE_MAX = 2
 
-def business_stability(data):
+# ========================= # 4️⃣ Score Stabilité business # =========================
 
+def stability_score(data):
+	# Max: 2 pts
 	revenue_growth = data.get("revenue_growth", 0)
 	margin = data.get("operating_margin", 0)
 
 	if revenue_growth > 5 and margin > 10:
-		return "stable"
+		return 2
 	elif revenue_growth > 0:
-		return "moyenne"
+		return 1
 	else:
-		return "volatile"
+		return 0
 
-# ========================= # 5️⃣ Diagnostic Business # =========================
+STABILITY_SCORE_MAX = 2
 
-def business_quality(data):
+# ========================= # 5️⃣ Score Business Quality # =========================
 
+def biz_quality_score(data):
+	# Max: 3 pts
 	roe = data.get("roe", 0)
 	margin = data.get("operating_margin", 0)
 
 	if roe > 20 and margin > 25:
-		return "exceptionnelle"
+		return 3
 	elif roe > 12 and margin > 15:
-		return "solide"
+		return 2
 	elif roe > 8:
-		return "correcte"
+		return 1
 	else:
-		return "faible"
+		return 0
+
+BIZ_QUALITY_SCORE_MAX = 3
+
 # ========================= # 6️⃣ Score final # =========================
 
+SCORE_MAX = GROWTH_SCORE_MAX + QUALITY_SCORE_MAX + MOAT_SCORE_MAX + STABILITY_SCORE_MAX + BIZ_QUALITY_SCORE_MAX
+
 def compute_score(data):
+	total = (
+		growth_score(data)
+		+ quality_score(data)
+		+ moat_score(data)
+		+ stability_score(data)
+		+ biz_quality_score(data)
+	)
 
-	total = growth_score(data) + quality_score(data)
-
-	# score max = 9
-	score_normalized = round((total / 9) * 10, 1)
+	total = max(total, 0)
+	score_normalized = round((total / SCORE_MAX) * 10, 1)
 
 	return score_normalized
 
-# ========================= # 7️⃣ Verdict score # =========================
+# ========================= # 7️⃣ Fonctions legacy (labels textuels) # =========================
+
+def detect_moat(data):
+	s = moat_score(data)
+	if s == 2:
+		return "fort"
+	elif s == 1:
+		return "modéré"
+	else:
+		return "faible"
+
+def business_stability(data):
+	s = stability_score(data)
+	if s == 2:
+		return "stable"
+	elif s == 1:
+		return "moyenne"
+	else:
+		return "volatile"
+
+def business_quality(data):
+	s = biz_quality_score(data)
+	if s == 3:
+		return "exceptionnelle"
+	elif s == 2:
+		return "solide"
+	elif s == 1:
+		return "correcte"
+	else:
+		return "faible"
+
+# ========================= # 8️⃣ Verdict score # =========================
 
 def get_verdict(score):
-
 	if score >= 9:
 		return "Excellente entreprise"
 	elif score >= 7:
