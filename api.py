@@ -22,12 +22,12 @@ class TickerInput(BaseModel):
 @app.post("/analyze")
 def analyze_stock(data: StockInput):
 
-	data_dict = data.dict()
+	data_dict = data.model_dump()
 
 	# --- QUALITÉ ---
 	score = compute_score(data_dict)
 	verdict = get_verdict(score)
-	analysis = generate_analysis(data_dict, score)
+	analysis = generate_analysis(data_dict)
 
 	# --- VALORISATION ---
 	fair_value, upside, multiple = compute_valuation(data_dict)
@@ -77,9 +77,9 @@ def analyze_from_ticker(input: TickerInput):
 		"net_cash": float(data_dict["net_cash"])
 	}
 
-	import os
-	import uvicorn
+import os
+import uvicorn
 
-	if __name__ == "__main":
-			port = int(os.environ.get("PORT", 10000))
-			uvicorn.run(app, host="0.0.0.0",port=port)
+if __name__ == "__main__":
+	port = int(os.environ.get("PORT", 10000))
+	uvicorn.run(app, host="0.0.0.0", port=port)
