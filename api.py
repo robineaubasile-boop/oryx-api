@@ -1,11 +1,18 @@
-from fastapi import FastAPI
+import os
+import logging
+import uvicorn
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
+from core.data_fetcher import fetch_financial_data, TickerNotFoundError, YahooFinanceError
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
+
 
 class StockInput(BaseModel):
 	revenue_growth: float
@@ -15,13 +22,20 @@ class StockInput(BaseModel):
 	fcf_per_share: float
 	growth: float
 	current_price: float
+	eps: float = 0.0
+
 
 class TickerInput(BaseModel):
 	ticker: str
 
+
+@app.get("/health")
+def health():
+	return {"status": "ok"}
+
+
 @app.post("/analyze")
 def analyze_stock(data: StockInput):
-
 	data_dict = data.model_dump()
 
 	# --- QUALITÉ ---
@@ -44,17 +58,22 @@ def analyze_stock(data: StockInput):
 		"valuation_verdict": valo
 	}
 
-from core.data_fetcher import fetch_financial_data
+
 @app.post("/analyze-ticker")
 def analyze_from_ticker(input: TickerInput):
-
 	ticker = input.ticker.upper()
-	data_dict = fetch_financial_data(ticker)
+
+	try:
+		data_dict = fetch_financial_data(ticker)
+	except TickerNotFoundError:
+		raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found on Yahoo Finance")
+	except YahooFinanceError:
+		raise HTTPException(status_code=502, detail="Yahoo Finance is unavailable, please try again later")
 
 	# --- QUALITÉ ---
 	score = compute_score(data_dict)
 	verdict = get_verdict(score)
-	analysis = "test analysis"
+	analysis = generate_analysis(data_dict)
 
 	# --- VALORISATION ---
 	fair_value, upside, multiple = compute_valuation(data_dict)
@@ -64,7 +83,7 @@ def analyze_from_ticker(input: TickerInput):
 		"ticker": str(ticker),
 		"score": float(score),
 		"verdict": str(verdict),
-		"analysis": str(analysis),
+		"analysis": analysis,
 		"multiple": float(multiple),
 		"fair_value": float(round(fair_value, 2)),
 		"current_price": float(data_dict["current_price"]),
@@ -77,8 +96,6 @@ def analyze_from_ticker(input: TickerInput):
 		"net_cash": float(data_dict["net_cash"])
 	}
 
-import os
-import uvicorn
 
 if __name__ == "__main__":
 	port = int(os.environ.get("PORT", 10000))
