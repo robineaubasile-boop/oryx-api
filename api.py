@@ -10,6 +10,8 @@ from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data
 
+import yfinance as yf
+
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
@@ -41,6 +43,27 @@ class TickerInput(BaseModel):
 @app.get("/health")
 def health():
 	return {"status": "ok"}
+
+
+@app.get("/debug-ticker/{ticker}")
+def debug_ticker(ticker: str):
+	ticker = ticker.upper()
+	try:
+		stock = yf.Ticker(ticker)
+		info = stock.info
+		return {
+			"success": True,
+			"ticker": ticker,
+			"keys": list(info.keys()) if info else [],
+			"raw": info
+		}
+	except Exception as e:
+		return {
+			"success": False,
+			"ticker": ticker,
+			"error": str(e),
+			"error_type": type(e).__name__
+		}
 
 
 @app.post("/analyze")
