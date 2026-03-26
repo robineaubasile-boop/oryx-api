@@ -1,14 +1,18 @@
+import os
 import time
 import logging
 import threading
-import yfinance as yf
+import requests
 
 logger = logging.getLogger(__name__)
 
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+
 MAX_RETRIES = 3
-TIMEOUT_SECONDS = 30
-CACHE_TTL = 3600  # 1 hour in seconds
-RATE_LIMIT_DELAY = 2  # seconds between yfinance calls
+REQUEST_TIMEOUT = 30
+CACHE_TTL = 3600  # 1 hour
+RATE_LIMIT_DELAY = 2  # seconds between FMP calls
 
 # --- In-memory cache ---
 _cache = {}  # {ticker: {"timestamp": float, "result": dict}}
@@ -45,29 +49,22 @@ def _rate_limit_wait():
 		_last_call_time = time.time()
 
 
-def _fetch_with_retry(ticker: str):
-	"""Fetch yfinance info with retry, rate limiting, and fast_info priority for price."""
+def _fmp_get(endpoint: str, ticker: str):
+	"""GET request to FMP API with retry and rate limiting."""
+	url = f"{FMP_BASE_URL}/{endpoint}/{ticker}"
+	params = {"apikey": FMP_API_KEY}
 	last_error = None
 
 	for attempt in range(1, MAX_RETRIES + 1):
 		try:
 			_rate_limit_wait()
-			stock = yf.Ticker(ticker)
-
-			# Use fast_info first for price data (lighter call)
-			fast_price = None
-			try:
-				fast_info = stock.fast_info
-				fast_price = getattr(fast_info, "last_price", None)
-				logger.debug(f"fast_info.last_price for {ticker}: {fast_price}")
-			except Exception as e:
-				logger.debug(f"fast_info unavailable for {ticker}: {e}")
-
-			info = stock.info
-			return info, fast_price
+			resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+			resp.raise_for_status()
+			data = resp.json()
+			return data
 		except Exception as e:
 			last_error = e
-			logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for {ticker}: {e}")
+			logger.warning(f"FMP {endpoint}/{ticker} attempt {attempt}/{MAX_RETRIES} failed: {e}")
 			if attempt < MAX_RETRIES:
 				wait = 2 ** attempt
 				logger.info(f"Retrying in {wait}s...")
@@ -81,54 +78,84 @@ def make_error(ticker: str, message: str):
 
 
 def fetch_financial_data(ticker: str):
+	if not FMP_API_KEY:
+		return make_error(ticker, "FMP_API_KEY environment variable is not set")
+
 	# --- Check cache ---
 	cached = _get_cached(ticker)
 	if cached is not None:
 		return cached
 
-	# --- Fetch with retry ---
+	# --- Fetch profile ---
 	try:
-		info, fast_price = _fetch_with_retry(ticker)
+		profile_list = _fmp_get("profile", ticker)
 	except Exception as e:
-		logger.error(f"All {MAX_RETRIES} attempts failed for {ticker}: {e}")
-		return make_error(ticker, f"Yahoo Finance is unreachable after {MAX_RETRIES} attempts")
+		logger.error(f"All {MAX_RETRIES} attempts failed for profile/{ticker}: {e}")
+		return make_error(ticker, f"FMP API is unreachable after {MAX_RETRIES} attempts")
 
-	# --- Empty/None data ---
-	if not info or not isinstance(info, dict):
-		return make_error(ticker, f"Yahoo Finance returned empty data for '{ticker}'")
+	if not profile_list or not isinstance(profile_list, list) or len(profile_list) == 0:
+		return make_error(ticker, f"Ticker '{ticker}' not found on FMP")
 
-	if info.get("regularMarketPrice") is None and fast_price is None:
-		return make_error(ticker, f"Ticker '{ticker}' not found or has no market data")
+	profile = profile_list[0]
 
-	logger.debug(f"Raw yfinance data for {ticker}: {info}")
+	if profile.get("price") is None:
+		return make_error(ticker, f"Ticker '{ticker}' has no market data on FMP")
 
-	# --- Parse fields ---
-	revenue_growth = (info.get("revenueGrowth") or 0) * 100
-	operating_margin = (info.get("operatingMargins") or 0) * 100
-	roe = (info.get("returnOnEquity") or 0) * 100
-	total_cash = info.get("totalCash") or 0
-	total_debt = info.get("totalDebt") or 0
-	free_cashflow = info.get("freeCashflow") or 0
-	eps = info.get("trailingEps") or 0
-	shares = info.get("sharesOutstanding") or 0
+	# --- Fetch key metrics ---
+	try:
+		metrics_list = _fmp_get("key-metrics", ticker)
+	except Exception as e:
+		logger.warning(f"key-metrics failed for {ticker}, using defaults: {e}")
+		metrics_list = []
 
-	if shares == 0:
-		fcf_per_share = 0.0
-	else:
-		fcf_per_share = free_cashflow / shares
+	metrics = metrics_list[0] if metrics_list and isinstance(metrics_list, list) and len(metrics_list) > 0 else {}
 
-	# Prefer fast_info price, fallback to info
-	current_price = fast_price or info.get("currentPrice") or info.get("regularMarketPrice") or 0
+	# --- Fetch income statements (for revenue growth) ---
+	try:
+		income_list = _fmp_get("income-statement", ticker)
+	except Exception as e:
+		logger.warning(f"income-statement failed for {ticker}, using defaults: {e}")
+		income_list = []
+
+	# Calculate revenue growth from last 2 years
+	revenue_growth = 0.0
+	if isinstance(income_list, list) and len(income_list) >= 2:
+		rev_current = income_list[0].get("revenue") or 0
+		rev_previous = income_list[1].get("revenue") or 0
+		if rev_previous > 0:
+			revenue_growth = ((rev_current - rev_previous) / rev_previous) * 100
+
+	# Calculate EPS growth from last 2 years
+	eps_growth = 0.0
+	if isinstance(income_list, list) and len(income_list) >= 2:
+		eps_current = income_list[0].get("eps") or 0
+		eps_previous = income_list[1].get("eps") or 0
+		if eps_previous > 0:
+			eps_growth = ((eps_current - eps_previous) / eps_previous) * 100
+
+	logger.debug(f"FMP profile for {ticker}: {profile}")
+	logger.debug(f"FMP metrics for {ticker}: {metrics}")
+
+	# --- Parse fields (same output format as before) ---
+	operating_margin = (profile.get("operatingMargin") or 0) * 100 if profile.get("operatingMargin") and profile.get("operatingMargin") < 1 else (profile.get("operatingMargin") or 0)
+	roe = (metrics.get("roe") or 0) * 100 if metrics.get("roe") and abs(metrics.get("roe")) < 5 else (metrics.get("roe") or 0)
+
+	total_cash = profile.get("totalCash") or metrics.get("cashPerShare", 0) * (profile.get("volAvg", 0) or 0)
+	total_debt = profile.get("totalDebt") or 0
+	free_cashflow = metrics.get("freeCashFlowPerShare", 0) * (profile.get("sharesOutstanding") or 1) if metrics.get("freeCashFlowPerShare") else 0
+	eps = profile.get("eps") or 0
+	shares = profile.get("sharesOutstanding") or 0
+	fcf_per_share = metrics.get("freeCashFlowPerShare") or 0
 
 	data = {
-		"revenue_growth": revenue_growth,
-		"operating_margin": operating_margin,
-		"roe": roe,
+		"revenue_growth": round(revenue_growth, 2),
+		"operating_margin": round(operating_margin, 2),
+		"roe": round(roe, 2),
 		"net_cash": total_cash - total_debt,
-		"fcf_per_share": fcf_per_share,
-		"growth": (info.get("earningsGrowth") or 0) * 100,
+		"fcf_per_share": round(fcf_per_share, 4),
+		"growth": round(eps_growth, 2),
 		"eps": eps,
-		"current_price": current_price
+		"current_price": profile.get("price") or 0
 	}
 
 	logger.debug(f"Processed data for {ticker}: {data}")
