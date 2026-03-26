@@ -3,6 +3,7 @@ def compute_valuation(data):
 	data attendu :
 	{
 		"eps": float,
+		"fcf_per_share": float,
 		"revenue_growth": float,
 		"roe": float,
 		"operating_margin": float,
@@ -12,6 +13,7 @@ def compute_valuation(data):
 	"""
 
 	eps = data.get("eps", 0)
+	fcf_per_share = data.get("fcf_per_share", 0)
 	growth = data.get("revenue_growth", 0)
 	roe = data.get("roe", 0)
 	margin = data.get("operating_margin", 0)
@@ -37,13 +39,24 @@ def compute_valuation(data):
 		multiple += 1
 
 	# --- Calcul fair value ---
-	fair_value = eps * multiple
+	# Fallback sur FCF/share quand EPS <= 0 (entreprise non rentable)
+	if eps > 0:
+		base_value = eps
+	elif fcf_per_share > 0:
+		base_value = fcf_per_share
+	else:
+		base_value = 0
+
+	fair_value = base_value * multiple
 
 	# --- Calcul potentiel ---
-	if current_price > 0:
+	if current_price > 0 and fair_value > 0:
 		upside = ((fair_value - current_price) / current_price) * 100
-	else: upside = 0
+	else:
+		upside = 0
+
 	return fair_value, upside, multiple
+
 
 def valuation_verdict(upside):
 	if upside >= 25:

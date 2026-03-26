@@ -2,7 +2,7 @@ import os
 import logging
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
@@ -15,14 +15,14 @@ app = FastAPI()
 
 
 class StockInput(BaseModel):
-	revenue_growth: float
-	operating_margin: float
-	roe: float
-	net_cash: float
-	fcf_per_share: float
-	growth: float
-	current_price: float
-	eps: float = 0.0
+	revenue_growth: float = Field(ge=-100, le=500, description="Revenue growth (%)")
+	operating_margin: float = Field(ge=-100, le=100, description="Operating margin (%)")
+	roe: float = Field(ge=-200, le=200, description="Return on equity (%)")
+	net_cash: float = Field(description="Net cash (total cash - total debt)")
+	fcf_per_share: float = Field(description="Free cash flow per share")
+	growth: float = Field(ge=-100, le=500, description="EPS growth (%)")
+	current_price: float = Field(gt=0, description="Current stock price")
+	eps: float = Field(default=0.0, description="Earnings per share")
 
 
 class TickerInput(BaseModel):
