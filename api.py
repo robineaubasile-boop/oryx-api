@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
-from core.data_fetcher import fetch_financial_data, TickerNotFoundError, YahooFinanceError
+from core.data_fetcher import fetch_financial_data
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,12 +72,12 @@ def analyze_stock(data: StockInput):
 def analyze_from_ticker(input: TickerInput):
 	ticker = input.ticker.upper()
 
-	try:
-		data_dict = fetch_financial_data(ticker)
-	except TickerNotFoundError:
-		raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found on Yahoo Finance")
-	except YahooFinanceError:
-		raise HTTPException(status_code=502, detail="Yahoo Finance is unavailable, please try again later")
+	result = fetch_financial_data(ticker)
+
+	if not result["success"]:
+		return {"success": False, "ticker": ticker, "error": result["error"]}
+
+	data_dict = result["data"]
 
 	# --- QUALITÉ ---
 	score = compute_score(data_dict)
@@ -89,6 +89,7 @@ def analyze_from_ticker(input: TickerInput):
 	valo = valuation_verdict(upside)
 
 	return {
+		"success": True,
 		"ticker": str(ticker),
 		"score": float(score),
 		"verdict": str(verdict),
