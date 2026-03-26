@@ -8,9 +8,7 @@ from pydantic import BaseModel, Field
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
-from core.data_fetcher import fetch_financial_data
-
-import yfinance as yf
+from core.data_fetcher import fetch_financial_data, _fmp_get, FMP_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 
@@ -48,14 +46,20 @@ def health():
 @app.get("/debug-ticker/{ticker}")
 def debug_ticker(ticker: str):
 	ticker = ticker.upper()
+	if not FMP_API_KEY:
+		return {"success": False, "ticker": ticker, "error": "FMP_API_KEY not set"}
 	try:
-		stock = yf.Ticker(ticker)
-		info = stock.info
+		profile = _fmp_get("profile", ticker)
+		metrics = _fmp_get("key-metrics", ticker)
+		income = _fmp_get("income-statement", ticker)
 		return {
 			"success": True,
 			"ticker": ticker,
-			"keys": list(info.keys()) if info else [],
-			"raw": info
+			"profile": profile[0] if profile else None,
+			"profile_keys": list(profile[0].keys()) if profile else [],
+			"metrics": metrics[0] if metrics else None,
+			"metrics_keys": list(metrics[0].keys()) if metrics else [],
+			"income_latest": income[0] if income else None,
 		}
 	except Exception as e:
 		return {
