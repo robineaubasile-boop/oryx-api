@@ -101,6 +101,7 @@ def analyze_from_ticker(input: TickerInput):
 
 	result = fetch_financial_data(ticker)
 
+	# Only fail if absolutely zero data
 	if not result["success"]:
 		return {"success": False, "ticker": ticker, "error": result["error"]}
 
@@ -122,15 +123,15 @@ def analyze_from_ticker(input: TickerInput):
 		"verdict": str(verdict),
 		"analysis": analysis,
 		"multiple": float(multiple),
-		"fair_value": float(round(fair_value, 2)),
-		"current_price": float(data_dict["current_price"]),
-		"upside_percent": float(round(upside, 1)),
+		"fair_value": round(fair_value, 2) if fair_value is not None else None,
+		"current_price": data_dict.get("current_price"),
+		"upside_percent": round(upside, 1) if upside is not None else None,
 		"valuation_verdict": str(valo),
-		"revenue_growth": float(data_dict["revenue_growth"]),
-		"operating_margin": float(data_dict["operating_margin"]),
-		"roe": float(data_dict["roe"]),
-		"fcf_per_share": float(data_dict["fcf_per_share"]),
-		"net_cash": float(data_dict["net_cash"])
+		"revenue_growth": data_dict.get("revenue_growth"),
+		"operating_margin": data_dict.get("operating_margin"),
+		"roe": data_dict.get("roe"),
+		"fcf_per_share": data_dict.get("fcf_per_share"),
+		"net_cash": data_dict.get("net_cash")
 	}
 
 

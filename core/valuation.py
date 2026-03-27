@@ -1,24 +1,29 @@
+def _v(val):
+	"""Treat None as 0 for numeric comparisons."""
+	return val if val is not None else 0
+
+
 def compute_valuation(data):
 	"""
 	data attendu :
 	{
-		"eps": float,
-		"fcf_per_share": float,
-		"revenue_growth": float,
-		"roe": float,
-		"operating_margin": float,
-		"net_cash": float,
-		"current_price": float
+		"eps": float | None,
+		"fcf_per_share": float | None,
+		"revenue_growth": float | None,
+		"roe": float | None,
+		"operating_margin": float | None,
+		"net_cash": float | None,
+		"current_price": float | None
 	}
 	"""
 
-	eps = data.get("eps", 0)
-	fcf_per_share = data.get("fcf_per_share", 0)
-	growth = data.get("revenue_growth", 0)
-	roe = data.get("roe", 0)
-	margin = data.get("operating_margin", 0)
-	net_cash = data.get("net_cash", 0)
-	current_price = data.get("current_price", 0)
+	eps = _v(data.get("eps"))
+	fcf_per_share = _v(data.get("fcf_per_share"))
+	growth = _v(data.get("revenue_growth"))
+	roe = _v(data.get("roe"))
+	margin = _v(data.get("operating_margin"))
+	net_cash = _v(data.get("net_cash"))
+	current_price = _v(data.get("current_price"))
 
 	# --- Multiple de base basé sur la croissance ---
 	if growth >= 15:
