@@ -1,29 +1,38 @@
+def _v(val):
+	"""Treat None as 0 for numeric comparisons."""
+	return val if val is not None else 0
+
+
 def generate_analysis(data):
 
 	analysis = {}
 
-	if data["revenue_growth"] >= 10:
+	rg = _v(data.get("revenue_growth"))
+	if rg >= 10:
 		analysis["growth"] = "forte"
-	elif data["revenue_growth"] >= 5:
+	elif rg >= 5:
 		analysis["growth"] = "correcte"
 	else:
 		analysis["growth"] = "faible"
 
-	if data["operating_margin"] >= 10:
+	margin = _v(data.get("operating_margin"))
+	if margin >= 10:
 		analysis["margin"] = "excellente"
-	elif data["operating_margin"] >= 7:
+	elif margin >= 7:
 		analysis["margin"] = "solide"
 	else:
 		analysis["margin"] = "faible"
 
-	if data["roe"] >= 15:
+	roe = _v(data.get("roe"))
+	if roe >= 15:
 		analysis["roe"] = "élevé"
-	elif data["roe"] >= 10:
+	elif roe >= 10:
 		analysis["roe"] = "correct"
 	else:
 		analysis["roe"] = "faible"
 
-	if data["net_cash"] > 0:
+	nc = _v(data.get("net_cash"))
+	if nc > 0:
 		analysis["balance_sheet"] = "solide"
 	else:
 		analysis["balance_sheet"] = "endetté"

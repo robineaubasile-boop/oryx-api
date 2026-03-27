@@ -55,23 +55,100 @@ def _fmp_get(endpoint: str, ticker: str):
 		return None
 
 
-def make_error(ticker: str, message: str):
-	return {"success": False, "ticker": ticker, "error": message, "data": None}
+def _safe_get(source, key, default=None):
+	"""Safely get a value from a dict, returning default if source is None."""
+	if source is None:
+		return default
+	return source.get(key, default)
+
+
+def _parse_profile(profile):
+	"""Extract data from profile, returns dict with None for missing values."""
+	if not profile:
+		logger.warning("PROFILE: None")
+		return {}
+
+	logger.info(f"PROFILE: price={profile.get('price')}, eps={profile.get('eps')}, margin={profile.get('operatingMargin')}")
+
+	result = {}
+	result["current_price"] = profile.get("price")
+	result["eps"] = profile.get("eps")
+
+	margin_raw = profile.get("operatingMargin")
+	if margin_raw is not None:
+		result["operating_margin"] = round(margin_raw * 100, 2) if abs(margin_raw) < 1 else round(margin_raw, 2)
+	else:
+		result["operating_margin"] = None
+
+	result["total_cash"] = profile.get("totalCash")
+	result["total_debt"] = profile.get("totalDebt")
+	result["shares"] = profile.get("sharesOutstanding")
+
+	return result
+
+
+def _parse_metrics(metrics):
+	"""Extract data from key-metrics, returns dict with None for missing values."""
+	if not metrics:
+		logger.warning("METRICS: None")
+		return {}
+
+	logger.info(f"METRICS: roe={metrics.get('roe')}, fcf/share={metrics.get('freeCashFlowPerShare')}, cashPerShare={metrics.get('cashPerShare')}")
+
+	result = {}
+
+	roe_raw = metrics.get("roe")
+	if roe_raw is not None:
+		result["roe"] = round(roe_raw * 100, 2) if abs(roe_raw) < 5 else round(roe_raw, 2)
+	else:
+		result["roe"] = None
+
+	result["fcf_per_share"] = metrics.get("freeCashFlowPerShare")
+	result["cash_per_share"] = metrics.get("cashPerShare")
+
+	return result
+
+
+def _parse_income(income_list):
+	"""Extract revenue/EPS growth from income statements."""
+	if not income_list or not isinstance(income_list, list) or len(income_list) < 2:
+		logger.warning(f"INCOME: None or insufficient data (got {len(income_list) if isinstance(income_list, list) else 0} entries)")
+		return {}
+
+	logger.info(f"INCOME: latest revenue={income_list[0].get('revenue')}, eps={income_list[0].get('eps')}")
+
+	result = {}
+
+	rev_current = income_list[0].get("revenue") or 0
+	rev_previous = income_list[1].get("revenue") or 0
+	if rev_previous > 0:
+		result["revenue_growth"] = round(((rev_current - rev_previous) / rev_previous) * 100, 2)
+	else:
+		result["revenue_growth"] = None
+
+	eps_current = income_list[0].get("eps") or 0
+	eps_previous = income_list[1].get("eps") or 0
+	if eps_previous > 0:
+		result["growth"] = round(((eps_current - eps_previous) / eps_previous) * 100, 2)
+	else:
+		result["growth"] = None
+
+	return result
 
 
 def fetch_financial_data(ticker: str):
 	total_start = time.time()
 
 	if not FMP_API_KEY:
-		return make_error(ticker, "FMP_API_KEY environment variable is not set")
+		return {"success": False, "ticker": ticker, "error": "FMP_API_KEY environment variable is not set", "data": None}
 
 	# --- Check cache ---
 	cached = _get_cached(ticker)
 	if cached is not None:
 		return cached
 
-	# --- Fetch all 3 endpoints in parallel ---
-	results = {}
+	# --- Fetch all 3 endpoints in parallel (each independent) ---
+	raw = {}
 	with ThreadPoolExecutor(max_workers=3) as executor:
 		futures = {
 			executor.submit(_fmp_get, "profile", ticker): "profile",
@@ -80,71 +157,67 @@ def fetch_financial_data(ticker: str):
 		}
 		for future in as_completed(futures):
 			key = futures[future]
-			results[key] = future.result()
+			raw[key] = future.result()
 
-	profile_list = results.get("profile")
-	metrics_list = results.get("metrics")
-	income_list = results.get("income")
+	# --- Parse each source independently ---
+	profile_list = raw.get("profile")
+	profile = profile_list[0] if profile_list and isinstance(profile_list, list) and len(profile_list) > 0 else None
 
-	# --- Profile is required (price, EPS) ---
-	if not profile_list or not isinstance(profile_list, list) or len(profile_list) == 0:
-		logger.error(f"Profile unavailable for {ticker}")
-		return make_error(ticker, "timeout_or_unavailable")
+	metrics_list = raw.get("metrics")
+	metrics = metrics_list[0] if metrics_list and isinstance(metrics_list, list) and len(metrics_list) > 0 else None
 
-	profile = profile_list[0]
+	income_list = raw.get("income")
 
-	if profile.get("price") is None:
-		return make_error(ticker, f"Ticker '{ticker}' not found or has no market data")
+	profile_data = _parse_profile(profile)
+	metrics_data = _parse_metrics(metrics)
+	income_data = _parse_income(income_list)
 
-	# --- Metrics: optional, use defaults ---
-	metrics = {}
-	if metrics_list and isinstance(metrics_list, list) and len(metrics_list) > 0:
-		metrics = metrics_list[0]
+	# --- Build output: each field independent, None if unavailable ---
+	current_price = profile_data.get("current_price")
+	eps = profile_data.get("eps")
+	operating_margin = profile_data.get("operating_margin")
+	total_cash = profile_data.get("total_cash")
+	total_debt = profile_data.get("total_debt")
+
+	roe = metrics_data.get("roe")
+	fcf_per_share = metrics_data.get("fcf_per_share")
+
+	revenue_growth = income_data.get("revenue_growth")
+	eps_growth = income_data.get("growth")
+
+	# net_cash: compute if both available, else None
+	if total_cash is not None and total_debt is not None:
+		net_cash = total_cash - total_debt
+	elif total_cash is not None:
+		net_cash = total_cash
 	else:
-		logger.warning(f"Metrics unavailable for {ticker}, using defaults")
-
-	# --- Income: optional, use defaults ---
-	revenue_growth = 0.0
-	eps_growth = 0.0
-	if income_list and isinstance(income_list, list) and len(income_list) >= 2:
-		rev_current = income_list[0].get("revenue") or 0
-		rev_previous = income_list[1].get("revenue") or 0
-		if rev_previous > 0:
-			revenue_growth = ((rev_current - rev_previous) / rev_previous) * 100
-
-		eps_current = income_list[0].get("eps") or 0
-		eps_previous = income_list[1].get("eps") or 0
-		if eps_previous > 0:
-			eps_growth = ((eps_current - eps_previous) / eps_previous) * 100
-	else:
-		logger.warning(f"Income data unavailable for {ticker}, using defaults")
-
-	# --- Parse fields (same output format) ---
-	operating_margin = (profile.get("operatingMargin") or 0) * 100 if profile.get("operatingMargin") and profile.get("operatingMargin") < 1 else (profile.get("operatingMargin") or 0)
-	roe = (metrics.get("roe") or 0) * 100 if metrics.get("roe") and abs(metrics.get("roe")) < 5 else (metrics.get("roe") or 0)
-
-	total_cash = profile.get("totalCash") or metrics.get("cashPerShare", 0) * (profile.get("volAvg", 0) or 0)
-	total_debt = profile.get("totalDebt") or 0
-	fcf_per_share = metrics.get("freeCashFlowPerShare") or 0
-	eps = profile.get("eps") or 0
+		net_cash = None
 
 	data = {
-		"revenue_growth": round(revenue_growth, 2),
-		"operating_margin": round(operating_margin, 2),
-		"roe": round(roe, 2),
-		"net_cash": total_cash - total_debt,
-		"fcf_per_share": round(fcf_per_share, 4),
-		"growth": round(eps_growth, 2),
+		"revenue_growth": revenue_growth,
+		"operating_margin": operating_margin,
+		"roe": roe,
+		"net_cash": net_cash,
+		"fcf_per_share": fcf_per_share,
+		"growth": eps_growth,
 		"eps": eps,
-		"current_price": profile.get("price") or 0
+		"current_price": current_price
 	}
 
+	# --- Count available fields ---
+	available = sum(1 for v in data.values() if v is not None)
+	total_fields = len(data)
+
 	total_elapsed = round(time.time() - total_start, 2)
-	logger.info(f"fetch_financial_data({ticker}) completed in {total_elapsed}s")
+	logger.info(f"fetch_financial_data({ticker}) completed in {total_elapsed}s — {available}/{total_fields} fields available")
+
+	# --- Only fail if ZERO data available ---
+	if available == 0:
+		return {"success": False, "ticker": ticker, "error": "All data sources failed, no data available", "data": None}
 
 	result = {"success": True, "ticker": ticker, "error": None, "data": data}
 
-	# --- Store in cache ---
+	# --- Cache only if we got data ---
 	_set_cached(ticker, result)
 
 	return result

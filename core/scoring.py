@@ -1,11 +1,16 @@
 # ========================= # 1️⃣ Score Croissance # =========================
 
+def _v(data, key):
+	"""Get a numeric value from data, treating None as 0."""
+	val = data.get(key, 0)
+	return val if val is not None else 0
+
 def growth_score(data):
 	# Max: 4 pts
 	score = 0
 
-	revenue_growth = data.get("revenue_growth", 0)
-	eps_growth = data.get("growth", 0)
+	revenue_growth = _v(data, "revenue_growth")
+	eps_growth = _v(data, "growth")
 
 	if revenue_growth > 15:
 		score += 2
@@ -28,9 +33,9 @@ def quality_score(data):
 	# Max: 5 pts
 	score = 0
 
-	margin = data.get("operating_margin", 0)
-	roe = data.get("roe", 0)
-	net_cash = data.get("net_cash", 0)
+	margin = _v(data, "operating_margin")
+	roe = _v(data, "roe")
+	net_cash = _v(data, "net_cash")
 
 	if margin > 25:
 		score += 2
@@ -53,8 +58,8 @@ QUALITY_SCORE_MAX = 5
 
 def moat_score(data):
 	# Max: 2 pts
-	roic = data.get("roic", 0)
-	margin = data.get("operating_margin", 0)
+	roic = _v(data, "roic")
+	margin = _v(data, "operating_margin")
 
 	if roic > 20 and margin > 25:
 		return 2
@@ -69,8 +74,8 @@ MOAT_SCORE_MAX = 2
 
 def stability_score(data):
 	# Max: 2 pts
-	revenue_growth = data.get("revenue_growth", 0)
-	margin = data.get("operating_margin", 0)
+	revenue_growth = _v(data, "revenue_growth")
+	margin = _v(data, "operating_margin")
 
 	if revenue_growth > 5 and margin > 10:
 		return 2
@@ -85,8 +90,8 @@ STABILITY_SCORE_MAX = 2
 
 def biz_quality_score(data):
 	# Max: 3 pts
-	roe = data.get("roe", 0)
-	margin = data.get("operating_margin", 0)
+	roe = _v(data, "roe")
+	margin = _v(data, "operating_margin")
 
 	if roe > 20 and margin > 25:
 		return 3
