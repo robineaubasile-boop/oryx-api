@@ -37,20 +37,41 @@ def _fmp_get(endpoint: str, ticker: str):
 	url = f"{FMP_BASE_URL}/{endpoint}/{ticker}"
 	params = {"apikey": FMP_API_KEY}
 
+	print(f"[FMP DEBUG] Calling: {url}?apikey={FMP_API_KEY[:8]}...")
+
 	start = time.time()
 	try:
 		resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
 		elapsed = round(time.time() - start, 2)
+		print(f"[FMP DEBUG] {endpoint}/{ticker} status_code={resp.status_code} elapsed={elapsed}s")
+		print(f"[FMP DEBUG] {endpoint}/{ticker} response (first 500 chars): {resp.text[:500]}")
 		resp.raise_for_status()
 		data = resp.json()
-		logger.info(f"FMP {endpoint}/{ticker} OK in {elapsed}s")
+		print(f"[FMP DEBUG] {endpoint}/{ticker} parsed OK — type={type(data).__name__}, length={len(data) if isinstance(data, list) else 'N/A'}")
 		return data
 	except requests.exceptions.Timeout:
 		elapsed = round(time.time() - start, 2)
+		print(f"[FMP ERROR] {endpoint}/{ticker} TIMEOUT after {elapsed}s")
 		logger.error(f"FMP {endpoint}/{ticker} TIMEOUT after {elapsed}s")
+		return None
+	except requests.exceptions.ProxyError as e:
+		elapsed = round(time.time() - start, 2)
+		print(f"[FMP ERROR] {endpoint}/{ticker} PROXY BLOCKED after {elapsed}s: {e}")
+		logger.error(f"FMP {endpoint}/{ticker} PROXY BLOCKED: {e}")
+		return None
+	except requests.exceptions.ConnectionError as e:
+		elapsed = round(time.time() - start, 2)
+		print(f"[FMP ERROR] {endpoint}/{ticker} CONNECTION ERROR after {elapsed}s: {e}")
+		logger.error(f"FMP {endpoint}/{ticker} CONNECTION ERROR: {e}")
+		return None
+	except requests.exceptions.HTTPError as e:
+		elapsed = round(time.time() - start, 2)
+		print(f"[FMP ERROR] {endpoint}/{ticker} HTTP ERROR {resp.status_code} after {elapsed}s: {resp.text[:300]}")
+		logger.error(f"FMP {endpoint}/{ticker} HTTP {resp.status_code}: {e}")
 		return None
 	except Exception as e:
 		elapsed = round(time.time() - start, 2)
+		print(f"[FMP ERROR] {endpoint}/{ticker} UNEXPECTED ERROR after {elapsed}s: {type(e).__name__}: {e}")
 		logger.error(f"FMP {endpoint}/{ticker} FAILED in {elapsed}s: {e}")
 		return None
 
@@ -139,7 +160,11 @@ def _parse_income(income_list):
 def fetch_financial_data(ticker: str):
 	total_start = time.time()
 
+	print(f"[FETCH DEBUG] Starting fetch for {ticker}")
+	print(f"[FETCH DEBUG] FMP_API_KEY set: {bool(FMP_API_KEY)} (length: {len(FMP_API_KEY)})")
+
 	if not FMP_API_KEY:
+		print(f"[FETCH ERROR] FMP_API_KEY is empty!")
 		return {"success": False, "ticker": ticker, "error": "FMP_API_KEY environment variable is not set", "data": None}
 
 	# --- Check cache ---
@@ -161,12 +186,13 @@ def fetch_financial_data(ticker: str):
 
 	# --- Parse each source independently ---
 	profile_list = raw.get("profile")
-	profile = profile_list[0] if profile_list and isinstance(profile_list, list) and len(profile_list) > 0 else None
-
 	metrics_list = raw.get("metrics")
-	metrics = metrics_list[0] if metrics_list and isinstance(metrics_list, list) and len(metrics_list) > 0 else None
-
 	income_list = raw.get("income")
+
+	print(f"[FETCH DEBUG] Raw results — profile: {type(profile_list).__name__}({len(profile_list) if isinstance(profile_list, list) else 'None'}), metrics: {type(metrics_list).__name__}({len(metrics_list) if isinstance(metrics_list, list) else 'None'}), income: {type(income_list).__name__}({len(income_list) if isinstance(income_list, list) else 'None'})")
+
+	profile = profile_list[0] if profile_list and isinstance(profile_list, list) and len(profile_list) > 0 else None
+	metrics = metrics_list[0] if metrics_list and isinstance(metrics_list, list) and len(metrics_list) > 0 else None
 
 	profile_data = _parse_profile(profile)
 	metrics_data = _parse_metrics(metrics)
@@ -211,8 +237,12 @@ def fetch_financial_data(ticker: str):
 	total_elapsed = round(time.time() - total_start, 2)
 	logger.info(f"fetch_financial_data({ticker}) completed in {total_elapsed}s — {available}/{total_fields} fields available")
 
+	print(f"[FETCH DEBUG] Final data: {data}")
+	print(f"[FETCH DEBUG] Available fields: {available}/{total_fields}")
+
 	# --- Only fail if ZERO data available ---
 	if available == 0:
+		print(f"[FETCH ERROR] ZERO fields available for {ticker} — returning error")
 		return {"success": False, "ticker": ticker, "error": "All data sources failed, no data available", "data": None}
 
 	result = {"success": True, "ticker": ticker, "error": None, "data": data}
