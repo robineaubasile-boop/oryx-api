@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
-from core.data_fetcher import fetch_financial_data, _fmp_get, FMP_API_KEY
+from core.data_fetcher import fetch_financial_data, FMP_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
