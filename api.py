@@ -1,17 +1,13 @@
 import os
-import logging
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
-from core.data_fetcher import fetch_financial_data, FMP_API_KEY
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from core.data_fetcher import fetch_financial_data
 
 app = FastAPI()
 
@@ -27,65 +23,58 @@ app.add_middleware(
 class StockRequest(BaseModel):
 	ticker: str
 
+	@field_validator("ticker")
+	@classmethod
+	def ticker_must_not_be_empty(cls, v):
+		v = v.strip().upper()
+		if not v:
+			raise ValueError("ticker must not be empty")
+		return v
+
 
 @app.get("/health")
 def health():
 	return {"status": "ok"}
 
 
-@app.get("/debug-ticker/{ticker}")
-def debug_ticker(ticker: str):
-	ticker = ticker.upper()
-	if not FMP_API_KEY:
-		return {"success": False, "ticker": ticker, "error": "FMP_API_KEY not set"}
-	try:
-		profile = _fmp_get("profile", ticker)
-		metrics = _fmp_get("key-metrics", ticker)
-		income = _fmp_get("income-statement", ticker)
-		return {
-			"success": True,
-			"ticker": ticker,
-			"profile": profile[0] if profile else None,
-			"profile_keys": list(profile[0].keys()) if profile else [],
-			"metrics": metrics[0] if metrics else None,
-			"metrics_keys": list(metrics[0].keys()) if metrics else [],
-			"income_latest": income[0] if income else None,
-		}
-	except Exception as e:
-		return {
-			"success": False,
-			"ticker": ticker,
-			"error": str(e),
-			"error_type": type(e).__name__
-		}
-
-
 @app.post("/analyze")
 def analyze(request: StockRequest):
-	ticker = request.ticker.upper()
+	ticker = request.ticker
 	print(f"[ANALYZE] Received ticker: {ticker}")
 
 	# --- Fetch data from FMP ---
-	print(f"[ANALYZE] Calling fetch_financial_data({ticker})")
-	result = fetch_financial_data(ticker)
+	try:
+		print(f"[ANALYZE] Fetching data for {ticker}...")
+		result = fetch_financial_data(ticker)
+	except Exception as e:
+		print(f"[ANALYZE ERROR] fetch_financial_data crashed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": f"Internal error: {e}"}
 
 	if not result["success"]:
 		print(f"[ANALYZE] Fetch failed: {result['error']}")
 		return {"success": False, "ticker": ticker, "error": result["error"]}
 
-	data_dict = result["data"]
-	print(f"[ANALYZE] Data retrieved: {data_dict}")
+	data = result["data"]
+	print(f"[ANALYZE] Data: {data}")
 
-	# --- QUALITÉ ---
-	score = compute_score(data_dict)
-	verdict = get_verdict(score)
-	analysis = generate_analysis(data_dict)
-	print(f"[ANALYZE] Score: {score}, Verdict: {verdict}")
+	# --- Scoring ---
+	try:
+		score = compute_score(data)
+		verdict = get_verdict(score)
+		analysis = generate_analysis(data)
+		print(f"[ANALYZE] Score: {score}, Verdict: {verdict}")
+	except Exception as e:
+		print(f"[ANALYZE ERROR] Scoring failed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": f"Scoring error: {e}"}
 
-	# --- VALORISATION ---
-	fair_value, upside, multiple = compute_valuation(data_dict)
-	valo = valuation_verdict(upside)
-	print(f"[ANALYZE] Fair value: {fair_value}, Upside: {upside}%, Multiple: {multiple}")
+	# --- Valuation ---
+	try:
+		fair_value, upside, multiple = compute_valuation(data)
+		valo = valuation_verdict(upside)
+		print(f"[ANALYZE] Fair value: {fair_value}, Upside: {upside}%, Multiple: {multiple}")
+	except Exception as e:
+		print(f"[ANALYZE ERROR] Valuation failed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": f"Valuation error: {e}"}
 
 	return {
 		"success": True,
@@ -94,22 +83,16 @@ def analyze(request: StockRequest):
 		"verdict": verdict,
 		"analysis": analysis,
 		"multiple": float(multiple),
-		"fair_value": round(fair_value, 2) if fair_value is not None else None,
-		"current_price": data_dict.get("current_price"),
-		"upside_percent": round(upside, 1) if upside is not None else None,
+		"fair_value": round(fair_value, 2),
+		"current_price": data.get("current_price", 0),
+		"upside_percent": round(upside, 1),
 		"valuation_verdict": valo,
-		"revenue_growth": data_dict.get("revenue_growth"),
-		"operating_margin": data_dict.get("operating_margin"),
-		"roe": data_dict.get("roe"),
-		"fcf_per_share": data_dict.get("fcf_per_share"),
-		"net_cash": data_dict.get("net_cash")
+		"revenue_growth": data.get("revenue_growth", 0),
+		"operating_margin": data.get("operating_margin", 0),
+		"roe": data.get("roe", 0),
+		"fcf_per_share": data.get("fcf_per_share", 0),
+		"net_cash": data.get("net_cash", 0),
 	}
-
-
-@app.post("/analyze-ticker")
-def analyze_ticker(request: StockRequest):
-	"""Alias for /analyze — kept for backwards compatibility."""
-	return analyze(request)
 
 
 if __name__ == "__main__":
