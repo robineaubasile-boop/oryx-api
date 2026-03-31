@@ -36,24 +36,52 @@ def _fmp_get(endpoint: str, ticker: str):
     """Single FMP GET — fail fast, never crash."""
     url = f"{FMP_BASE_URL}/{endpoint}/{ticker}"
     params = {"apikey": FMP_API_KEY}
+    full_url = f"{url}?apikey={FMP_API_KEY[:8]}..."
 
-    print(f"[FMP] Calling {endpoint}/{ticker} -> {url}")
+    logger.info(f"[DEBUG] URL: {url}")
+    logger.info(f"[DEBUG] API KEY used: {FMP_API_KEY[:8]}... (len={len(FMP_API_KEY)})")
+    print(f"[FMP] Calling {endpoint}/{ticker} -> {full_url}")
 
     start = time.time()
     try:
         resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         elapsed = round(time.time() - start, 2)
+
+        logger.info(f"[DEBUG] Status: {resp.status_code}")
+        logger.info(f"[DEBUG] Response: {resp.text[:500]}")
         print(f"[FMP] {endpoint}/{ticker} status={resp.status_code} time={elapsed}s")
 
         if resp.status_code != 200:
-            print(f"[FMP ERROR] {endpoint}/{ticker} body: {resp.text[:300]}")
+            logger.error(f"[FETCH ERROR] {endpoint}/{ticker}: HTTP {resp.status_code} — {resp.text[:500]}")
+            print(f"[FMP ERROR] {endpoint}/{ticker} body: {resp.text[:500]}")
             return None
 
         data = resp.json()
+
+        # Log empty responses (FMP returns [] for invalid tickers)
+        if isinstance(data, list) and len(data) == 0:
+            logger.warning(f"[DEBUG] {endpoint}/{ticker} returned EMPTY list []")
+            print(f"[FMP WARNING] {endpoint}/{ticker} returned empty list []")
+        elif isinstance(data, dict) and "Error Message" in data:
+            logger.error(f"[DEBUG] {endpoint}/{ticker} FMP error: {data['Error Message']}")
+            print(f"[FMP ERROR] {endpoint}/{ticker} FMP error: {data['Error Message']}")
+            return None
+
         print(f"[FMP] {endpoint}/{ticker} OK — type={type(data).__name__}, len={len(data) if isinstance(data, list) else 'dict'}")
         return data
+    except requests.exceptions.ConnectionError as e:
+        elapsed = round(time.time() - start, 2)
+        logger.error(f"[FETCH ERROR] {endpoint}/{ticker}: ConnectionError after {elapsed}s — {e}")
+        print(f"[FMP ERROR] {endpoint}/{ticker} ConnectionError after {elapsed}s: {e}")
+        return None
+    except requests.exceptions.Timeout as e:
+        elapsed = round(time.time() - start, 2)
+        logger.error(f"[FETCH ERROR] {endpoint}/{ticker}: Timeout after {elapsed}s — {e}")
+        print(f"[FMP ERROR] {endpoint}/{ticker} Timeout after {elapsed}s: {e}")
+        return None
     except Exception as e:
         elapsed = round(time.time() - start, 2)
+        logger.error(f"[FETCH ERROR] {endpoint}/{ticker}: {type(e).__name__} after {elapsed}s — {e}", exc_info=True)
         print(f"[FMP ERROR] {endpoint}/{ticker} {type(e).__name__} after {elapsed}s: {e}")
         return None
 
@@ -78,8 +106,11 @@ def _num(value):
 def fetch_financial_data(ticker: str):
     ticker = ticker.upper()
 
+    logger.info(f"[DEBUG] API KEY from env: {os.getenv('FMP_API_KEY')}")
+    logger.info(f"[DEBUG] API KEY module var: {FMP_API_KEY[:8]}... (len={len(FMP_API_KEY)})")
     print(f"[FETCH] === Starting fetch for {ticker} ===")
     print(f"[FETCH] FMP_API_KEY present: {bool(FMP_API_KEY)} (len={len(FMP_API_KEY)})")
+    print(f"[FETCH] FMP_API_KEY value: {FMP_API_KEY[:8]}..." if FMP_API_KEY else "[FETCH] FMP_API_KEY is EMPTY!")
 
     # Check cache first
     cached = _get_cached(ticker)
