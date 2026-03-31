@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+FMP_STABLE_URL = "https://financialmodelingprep.com/stable"
 
 REQUEST_TIMEOUT = 8
 CACHE_TTL = 3600
@@ -33,11 +33,11 @@ def _set_cached(ticker: str, result: dict):
 
 
 def _fmp_get(endpoint: str, ticker: str):
-    """Single FMP GET — fail fast, never crash."""
-    url = f"{FMP_BASE_URL}/{endpoint}/{ticker}"
-    params = {"apikey": FMP_API_KEY}
+    """Single FMP GET via /stable/ endpoints — fail fast, never crash."""
+    url = f"{FMP_STABLE_URL}/{endpoint}"
+    params = {"symbol": ticker, "apikey": FMP_API_KEY}
 
-    logger.info(f"[FMP CALL] URL: {url}")
+    logger.info(f"[FMP CALL] URL: {url}?symbol={ticker}")
     logger.info(f"[FMP CALL] API KEY: {FMP_API_KEY}")
 
     start = time.time()
@@ -80,8 +80,13 @@ def _fmp_get(endpoint: str, ticker: str):
 
 
 def _first(response):
-    """Safely get first element from FMP list response."""
-    if response and isinstance(response, list) and len(response) > 0:
+    """Safely get first element from FMP response (list or dict)."""
+    if response is None:
+        return None
+    # Stable API may return a single dict instead of a list
+    if isinstance(response, dict):
+        return response if response else None
+    if isinstance(response, list) and len(response) > 0:
         return response[0]
     return None
 
