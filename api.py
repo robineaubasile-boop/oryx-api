@@ -42,7 +42,7 @@ def analyze(request: StockRequest):
 	ticker = request.ticker
 	print(f"[ANALYZE] Received ticker: {ticker}")
 
-	# --- Fetch data from FMP ---
+	# --- Fetch data ---
 	try:
 		print(f"[ANALYZE] Fetching data for {ticker}...")
 		result = fetch_financial_data(ticker)
@@ -92,6 +92,7 @@ def analyze(request: StockRequest):
 		"roe": data.get("roe", 0),
 		"fcf_per_share": data.get("fcf_per_share", 0),
 		"net_cash": data.get("net_cash", 0),
+		"currency": data.get("currency", "USD"),
 	}
 
 
