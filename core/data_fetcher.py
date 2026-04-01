@@ -210,9 +210,19 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     return data
 
 
+def _normalize_ticker(ticker: str) -> str:
+    """Add .US suffix for EODHD if no exchange suffix present."""
+    if "." in ticker:
+        return ticker
+    normalized = f"{ticker}.US"
+    logger.info(f"[TICKER] {ticker} → {normalized}")
+    return normalized
+
+
 def _fetch_eod(ticker: str) -> dict | None:
     """Fetch from EODHD. Returns parsed data dict or None."""
-    logger.info(f"[EOD] Fetch start for {ticker}")
+    eod_ticker = _normalize_ticker(ticker)
+    logger.info(f"[EOD] Fetch start for {eod_ticker}")
 
     if not EOD_API_KEY:
         logger.warning("[EOD] No EOD_API_KEY set, skipping EOD")
@@ -222,8 +232,8 @@ def _fetch_eod(ticker: str) -> dict | None:
     raw = {}
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
-            executor.submit(_eod_get, f"real-time/{ticker}"): "realtime",
-            executor.submit(_eod_get, f"fundamentals/{ticker}"): "fundamentals",
+            executor.submit(_eod_get, f"real-time/{eod_ticker}"): "realtime",
+            executor.submit(_eod_get, f"fundamentals/{eod_ticker}"): "fundamentals",
         }
         for future in as_completed(futures):
             key = futures[future]
@@ -236,7 +246,7 @@ def _fetch_eod(ticker: str) -> dict | None:
     logger.info(f"[EOD] fundamentals: {'OK' if fundamentals else 'NONE'}")
 
     if not fundamentals:
-        logger.error(f"[EOD ERROR] No fundamentals data for {ticker}")
+        logger.error(f"[EOD ERROR] No fundamentals data for {eod_ticker}")
         return None
 
     return _parse_eod_data(fundamentals, realtime, ticker)
