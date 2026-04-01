@@ -38,12 +38,11 @@ def _set_cached(ticker: str, result: dict):
 
 
 def _num(value):
-    """Convert value to float. Returns None if value is None, 0, or invalid."""
+    """Convert value to float. Returns None only if value is None or non-numeric."""
     if value is None:
         return None
     try:
-        f = float(value)
-        return f if f != 0 else None
+        return float(value)
     except (ValueError, TypeError):
         return None
 
@@ -195,17 +194,20 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
         logger.warning(f"[DATA QUALITY] Insufficient data for {ticker} — only {valid_count} valid fields")
         return None
 
-    return {
+    data = {
         "current_price": current_price,
         "currency": currency,
-        "revenue_growth": revenue_growth if revenue_growth is not None else 0,
-        "operating_margin": operating_margin if operating_margin is not None else 0,
-        "roe": roe if roe is not None else 0,
-        "net_cash": net_cash if net_cash is not None else 0,
-        "fcf_per_share": fcf_per_share if fcf_per_share is not None else 0,
-        "growth": eps_growth if eps_growth is not None else 0,
-        "eps": eps if eps is not None else 0,
+        "revenue_growth": revenue_growth,
+        "operating_margin": operating_margin,
+        "roe": roe,
+        "net_cash": net_cash,
+        "fcf_per_share": fcf_per_share,
+        "growth": eps_growth,
+        "eps": eps,
     }
+
+    data["missing_fields"] = [k for k, v in data.items() if v is None]
+    return data
 
 
 def _fetch_eod(ticker: str) -> dict | None:
@@ -331,21 +333,30 @@ def _fetch_fmp(ticker: str) -> dict | None:
         return None
 
     current_price = _num_or_zero(profile.get("price")) if profile else 0
-    eps = _num_or_zero(profile.get("eps")) if profile else 0
     currency = profile.get("currency", "USD") if profile else "USD"
 
-    operating_margin = round(_num_or_zero(ratios.get("operatingProfitMargin")) * 100, 2) if ratios else 0
-    roe = round(_num_or_zero(ratios.get("returnOnEquity")) * 100, 2) if ratios else 0
-    fcf_per_share = round(_num_or_zero(ratios.get("freeCashFlowPerShare")), 4) if ratios else 0
+    eps = _num(profile.get("eps")) if profile else None
 
-    revenue_growth = round(_num_or_zero(growth.get("revenueGrowth")) * 100, 2) if growth else 0
-    eps_growth = round(_num_or_zero(growth.get("epsgrowth")) * 100, 2) if growth else 0
+    om_raw = _num(ratios.get("operatingProfitMargin")) if ratios else None
+    operating_margin = round(om_raw * 100, 2) if om_raw is not None else None
+
+    roe_raw = _num(ratios.get("returnOnEquity")) if ratios else None
+    roe = round(roe_raw * 100, 2) if roe_raw is not None else None
+
+    fcf_raw = _num(ratios.get("freeCashFlowPerShare")) if ratios else None
+    fcf_per_share = round(fcf_raw, 4) if fcf_raw is not None else None
+
+    rg_raw = _num(growth.get("revenueGrowth")) if growth else None
+    revenue_growth = round(rg_raw * 100, 2) if rg_raw is not None else None
+
+    eg_raw = _num(growth.get("epsgrowth")) if growth else None
+    eps_growth = round(eg_raw * 100, 2) if eg_raw is not None else None
 
     total_cash = _num_or_zero(profile.get("totalCash")) if profile else 0
     total_debt = _num_or_zero(profile.get("totalDebt")) if profile else 0
     net_cash = total_cash - total_debt
 
-    return {
+    data = {
         "current_price": current_price,
         "currency": currency,
         "revenue_growth": revenue_growth,
@@ -356,6 +367,9 @@ def _fetch_fmp(ticker: str) -> dict | None:
         "growth": eps_growth,
         "eps": eps,
     }
+
+    data["missing_fields"] = [k for k, v in data.items() if v is None]
+    return data
 
 
 # ============================================================
