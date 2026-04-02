@@ -142,9 +142,18 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     free_cash_flow = None
     if len(cf_sorted) >= 1:
         latest_cf = cashflow_raw[cf_sorted[0]]
-        logger.info(f"[DEBUG CF] Keys for {ticker}: {list(latest_cf.keys())}")
-        logger.info(f"[DEBUG CF] Full data for {ticker}: {latest_cf}")
+        logger.info(f"[CF KEYS] {list(latest_cf.keys())}")
         free_cash_flow = _num(latest_cf.get("freeCashFlow"))
+        if free_cash_flow is None:
+            operating_cf = _num(latest_cf.get("totalCashFromOperatingActivities"))
+            capex = _num(latest_cf.get("capitalExpenditures"))
+            if operating_cf is not None and capex is not None:
+                if capex > 0:
+                    capex = -capex
+                free_cash_flow = operating_cf + capex
+                logger.info(f"[FCF FALLBACK] Calculated FCF from OCF ({operating_cf}) + CapEx ({capex}) = {free_cash_flow}")
+            else:
+                logger.warning(f"[FCF] No freeCashFlow and no OCF/CapEx available. OCF={operating_cf}, CapEx={capex}")
 
     # --- Balance Sheet: net cash ---
     balance_raw = financials.get("Balance_Sheet", {}).get("yearly", {})
