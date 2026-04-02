@@ -111,6 +111,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     highlights = fundamentals.get("Highlights", {}) if fundamentals else {}
     eps = _num(highlights.get("EarningsShare"))
     shares_outstanding = _num_or_zero(highlights.get("SharesOutstanding"))
+    logger.info(f"[DEBUG SHARES] SharesOutstanding for {ticker}: {highlights.get('SharesOutstanding')}")
 
     # --- Income Statement: revenue, operating income (up to 5 years for CAGR) ---
     financials = fundamentals.get("Financials", {}) if fundamentals else {}
@@ -141,6 +142,8 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     free_cash_flow = None
     if len(cf_sorted) >= 1:
         latest_cf = cashflow_raw[cf_sorted[0]]
+        logger.info(f"[DEBUG CF] Keys for {ticker}: {list(latest_cf.keys())}")
+        logger.info(f"[DEBUG CF] Full data for {ticker}: {latest_cf}")
         free_cash_flow = _num(latest_cf.get("freeCashFlow"))
 
     # --- Balance Sheet: net cash ---
