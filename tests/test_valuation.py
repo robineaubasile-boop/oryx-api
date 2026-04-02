@@ -3,44 +3,135 @@ from core.valuation import compute_valuation, valuation_verdict
 
 # --- Multiple de base (croissance) ---
 
+def test_multiple_very_high_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 35, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 40
+
 def test_multiple_high_growth():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 20, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 22, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 32
+
+def test_multiple_good_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 14, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
 	assert multiple == 25
 
-def test_multiple_medium_growth():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 12, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+def test_multiple_moderate_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 9, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
 	assert multiple == 20
 
-def test_multiple_moderate_growth():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 7, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+def test_multiple_low_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 6, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
 	assert multiple == 16
 
-def test_multiple_low_growth():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+def test_multiple_flat_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12
+
+def test_multiple_negative_growth():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": -5, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 8
+
+
+# --- Bonus FCF yield ---
+
+def test_fcf_yield_high():
+	# fcf_per_share=6, price=100 → yield 6% → +5
+	data = {"eps": 5, "fcf_per_share": 6, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 5
+
+def test_fcf_yield_medium():
+	# fcf_per_share=4, price=100 → yield 4% → +3
+	data = {"eps": 5, "fcf_per_share": 4, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 3
+
+def test_fcf_yield_low():
+	# fcf_per_share=1, price=100 → yield 1% → +1 (fcf_per_share > 0)
+	data = {"eps": 5, "fcf_per_share": 1, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 1
+
+def test_fcf_yield_zero():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
 	assert multiple == 12
 
 
-# --- Bonus qualité ---
+# --- Bonus marge ---
+
+def test_margin_bonus_high():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 35, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 4
+
+def test_margin_bonus_medium():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 22, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 3
+
+def test_margin_bonus_low():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 15, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 1
+
+
+# --- Bonus ROE ---
+
+def test_roe_bonus_high():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 30, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 3
+
+def test_roe_bonus_medium():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 18, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 2
+
+def test_roe_bonus_low():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 10, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 1
+
+
+# --- Bonus net cash ---
+
+def test_cash_bonus_positive():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 500, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12 + 2
+
+def test_cash_bonus_negative():
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": -100, "current_price": 100}
+	_, _, multiple = compute_valuation(data)
+	assert multiple == 12
+
+
+# --- All bonuses combined ---
 
 def test_multiple_with_all_bonuses():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 20, "roe": 25, "operating_margin": 30, "net_cash": 100, "current_price": 100}
+	# growth 22 → 32, fcf 6/100=6%→+5, margin 35→+4, roe 30→+3, cash +2 = 46
+	data = {"eps": 5, "fcf_per_share": 6, "revenue_growth": 22, "roe": 30, "operating_margin": 35, "net_cash": 100, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
-	assert multiple == 25 + 3 + 2 + 1  # 31
+	assert multiple == 32 + 5 + 4 + 3 + 2
 
 def test_multiple_no_bonus():
-	data = {"eps": 5, "fcf_per_share": 3, "revenue_growth": 20, "roe": 10, "operating_margin": 10, "net_cash": -50, "current_price": 100}
+	data = {"eps": 5, "fcf_per_share": 0, "revenue_growth": 22, "roe": 5, "operating_margin": 5, "net_cash": -50, "current_price": 100}
 	_, _, multiple = compute_valuation(data)
-	assert multiple == 25
+	assert multiple == 32
 
 
 # --- Fair value et fallback FCF ---
 
 def test_fair_value_uses_eps():
-	data = {"eps": 10, "fcf_per_share": 5, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
+	data = {"eps": 10, "fcf_per_share": 0, "revenue_growth": 2, "roe": 0, "operating_margin": 0, "net_cash": 0, "current_price": 100}
 	fair_value, _, multiple = compute_valuation(data)
 	assert fair_value == 10 * multiple
 
