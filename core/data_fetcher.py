@@ -112,29 +112,27 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     eps = _num(highlights.get("EarningsShare"))
     shares_outstanding = _num_or_zero(highlights.get("SharesOutstanding"))
 
-    # --- Income Statement: revenue, operating income (latest 2 years) ---
-    income_yearly = {}
+    # --- Income Statement: revenue, operating income (up to 5 years for CAGR) ---
     financials = fundamentals.get("Financials", {}) if fundamentals else {}
     income_raw = financials.get("Income_Statement", {}).get("yearly", {})
 
     # Sort years descending (keys are like "2024-12-31")
     sorted_years = sorted(income_raw.keys(), reverse=True)
-    for date_key in sorted_years:
-        income_yearly[date_key] = income_raw[date_key]
 
-    revenue_t = None
-    revenue_t1 = None
+    # Collect revenues for each available year (most recent first)
+    revenues_by_year = []
+    for date_key in sorted_years[:5]:
+        rev = _num(income_raw[date_key].get("totalRevenue"))
+        if rev is not None and rev > 0:
+            revenues_by_year.append(rev)
+
+    revenue_t = revenues_by_year[0] if len(revenues_by_year) >= 1 else None
+
     operating_income = None
-
     if len(sorted_years) >= 1:
-        latest = income_raw[sorted_years[0]]
-        revenue_t = _num(latest.get("totalRevenue"))
-        operating_income = _num(latest.get("operatingIncome"))
-    if len(sorted_years) >= 2:
-        previous = income_raw[sorted_years[1]]
-        revenue_t1 = _num(previous.get("totalRevenue"))
+        operating_income = _num(income_raw[sorted_years[0]].get("operatingIncome"))
 
-    logger.info(f"[EOD] revenue_t={revenue_t}, revenue_t1={revenue_t1}, operating_income={operating_income}")
+    logger.info(f"[EOD] revenues (recent→old): {revenues_by_year}, operating_income={operating_income}")
 
     # --- Cash Flow: FCF (latest year) ---
     cashflow_raw = financials.get("Cash_Flow", {}).get("yearly", {})
@@ -161,10 +159,16 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     if roe is not None:
         roe = round(roe * 100, 2)
 
-    # --- Computed metrics ---
+    # --- Revenue growth as CAGR (3-5 years preferred, 2-year fallback) ---
+    # Key is "revenue_growth" for backward compatibility, but value is a CAGR, not YoY
     revenue_growth = None
-    if revenue_t is not None and revenue_t1 is not None and revenue_t1 != 0:
-        revenue_growth = round(((revenue_t - revenue_t1) / abs(revenue_t1)) * 100, 2)
+    if len(revenues_by_year) >= 2:
+        revenue_recent = revenues_by_year[0]
+        revenue_oldest = revenues_by_year[-1]
+        nb_years = len(revenues_by_year) - 1
+        if revenue_oldest > 0:
+            revenue_growth = round(((revenue_recent / revenue_oldest) ** (1 / nb_years) - 1) * 100, 2)
+            logger.info(f"[CAGR] revenue: {revenue_oldest} → {revenue_recent} over {nb_years} years = {revenue_growth}%")
 
     operating_margin = None
     if operating_income is not None and revenue_t is not None and revenue_t != 0:
@@ -356,8 +360,11 @@ def _fetch_fmp(ticker: str) -> dict | None:
     fcf_raw = _num(ratios.get("freeCashFlowPerShare")) if ratios else None
     fcf_per_share = round(fcf_raw, 4) if fcf_raw is not None else None
 
+    # FMP financial-growth only provides YoY, not CAGR — log it clearly
     rg_raw = _num(growth.get("revenueGrowth")) if growth else None
     revenue_growth = round(rg_raw * 100, 2) if rg_raw is not None else None
+    if revenue_growth is not None:
+        logger.info(f"[FMP] revenue_growth is YoY (not CAGR): {revenue_growth}%")
 
     eg_raw = _num(growth.get("epsgrowth")) if growth else None
     eps_growth = round(eg_raw * 100, 2) if eg_raw is not None else None
