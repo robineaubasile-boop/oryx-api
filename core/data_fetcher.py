@@ -402,6 +402,53 @@ def _fetch_fmp(ticker: str) -> dict | None:
 
 
 # ============================================================
+# yfinance — FCF-only fallback (covers European stocks)
+# ============================================================
+
+def _fetch_fcf_yfinance(ticker: str) -> float | None:
+    """Fetch FCF per share from yfinance. Used only when EOD+FMP have no FCF."""
+    try:
+        import yfinance as yf
+
+        stock = yf.Ticker(ticker)
+        cashflow = stock.cashflow  # DataFrame: rows=items, cols=dates (most recent first)
+
+        if cashflow is None or cashflow.empty:
+            logger.warning(f"[YFINANCE] No cashflow data for {ticker}")
+            return None
+
+        # Try "Free Cash Flow" row directly
+        fcf = None
+        if "Free Cash Flow" in cashflow.index:
+            fcf = cashflow.loc["Free Cash Flow"].iloc[0]
+        elif "Operating Cash Flow" in cashflow.index and "Capital Expenditure" in cashflow.index:
+            # Manual fallback: OCF - CapEx (CapEx is negative in yfinance)
+            ocf = cashflow.loc["Operating Cash Flow"].iloc[0]
+            capex = cashflow.loc["Capital Expenditure"].iloc[0]
+            if capex > 0:
+                capex = -capex
+            fcf = ocf + capex
+            logger.info(f"[YFINANCE] Calculated FCF from OCF ({ocf}) + CapEx ({capex}) = {fcf}")
+
+        if fcf is None or (hasattr(fcf, '__float__') and float(fcf) == 0):
+            logger.warning(f"[YFINANCE] FCF is None or 0 for {ticker}")
+            return None
+
+        shares = stock.info.get("sharesOutstanding")
+        if not shares or shares == 0:
+            logger.warning(f"[YFINANCE] No sharesOutstanding for {ticker}")
+            return None
+
+        fcf_per_share = round(float(fcf) / float(shares), 4)
+        logger.info(f"[YFINANCE] FCF per share for {ticker}: {fcf_per_share}")
+        return fcf_per_share
+
+    except Exception as e:
+        logger.warning(f"[YFINANCE] Failed to get FCF for {ticker}: {e}")
+        return None
+
+
+# ============================================================
 # Merge — fill missing EOD fields from FMP
 # ============================================================
 
@@ -458,6 +505,15 @@ def fetch_financial_data(ticker: str):
         fmp_data = _fetch_fmp(ticker)
         if fmp_data:
             data = _merge_data(data, fmp_data)
+
+    # --- 2b. If FCF still missing after merge, try yfinance ---
+    if data is not None and "fcf_per_share" in data.get("missing_fields", []):
+        logger.info(f"[YFINANCE] FCF still missing for {ticker}, trying yfinance...")
+        yf_fcf = _fetch_fcf_yfinance(ticker)
+        if yf_fcf is not None:
+            data["fcf_per_share"] = yf_fcf
+            data["missing_fields"] = [f for f in data["missing_fields"] if f != "fcf_per_share"]
+            logger.info(f"[YFINANCE] FCF filled: {yf_fcf}")
 
     # --- 3. Full fallback to FMP if EOD failed entirely ---
     if data is None:
