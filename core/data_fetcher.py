@@ -383,7 +383,40 @@ def _fetch_fmp(ticker: str) -> dict | None:
 
 
 # ============================================================
-# Main entry point — EOD first, FMP fallback
+# Merge — fill missing EOD fields from FMP
+# ============================================================
+
+def _merge_data(primary: dict, secondary: dict) -> dict:
+    """Fill None fields in primary (EOD) from secondary (FMP).
+
+    Only overwrites fields listed in primary["missing_fields"].
+    Returns the updated primary dict.
+    """
+    missing = primary.get("missing_fields", [])
+    if not missing or not secondary:
+        return primary
+
+    filled = []
+    for field in list(missing):
+        value = secondary.get(field)
+        if value is not None:
+            primary[field] = value
+            filled.append(field)
+            logger.info(f"[MERGE] {field} filled from FMP: {value}")
+
+    # Update missing_fields to reflect what's still missing
+    primary["missing_fields"] = [f for f in missing if f not in filled]
+
+    if filled:
+        logger.info(f"[MERGE] Filled {len(filled)} fields from FMP: {filled}")
+    else:
+        logger.info("[MERGE] FMP had no additional data to fill")
+
+    return primary
+
+
+# ============================================================
+# Main entry point — EOD first, FMP fallback/complement
 # ============================================================
 
 def fetch_financial_data(ticker: str):
@@ -400,7 +433,14 @@ def fetch_financial_data(ticker: str):
     # --- 1. Try EOD first ---
     data = _fetch_eod(ticker)
 
-    # --- 2. Fallback to FMP if EOD failed ---
+    # --- 2. If EOD succeeded but has missing fields, complement with FMP ---
+    if data is not None and data.get("missing_fields"):
+        logger.info(f"[MERGE] EOD missing fields: {data['missing_fields']} — calling FMP to fill gaps")
+        fmp_data = _fetch_fmp(ticker)
+        if fmp_data:
+            data = _merge_data(data, fmp_data)
+
+    # --- 3. Full fallback to FMP if EOD failed entirely ---
     if data is None:
         logger.info(f"[FALLBACK] EOD failed for {ticker}, trying FMP...")
         data = _fetch_fmp(ticker)
