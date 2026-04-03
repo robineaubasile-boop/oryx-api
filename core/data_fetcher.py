@@ -122,16 +122,14 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
 
     # Collect revenues for each available year (most recent first)
     revenues_by_year = []
+    latest_income = income_raw[sorted_years[0]] if len(sorted_years) >= 1 else {}
     for date_key in sorted_years[:5]:
         rev = _num(income_raw[date_key].get("totalRevenue"))
         if rev is not None and rev > 0:
             revenues_by_year.append(rev)
 
     revenue_t = revenues_by_year[0] if len(revenues_by_year) >= 1 else None
-
-    operating_income = None
-    if len(sorted_years) >= 1:
-        operating_income = _num(income_raw[sorted_years[0]].get("operatingIncome"))
+    operating_income = _num(latest_income.get("operatingIncome"))
 
     logger.info(f"[EOD] revenues (recent→old): {revenues_by_year}, operating_income={operating_income}")
 
@@ -190,6 +188,36 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     if free_cash_flow is not None and shares_outstanding > 0:
         fcf_per_share = round(free_cash_flow / shares_outstanding, 4)
 
+    # --- ROIC (Return on Invested Capital) ---
+    roic = None
+    if operating_income is not None and len(bs_sorted) >= 1:
+        latest_bs_ref = balance_raw[bs_sorted[0]]
+        tax_expense = _num(latest_income.get("incomeTaxExpense"))
+        pretax_income = _num(latest_income.get("incomeBeforeTax"))
+
+        if tax_expense is not None and pretax_income is not None and pretax_income != 0:
+            tax_rate = tax_expense / pretax_income
+        else:
+            tax_rate = 0.25
+
+        nopat = operating_income * (1 - tax_rate)
+
+        equity = _num(latest_bs_ref.get("totalStockholderEquity"))
+        if equity is not None:
+            invested_capital = equity + total_debt - total_cash
+            if invested_capital > 0:
+                roic = round((nopat / invested_capital) * 100, 2)
+                logger.info(f"[ROIC] NOPAT={nopat}, Invested Capital={invested_capital}, ROIC={roic}%")
+
+    # --- Debt to Equity ---
+    debt_to_equity = None
+    if len(bs_sorted) >= 1:
+        latest_bs_ref = balance_raw[bs_sorted[0]]
+        equity = _num(latest_bs_ref.get("totalStockholderEquity"))
+        if equity is not None and equity > 0:
+            debt_to_equity = round(total_debt / equity, 2)
+            logger.info(f"[D/E] Debt={total_debt}, Equity={equity}, D/E={debt_to_equity}")
+
     # --- EPS growth from Highlights ---
     eps_growth = _num(highlights.get("EPSEstimateCurrentYear"))
     if eps_growth is not None and eps is not None and eps != 0:
@@ -216,6 +244,8 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
         "revenue_growth": revenue_growth,
         "operating_margin": operating_margin,
         "roe": roe,
+        "roic": roic,
+        "debt_to_equity": debt_to_equity,
         "net_cash": net_cash,
         "fcf_per_share": fcf_per_share,
         "growth": eps_growth,
@@ -385,12 +415,22 @@ def _fetch_fmp(ticker: str) -> dict | None:
     total_debt = _num_or_zero(profile.get("totalDebt")) if profile else 0
     net_cash = total_cash - total_debt
 
+    # ROIC — FMP has returnOnCapitalEmployed in ratios (close proxy)
+    roce_raw = _num(ratios.get("returnOnCapitalEmployed")) if ratios else None
+    roic = round(roce_raw * 100, 2) if roce_raw is not None else None
+
+    # Debt to Equity
+    de_raw = _num(ratios.get("debtEquityRatio")) if ratios else None
+    debt_to_equity = round(de_raw, 2) if de_raw is not None else None
+
     data = {
         "current_price": current_price,
         "currency": currency,
         "revenue_growth": revenue_growth,
         "operating_margin": operating_margin,
         "roe": roe,
+        "roic": roic,
+        "debt_to_equity": debt_to_equity,
         "net_cash": net_cash,
         "fcf_per_share": fcf_per_share,
         "growth": eps_growth,
