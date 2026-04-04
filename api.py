@@ -92,6 +92,8 @@ def analyze(request: StockRequest):
 		"roe": data.get("roe", 0),
 		"fcf_per_share": data.get("fcf_per_share", 0),
 		"net_cash": data.get("net_cash", 0),
+		"roic": data.get("roic", 0),
+		"debt_to_equity": data.get("debt_to_equity", 0),
 		"currency": data.get("currency", "USD"),
 	}
 
