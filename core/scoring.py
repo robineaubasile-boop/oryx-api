@@ -101,12 +101,14 @@ def structure_score(data):
 	net_cash = _v(data, "net_cash")
 	debt_to_equity = _v(data, "debt_to_equity")
 
-	# Trésorerie nette positive
+	# Trésorerie nette positive (bonus)
 	if net_cash > 0:
-		score += 2
+		score += 1
 
 	# Niveau d'endettement
 	if debt_to_equity < 0.5:
+		score += 2
+	elif debt_to_equity < 1:
 		score += 1
 	elif debt_to_equity > 2:
 		score -= 1
