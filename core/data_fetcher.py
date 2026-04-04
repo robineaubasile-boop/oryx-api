@@ -105,7 +105,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     """
     # --- Price from real-time ---
     current_price = _num_or_zero(realtime.get("close")) if realtime else 0
-    currency = realtime.get("currency", "USD") if realtime else "USD"
+    currency = _currency_from_ticker(ticker)
 
     # --- EPS from Highlights ---
     highlights = fundamentals.get("Highlights", {}) if fundamentals else {}
@@ -265,6 +265,32 @@ def _normalize_ticker(ticker: str) -> str:
     return normalized
 
 
+def _currency_from_ticker(ticker: str) -> str:
+    """Determine currency from ticker exchange suffix."""
+    EXCHANGE_CURRENCY = {
+        ".PA": "EUR",   # Euronext Paris
+        ".AS": "EUR",   # Euronext Amsterdam
+        ".BR": "EUR",   # Euronext Brussels
+        ".LI": "EUR",   # Euronext Lisbon
+        ".DE": "EUR",   # XETRA Frankfurt
+        ".MI": "EUR",   # Milan
+        ".MC": "EUR",   # Madrid
+        ".HE": "EUR",   # Helsinki
+        ".VI": "EUR",   # Vienna
+        ".L": "GBP",    # London
+        ".TO": "CAD",   # Toronto
+        ".HK": "HKD",   # Hong Kong
+        ".T": "JPY",    # Tokyo
+        ".US": "USD",   # US exchanges
+    }
+    for suffix, currency in EXCHANGE_CURRENCY.items():
+        if ticker.upper().endswith(suffix):
+            logger.info(f"[CURRENCY] {ticker} → {currency}")
+            return currency
+    logger.info(f"[CURRENCY] {ticker} → USD (default)")
+    return "USD"
+
+
 def _fetch_eod(ticker: str) -> dict | None:
     """Fetch from EODHD. Returns parsed data dict or None."""
     eod_ticker = _normalize_ticker(ticker)
@@ -295,7 +321,7 @@ def _fetch_eod(ticker: str) -> dict | None:
         logger.error(f"[EOD ERROR] No fundamentals data for {eod_ticker}")
         return None
 
-    return _parse_eod_data(fundamentals, realtime, ticker)
+    return _parse_eod_data(fundamentals, realtime, eod_ticker)
 
 
 # ============================================================
