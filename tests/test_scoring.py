@@ -75,22 +75,26 @@ def test_moat_score_zero():
 
 def test_structure_score_max():
 	data = {"net_cash": 100, "debt_to_equity": 0.3}
-	assert structure_score(data) == 3  # 2 (cash) + 1 (low debt)
+	assert structure_score(data) == 3  # 1 (cash) + 2 (low debt)
 
-def test_structure_score_cash_only():
-	data = {"net_cash": 100, "debt_to_equity": 1.0}
-	assert structure_score(data) == 2
+def test_structure_score_cash_and_moderate_debt():
+	data = {"net_cash": 100, "debt_to_equity": 0.7}
+	assert structure_score(data) == 2  # 1 (cash) + 1 (D/E < 1)
 
 def test_structure_score_low_debt_only():
 	data = {"net_cash": -50, "debt_to_equity": 0.3}
-	assert structure_score(data) == 1
+	assert structure_score(data) == 2  # 0 (cash) + 2 (D/E < 0.5)
+
+def test_structure_score_moderate_debt_only():
+	data = {"net_cash": -50, "debt_to_equity": 0.7}
+	assert structure_score(data) == 1  # 0 + 1 (D/E < 1)
 
 def test_structure_score_high_debt():
 	data = {"net_cash": -50, "debt_to_equity": 2.5}
 	assert structure_score(data) == -1  # 0 - 1
 
 def test_structure_score_zero():
-	data = {"net_cash": -50, "debt_to_equity": 1.0}
+	data = {"net_cash": -50, "debt_to_equity": 1.5}
 	assert structure_score(data) == 0
 
 
