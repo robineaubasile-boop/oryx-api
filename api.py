@@ -105,6 +105,7 @@ def analyze(request: StockRequest):
 		"roic": data.get("roic", 0),
 		"debt_to_equity": data.get("debt_to_equity", 0),
 		"currency": data.get("currency", "USD"),
+		"pe_history_avg": data.get("pe_history_avg"),
 	}
 
 
