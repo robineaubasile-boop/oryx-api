@@ -83,6 +83,7 @@ def analyze(request: StockRequest):
 		pe_ratio = round(current_price / eps, 2)
 	else:
 		pe_ratio = None
+	print(f"[ANALYZE] P/E ratio: {pe_ratio}")
 
 	return {
 		"success": True,
