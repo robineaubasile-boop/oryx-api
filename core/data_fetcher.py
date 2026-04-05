@@ -98,7 +98,109 @@ def _eod_get(endpoint: str, params: dict = None):
         return None
 
 
-def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | None:
+def _fetch_eod_yearly_prices(ticker: str, years: int = 5) -> dict:
+    """Fetch end-of-year closing prices from EODHD EOD endpoint.
+    Returns dict like {2024: 236.15, 2023: 198.50, ...}
+    """
+    from datetime import datetime, timedelta
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=365 * years + 30)).strftime("%Y-%m-%d")
+
+    data = _eod_get(f"eod/{ticker}", params={
+        "from": start_date,
+        "to": end_date,
+        "period": "m",
+        "order": "d"
+    })
+
+    if not data or not isinstance(data, list):
+        logger.warning(f"[EOD PRICES] No historical prices for {ticker}")
+        return {}
+
+    # Pour chaque année, prendre le dernier prix mensuel disponible (décembre ou le dernier mois)
+    prices_by_year = {}
+    for entry in data:
+        date_str = entry.get("date", "")
+        close = _num(entry.get("adjusted_close") or entry.get("close"))
+        if not date_str or close is None:
+            continue
+        year = int(date_str[:4])
+        month = int(date_str[5:7])
+        # Garder le mois le plus tardif de chaque année
+        if year not in prices_by_year or month > prices_by_year[year]["month"]:
+            prices_by_year[year] = {"month": month, "price": close}
+
+    result = {y: v["price"] for y, v in prices_by_year.items()}
+    logger.info(f"[EOD PRICES] Yearly prices for {ticker}: {result}")
+    return result
+
+
+def _extract_annual_eps(fundamentals: dict, years: int = 5) -> dict:
+    """Extract annual EPS from Earnings.History (sum of quarterly epsActual).
+    Returns dict like {2024: 7.98, 2023: 6.50, ...}
+    """
+    from datetime import datetime
+
+    earnings_history = fundamentals.get("Earnings", {}).get("History", {})
+    if not earnings_history:
+        logger.warning("[EPS HISTORY] No Earnings.History section found")
+        return {}
+
+    # Collecter les EPS trimestriels par année
+    quarterly_eps = {}  # {2024: [eps_q1, eps_q2, ...], ...}
+    current_year = datetime.now().year
+    min_year = current_year - years
+
+    for date_key, entry in earnings_history.items():
+        eps_actual = _num(entry.get("epsActual"))
+        if eps_actual is None:
+            continue
+        try:
+            year = int(date_key[:4])
+        except (ValueError, IndexError):
+            continue
+        if year < min_year:
+            continue
+        if year not in quarterly_eps:
+            quarterly_eps[year] = []
+        quarterly_eps[year].append(eps_actual)
+
+    # Sommer les trimestres pour obtenir l'EPS annuel (garder seulement les années avec 4 trimestres)
+    annual_eps = {}
+    for year, eps_list in quarterly_eps.items():
+        if len(eps_list) >= 4:
+            # Prendre les 4 trimestres les plus récents si plus de 4
+            annual_eps[year] = round(sum(sorted(eps_list, reverse=True)[:4]), 4)
+            logger.info(f"[EPS HISTORY] {year}: {len(eps_list)} quarters, annual EPS = {annual_eps[year]}")
+        else:
+            logger.info(f"[EPS HISTORY] {year}: only {len(eps_list)} quarters, skipping")
+
+    return annual_eps
+
+
+def _compute_historical_pe(annual_eps: dict, yearly_prices: dict) -> float | None:
+    """Compute average historical P/E from annual EPS and year-end prices.
+    Returns the average P/E over available years, or None.
+    """
+    pe_ratios = {}
+    for year in sorted(annual_eps.keys()):
+        eps = annual_eps[year]
+        price = yearly_prices.get(year)
+        if eps is not None and eps > 0 and price is not None and price > 0:
+            pe = round(price / eps, 2)
+            pe_ratios[year] = pe
+            logger.info(f"[PE HISTORY] {year}: price={price}, EPS={eps}, P/E={pe}")
+
+    if not pe_ratios:
+        logger.warning("[PE HISTORY] No valid P/E ratios computed")
+        return None
+
+    avg_pe = round(sum(pe_ratios.values()) / len(pe_ratios), 2)
+    logger.info(f"[PE HISTORY] Average P/E over {len(pe_ratios)} years: {avg_pe} (years: {list(pe_ratios.keys())})")
+    return avg_pe
+
+
+def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_prices: dict = None) -> dict | None:
     """Parse EOD fundamentals + real-time into our standard data format.
 
     Returns None if insufficient valid data.
@@ -225,6 +327,13 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
     else:
         eps_growth = None
 
+    # --- P/E historique ---
+    pe_history_avg = None
+    if fundamentals:
+        annual_eps = _extract_annual_eps(fundamentals)
+        if annual_eps and yearly_prices:
+            pe_history_avg = _compute_historical_pe(annual_eps, yearly_prices)
+
     # --- Data quality check: at least 3 valid fields ---
     fields = [revenue_growth, operating_margin, fcf_per_share, roe, eps]
     valid_count = sum(1 for f in fields if f is not None)
@@ -250,6 +359,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
         "fcf_per_share": fcf_per_share,
         "growth": eps_growth,
         "eps": eps,
+        "pe_history_avg": pe_history_avg,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -300,12 +410,13 @@ def _fetch_eod(ticker: str) -> dict | None:
         logger.warning("[EOD] No EOD_API_KEY set, skipping EOD")
         return None
 
-    # Fetch real-time and fundamentals in parallel
+    # Fetch real-time, fundamentals, and historical prices in parallel
     raw = {}
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(_eod_get, f"real-time/{eod_ticker}"): "realtime",
             executor.submit(_eod_get, f"fundamentals/{eod_ticker}"): "fundamentals",
+            executor.submit(_fetch_eod_yearly_prices, eod_ticker): "yearly_prices",
         }
         for future in as_completed(futures):
             key = futures[future]
@@ -313,15 +424,17 @@ def _fetch_eod(ticker: str) -> dict | None:
 
     realtime = raw.get("realtime")
     fundamentals = raw.get("fundamentals")
+    yearly_prices = raw.get("yearly_prices", {})
 
     logger.info(f"[EOD] realtime: {'OK' if realtime else 'NONE'}")
     logger.info(f"[EOD] fundamentals: {'OK' if fundamentals else 'NONE'}")
+    logger.info(f"[EOD] yearly_prices: {len(yearly_prices)} years")
 
     if not fundamentals:
         logger.error(f"[EOD ERROR] No fundamentals data for {eod_ticker}")
         return None
 
-    return _parse_eod_data(fundamentals, realtime, eod_ticker)
+    return _parse_eod_data(fundamentals, realtime, eod_ticker, yearly_prices=yearly_prices)
 
 
 # ============================================================
