@@ -76,6 +76,14 @@ def analyze(request: StockRequest):
 		print(f"[ANALYZE ERROR] Valuation failed: {type(e).__name__}: {e}")
 		return {"success": False, "ticker": ticker, "error": f"Valuation error: {e}"}
 
+	# --- P/E réel ---
+	eps = data.get("eps")
+	current_price = data.get("current_price", 0)
+	if eps is not None and eps > 0 and current_price > 0:
+		pe_ratio = round(current_price / eps, 2)
+	else:
+		pe_ratio = None
+
 	return {
 		"success": True,
 		"ticker": ticker,
@@ -84,7 +92,8 @@ def analyze(request: StockRequest):
 		"analysis": analysis,
 		"multiple": float(multiple),
 		"fair_value": round(fair_value, 2),
-		"current_price": data.get("current_price", 0),
+		"current_price": current_price,
+		"pe_ratio": pe_ratio,
 		"upside_percent": round(upside, 1),
 		"valuation_verdict": valo,
 		"revenue_growth": data.get("revenue_growth", 0),
