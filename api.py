@@ -9,6 +9,26 @@ from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data
 
+
+def _format_large_number(value, currency="USD"):
+	"""Formate un grand nombre en Mds/M lisible.
+	Ex: -13109000000 → '-13.1 Mds'
+	    5400000 → '5.4 M'
+	"""
+	if value is None:
+		return None
+	abs_val = abs(value)
+	sign = "-" if value < 0 else ""
+	if abs_val >= 1_000_000_000:
+		return f"{sign}{abs_val / 1_000_000_000:.1f} Mds {currency}"
+	elif abs_val >= 1_000_000:
+		return f"{sign}{abs_val / 1_000_000:.1f} M {currency}"
+	elif abs_val >= 1_000:
+		return f"{sign}{abs_val / 1_000:.1f} K {currency}"
+	else:
+		return f"{value} {currency}"
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -101,7 +121,7 @@ def analyze(request: StockRequest):
 		"operating_margin": data.get("operating_margin", 0),
 		"roe": data.get("roe", 0),
 		"fcf_per_share": data.get("fcf_per_share", 0),
-		"net_cash": data.get("net_cash", 0),
+		"net_cash": _format_large_number(data.get("net_cash", 0), data.get("currency", "USD")),
 		"roic": data.get("roic", 0),
 		"debt_to_equity": data.get("debt_to_equity", 0),
 		"currency": data.get("currency", "USD"),
