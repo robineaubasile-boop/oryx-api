@@ -3,6 +3,7 @@ from core.scoring import (
 	quality_score,
 	moat_score,
 	structure_score,
+	predictability_score,
 	compute_score,
 	get_verdict,
 	detect_moat,
@@ -98,10 +99,32 @@ def test_structure_score_zero():
 	assert structure_score(data) == 0
 
 
+# --- predictability_score (max 3) ---
+
+def test_predictability_score_max():
+	data = {"revenue_growth_years": 4, "margin_stability": 2, "eps_positive_years": 5}
+	assert predictability_score(data) == 3
+
+def test_predictability_score_medium():
+	data = {"revenue_growth_years": 3, "margin_stability": 4, "eps_positive_years": 4}
+	assert predictability_score(data) == 1.5  # 0.5 + 0.5 + 0.5
+
+def test_predictability_score_zero():
+	data = {"revenue_growth_years": 1, "margin_stability": 8, "eps_positive_years": 2}
+	assert predictability_score(data) == 0
+
+def test_predictability_score_no_margin_data():
+	data = {"revenue_growth_years": 4, "eps_positive_years": 5}
+	assert predictability_score(data) == 2  # 1 + 0 (no margin_stability) + 1
+
+def test_predictability_score_empty():
+	assert predictability_score({}) == 0
+
+
 # --- compute_score ---
 
 def test_score_max_constant():
-	assert SCORE_MAX == 16
+	assert SCORE_MAX == 19
 
 def test_compute_score_perfect():
 	data = {
@@ -113,6 +136,9 @@ def test_compute_score_perfect():
 		"fcf_per_share": 5,
 		"net_cash": 100,
 		"debt_to_equity": 0.3,
+		"revenue_growth_years": 4,
+		"margin_stability": 2,
+		"eps_positive_years": 5,
 	}
 	assert compute_score(data) == 10.0
 
@@ -144,10 +170,13 @@ def test_compute_score_netflix():
 		"fcf_per_share": 2.24,
 		"net_cash": -5000,
 		"debt_to_equity": 0.54,
+		"revenue_growth_years": 4,
+		"margin_stability": 2.5,
+		"eps_positive_years": 5,
 	}
 	score = compute_score(data)
-	# growth=1+2=3, quality=5, moat=4, structure=0 → 12/16=7.5
-	assert 7 <= score <= 9.5
+	# growth=3, quality=5, moat=4, structure=0, predictability=3 → 15/19=7.9
+	assert 6.5 <= score <= 9.5
 
 def test_compute_score_schneider():
 	"""Schneider-like: CAGR 8.5%, margin 17.5%, ROE 15.6%, ROIC 14.2%, D/E 0.73, FCF 8.16"""
@@ -160,9 +189,12 @@ def test_compute_score_schneider():
 		"fcf_per_share": 8.16,
 		"net_cash": -3000,
 		"debt_to_equity": 0.73,
+		"revenue_growth_years": 3,
+		"margin_stability": 2,
+		"eps_positive_years": 5,
 	}
 	score = compute_score(data)
-	# growth=1+1=2, quality=1+0+0+1=2, moat=0+2=2, structure=0 → 6/16=3.8
+	# growth=2, quality=2, moat=2, structure=1, predictability=2.5 → 9.5/19=5.0
 	assert 3.5 <= score <= 6
 
 

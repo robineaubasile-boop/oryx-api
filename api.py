@@ -126,6 +126,9 @@ def analyze(request: StockRequest):
 		"debt_to_equity": data.get("debt_to_equity", 0),
 		"currency": data.get("currency", "USD"),
 		"pe_history_avg": data.get("pe_history_avg"),
+		"revenue_growth_years": data.get("revenue_growth_years", 0),
+		"margin_stability": data.get("margin_stability"),
+		"eps_positive_years": data.get("eps_positive_years", 0),
 	}
 
 
