@@ -118,22 +118,56 @@ def structure_score(data):
 STRUCTURE_SCORE_MAX = 3
 
 
+# ========================= # 5. Score Prévisibilité (max 3 pts) # =========================
+
+def predictability_score(data):
+    score = 0
+
+    revenue_growth_years = _v(data, "revenue_growth_years")
+    margin_stability = data.get("margin_stability")  # None means no data
+    eps_positive_years = _v(data, "eps_positive_years")
+
+    # Années consécutives de croissance du CA
+    if revenue_growth_years >= 4:
+        score += 1
+    elif revenue_growth_years >= 2:
+        score += 0.5
+
+    # Stabilité de la marge (écart-type faible = bon)
+    if margin_stability is not None:
+        if margin_stability < 3:
+            score += 1
+        elif margin_stability < 5:
+            score += 0.5
+
+    # Années avec EPS positif
+    if eps_positive_years >= 5:
+        score += 1
+    elif eps_positive_years >= 4:
+        score += 0.5
+
+    return score
+
+PREDICTABILITY_SCORE_MAX = 3
+
+
 # ========================= # Score final # =========================
 
-SCORE_MAX = GROWTH_SCORE_MAX + QUALITY_SCORE_MAX + MOAT_SCORE_MAX + STRUCTURE_SCORE_MAX  # 16
+SCORE_MAX = GROWTH_SCORE_MAX + QUALITY_SCORE_MAX + MOAT_SCORE_MAX + STRUCTURE_SCORE_MAX + PREDICTABILITY_SCORE_MAX  # 19
 
 def compute_score(data):
 	g = growth_score(data)
 	q = quality_score(data)
 	m = moat_score(data)
 	s = structure_score(data)
+	p = predictability_score(data)
 
-	total = g + q + m + s
+	total = g + q + m + s + p
 	total = max(total, 0)
 	score_normalized = round((total / SCORE_MAX) * 10, 1)
 
 	logger.info(
-		f"[SCORING] Growth={g}, Quality={q}, Moat={m}, Structure={s} "
+		f"[SCORING] Growth={g}, Quality={q}, Moat={m}, Structure={s}, Predictability={p} "
 		f"→ Total={total}/{SCORE_MAX} → Normalized={score_normalized}/10"
 	)
 

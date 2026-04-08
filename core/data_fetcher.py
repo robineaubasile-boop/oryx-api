@@ -327,10 +327,41 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     else:
         eps_growth = None
 
+    # --- Predictability metrics ---
+
+    # revenue_growth_years: consecutive years of revenue growth (most recent first)
+    revenue_growth_years = 0
+    if len(revenues_by_year) >= 2:
+        for i in range(len(revenues_by_year) - 1):
+            if revenues_by_year[i] > revenues_by_year[i + 1]:
+                revenue_growth_years += 1
+            else:
+                break
+        logger.info(f"[PREDICTABILITY] revenue_growth_years={revenue_growth_years} (from {len(revenues_by_year)} years)")
+
+    # margin_stability: standard deviation of operating margins over available years
+    margin_stability = None
+    margins_list = []
+    for date_key in sorted_years[:5]:
+        inc = income_raw[date_key]
+        rev = _num(inc.get("totalRevenue"))
+        op_inc = _num(inc.get("operatingIncome"))
+        if rev is not None and rev > 0 and op_inc is not None:
+            margins_list.append((op_inc / rev) * 100)
+    if len(margins_list) >= 2:
+        import statistics
+        margin_stability = round(statistics.stdev(margins_list), 2)
+        logger.info(f"[PREDICTABILITY] margin_stability={margin_stability} (stdev of {margins_list})")
+
+    # eps_positive_years: count of years with positive annual EPS
+    annual_eps_for_pred = _extract_annual_eps(fundamentals) if fundamentals else {}
+    eps_positive_years = sum(1 for v in annual_eps_for_pred.values() if v is not None and v > 0)
+    logger.info(f"[PREDICTABILITY] eps_positive_years={eps_positive_years} (from {len(annual_eps_for_pred)} years)")
+
     # --- P/E historique ---
     pe_history_avg = None
     if fundamentals:
-        annual_eps = _extract_annual_eps(fundamentals)
+        annual_eps = annual_eps_for_pred if annual_eps_for_pred else _extract_annual_eps(fundamentals)
         if annual_eps and yearly_prices:
             pe_history_avg = _compute_historical_pe(annual_eps, yearly_prices)
 
@@ -360,6 +391,9 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "growth": eps_growth,
         "eps": eps,
         "pe_history_avg": pe_history_avg,
+        "revenue_growth_years": revenue_growth_years,
+        "margin_stability": margin_stability,
+        "eps_positive_years": eps_positive_years,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
