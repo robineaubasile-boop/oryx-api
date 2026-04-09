@@ -125,6 +125,7 @@ def analyze(request: StockRequest):
 		"roic": data.get("roic", 0),
 		"debt_to_equity": data.get("debt_to_equity", 0),
 		"currency": data.get("currency", "USD"),
+		"sector": data.get("sector", "Unknown"),
 		"pe_history_avg": data.get("pe_history_avg"),
 		"revenue_growth_years": data.get("revenue_growth_years", 0),
 		"margin_stability": data.get("margin_stability"),

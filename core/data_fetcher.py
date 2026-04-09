@@ -209,6 +209,12 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     current_price = _num_or_zero(realtime.get("close")) if realtime else 0
     currency = _currency_from_ticker(ticker)
 
+    # --- Sector from General ---
+    general = fundamentals.get("General", {}) if fundamentals else {}
+    sector = general.get("Sector", "Unknown")
+    industry = general.get("Industry", "Unknown")
+    logger.info(f"[SECTOR] {ticker}: Sector={sector}, Industry={industry}")
+
     # --- EPS from Highlights ---
     highlights = fundamentals.get("Highlights", {}) if fundamentals else {}
     eps = _num(highlights.get("EarningsShare"))
@@ -381,6 +387,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     data = {
         "current_price": current_price,
         "currency": currency,
+        "sector": sector,
         "revenue_growth": revenue_growth,
         "operating_margin": operating_margin,
         "roe": roe,
