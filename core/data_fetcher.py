@@ -388,6 +388,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "current_price": current_price,
         "currency": currency,
         "sector": sector,
+        "name": general.get("Name", ticker),
         "revenue_growth": revenue_growth,
         "operating_margin": operating_margin,
         "roe": roe,
