@@ -408,6 +408,148 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     return data
 
 
+def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | None:
+    """Parse EODHD fundamentals for an ETF into our standard ETF format."""
+    general = fundamentals.get("General", {})
+    etf_data = fundamentals.get("ETF_Data", {})
+    technicals = fundamentals.get("Technicals", {})
+
+    if not etf_data:
+        logger.warning(f"[ETF] No ETF_Data section for {ticker}")
+        return None
+
+    current_price = _num_or_zero(realtime.get("close")) if realtime else 0
+    currency = _currency_from_ticker(ticker)
+
+    # --- General info ---
+    name = general.get("Name", ticker)
+    category = general.get("Category", "Unknown")
+
+    # --- ETF info ---
+    isin = etf_data.get("ISIN", None)
+    index_name = etf_data.get("Index_Name", None)
+    inception_date = etf_data.get("Inception_Date", None)
+    total_assets = _num(etf_data.get("TotalAssets"))
+    holdings_count = _num(etf_data.get("Holdings_Count"))
+    yield_pct = _num(etf_data.get("Yield"))
+
+    # --- Frais ---
+    net_expense_ratio = _num(etf_data.get("NetExpenseRatio"))
+    ongoing_charge = _num(etf_data.get("Ongoing_Charge"))
+    # Utiliser ongoing_charge en priorité (standard européen), sinon expense ratio
+    ter = ongoing_charge if ongoing_charge is not None else net_expense_ratio
+    # Convertir en pourcentage lisible si besoin
+    if ter is not None and ter < 1:
+        ter = round(ter * 100, 2)
+
+    # --- Performance ---
+    performance = etf_data.get("Performance", {})
+    returns_ytd = _num(performance.get("Returns_YTD"))
+    returns_1y = _num(performance.get("Returns_1Y"))
+    returns_3y = _num(performance.get("Returns_3Y"))
+    returns_5y = _num(performance.get("Returns_5Y"))
+    returns_10y = _num(performance.get("Returns_10Y"))
+    volatility_1y = _num(performance.get("1y_Volatility"))
+    volatility_3y = _num(performance.get("3y_Volatility"))
+    sharpe_3y = _num(performance.get("3y_SharpRatio"))
+
+    # --- Top 10 Holdings ---
+    top_10_raw = etf_data.get("Top_10_Holdings", {})
+    top_10 = []
+    if isinstance(top_10_raw, dict):
+        for key, holding in top_10_raw.items():
+            if isinstance(holding, dict):
+                top_10.append({
+                    "code": holding.get("Code", key),
+                    "name": holding.get("Name", "Unknown"),
+                    "assets_pct": _num(holding.get("Assets_%")),
+                    "sector": holding.get("Sector", ""),
+                })
+        top_10 = sorted(top_10, key=lambda x: x.get("assets_pct") or 0, reverse=True)[:10]
+
+    # --- Sector Weights ---
+    sector_weights_raw = etf_data.get("Sector_Weights", {})
+    sector_weights = {}
+    if isinstance(sector_weights_raw, dict):
+        for sector_name, values in sector_weights_raw.items():
+            if isinstance(values, dict):
+                pct = _num(values.get("Equity_%"))
+                if pct is not None and pct > 0:
+                    sector_weights[sector_name] = round(pct, 2)
+
+    # --- World Regions ---
+    regions_raw = etf_data.get("World_Regions", {})
+    world_regions = {}
+    if isinstance(regions_raw, dict):
+        for region_name, values in regions_raw.items():
+            if isinstance(values, dict):
+                pct = _num(values.get("Equity_%"))
+                if pct is not None and pct > 0:
+                    world_regions[region_name] = round(pct, 2)
+
+    # --- Market Cap breakdown ---
+    market_cap_raw = etf_data.get("Market_Capitalisation", {})
+    market_cap = {}
+    if isinstance(market_cap_raw, dict):
+        for size, pct in market_cap_raw.items():
+            val = _num(pct)
+            if val is not None and val > 0:
+                market_cap[size] = round(val, 2)
+
+    # --- Valuations vs category ---
+    valuations_growth = etf_data.get("Valuations_Growth", {})
+    valuations_portfolio = valuations_growth.get("Valuations_Rates_Portfolio", {})
+    valuations_category = valuations_growth.get("Valuations_Rates_To_Category", {})
+
+    pe_portfolio = _num(valuations_portfolio.get("Price/Prospective Earnings"))
+    pb_portfolio = _num(valuations_portfolio.get("Price/Book"))
+    pe_category = _num(valuations_category.get("Price/Prospective Earnings"))
+    pb_category = _num(valuations_category.get("Price/Book"))
+
+    # --- Morningstar ---
+    morningstar = etf_data.get("MorningStar", {})
+    morningstar_rating = _num(morningstar.get("Ratio"))
+    morningstar_benchmark = morningstar.get("Category_Benchmark", None)
+
+    logger.info(f"[ETF] Parsed: name={name}, TER={ter}, AUM={total_assets}, holdings={holdings_count}")
+    logger.info(f"[ETF] Returns: YTD={returns_ytd}, 1Y={returns_1y}, 3Y={returns_3y}, 5Y={returns_5y}")
+    logger.info(f"[ETF] Top sectors: {sector_weights}")
+    logger.info(f"[ETF] Top regions: {world_regions}")
+
+    return {
+        "type": "ETF",
+        "name": name,
+        "current_price": current_price,
+        "currency": currency,
+        "category": category,
+        "isin": isin,
+        "index_name": index_name,
+        "inception_date": inception_date,
+        "total_assets": total_assets,
+        "holdings_count": int(holdings_count) if holdings_count else None,
+        "yield_pct": round(yield_pct, 2) if yield_pct else None,
+        "ter": ter,
+        "returns_ytd": round(returns_ytd, 2) if returns_ytd else None,
+        "returns_1y": round(returns_1y, 2) if returns_1y else None,
+        "returns_3y": round(returns_3y, 2) if returns_3y else None,
+        "returns_5y": round(returns_5y, 2) if returns_5y else None,
+        "returns_10y": round(returns_10y, 2) if returns_10y else None,
+        "volatility_1y": round(volatility_1y, 2) if volatility_1y else None,
+        "volatility_3y": round(volatility_3y, 2) if volatility_3y else None,
+        "sharpe_3y": round(sharpe_3y, 2) if sharpe_3y else None,
+        "top_10_holdings": top_10,
+        "sector_weights": sector_weights,
+        "world_regions": world_regions,
+        "market_cap_breakdown": market_cap,
+        "pe_portfolio": round(pe_portfolio, 2) if pe_portfolio else None,
+        "pb_portfolio": round(pb_portfolio, 2) if pb_portfolio else None,
+        "pe_category": round(pe_category, 2) if pe_category else None,
+        "pb_category": round(pb_category, 2) if pb_category else None,
+        "morningstar_rating": int(morningstar_rating) if morningstar_rating else None,
+        "morningstar_benchmark": morningstar_benchmark,
+    }
+
+
 def _normalize_ticker(ticker: str) -> str:
     """Add .US suffix for EODHD if no exchange suffix present."""
     if "." in ticker:
@@ -758,4 +900,53 @@ def fetch_financial_data(ticker: str):
 
     result = {"success": True, "ticker": ticker, "error": None, "data": data}
     _set_cached(ticker, result)
+    return result
+
+
+def fetch_etf_data(ticker: str):
+    """Fetch and parse ETF data from EODHD."""
+    ticker = ticker.upper()
+    logger.info(f"[ETF FETCH] === Starting ETF fetch for {ticker} ===")
+
+    cached = _get_cached(f"ETF_{ticker}")
+    if cached:
+        return cached
+
+    total_start = time.time()
+    eod_ticker = _normalize_ticker(ticker)
+
+    if not EOD_API_KEY:
+        return {"success": False, "ticker": ticker, "error": "No EOD API key", "data": None}
+
+    raw = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_eod_get, f"real-time/{eod_ticker}"): "realtime",
+            executor.submit(_eod_get, f"fundamentals/{eod_ticker}"): "fundamentals",
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            raw[key] = future.result()
+
+    realtime = raw.get("realtime")
+    fundamentals = raw.get("fundamentals")
+
+    if not fundamentals:
+        return {"success": False, "ticker": ticker, "error": "No fundamentals data", "data": None}
+
+    # Vérifier que c'est bien un ETF
+    asset_type = fundamentals.get("General", {}).get("Type", "")
+    if asset_type != "ETF":
+        return {"success": False, "ticker": ticker, "error": f"Ce ticker est un {asset_type}, pas un ETF. Utilisez la commande Analyse classique.", "data": None}
+
+    data = _parse_etf_data(fundamentals, realtime, eod_ticker)
+
+    if data is None:
+        return {"success": False, "ticker": ticker, "error": "ETF data parsing failed", "data": None}
+
+    total_elapsed = round(time.time() - total_start, 2)
+    logger.info(f"[ETF FETCH] Total time: {total_elapsed}s")
+
+    result = {"success": True, "ticker": ticker, "error": None, "data": data}
+    _set_cached(f"ETF_{ticker}", result)
     return result
