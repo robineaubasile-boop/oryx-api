@@ -811,6 +811,165 @@ def _fetch_fcf_yfinance(ticker: str) -> float | None:
         return None
 
 
+def _fetch_yfinance_full(ticker: str) -> dict | None:
+    """Full yfinance fallback for tickers not covered by EODHD/FMP (e.g. European midcaps)."""
+    try:
+        import yfinance as yf
+        import statistics
+
+        logger.info(f"[YFINANCE FULL] Fetching all data for {ticker}")
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        if not info or info.get("regularMarketPrice") is None:
+            logger.warning(f"[YFINANCE FULL] No info data for {ticker}")
+            return None
+
+        current_price = _num(info.get("currentPrice") or info.get("regularMarketPrice"))
+        currency = info.get("currency", "EUR")
+        name = info.get("longName") or info.get("shortName") or ticker
+        sector = info.get("sector", "Unknown")
+        eps = _num(info.get("trailingEps"))
+        shares = _num(info.get("sharesOutstanding"))
+
+        # ROE
+        roe_raw = _num(info.get("returnOnEquity"))
+        roe = round(roe_raw * 100, 2) if roe_raw is not None else None
+
+        # Operating margin
+        om_raw = _num(info.get("operatingMargins"))
+        operating_margin = round(om_raw * 100, 2) if om_raw is not None else None
+
+        # Debt to equity
+        de_raw = _num(info.get("debtToEquity"))
+        debt_to_equity = round(de_raw / 100, 2) if de_raw is not None else None
+
+        # Net cash
+        total_cash = _num_or_zero(info.get("totalCash"))
+        total_debt = _num_or_zero(info.get("totalDebt"))
+        net_cash = total_cash - total_debt
+
+        # FCF per share
+        fcf = _num(info.get("freeCashflow"))
+        fcf_per_share = None
+        if fcf is not None and shares and shares > 0:
+            fcf_per_share = round(fcf / shares, 2)
+
+        # Revenue growth (CAGR from financials)
+        revenue_growth = None
+        revenues_by_year = []
+        try:
+            financials = stock.financials
+            if financials is not None and not financials.empty:
+                for col in financials.columns[:5]:
+                    rev = _num(financials.loc["Total Revenue", col]) if "Total Revenue" in financials.index else None
+                    if rev is not None and rev > 0:
+                        revenues_by_year.append(rev)
+                if len(revenues_by_year) >= 2:
+                    revenue_recent = revenues_by_year[0]
+                    revenue_oldest = revenues_by_year[-1]
+                    nb_years = len(revenues_by_year) - 1
+                    if revenue_oldest > 0:
+                        revenue_growth = round(((revenue_recent / revenue_oldest) ** (1 / nb_years) - 1) * 100, 2)
+                        logger.info(f"[YFINANCE FULL] CAGR: {revenue_oldest} -> {revenue_recent} over {nb_years}y = {revenue_growth}%")
+        except Exception as e:
+            logger.warning(f"[YFINANCE FULL] Revenue CAGR calc failed: {e}")
+
+        # ROIC
+        roic = None
+        try:
+            financials = stock.financials
+            balance = stock.balance_sheet
+            if financials is not None and not financials.empty and balance is not None and not balance.empty:
+                latest_fin = financials.iloc[:, 0]
+                latest_bs = balance.iloc[:, 0]
+                op_income = _num(latest_fin.get("Operating Income"))
+                tax = _num(latest_fin.get("Tax Provision"))
+                pretax = _num(latest_fin.get("Pretax Income"))
+                equity = _num(latest_bs.get("Stockholders Equity") or latest_bs.get("Total Stockholder Equity"))
+                if op_income is not None and equity is not None:
+                    tax_rate = (tax / pretax) if (tax is not None and pretax is not None and pretax != 0) else 0.25
+                    nopat = op_income * (1 - tax_rate)
+                    invested_capital = (equity or 0) + total_debt - total_cash
+                    if invested_capital > 0:
+                        roic = round((nopat / invested_capital) * 100, 2)
+                        logger.info(f"[YFINANCE FULL] ROIC={roic}%")
+        except Exception as e:
+            logger.warning(f"[YFINANCE FULL] ROIC calc failed: {e}")
+
+        # Predictability metrics
+        revenue_growth_years = 0
+        if len(revenues_by_year) >= 2:
+            for i in range(len(revenues_by_year) - 1):
+                if revenues_by_year[i] > revenues_by_year[i + 1]:
+                    revenue_growth_years += 1
+                else:
+                    break
+
+        margin_stability = None
+        margins_list = []
+        try:
+            financials = stock.financials
+            if financials is not None and not financials.empty:
+                for col in financials.columns[:5]:
+                    rev = _num(financials.loc["Total Revenue", col]) if "Total Revenue" in financials.index else None
+                    op_inc = _num(financials.loc["Operating Income", col]) if "Operating Income" in financials.index else None
+                    if rev and rev > 0 and op_inc is not None:
+                        margins_list.append((op_inc / rev) * 100)
+                if len(margins_list) >= 2:
+                    margin_stability = round(statistics.stdev(margins_list), 2)
+        except Exception as e:
+            logger.warning(f"[YFINANCE FULL] Margin stability calc failed: {e}")
+
+        eps_positive_years = 0
+        try:
+            earnings = stock.earnings_history if hasattr(stock, 'earnings_history') else None
+            if earnings is not None and not earnings.empty:
+                eps_positive_years = sum(1 for _, row in earnings.iterrows() if _num(row.get("epsActual")) is not None and row.get("epsActual") > 0)
+            else:
+                if eps is not None and eps > 0:
+                    eps_positive_years = 1
+        except:
+            if eps is not None and eps > 0:
+                eps_positive_years = 1
+
+        # Data quality check
+        fields = [revenue_growth, operating_margin, fcf_per_share, roe, eps]
+        valid_count = sum(1 for f in fields if f is not None)
+        logger.info(f"[YFINANCE FULL] Valid fields: {valid_count}/{len(fields)}")
+
+        if valid_count < 2:
+            logger.warning(f"[YFINANCE FULL] Insufficient data for {ticker}")
+            return None
+
+        data = {
+            "current_price": current_price or 0,
+            "currency": currency,
+            "name": name,
+            "sector": sector,
+            "revenue_growth": revenue_growth,
+            "operating_margin": operating_margin,
+            "roe": roe,
+            "roic": roic,
+            "debt_to_equity": debt_to_equity,
+            "net_cash": net_cash,
+            "fcf_per_share": fcf_per_share,
+            "growth": None,
+            "eps": eps,
+            "pe_history_avg": None,
+            "revenue_growth_years": revenue_growth_years,
+            "margin_stability": margin_stability,
+            "eps_positive_years": eps_positive_years,
+        }
+        data["missing_fields"] = [k for k, v in data.items() if v is None]
+        logger.info(f"[YFINANCE FULL] Successfully parsed {ticker}: {data}")
+        return data
+
+    except Exception as e:
+        logger.error(f"[YFINANCE FULL] Failed for {ticker}: {e}")
+        return None
+
+
 # ============================================================
 # Merge — fill missing EOD fields from FMP
 # ============================================================
@@ -882,6 +1041,11 @@ def fetch_financial_data(ticker: str):
     if data is None:
         logger.info(f"[FALLBACK] EOD failed for {ticker}, trying FMP...")
         data = _fetch_fmp(ticker)
+
+    # --- 4. Full fallback to yfinance if FMP also failed ---
+    if data is None:
+        logger.info(f"[YFINANCE FULL] EOD+FMP failed for {ticker}, trying yfinance full fallback...")
+        data = _fetch_yfinance_full(ticker)
 
     total_elapsed = round(time.time() - total_start, 2)
 
