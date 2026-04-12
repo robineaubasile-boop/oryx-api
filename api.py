@@ -129,6 +129,10 @@ def analyze(request: StockRequest):
 	if not data.get("current_price") and not data.get("revenue_growth") and not data.get("operating_margin") and not data.get("roe"):
 		return {"success": False, "ticker": ticker, "error": "Cette entreprise n'est pas couverte par nos sources de données. Vérifiez le ticker ou essayez un autre actif."}
 
+	# --- Détection données partielles ---
+	_missing_count = sum(1 for k in ("roic", "debt_to_equity", "net_cash") if data.get(k) is None)
+	data_warning = "⚠️ Données partielles — certaines métriques (ROIC, D/E, trésorerie) ne sont pas disponibles pour ce ticker. Le score Oryx peut être sous-estimé." if _missing_count >= 2 else None
+
 	return {
 		"success": True,
 		"ticker": ticker,
@@ -155,6 +159,7 @@ def analyze(request: StockRequest):
 		"revenue_growth_years": data.get("revenue_growth_years", 0),
 		"margin_stability": round(_safe(data.get("margin_stability")), 2),
 		"eps_positive_years": data.get("eps_positive_years", 0),
+		"data_warning": data_warning,
 	}
 
 
