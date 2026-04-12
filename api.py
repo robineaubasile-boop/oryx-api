@@ -10,6 +10,11 @@ from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data, fetch_etf_data
 
 
+def _safe(val, default=0):
+	"""Retourne default si val est None."""
+	return val if val is not None else default
+
+
 def _format_large_number(value, currency="USD"):
 	"""Formate un grand nombre en Mds/M lisible.
 	Ex: -13109000000 → '-13.1 Mds'
@@ -132,20 +137,20 @@ def analyze(request: StockRequest):
 		"fair_value": round(fair_value, 2),
 		"current_price": current_price,
 		"pe_ratio": pe_ratio,
-		"upside_percent": f"+{round(upside, 1)}" if upside > 0 else str(round(upside, 1)),
+		"upside_percent": f"+{round(upside, 1)}" if upside and upside > 0 else str(round(_safe(upside), 1)),
 		"valuation_verdict": valo,
-		"revenue_growth": round(data.get("revenue_growth", 0), 2),
-		"operating_margin": round(data.get("operating_margin", 0), 2),
-		"roe": round(data.get("roe", 0), 2),
-		"fcf_per_share": round(data.get("fcf_per_share", 0), 2),
+		"revenue_growth": round(_safe(data.get("revenue_growth")), 2),
+		"operating_margin": round(_safe(data.get("operating_margin")), 2),
+		"roe": round(_safe(data.get("roe")), 2),
+		"fcf_per_share": round(_safe(data.get("fcf_per_share")), 2),
 		"net_cash": _format_large_number(data.get("net_cash", 0), data.get("currency", "USD")),
-		"roic": round(data.get("roic", 0), 2),
-		"debt_to_equity": round(data.get("debt_to_equity", 0), 2),
+		"roic": round(_safe(data.get("roic")), 2),
+		"debt_to_equity": round(_safe(data.get("debt_to_equity")), 2),
 		"currency": data.get("currency", "USD"),
 		"sector": data.get("sector", "Unknown"),
 		"pe_history_avg": data.get("pe_history_avg"),
 		"revenue_growth_years": data.get("revenue_growth_years", 0),
-		"margin_stability": round(data.get("margin_stability", 0), 2),
+		"margin_stability": round(_safe(data.get("margin_stability")), 2),
 		"eps_positive_years": data.get("eps_positive_years", 0),
 	}
 
