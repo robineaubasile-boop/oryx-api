@@ -1055,7 +1055,7 @@ def fetch_financial_data(ticker: str):
         return {
             "success": False,
             "ticker": ticker,
-            "error": "All data sources failed, no data available",
+            "error": "Ce ticker n'est pas disponible dans nos sources de données. Vérifiez le ticker ou essayez un autre actif.",
             "data": None,
         }
 
@@ -1080,7 +1080,7 @@ def fetch_etf_data(ticker: str):
     eod_ticker = _normalize_ticker(ticker)
 
     if not EOD_API_KEY:
-        return {"success": False, "ticker": ticker, "error": "No EOD API key", "data": None}
+        return {"success": False, "ticker": ticker, "error": "Clé API EOD manquante.", "data": None}
 
     raw = {}
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1096,7 +1096,7 @@ def fetch_etf_data(ticker: str):
     fundamentals = raw.get("fundamentals")
 
     if not fundamentals:
-        return {"success": False, "ticker": ticker, "error": "No fundamentals data", "data": None}
+        return {"success": False, "ticker": ticker, "error": "Aucune donnée fondamentale disponible pour ce ticker.", "data": None}
 
     # Vérifier que c'est bien un ETF
     asset_type = fundamentals.get("General", {}).get("Type", "")
@@ -1106,7 +1106,7 @@ def fetch_etf_data(ticker: str):
     data = _parse_etf_data(fundamentals, realtime, eod_ticker)
 
     if data is None:
-        return {"success": False, "ticker": ticker, "error": "ETF data parsing failed", "data": None}
+        return {"success": False, "ticker": ticker, "error": "Impossible de traiter les données de cet ETF.", "data": None}
 
     total_elapsed = round(time.time() - total_start, 2)
     logger.info(f"[ETF FETCH] Total time: {total_elapsed}s")

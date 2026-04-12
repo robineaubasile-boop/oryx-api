@@ -85,7 +85,7 @@ def analyze(request: StockRequest):
 		result = fetch_financial_data(ticker)
 	except Exception as e:
 		print(f"[ANALYZE ERROR] fetch_financial_data crashed: {type(e).__name__}: {e}")
-		return {"success": False, "ticker": ticker, "error": f"Internal error: {e}"}
+		return {"success": False, "ticker": ticker, "error": f"Erreur interne : {e}"}
 
 	if not result["success"]:
 		print(f"[ANALYZE] Fetch failed: {result['error']}")
@@ -106,7 +106,7 @@ def analyze(request: StockRequest):
 		print(f"[ANALYZE] Score: {score}, Verdict: {verdict}")
 	except Exception as e:
 		print(f"[ANALYZE ERROR] Scoring failed: {type(e).__name__}: {e}")
-		return {"success": False, "ticker": ticker, "error": f"Scoring error: {e}"}
+		return {"success": False, "ticker": ticker, "error": f"Erreur de scoring : {e}"}
 
 	# --- Valuation ---
 	try:
@@ -115,7 +115,7 @@ def analyze(request: StockRequest):
 		print(f"[ANALYZE] Fair value: {fair_value}, Upside: {upside}%, Multiple: {multiple}")
 	except Exception as e:
 		print(f"[ANALYZE ERROR] Valuation failed: {type(e).__name__}: {e}")
-		return {"success": False, "ticker": ticker, "error": f"Valuation error: {e}"}
+		return {"success": False, "ticker": ticker, "error": f"Erreur de valorisation : {e}"}
 
 	# --- P/E réel ---
 	eps = data.get("eps")
@@ -167,7 +167,7 @@ def analyze_etf(request: StockRequest):
 		result = fetch_etf_data(ticker)
 	except Exception as e:
 		print(f"[ETF ERROR] fetch_etf_data crashed: {type(e).__name__}: {e}")
-		return {"success": False, "ticker": ticker, "error": f"Internal error: {e}"}
+		return {"success": False, "ticker": ticker, "error": f"Erreur interne : {e}"}
 
 	if not result["success"]:
 		return {"success": False, "ticker": ticker, "error": result["error"]}
