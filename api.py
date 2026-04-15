@@ -159,6 +159,7 @@ def analyze(request: StockRequest):
 		"revenue_growth_years": data.get("revenue_growth_years", 0),
 		"margin_stability": round(_safe(data.get("margin_stability")), 2),
 		"eps_positive_years": data.get("eps_positive_years", 0),
+		"fcf_vs_net_income": data.get("fcf_vs_net_income"),
 		"data_warning": data_warning,
 	}
 

@@ -261,6 +261,45 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
             else:
                 logger.warning(f"[FCF] No freeCashFlow and no OCF/CapEx available. OCF={operating_cf}, CapEx={capex}")
 
+    # --- FCF vs Net Income (accounting quality signal over 3 years) ---
+    net_incomes = []
+    for date_key in sorted_years[:3]:
+        ni = _num(income_raw[date_key].get("netIncome"))
+        if ni is not None:
+            net_incomes.append(ni)
+
+    fcfs = []
+    for date_key in cf_sorted[:3]:
+        cf_entry = cashflow_raw[date_key]
+        fcf_val = _num(cf_entry.get("freeCashFlow"))
+        if fcf_val is None:
+            ocf = _num(cf_entry.get("totalCashFromOperatingActivities"))
+            capex = _num(cf_entry.get("capitalExpenditures"))
+            if ocf is not None and capex is not None:
+                if capex > 0:
+                    capex = -capex
+                fcf_val = ocf + capex
+        if fcf_val is not None:
+            fcfs.append(fcf_val)
+
+    fcf_vs_net_income = None
+    if len(fcfs) >= 2 and len(net_incomes) >= 2:
+        ni_growing = net_incomes[0] > net_incomes[-1]
+        fcf_declining = fcfs[0] < fcfs[-1]
+
+        if ni_growing and fcf_declining:
+            fcf_vs_net_income = "divergence négative"
+        elif ni_growing and not fcf_declining:
+            fcf_vs_net_income = "cohérent"
+        elif not ni_growing and fcf_declining:
+            fcf_vs_net_income = "détérioration générale"
+        else:
+            fcf_vs_net_income = "cohérent"
+
+        logger.info(f"[QUALITY] FCF vs NI: NI growing={ni_growing}, FCF declining={fcf_declining} → {fcf_vs_net_income}")
+        logger.info(f"[QUALITY] Net Incomes (recent→old): {net_incomes}")
+        logger.info(f"[QUALITY] FCFs (recent→old): {fcfs}")
+
     # --- Balance Sheet: net cash ---
     balance_raw = financials.get("Balance_Sheet", {}).get("yearly", {})
     bs_sorted = sorted(balance_raw.keys(), reverse=True)
@@ -402,6 +441,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "revenue_growth_years": revenue_growth_years,
         "margin_stability": margin_stability,
         "eps_positive_years": eps_positive_years,
+        "fcf_vs_net_income": fcf_vs_net_income,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -758,6 +798,7 @@ def _fetch_fmp(ticker: str) -> dict | None:
         "fcf_per_share": fcf_per_share,
         "growth": eps_growth,
         "eps": eps,
+        "fcf_vs_net_income": None,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -854,6 +895,46 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
         fcf_per_share = None
         if fcf is not None and shares and shares > 0:
             fcf_per_share = round(fcf / shares, 2)
+
+        # FCF vs Net Income (accounting quality signal over 3 years)
+        fcf_vs_net_income = None
+        try:
+            cashflow_df = stock.cashflow
+            financials_df = stock.financials
+            if cashflow_df is not None and not cashflow_df.empty and financials_df is not None and not financials_df.empty:
+                fcfs_yf = []
+                for col in cashflow_df.columns[:3]:
+                    fcf_val = _num(cashflow_df.loc["Free Cash Flow", col]) if "Free Cash Flow" in cashflow_df.index else None
+                    if fcf_val is None and "Operating Cash Flow" in cashflow_df.index and "Capital Expenditure" in cashflow_df.index:
+                        ocf = _num(cashflow_df.loc["Operating Cash Flow", col])
+                        capex = _num(cashflow_df.loc["Capital Expenditure", col])
+                        if ocf is not None and capex is not None:
+                            if capex > 0:
+                                capex = -capex
+                            fcf_val = ocf + capex
+                    if fcf_val is not None:
+                        fcfs_yf.append(fcf_val)
+
+                nis_yf = []
+                for col in financials_df.columns[:3]:
+                    ni = _num(financials_df.loc["Net Income", col]) if "Net Income" in financials_df.index else None
+                    if ni is not None:
+                        nis_yf.append(ni)
+
+                if len(fcfs_yf) >= 2 and len(nis_yf) >= 2:
+                    ni_growing = nis_yf[0] > nis_yf[-1]
+                    fcf_declining = fcfs_yf[0] < fcfs_yf[-1]
+                    if ni_growing and fcf_declining:
+                        fcf_vs_net_income = "divergence négative"
+                    elif ni_growing and not fcf_declining:
+                        fcf_vs_net_income = "cohérent"
+                    elif not ni_growing and fcf_declining:
+                        fcf_vs_net_income = "détérioration générale"
+                    else:
+                        fcf_vs_net_income = "cohérent"
+                    logger.info(f"[YFINANCE QUALITY] FCF vs NI → {fcf_vs_net_income}")
+        except Exception as e:
+            logger.warning(f"[YFINANCE QUALITY] FCF vs NI calc failed: {e}")
 
         # Revenue growth (CAGR from financials)
         revenue_growth = None
@@ -960,6 +1041,7 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
             "revenue_growth_years": revenue_growth_years,
             "margin_stability": margin_stability,
             "eps_positive_years": eps_positive_years,
+            "fcf_vs_net_income": fcf_vs_net_income,
         }
         data["missing_fields"] = [k for k, v in data.items() if v is None]
         logger.info(f"[YFINANCE FULL] Successfully parsed {ticker}: {data}")
