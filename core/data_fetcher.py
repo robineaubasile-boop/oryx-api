@@ -300,6 +300,42 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         logger.info(f"[QUALITY] Net Incomes (recent→old): {net_incomes}")
         logger.info(f"[QUALITY] FCFs (recent→old): {fcfs}")
 
+    # --- Gross margin trend (competitiveness signal over 3 years) ---
+    gross_margins = []
+    for date_key in sorted_years[:3]:
+        rev = _num(income_raw[date_key].get("totalRevenue"))
+        gp = _num(income_raw[date_key].get("grossProfit"))
+        if rev is not None and rev > 0 and gp is not None:
+            gross_margins.append(round((gp / rev) * 100, 2))
+
+    gross_margin_trend = None
+    if len(gross_margins) >= 3:
+        decline_total = gross_margins[0] - gross_margins[-1]
+        consecutive_decline = all(gross_margins[i] < gross_margins[i+1] for i in range(len(gross_margins)-1))
+
+        if consecutive_decline and decline_total <= -3:
+            gross_margin_trend = "érosion marquée"
+        elif consecutive_decline and decline_total < 0:
+            gross_margin_trend = "érosion légère"
+        elif decline_total <= -3:
+            gross_margin_trend = "en baisse"
+        elif decline_total >= 3:
+            gross_margin_trend = "en hausse"
+        else:
+            gross_margin_trend = "stable"
+
+        logger.info(f"[QUALITY] Gross margins (recent→old): {gross_margins}")
+        logger.info(f"[QUALITY] Gross margin trend: {gross_margin_trend} (variation: {decline_total}pts)")
+    elif len(gross_margins) == 2:
+        decline = gross_margins[0] - gross_margins[1]
+        if decline <= -3:
+            gross_margin_trend = "en baisse"
+        elif decline >= 3:
+            gross_margin_trend = "en hausse"
+        else:
+            gross_margin_trend = "stable"
+        logger.info(f"[QUALITY] Gross margins (2 ans): {gross_margins}, trend: {gross_margin_trend}")
+
     # --- Balance Sheet: net cash ---
     balance_raw = financials.get("Balance_Sheet", {}).get("yearly", {})
     bs_sorted = sorted(balance_raw.keys(), reverse=True)
@@ -442,6 +478,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "margin_stability": margin_stability,
         "eps_positive_years": eps_positive_years,
         "fcf_vs_net_income": fcf_vs_net_income,
+        "gross_margin_trend": gross_margin_trend,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -799,6 +836,7 @@ def _fetch_fmp(ticker: str) -> dict | None:
         "growth": eps_growth,
         "eps": eps,
         "fcf_vs_net_income": None,
+        "gross_margin_trend": None,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -936,6 +974,43 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
         except Exception as e:
             logger.warning(f"[YFINANCE QUALITY] FCF vs NI calc failed: {e}")
 
+        # Gross margin trend (competitiveness signal over 3 years)
+        gross_margin_trend = None
+        try:
+            financials_df = stock.financials
+            if financials_df is not None and not financials_df.empty:
+                gross_margins_yf = []
+                for col in financials_df.columns[:3]:
+                    rev = _num(financials_df.loc["Total Revenue", col]) if "Total Revenue" in financials_df.index else None
+                    gp = _num(financials_df.loc["Gross Profit", col]) if "Gross Profit" in financials_df.index else None
+                    if rev is not None and rev > 0 and gp is not None:
+                        gross_margins_yf.append(round((gp / rev) * 100, 2))
+
+                if len(gross_margins_yf) >= 3:
+                    decline_total = gross_margins_yf[0] - gross_margins_yf[-1]
+                    consecutive_decline = all(gross_margins_yf[i] < gross_margins_yf[i+1] for i in range(len(gross_margins_yf)-1))
+                    if consecutive_decline and decline_total <= -3:
+                        gross_margin_trend = "érosion marquée"
+                    elif consecutive_decline and decline_total < 0:
+                        gross_margin_trend = "érosion légère"
+                    elif decline_total <= -3:
+                        gross_margin_trend = "en baisse"
+                    elif decline_total >= 3:
+                        gross_margin_trend = "en hausse"
+                    else:
+                        gross_margin_trend = "stable"
+                    logger.info(f"[YFINANCE QUALITY] Gross margins: {gross_margins_yf}, trend: {gross_margin_trend}")
+                elif len(gross_margins_yf) == 2:
+                    decline = gross_margins_yf[0] - gross_margins_yf[1]
+                    if decline <= -3:
+                        gross_margin_trend = "en baisse"
+                    elif decline >= 3:
+                        gross_margin_trend = "en hausse"
+                    else:
+                        gross_margin_trend = "stable"
+        except Exception as e:
+            logger.warning(f"[YFINANCE QUALITY] Gross margin trend calc failed: {e}")
+
         # Revenue growth (CAGR from financials)
         revenue_growth = None
         revenues_by_year = []
@@ -1042,6 +1117,7 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
             "margin_stability": margin_stability,
             "eps_positive_years": eps_positive_years,
             "fcf_vs_net_income": fcf_vs_net_income,
+            "gross_margin_trend": gross_margin_trend,
         }
         data["missing_fields"] = [k for k, v in data.items() if v is None]
         logger.info(f"[YFINANCE FULL] Successfully parsed {ticker}: {data}")
