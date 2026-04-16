@@ -347,6 +347,38 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         total_debt = _num_or_zero(latest_bs.get("shortLongTermDebtTotal"))
         net_cash = total_cash - total_debt
 
+    # --- Receivables vs Revenue (accounting quality signal over 3 years) ---
+    receivables_vs_revenue = None
+    receivables_list = []
+    revenues_list = []
+
+    for date_key in bs_sorted[:3]:
+        rec = _num(balance_raw[date_key].get("netReceivables"))
+        if rec is not None:
+            receivables_list.append(rec)
+
+    for date_key in sorted_years[:3]:
+        rev = _num(income_raw[date_key].get("totalRevenue"))
+        if rev is not None:
+            revenues_list.append(rev)
+
+    if len(receivables_list) >= 2 and len(revenues_list) >= 2:
+        rec_growth = (receivables_list[0] - receivables_list[-1]) / abs(receivables_list[-1]) * 100 if receivables_list[-1] != 0 else 0
+        rev_growth = (revenues_list[0] - revenues_list[-1]) / abs(revenues_list[-1]) * 100 if revenues_list[-1] != 0 else 0
+
+        ecart = rec_growth - rev_growth
+
+        if ecart > 15:
+            receivables_vs_revenue = "alerte forte"
+        elif ecart > 5:
+            receivables_vs_revenue = "à surveiller"
+        else:
+            receivables_vs_revenue = "normal"
+
+        logger.info(f"[QUALITY] Receivables growth: {round(rec_growth, 1)}%, Revenue growth: {round(rev_growth, 1)}%, Écart: {round(ecart, 1)}pts → {receivables_vs_revenue}")
+        logger.info(f"[QUALITY] Receivables (recent→old): {receivables_list}")
+        logger.info(f"[QUALITY] Revenues (recent→old): {revenues_list}")
+
     # --- ROE from Highlights ---
     roe = _num(highlights.get("ReturnOnEquityTTM"))
     if roe is not None:
@@ -479,6 +511,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "eps_positive_years": eps_positive_years,
         "fcf_vs_net_income": fcf_vs_net_income,
         "gross_margin_trend": gross_margin_trend,
+        "receivables_vs_revenue": receivables_vs_revenue,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -837,6 +870,7 @@ def _fetch_fmp(ticker: str) -> dict | None:
         "eps": eps,
         "fcf_vs_net_income": None,
         "gross_margin_trend": None,
+        "receivables_vs_revenue": None,
     }
 
     data["missing_fields"] = [k for k, v in data.items() if v is None]
@@ -1011,6 +1045,42 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
         except Exception as e:
             logger.warning(f"[YFINANCE QUALITY] Gross margin trend calc failed: {e}")
 
+        # Receivables vs Revenue (accounting quality signal over 3 years)
+        receivables_vs_revenue = None
+        try:
+            balance_df = stock.balance_sheet
+            financials_df = stock.financials
+            if balance_df is not None and not balance_df.empty and financials_df is not None and not financials_df.empty:
+                receivables_yf = []
+                revenues_yf = []
+
+                for col in balance_df.columns[:3]:
+                    rec = _num(balance_df.loc["Net Receivable", col]) if "Net Receivable" in balance_df.index else None
+                    if rec is None and "Receivables" in balance_df.index:
+                        rec = _num(balance_df.loc["Receivables", col])
+                    if rec is not None:
+                        receivables_yf.append(rec)
+
+                for col in financials_df.columns[:3]:
+                    rev = _num(financials_df.loc["Total Revenue", col]) if "Total Revenue" in financials_df.index else None
+                    if rev is not None:
+                        revenues_yf.append(rev)
+
+                if len(receivables_yf) >= 2 and len(revenues_yf) >= 2:
+                    rec_growth = (receivables_yf[0] - receivables_yf[-1]) / abs(receivables_yf[-1]) * 100 if receivables_yf[-1] != 0 else 0
+                    rev_growth = (revenues_yf[0] - revenues_yf[-1]) / abs(revenues_yf[-1]) * 100 if revenues_yf[-1] != 0 else 0
+                    ecart = rec_growth - rev_growth
+
+                    if ecart > 15:
+                        receivables_vs_revenue = "alerte forte"
+                    elif ecart > 5:
+                        receivables_vs_revenue = "à surveiller"
+                    else:
+                        receivables_vs_revenue = "normal"
+                    logger.info(f"[YFINANCE QUALITY] Receivables vs Revenue: écart={round(ecart, 1)}pts → {receivables_vs_revenue}")
+        except Exception as e:
+            logger.warning(f"[YFINANCE QUALITY] Receivables vs Revenue calc failed: {e}")
+
         # Revenue growth (CAGR from financials)
         revenue_growth = None
         revenues_by_year = []
@@ -1118,6 +1188,7 @@ def _fetch_yfinance_full(ticker: str) -> dict | None:
             "eps_positive_years": eps_positive_years,
             "fcf_vs_net_income": fcf_vs_net_income,
             "gross_margin_trend": gross_margin_trend,
+            "receivables_vs_revenue": receivables_vs_revenue,
         }
         data["missing_fields"] = [k for k, v in data.items() if v is None]
         logger.info(f"[YFINANCE FULL] Successfully parsed {ticker}: {data}")

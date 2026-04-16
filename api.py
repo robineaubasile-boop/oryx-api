@@ -161,6 +161,7 @@ def analyze(request: StockRequest):
 		"eps_positive_years": data.get("eps_positive_years", 0),
 		"fcf_vs_net_income": data.get("fcf_vs_net_income"),
 		"gross_margin_trend": data.get("gross_margin_trend"),
+		"receivables_vs_revenue": data.get("receivables_vs_revenue"),
 		"data_warning": data_warning,
 	}
 
