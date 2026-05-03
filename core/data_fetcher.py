@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import threading
@@ -17,6 +18,84 @@ FMP_STABLE_URL = "https://financialmodelingprep.com/stable"
 
 REQUEST_TIMEOUT = 8
 CACHE_TTL = 3600
+
+# --- ETF translation mappings ---
+
+ETF_CATEGORY_FR = {
+    "Global Large-Cap Blend Equity": "Actions Monde grandes capitalisations",
+    "Global Large-Cap Growth Equity": "Actions Monde grandes capitalisations croissance",
+    "Global Large-Cap Value Equity": "Actions Monde grandes capitalisations value",
+    "US Large-Cap Blend Equity": "Actions USA grandes capitalisations",
+    "US Large-Cap Growth Equity": "Actions USA grandes capitalisations croissance",
+    "US Large-Cap Value Equity": "Actions USA grandes capitalisations value",
+    "Europe Large-Cap Blend Equity": "Actions Europe grandes capitalisations",
+    "Eurozone Large-Cap Equity": "Actions zone euro grandes capitalisations",
+    "Global Emerging Markets Equity": "Actions marchés émergents",
+    "Asia ex-Japan Equity": "Actions Asie hors Japon",
+    "Sector Equity Technology": "Actions sectorielles Technologie",
+    "Sector Equity Healthcare": "Actions sectorielles Santé",
+    "Sector Equity Financial Services": "Actions sectorielles Services financiers",
+    "Sector Equity Energy": "Actions sectorielles Énergie",
+    "Sector Equity Consumer Goods": "Actions sectorielles Biens de consommation",
+    "Sector Equity Industrial Materials": "Actions sectorielles Industrie",
+    "Sector Equity Utilities": "Actions sectorielles Services aux collectivités",
+    "Global Bond": "Obligations Monde",
+    "EUR Government Bond": "Obligations d'État zone euro",
+    "USD Corporate Bond": "Obligations entreprises USD",
+}
+
+ETF_SECTOR_FR = {
+    "Technology": "Technologie",
+    "Financial Services": "Services financiers",
+    "Industrials": "Industrie",
+    "Consumer Cyclicals": "Consommation discrétionnaire",
+    "Consumer Defensive": "Consommation de base",
+    "Healthcare": "Santé",
+    "Energy": "Énergie",
+    "Communication Services": "Services de communication",
+    "Utilities": "Services aux collectivités",
+    "Real Estate": "Immobilier",
+    "Basic Materials": "Matériaux de base",
+}
+
+ETF_REGION_FR = {
+    "North America": "Amérique du Nord",
+    "United Kingdom": "Royaume-Uni",
+    "Europe Developed": "Europe développée",
+    "Europe Emerging": "Europe émergente",
+    "Latin America": "Amérique latine",
+    "Asia Developed": "Asie développée",
+    "Asia Emerging": "Asie émergente",
+    "Japan": "Japon",
+    "Australasia": "Océanie",
+    "Africa/Middle East": "Afrique / Moyen-Orient",
+}
+
+
+def _extract_index_from_name(name: str) -> str | None:
+    """Extract index name from ETF full name via regex."""
+    if not name:
+        return None
+    patterns = [
+        r'(MSCI[\s]+[\w]+(?:[\s]+[\w]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist|DR|IE|LU|C\b|D\b))',
+        r'(S&P[\s]+\d+(?:[\s]+[\w]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'(STOXX[\s]+[\w]+(?:[\s]+[\w\d]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'(FTSE[\s]+[\w]+(?:[\s]+[\w\d]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'(Russell[\s]+\d+(?:[\s]+[\w]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'(Nasdaq[\s]+[\w]+(?:[\s]+[\w]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'(Bloomberg[\s]+[\w]+(?:[\s]+[\w]+)*?)(?:\s+(?:UCITS|ETF|Index|Fund|EUR|USD|GBP|Acc|Dist))',
+        r'\b(DAX)\b',
+        r'\b(CAC[\s]*\d+)\b',
+        r'\b(Nikkei[\s]*\d*)\b',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, name)
+        if m:
+            result = m.group(1).strip()
+            logger.info(f"[ETF INDEX] Extracted '{result}' from name '{name}'")
+            return result
+    logger.info(f"[ETF INDEX] No index pattern found in '{name}'")
+    return None
 
 # --- In-memory cache ---
 _cache = {}
@@ -518,7 +597,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     return data
 
 
-def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | None:
+def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str, eod_close: float | None = None) -> dict | None:
     """Parse EODHD fundamentals for an ETF into our standard ETF format."""
     general = fundamentals.get("General", {})
     etf_data = fundamentals.get("ETF_Data", {})
@@ -528,16 +607,32 @@ def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
         logger.warning(f"[ETF] No ETF_Data section for {ticker}")
         return None
 
-    current_price = _num_or_zero(realtime.get("close")) if realtime else 0
+    # --- Price with fallback chain: realtime → eod daily → 50DMA proxy ---
+    current_price = None
+    rt_close = _num(realtime.get("close")) if realtime else None
+    if rt_close is not None and rt_close > 0:
+        current_price = rt_close
+        logger.info(f"[ETF PRICE] Using real-time close: {current_price}")
+    elif eod_close is not None and eod_close > 0:
+        current_price = eod_close
+        logger.info(f"[ETF PRICE] Using EOD daily close fallback: {current_price}")
+    else:
+        ma50 = _num(technicals.get("50DayMA"))
+        if ma50 is not None and ma50 > 0:
+            current_price = ma50
+            logger.info(f"[ETF PRICE] Using 50DayMA proxy (not real-time): {current_price}")
+        else:
+            logger.warning(f"[ETF PRICE] No price available for {ticker} (realtime={rt_close}, eod_close={eod_close}, 50DMA={ma50})")
+
     currency = _currency_from_ticker(ticker)
 
     # --- General info ---
     name = general.get("Name", ticker)
-    category = general.get("Category", "Unknown")
+    category = ETF_CATEGORY_FR.get(general.get("Category", "Unknown"), general.get("Category", "Unknown"))
 
     # --- ETF info ---
     isin = etf_data.get("ISIN", None)
-    index_name = etf_data.get("Index_Name", None)
+    index_name = _extract_index_from_name(name) or etf_data.get("Index_Name", None)
     inception_date = etf_data.get("Inception_Date", None)
     total_assets = _num(etf_data.get("TotalAssets"))
     holdings_count = _num(etf_data.get("Holdings_Count"))
@@ -585,7 +680,8 @@ def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
             if isinstance(values, dict):
                 pct = _num(values.get("Equity_%"))
                 if pct is not None and pct > 0:
-                    sector_weights[sector_name] = round(pct, 2)
+                    sector_name_fr = ETF_SECTOR_FR.get(sector_name, sector_name)
+                    sector_weights[sector_name_fr] = round(pct, 2)
 
     # --- World Regions ---
     regions_raw = etf_data.get("World_Regions", {})
@@ -595,7 +691,8 @@ def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str) -> dict | N
             if isinstance(values, dict):
                 pct = _num(values.get("Equity_%"))
                 if pct is not None and pct > 0:
-                    world_regions[region_name] = round(pct, 2)
+                    region_name_fr = ETF_REGION_FR.get(region_name, region_name)
+                    world_regions[region_name_fr] = round(pct, 2)
 
     # --- Market Cap breakdown ---
     market_cap_raw = etf_data.get("Market_Capitalisation", {})
@@ -1332,7 +1429,19 @@ def fetch_etf_data(ticker: str):
     if asset_type != "ETF":
         return {"success": False, "ticker": ticker, "error": f"Ce ticker est un {asset_type}, pas un ETF. Utilisez la commande Analyse classique.", "data": None}
 
-    data = _parse_etf_data(fundamentals, realtime, eod_ticker)
+    # --- Price fallback: if real-time is unavailable (403 for EU ETFs), use EOD daily ---
+    eod_close = None
+    rt_close = _num(realtime.get("close")) if realtime else None
+    if rt_close is None or rt_close == 0:
+        logger.info(f"[ETF PRICE] Real-time unavailable for {eod_ticker} (close={rt_close}), trying EOD daily endpoint...")
+        eod_daily = _eod_get(f"eod/{eod_ticker}", params={"order": "d", "period": "d", "limit": "1"})
+        if eod_daily and isinstance(eod_daily, list) and len(eod_daily) > 0:
+            eod_close = _num(eod_daily[0].get("close"))
+            logger.info(f"[ETF PRICE] EOD daily close for {eod_ticker}: {eod_close} (date: {eod_daily[0].get('date')})")
+        else:
+            logger.warning(f"[ETF PRICE] EOD daily endpoint also returned no data for {eod_ticker}")
+
+    data = _parse_etf_data(fundamentals, realtime, eod_ticker, eod_close=eod_close)
 
     if data is None:
         return {"success": False, "ticker": ticker, "error": "Impossible de traiter les données de cet ETF.", "data": None}
