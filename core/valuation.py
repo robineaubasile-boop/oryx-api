@@ -30,6 +30,9 @@ def compute_valuation(data):
 	net_cash = _v(data.get("net_cash"))
 	current_price = _v(data.get("current_price"))
 
+	# P/E actuel du marché (pour cap multiple)
+	pe_ratio = (current_price / eps) if (eps > 0 and current_price > 0) else 0
+
 	# --- Multiple de base basé sur la croissance ---
 	if growth >= 30:
 		multiple = 40
@@ -95,6 +98,22 @@ def compute_valuation(data):
 		f"→ final multiple={multiple}"
 	)
 
+	# === CAP 1: Multiple vs P/E actuel du marché ===
+	multiple_raw = multiple
+	multiple_capped = False
+	cap_reason = None
+
+	if pe_ratio > 0:
+		multiple_cap = pe_ratio * 1.5
+		if multiple > multiple_cap:
+			multiple = multiple_cap
+			multiple_capped = True
+			cap_reason = "market_pe"
+			logger.info(
+				f"[VALUATION CAP] Multiple capé: {multiple_raw:.1f}x → "
+				f"{multiple:.1f}x (P/E actuel {pe_ratio:.1f} × 1.5)"
+			)
+
 	# --- Calcul fair value ---
 	# Fallback sur FCF/share quand EPS <= 0 (entreprise non rentable)
 	if eps > 0:
@@ -112,7 +131,40 @@ def compute_valuation(data):
 	else:
 		upside = 0
 
-	return fair_value, upside, multiple
+	# === CAP 2: Upside extrême (>±60%) ===
+	upside_raw = upside
+	upside_capped = False
+
+	if upside > 60:
+		upside = 60
+		upside_capped = True
+		if cap_reason is None:
+			cap_reason = "extreme_upside"
+	elif upside < -60:
+		upside = -60
+		upside_capped = True
+		if cap_reason is None:
+			cap_reason = "extreme_upside"
+
+	if upside_capped:
+		logger.info(
+			f"[VALUATION CAP] Upside capé: {upside_raw:.1f}% → {upside:.0f}%"
+		)
+		# Recalculer fair_value cohérente avec upside capé
+		if current_price > 0:
+			fair_value = current_price * (1 + upside / 100)
+
+	return {
+		"fair_value": fair_value,
+		"upside": upside,
+		"multiple": multiple,
+		"multiple_raw": multiple_raw,
+		"multiple_capped": multiple_capped,
+		"upside_raw": upside_raw,
+		"upside_capped": upside_capped,
+		"cap_reason": cap_reason,
+		"pe_ratio": pe_ratio,
+	}
 
 
 def valuation_verdict(upside):

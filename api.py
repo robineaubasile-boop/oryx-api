@@ -110,7 +110,10 @@ def analyze(request: StockRequest):
 
 	# --- Valuation ---
 	try:
-		fair_value, upside, multiple = compute_valuation(data)
+		valuation = compute_valuation(data)
+		fair_value = valuation["fair_value"]
+		upside = valuation["upside"]
+		multiple = valuation["multiple"]
 		valo = valuation_verdict(upside)
 		print(f"[ANALYZE] Fair value: {fair_value}, Upside: {upside}%, Multiple: {multiple}")
 	except Exception as e:
@@ -118,12 +121,7 @@ def analyze(request: StockRequest):
 		return {"success": False, "ticker": ticker, "error": f"Erreur de valorisation : {e}"}
 
 	# --- P/E réel ---
-	eps = data.get("eps")
-	current_price = data.get("current_price", 0)
-	if eps is not None and eps > 0 and current_price > 0:
-		pe_ratio = round(current_price / eps, 2)
-	else:
-		pe_ratio = None
+	pe_ratio = round(valuation["pe_ratio"], 2) if valuation["pe_ratio"] > 0 else None
 	print(f"[ANALYZE] P/E ratio: {pe_ratio}")
 
 	if not data.get("current_price") and not data.get("revenue_growth") and not data.get("operating_margin") and not data.get("roe"):
@@ -141,10 +139,15 @@ def analyze(request: StockRequest):
 		"verdict": verdict,
 		"analysis": analysis,
 		"multiple": float(multiple),
+		"multiple_raw": float(valuation["multiple_raw"]),
+		"multiple_capped": valuation["multiple_capped"],
 		"fair_value": round(fair_value, 2),
-		"current_price": current_price,
+		"current_price": data.get("current_price", 0),
 		"pe_ratio": pe_ratio,
 		"upside_percent": f"+{round(upside, 1)}" if upside and upside > 0 else str(round(_safe(upside), 1)),
+		"upside_raw": round(valuation["upside_raw"], 1),
+		"upside_capped": valuation["upside_capped"],
+		"cap_reason": valuation["cap_reason"],
 		"valuation_verdict": valo,
 		"revenue_growth": round(_safe(data.get("revenue_growth")), 2),
 		"operating_margin": round(_safe(data.get("operating_margin")), 2),
