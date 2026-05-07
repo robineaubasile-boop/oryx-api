@@ -8,6 +8,7 @@ from core.scoring import compute_score, get_verdict
 from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data, fetch_etf_data
+from core.ticker_resolver import normalize_ticker
 
 
 def _safe(val, default=0):
@@ -76,8 +77,9 @@ def health():
 
 @app.post("/analyze")
 def analyze(request: StockRequest):
-	ticker = request.ticker
-	print(f"[ANALYZE] Received ticker: {ticker}")
+	raw_ticker = request.ticker
+	ticker = normalize_ticker(raw_ticker)
+	print(f"[ANALYZE] Received: '{raw_ticker}' → resolved: '{ticker}'")
 
 	# --- Fetch data ---
 	try:
@@ -171,8 +173,9 @@ def analyze(request: StockRequest):
 
 @app.post("/analyze-etf")
 def analyze_etf(request: StockRequest):
-	ticker = request.ticker
-	print(f"[ETF] Received ticker: {ticker}")
+	raw_ticker = request.ticker
+	ticker = normalize_ticker(raw_ticker)
+	print(f"[ETF] Received: '{raw_ticker}' → resolved: '{ticker}'")
 
 	try:
 		result = fetch_etf_data(ticker)
