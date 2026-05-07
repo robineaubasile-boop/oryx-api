@@ -14,7 +14,7 @@ import re
 import requests
 from typing import Optional
 
-EODHD_API_KEY = os.environ.get("EODHD_API_KEY", "")
+EODHD_API_KEY = os.environ.get("EOD_API_KEY", "")
 EODHD_SEARCH_URL = "https://eodhd.com/api/search/{query}"
 
 # Cache en mémoire : input_normalisé → ticker_résolu
