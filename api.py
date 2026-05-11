@@ -9,6 +9,7 @@ from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data, fetch_etf_data
 from core.ticker_resolver import normalize_ticker
+from core.pedagogie_library import lookup_method
 
 
 def _safe(val, default=0):
@@ -246,6 +247,39 @@ def analyze_etf(request: StockRequest):
 		"pb_category": data.get("pb_category"),
 		"morningstar_rating": data.get("morningstar_rating"),
 		"morningstar_benchmark": data.get("morningstar_benchmark"),
+	}
+
+
+class PedagogieRequest(BaseModel):
+	question: str
+	context: str = ""
+
+
+@app.post("/pedagogie/lookup")
+def pedagogie_lookup(request: PedagogieRequest):
+	question = request.question
+	context = request.context or ""
+	print(f"[PEDAGOGIE] Received question: '{question}'")
+
+	result = lookup_method(question, context)
+
+	if result is None:
+		return {
+			"has_method": False,
+			"method_id": None,
+			"method_title": None,
+			"method_content": None,
+			"method_keywords_matched": [],
+			"example_company": None,
+		}
+
+	return {
+		"has_method": True,
+		"method_id": result["method_id"],
+		"method_title": result["title"],
+		"method_content": result["method_content"],
+		"method_keywords_matched": result["keywords_matched"],
+		"example_company": result["example_company"],
 	}
 
 
