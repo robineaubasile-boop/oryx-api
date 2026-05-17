@@ -4,3 +4,4 @@ pydantic==2.10.0
 requests
 python-dotenv
 yfinance
+anthropic>=0.25.0
