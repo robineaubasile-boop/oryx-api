@@ -10,6 +10,12 @@ from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data, fetch_etf_data
 from core.ticker_resolver import normalize_ticker
 from core.pedagogie_library import lookup_method
+import anthropic
+from core.decryptage_engine import build_system_prompt, build_user_message
+
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-5-20251001")
 
 
 def _safe(val, default=0):
@@ -250,6 +256,20 @@ def analyze_etf(request: StockRequest):
 	}
 
 
+class DecryptageRequest(BaseModel):
+	ticker: str
+	question: str = ""
+	context: str = ""
+
+	@field_validator("ticker")
+	@classmethod
+	def ticker_must_not_be_empty_decryptage(cls, v):
+		v = v.strip().upper()
+		if not v:
+			raise ValueError("ticker must not be empty")
+		return v
+
+
 class PedagogieRequest(BaseModel):
 	question: str
 	context: str = ""
@@ -280,6 +300,61 @@ def pedagogie_lookup(request: PedagogieRequest):
 		"method_content": result["method_content"],
 		"method_keywords_matched": result["keywords_matched"],
 		"example_company": result["example_company"],
+	}
+
+
+@app.post("/decryptage")
+def decryptage(request: DecryptageRequest):
+	raw_ticker = request.ticker
+	question = request.question.strip()
+	context = request.context.strip()
+	ticker = normalize_ticker(raw_ticker)
+	print(f"[DECRYPTAGE] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
+
+	try:
+		result = fetch_financial_data(ticker)
+	except Exception as e:
+		print(f"[DECRYPTAGE ERROR] fetch crashed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": str(e)}
+
+	if not result["success"]:
+		return {"success": False, "ticker": ticker, "error": result["error"]}
+
+	data = result["data"]
+	company_name = data.get("name", ticker)
+	print(f"[DECRYPTAGE] Data OK pour {company_name}")
+
+	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
+	method = lookup_method(lookup_text, context="")
+	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
+
+	system_prompt = build_system_prompt(data, method)
+	user_message = build_user_message(
+		question if question else f"Aide-moi à analyser {company_name} ({ticker}).",
+		context
+	)
+
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=CLAUDE_MODEL_DECRYPTAGE,
+			max_tokens=1200,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		analysis_text = response.content[0].text
+		print(f"[DECRYPTAGE] Claude OK — {len(analysis_text)} chars")
+	except Exception as e:
+		print(f"[DECRYPTAGE ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": f"Erreur Claude : {e}"}
+
+	return {
+		"success": True,
+		"ticker": ticker,
+		"name": company_name,
+		"method_used": method["method_id"] if method else None,
+		"analysis": analysis_text,
+		"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
 	}
 
 
