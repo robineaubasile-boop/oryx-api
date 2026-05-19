@@ -297,6 +297,10 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     # --- EPS from Highlights ---
     highlights = fundamentals.get("Highlights", {}) if fundamentals else {}
     eps = _num(highlights.get("EarningsShare"))
+    eps_ttm = _num(highlights.get("TrailingAnnualEPS")) or _num(highlights.get("EPSEstimateCurrentYear"))
+    if eps_ttm is not None:
+        eps = eps_ttm
+        logger.info(f"[EPS] Using TTM/forward EPS for {ticker}: {eps}")
     shares_outstanding = _num_or_zero(highlights.get("SharesOutstanding"))
     logger.info(f"[DEBUG SHARES] SharesOutstanding for {ticker}: {highlights.get('SharesOutstanding')}")
 
@@ -339,6 +343,32 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
                 logger.info(f"[FCF FALLBACK] Calculated FCF from OCF ({operating_cf}) + CapEx ({capex}) = {free_cash_flow}")
             else:
                 logger.warning(f"[FCF] No freeCashFlow and no OCF/CapEx available. OCF={operating_cf}, CapEx={capex}")
+
+    fcf_ttm = None
+    cashflow_quarterly = financials.get("Cash_Flow", {}).get("quarterly", {})
+
+    if cashflow_quarterly:
+        cf_q_sorted = sorted(cashflow_quarterly.keys(), reverse=True)[:4]
+
+        fcf_quarters = []
+        for q_date in cf_q_sorted:
+            q_data = cashflow_quarterly[q_date]
+            q_fcf = _num(q_data.get("freeCashFlow"))
+            if q_fcf is None:
+                q_ocf = _num(q_data.get("totalCashFromOperatingActivities"))
+                q_capex = _num(q_data.get("capitalExpenditures"))
+                if q_ocf is not None and q_capex is not None:
+                    if q_capex > 0:
+                        q_capex = -q_capex
+                    q_fcf = q_ocf + q_capex
+            if q_fcf is not None:
+                fcf_quarters.append(q_fcf)
+
+        if len(fcf_quarters) == 4:
+            fcf_ttm = sum(fcf_quarters)
+            logger.info(f"[FCF TTM] {ticker}: {fcf_quarters} → TTM={fcf_ttm}")
+        else:
+            logger.warning(f"[FCF TTM] Only {len(fcf_quarters)} quarters available for {ticker}, falling back to annual")
 
     # --- FCF vs Net Income (accounting quality signal over 3 years) ---
     net_incomes = []
@@ -479,8 +509,10 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         operating_margin = round((operating_income / revenue_t) * 100, 2)
 
     fcf_per_share = None
-    if free_cash_flow is not None and shares_outstanding > 0:
-        fcf_per_share = round(free_cash_flow / shares_outstanding, 4)
+    fcf_to_use = fcf_ttm if fcf_ttm is not None else free_cash_flow
+    if fcf_to_use is not None and shares_outstanding > 0:
+        fcf_per_share = round(fcf_to_use / shares_outstanding, 4)
+    logger.info(f"[FCF] Using {'TTM' if fcf_ttm is not None else 'annual'} FCF for {ticker}: {fcf_to_use}")
 
     # --- ROIC (Return on Invested Capital) ---
     roic = None
