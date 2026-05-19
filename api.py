@@ -12,10 +12,12 @@ from core.ticker_resolver import normalize_ticker
 from core.pedagogie_library import lookup_method
 import anthropic
 from core.decryptage_engine import build_system_prompt, build_user_message
+from core.education_engine import build_system_prompt as build_education_prompt, build_user_message as build_education_user_message
 
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-5-20251001")
+CLAUDE_MODEL_EDUCATION = os.getenv("CLAUDE_MODEL_EDUCATION", "claude-sonnet-4-6")
 
 
 def _safe(val, default=0):
@@ -275,6 +277,11 @@ class PedagogieRequest(BaseModel):
 	context: str = ""
 
 
+class EducationRequest(BaseModel):
+	question: str
+	context: str = ""
+
+
 @app.post("/pedagogie/lookup")
 def pedagogie_lookup(request: PedagogieRequest):
 	question = request.question
@@ -355,6 +362,41 @@ def decryptage(request: DecryptageRequest):
 		"method_used": method["method_id"] if method else None,
 		"analysis": analysis_text,
 		"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
+	}
+
+
+@app.post("/education")
+def education(request: EducationRequest):
+	question = request.question.strip()
+	context = request.context.strip()
+	print(f"[EDUCATION] question: '{question[:80]}...' " if len(question) > 80 else f"[EDUCATION] question: '{question}'")
+
+	# 1. Détection méthode pédagogique
+	method = lookup_method(question, context="")
+	print(f"[EDUCATION] Méthode: {method['method_id'] if method else 'aucune'}")
+
+	# 2. Construction prompts
+	system_prompt = build_education_prompt(method)
+	user_message = build_education_user_message(question, context)
+
+	# 3. Appel Claude
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=CLAUDE_MODEL_EDUCATION,
+			max_tokens=1500,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		response_text = response.content[0].text
+		print(f"[EDUCATION] Claude OK — {len(response_text)} chars")
+	except Exception as e:
+		print(f"[EDUCATION ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": f"Erreur Claude : {e}"}
+
+	return {
+		"success": True,
+		"response": response_text,
 	}
 
 
