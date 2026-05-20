@@ -13,11 +13,13 @@ from core.pedagogie_library import lookup_method
 import anthropic
 from core.decryptage_engine import build_system_prompt, build_user_message
 from core.education_engine import build_system_prompt as build_education_prompt, build_user_message as build_education_user_message
+from core.coach_engine import build_system_prompt as build_coach_prompt, build_user_message as build_coach_user_message
 
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-5-20251001")
 CLAUDE_MODEL_EDUCATION = os.getenv("CLAUDE_MODEL_EDUCATION", "claude-sonnet-4-6")
+CLAUDE_MODEL_COACH = os.getenv("CLAUDE_MODEL_COACH", "claude-sonnet-4-6")
 
 
 def _safe(val, default=0):
@@ -282,6 +284,13 @@ class EducationRequest(BaseModel):
 	context: str = ""
 
 
+class CoachRequest(BaseModel):
+	question: str
+	context: str = ""
+	tickers: str = ""
+	portfolio: str = ""
+
+
 @app.post("/pedagogie/lookup")
 def pedagogie_lookup(request: PedagogieRequest):
 	question = request.question
@@ -392,6 +401,39 @@ def education(request: EducationRequest):
 		print(f"[EDUCATION] Claude OK — {len(response_text)} chars")
 	except Exception as e:
 		print(f"[EDUCATION ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": f"Erreur Claude : {e}"}
+
+	return {
+		"success": True,
+		"response": response_text,
+	}
+
+
+@app.post("/coach")
+def coach(request: CoachRequest):
+	question = request.question.strip()
+	context = request.context.strip()
+	tickers = request.tickers.strip()
+	portfolio = request.portfolio.strip()
+	print(f"[COACH] question: '{question[:80]}...' " if len(question) > 80 else f"[COACH] question: '{question}'")
+
+	# 1. Construction prompts
+	system_prompt = build_coach_prompt(tickers, portfolio)
+	user_message = build_coach_user_message(question, context)
+
+	# 2. Appel Claude
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=CLAUDE_MODEL_COACH,
+			max_tokens=1500,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		response_text = response.content[0].text
+		print(f"[COACH] Claude OK — {len(response_text)} chars")
+	except Exception as e:
+		print(f"[COACH ERROR] Claude failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur Claude : {e}"}
 
 	return {
