@@ -703,6 +703,194 @@ il n'y a pas d'avantage compétitif réel — juste de la marge
 conjoncturelle qui finira par s'éroder."""
     },
 
+    "construction_these": {
+        "title": "Construire une thèse d'investissement",
+        "keywords": [
+            "these d'investissement", "these investissement",
+            "construire une these", "construction de these",
+            "rediger une these", "formuler une these",
+            "conviction d'investissement",
+            "5 composantes", "composantes d'une these",
+            "avant d'investir", "decidir d'investir",
+            "par ou commencer", "methode complete",
+            "analyse complete", "demarche d'investissement",
+            "processus d'investissement", "cadre d'analyse",
+            "quand investir", "comment valider",
+            "test des 3 questions", "marge de securite",
+            "value investing", "growth investing",
+            "these value", "these growth", "these contrariante",
+            "erreurs classiques", "pieges investisseur",
+            "template these", "fiche these"
+        ],
+        "example_company": "Nvidia 2026",
+        "method_content": """CONSTRUIRE UNE THÈSE D'INVESTISSEMENT — MÉTHODE ORYX
+
+Une thèse d'investissement répond à une question simple :
+"pourquoi cette entreprise vaut plus que ce que le marché
+pense aujourd'hui ?"
+
+Ce n'est pas une opinion vague. C'est un raisonnement documenté,
+chiffré, challengé. La thèse est l'antidote à l'émotion — elle
+t'empêche de vendre dans la panique et d'acheter dans l'euphorie.
+
+LES 5 COMPOSANTES DANS L'ORDRE
+
+Chaque composante filtre. Si tu ne peux pas répondre à l'une
+d'elles avec des données concrètes, la thèse est incomplète.
+
+COMPOSANTE 1 — LE BUSINESS : comment gagne-t-elle de l'argent ?
+
+Avant tout chiffre, comprendre le modèle économique. Si tu ne
+peux pas expliquer comment l'entreprise génère ses revenus en
+3 phrases, tu n'es pas prêt à investir.
+
+Questions à poser :
+- Qu'est-ce qu'ils vendent ? (produit, service, abonnement...)
+- À qui ? (B2B, B2C, gouvernements...)
+- Comment ils se font payer ? (transaction, récurrent, commission)
+- Quels sont les 2-3 principaux segments et leur part du CA ?
+- Où est la croissance — et pourquoi ?
+
+COMPOSANTE 2 — LE MOAT : pourquoi garderont-ils leur avantage ?
+
+Sans moat identifiable, toute thèse est fragile. Le moat se
+PROUVE DANS LES CHIFFRES — pas dans les mots.
+
+6 types de moat :
+- Marque : les clients paient plus juste pour le nom (LVMH, Apple)
+- Réseau : plus d'utilisateurs = produit plus utile (Visa, LinkedIn)
+- Switching costs : changer coûte trop cher (SAP, Nvidia/CUDA)
+- Coûts : produire moins cher que tous les concurrents (Costco)
+- Réglementaire : licences ou brevets impossibles à obtenir (pharma)
+- Actifs intangibles : données ou IP exclusives (ASML, Google)
+
+Règle : une Gross Margin durablement supérieure aux concurrents
+= preuve financière du moat. Si tu ne peux pas le montrer dans
+les états financiers, peut-être qu'il n'existe pas vraiment.
+
+COMPOSANTE 3 — LES CHIFFRES : les fondamentaux confirment-ils ?
+
+Les 3 états financiers viennent valider ou invalider ta thèse.
+
+P&L :
+- Gross Margin vs concurrents (prouve le moat)
+- Croissance du Revenue réelle
+- Marge EBIT en amélioration
+
+Cash Flow Statement :
+- FCF positif et croissant (pas le Net Income seul)
+- CFO > Net Income (bénéfices réels, pas comptables)
+- Payout Ratio sain (< 80%)
+
+Balance Sheet :
+- Dette Nette / EBITDA < 3x
+- Current Ratio > 1x
+- ROE > 15%
+
+COMPOSANTE 4 — LA VALORISATION : le marché a-t-il tort ?
+
+Une excellente entreprise trop chère = mauvais investissement.
+
+4 méthodes à utiliser ensemble :
+- DCF (Bear / Base / Bull) : valeur intrinsèque sur 5 ans de FCF
+- P/E vs historique sectoriel
+- P/FCF — le plus fiable (difficile à manipuler)
+- EV/EBITDA — comparaison entre entreprises
+
+Règle d'or : si DCF et multiples convergent → conviction forte.
+S'ils divergent fortement → creuse avant d'investir.
+
+Marge de sécurité Buffett : n'investis jamais sans 20-30% de
+décote entre le cours actuel et ta fair value calculée.
+
+COMPOSANTE 5 — LES RISQUES : qu'est-ce qui ferait échouer la thèse ?
+
+Identifier 3 risques maximum, concrets, avec leur signal
+d'invalidation.
+
+Catégories de risques :
+- Concurrentiel : un concurrent peut-il répliquer le moat ?
+  → Signal : perte de parts de marché sur 2+ trimestres
+- Réglementaire : une loi peut-elle mettre en danger le business ?
+  → Signal : décision judiciaire défavorable et définitive
+- Croissance : la croissance peut-elle décevoir ?
+  → Signal : révision baissière des guidances 2+ trimestres
+- Bilan : la dette est-elle soutenable en cas de retournement ?
+  → Signal : Dette Nette/EBITDA > 5x
+- Management : le CEO est-il aligné ?
+  → Signal : départ clé non anticipé ou scandale
+
+LES 3 TYPES DE THÈSES
+
+Value (2-5 ans) — L'entreprise est sous-valorisée, le marché
+exagère le pessimisme. Risque principal : value trap (cheap
+pour une bonne raison).
+
+Growth (3-10 ans) — L'entreprise va croître plus vite que le
+marché ne l'anticipe. Risque : déception sur la croissance ou
+valorisation déjà trop élevée.
+
+Contrariante (3-7 ans) — Le marché déteste ce secteur mais
+les fondamentaux long terme sont intacts. La plus puissante
+long terme, la plus difficile émotionnellement.
+
+LE TEST DES 3 QUESTIONS — valider avant d'investir
+
+Une seule réponse "non" suffit pour ne pas investir.
+
+1. Si ce titre corrige de -30% dans 6 mois, est-ce que je
+   renforce ?
+   OUI → ta conviction est réelle. NON → tu spécules.
+
+2. Pourrais-tu défendre ta thèse en 3 phrases avec des
+   chiffres précis ?
+   OUI → tu maîtrises le dossier. NON → fais plus d'analyse.
+
+3. Es-tu prêt à attendre 5 à 10 ans sans regarder ton
+   portefeuille chaque jour ?
+   OUI → tu es un investisseur. NON → reste sur tes ETF larges.
+
+LES ERREURS CLASSIQUES
+
+- Confondre bonne entreprise et bon investissement : qualité ≠
+  prix justifié. Toujours calculer la fair value avant d'acheter.
+- Construire la thèse APRÈS avoir acheté : c'est de la
+  justification émotionnelle, pas de l'analyse.
+- Ignorer les risques : force-toi à trouver 3 arguments contre.
+  Si tu n'en trouves pas, cherche mieux.
+- Changer de thèse à chaque article lu : relis ta thèse
+  originale. Le marché aura toujours des avis différents.
+- Absence de marge de sécurité : n'achète jamais exactement
+  à la fair value — l'erreur d'estimation existe toujours.
+
+LA THÈSE EN 3 PHRASES — LE FORMAT FINAL
+
+Phrase 1 — Le moat : "X détient [avantage compétitif concret]
+qui lui permet de [pricing power / récurrence / protection]
+prouvé par [Gross Margin / ROIC / FCF]."
+
+Phrase 2 — La valorisation : "À [prix actuel], le marché
+valorise l'entreprise à [P/FCF]x le FCF, [décote / prime]
+vs sa moyenne historique de [X]x."
+
+Phrase 3 — Le risque : "Le risque principal est [risque concret]
+— le signal d'invalidation à surveiller est [indicateur précis]."
+
+LA RÈGLE À RETENIR
+
+Une thèse n'est pas permanente. Elle doit être révisée si les
+fondamentaux changent, si la valorisation devient excessive,
+ou si un risque identifié se matérialise.
+
+La thèse est cassée si : moat qui s'érode (marges en baisse
+durable), management qui détruit de la valeur (ROIC < coût
+capital), valorisation déconnectée des fondamentaux.
+
+"Si tu ne peux pas défendre ta thèse en 3 phrases avec des
+chiffres précis, n'investis pas. Tu te raconteras des histoires
+et tu paniqueras à la première baisse." — Méthode Oryx Invest"""
+    },
+
 }
 
 
@@ -720,6 +908,7 @@ METHODES_PRINCIPALES = [
     "bilan_financier",
     "ratios_valorisation",
     "analyse_qualitative",
+    "construction_these",
 ]
 
 
