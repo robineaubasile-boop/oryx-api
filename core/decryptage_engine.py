@@ -101,6 +101,14 @@ Ces chiffres sont réels. Utilise-les pour poser des questions
 à l'utilisateur — pas pour conclure à sa place.
 """
 
+    prompt += """
+CLÔTURE CONVERSATIONNELLE :
+Si c'est le premier échange sur cette entreprise (pas de contexte historique),
+termine ta réponse par cette phrase (adapte le nom de l'entreprise) :
+"Tu veux qu'on formule une thèse d'investissement sur [nom] ensemble ?"
+Si l'utilisateur est déjà en train de construire sa thèse, ne l'ajoute pas.
+"""
+
     return prompt
 
 
