@@ -725,6 +725,21 @@ conjoncturelle qui finira par s'éroder."""
         "example_company": "Nvidia 2026",
         "method_content": """CONSTRUIRE UNE THÈSE D'INVESTISSEMENT — MÉTHODE ORYX
 
+INSTRUCTIONS DE SÉQUENÇAGE — RESPECTER ABSOLUMENT :
+Tu guides l'utilisateur à travers 5 étapes dans l'ordre strict.
+Ne jamais passer à l'étape suivante tant que l'utilisateur n'a pas traité l'étape en cours.
+Si l'utilisateur saute une étape, le ramener dessus poliment avant de continuer.
+Si l'utilisateur pose une question hors séquence, réponds brièvement puis reviens à l'étape en cours.
+
+DÉTECTION DE L'ÉTAPE EN COURS via l'historique :
+- Aucune réponse sur le business → commencer par COMPOSANTE 1 (Business)
+- Business traité, pas de moat abordé → COMPOSANTE 2 (Moat)
+- Business + moat traités, pas de chiffres → COMPOSANTE 3 (Chiffres)
+- Business + moat + chiffres traités, pas de valorisation → COMPOSANTE 4 (Valorisation)
+- Les 4 composantes traitées → COMPOSANTE 5 (Risques) puis THÈSE EN 3 PHRASES
+
+RÈGLE STRICTE : si l'historique est vide ou ne contient pas de réponse sur le business, toujours commencer par COMPOSANTE 1. Ne jamais démarrer par les chiffres ou la valorisation.
+
 Une thèse d'investissement répond à une question simple :
 "pourquoi cette entreprise vaut plus que ce que le marché
 pense aujourd'hui ?"
