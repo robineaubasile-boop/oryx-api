@@ -14,12 +14,14 @@ import anthropic
 from core.decryptage_engine import build_system_prompt, build_user_message
 from core.education_engine import build_system_prompt as build_education_prompt, build_user_message as build_education_user_message
 from core.coach_engine import build_system_prompt as build_coach_prompt, build_user_message as build_coach_user_message
+from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-5-20251001")
 CLAUDE_MODEL_EDUCATION = os.getenv("CLAUDE_MODEL_EDUCATION", "claude-sonnet-4-6")
 CLAUDE_MODEL_COACH = os.getenv("CLAUDE_MODEL_COACH", "claude-sonnet-4-6")
+CLAUDE_MODEL_CHECKLIST = os.getenv("CLAUDE_MODEL_CHECKLIST", "claude-sonnet-4-6")
 
 
 def _safe(val, default=0):
@@ -291,6 +293,20 @@ class CoachRequest(BaseModel):
 	portfolio: str = ""
 
 
+class ChecklistRequest(BaseModel):
+	ticker: str
+	question: str = ""
+	context: str = ""
+
+	@field_validator("ticker")
+	@classmethod
+	def ticker_must_not_be_empty_checklist(cls, v):
+		v = v.strip().upper()
+		if not v:
+			raise ValueError("ticker must not be empty")
+		return v
+
+
 @app.post("/pedagogie/lookup")
 def pedagogie_lookup(request: PedagogieRequest):
 	question = request.question
@@ -439,6 +455,41 @@ def coach(request: CoachRequest):
 	return {
 		"success": True,
 		"response": response_text,
+	}
+
+
+@app.post("/checklist")
+def checklist(request: ChecklistRequest):
+	raw_ticker = request.ticker
+	question = request.question.strip()
+	context = request.context.strip()
+	ticker = normalize_ticker(raw_ticker)
+	print(f"[CHECKLIST] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
+
+	system_prompt = build_checklist_prompt(ticker)
+	user_message = build_checklist_user_message(
+		question if question else f"Génère la checklist Oryx pour {ticker}.",
+		context
+	)
+
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=CLAUDE_MODEL_CHECKLIST,
+			max_tokens=1500,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		response_text = response.content[0].text
+		print(f"[CHECKLIST] Claude OK — {len(response_text)} chars")
+	except Exception as e:
+		print(f"[CHECKLIST ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "ticker": ticker, "error": f"Erreur Claude : {e}"}
+
+	return {
+		"success": True,
+		"ticker": ticker,
+		"analysis": response_text,
 	}
 
 
