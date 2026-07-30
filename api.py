@@ -27,6 +27,14 @@ CLAUDE_MODEL_CHECKLIST = os.getenv("CLAUDE_MODEL_CHECKLIST", "claude-sonnet-4-6"
 CLAUDE_MODEL_CLASSIFIER = os.getenv("CLAUDE_MODEL_CLASSIFIER", "claude-haiku-4-5-20251001")
 
 
+def _extract_text(response) -> str:
+	"""Extrait le texte d'une réponse Claude, en ignorant les blocs thinking éventuels."""
+	for block in response.content:
+		if block.type == "text":
+			return block.text
+	return ""
+
+
 def _safe(val, default=0):
 	"""Retourne default si val est None."""
 	return val if val is not None else default
@@ -377,7 +385,7 @@ def decryptage(request: DecryptageRequest):
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
-		analysis_text = response.content[0].text
+		analysis_text = _extract_text(response)
 		print(f"[DECRYPTAGE] Claude OK — {len(analysis_text)} chars")
 	except Exception as e:
 		print(f"[DECRYPTAGE ERROR] Claude failed: {type(e).__name__}: {e}")
@@ -416,7 +424,7 @@ def education(request: EducationRequest):
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
-		response_text = response.content[0].text
+		response_text = _extract_text(response)
 		print(f"[EDUCATION] Claude OK — {len(response_text)} chars")
 	except Exception as e:
 		print(f"[EDUCATION ERROR] Claude failed: {type(e).__name__}: {e}")
@@ -449,7 +457,7 @@ def coach(request: CoachRequest):
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
-		response_text = response.content[0].text
+		response_text = _extract_text(response)
 		print(f"[COACH] Claude OK — {len(response_text)} chars")
 	except Exception as e:
 		print(f"[COACH ERROR] Claude failed: {type(e).__name__}: {e}")
@@ -483,7 +491,7 @@ def checklist(request: ChecklistRequest):
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
-		response_text = response.content[0].text
+		response_text = _extract_text(response)
 		print(f"[CHECKLIST] Claude OK — {len(response_text)} chars")
 	except Exception as e:
 		print(f"[CHECKLIST ERROR] Claude failed: {type(e).__name__}: {e}")
@@ -546,7 +554,7 @@ En cas de doute entre coach et education : si le message parle d'argent concret 
 Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "MSFT"}""",
 		messages=[{"role": "user", "content": message}]
 	)
-	raw = response.content[0].text.strip()
+	raw = _extract_text(response).strip()
 	print(f"[WEB-CHAT] Classifier raw output: {raw!r}")
 	if raw.startswith("```"):
 		raw = raw.strip("`").replace("json", "", 1).strip()
@@ -630,7 +638,7 @@ def web_chat(request: WebChatRequest):
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
-		response_text = response.content[0].text
+		response_text = _extract_text(response)
 		print(f"[WEB-CHAT] Claude OK — route={route}, {len(response_text)} chars")
 	except Exception as e:
 		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
