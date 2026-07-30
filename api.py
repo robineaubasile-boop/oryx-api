@@ -2,6 +2,8 @@ import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
 from core.scoring import compute_score, get_verdict
@@ -22,6 +24,7 @@ CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-
 CLAUDE_MODEL_EDUCATION = os.getenv("CLAUDE_MODEL_EDUCATION", "claude-sonnet-4-6")
 CLAUDE_MODEL_COACH = os.getenv("CLAUDE_MODEL_COACH", "claude-sonnet-4-6")
 CLAUDE_MODEL_CHECKLIST = os.getenv("CLAUDE_MODEL_CHECKLIST", "claude-sonnet-4-6")
+CLAUDE_MODEL_CLASSIFIER = os.getenv("CLAUDE_MODEL_CLASSIFIER", "claude-haiku-4-5-20251001")
 
 
 def _safe(val, default=0):
@@ -491,6 +494,157 @@ def checklist(request: ChecklistRequest):
 		"ticker": ticker,
 		"analysis": response_text,
 	}
+
+
+# --- Web Chat ---
+
+from collections import defaultdict
+
+_web_chat_history = defaultdict(list)
+MAX_HISTORY_TURNS = 20
+
+
+class WebChatRequest(BaseModel):
+	session_id: str
+	message: str
+
+
+def _classify_intent(message: str) -> dict:
+	"""Classify user message intent using Claude Haiku."""
+	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+	response = client.messages.create(
+		model=CLAUDE_MODEL_CLASSIFIER,
+		max_tokens=100,
+		system="""Tu es un classificateur de messages pour un bot d'investissement.
+Analyse le message utilisateur et retourne UNIQUEMENT un JSON avec deux champs :
+- "route": une des valeurs suivantes : "decryptage", "checklist", "coach", "education"
+- "ticker": le ticker boursier mentionné (en majuscules), ou "" si aucun
+
+Règles de classification :
+- Si le message contient "checklist" ou "check" + un ticker → route "checklist"
+- Si le message contient "décrypte", "décryptage", "analyse" + un ticker → route "decryptage"
+- Si le message mentionne un ticker (AAPL, MSFT, LVMH.PA, etc.) sans commande spécifique → route "decryptage"
+- Si le message parle de portefeuille, allocation, diversification, PEA, stratégie → route "coach"
+- Si le message pose une question générale sur l'investissement (c'est quoi un ETF, comment fonctionne...) → route "education"
+- En cas de doute → route "education"
+
+Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "AAPL"}""",
+		messages=[{"role": "user", "content": message}]
+	)
+	import json
+	raw = response.content[0].text.strip()
+	try:
+		return json.loads(raw)
+	except json.JSONDecodeError:
+		return {"route": "education", "ticker": ""}
+
+
+def _build_context_string(history: list) -> str:
+	"""Build context string from history (most recent first)."""
+	if not history:
+		return ""
+	lines = []
+	for turn in reversed(history):
+		lines.append(f"[{turn['role'].upper()}] {turn['text']}")
+	return "\n".join(lines)
+
+
+@app.post("/web-chat")
+def web_chat(request: WebChatRequest):
+	session_id = request.session_id.strip()
+	message = request.message.strip()
+	if not message:
+		return {"success": False, "error": "Message vide"}
+
+	print(f"[WEB-CHAT] session={session_id[:8]}... | message: '{message[:80]}'")
+
+	# 1. Classify intent
+	try:
+		intent = _classify_intent(message)
+		route = intent.get("route", "education")
+		ticker = intent.get("ticker", "").strip().upper()
+		print(f"[WEB-CHAT] Classified → route={route}, ticker={ticker}")
+	except Exception as e:
+		print(f"[WEB-CHAT ERROR] Classifier failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": f"Erreur classification : {e}"}
+
+	# 2. Get conversation context
+	history = _web_chat_history[session_id]
+	context = _build_context_string(history)
+
+	# 3. Route to the appropriate engine
+	try:
+		if route == "decryptage" and ticker:
+			ticker = normalize_ticker(ticker)
+			result = fetch_financial_data(ticker)
+			if not result["success"]:
+				return {"success": False, "error": result["error"], "route_used": "decryptage"}
+			data = result["data"]
+			company_name = data.get("name", ticker)
+			lookup_text = message if message else f"analyser bilan états financiers {company_name}"
+			method = lookup_method(lookup_text, context="")
+			system_prompt = build_system_prompt(data, method)
+			user_message = build_user_message(message, context)
+			model = CLAUDE_MODEL_DECRYPTAGE
+			max_tokens = 1200
+
+		elif route == "checklist" and ticker:
+			ticker = normalize_ticker(ticker)
+			system_prompt = build_checklist_prompt(ticker)
+			user_message = build_checklist_user_message(message, context)
+			model = CLAUDE_MODEL_CHECKLIST
+			max_tokens = 1500
+
+		elif route == "coach":
+			system_prompt = build_coach_prompt(ticker, "")
+			user_message = build_coach_user_message(message, context)
+			model = CLAUDE_MODEL_COACH
+			max_tokens = 1500
+
+		else:
+			method = lookup_method(message, context="")
+			system_prompt = build_education_prompt(method)
+			user_message = build_education_user_message(message, context)
+			model = CLAUDE_MODEL_EDUCATION
+			max_tokens = 1500
+			route = "education"
+
+	except Exception as e:
+		print(f"[WEB-CHAT ERROR] Engine setup failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": str(e), "route_used": route}
+
+	# 4. Call Claude
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=model,
+			max_tokens=max_tokens,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		response_text = response.content[0].text
+		print(f"[WEB-CHAT] Claude OK — route={route}, {len(response_text)} chars")
+	except Exception as e:
+		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": f"Erreur Claude : {e}", "route_used": route}
+
+	# 5. Save to history
+	history.append({"role": "user", "text": message})
+	history.append({"role": "assistant", "text": response_text})
+	if len(history) > MAX_HISTORY_TURNS * 2:
+		_web_chat_history[session_id] = history[-(MAX_HISTORY_TURNS * 2):]
+
+	return {
+		"success": True,
+		"response": response_text,
+		"route_used": route,
+		"ticker": ticker if ticker else None,
+	}
+
+
+@app.get("/web")
+def serve_web():
+	return FileResponse("web/index.html")
 
 
 if __name__ == "__main__":
