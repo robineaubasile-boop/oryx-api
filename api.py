@@ -525,7 +525,7 @@ def _classify_intent(message: str) -> dict:
 	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 	response = client.messages.create(
 		model=CLAUDE_MODEL_CLASSIFIER,
-		max_tokens=100,
+		max_tokens=300,
 		system="""Tu es un classificateur de messages pour un bot d'investissement.
 Analyse le message utilisateur et retourne UNIQUEMENT un JSON avec deux champs :
 - "route": une des valeurs suivantes : "decryptage", "checklist", "coach", "education"
@@ -547,9 +547,13 @@ Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ti
 		messages=[{"role": "user", "content": message}]
 	)
 	raw = response.content[0].text.strip()
+	print(f"[WEB-CHAT] Classifier raw output: {raw!r}")
+	if raw.startswith("```"):
+		raw = raw.strip("`").replace("json", "", 1).strip()
 	try:
 		return json.loads(raw)
-	except json.JSONDecodeError:
+	except json.JSONDecodeError as e:
+		print(f"[WEB-CHAT ERROR] Classifier JSON invalide: {e} | raw={raw!r}")
 		return {"route": "education", "ticker": ""}
 
 
