@@ -499,53 +499,20 @@ def checklist(request: ChecklistRequest):
 # --- Web Chat ---
 
 import json
-from pyairtable import Api as AirtableApi
+from collections import defaultdict
 
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "")
-AIRTABLE_TABLE_HISTORIQUE = "Historique_Messages"
-
-
-def _get_airtable_table():
-	api = AirtableApi(AIRTABLE_API_KEY)
-	return api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_HISTORIQUE)
+_web_chat_history = defaultdict(list)
+MAX_HISTORY_TURNS = 20
 
 
-def _read_airtable_context(session_id: str, max_turns: int = 20) -> str:
-	if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-		print("[WEB-CHAT] Airtable non configuré, context vide")
+def _build_context_string(history: list) -> str:
+	"""Build context string from history (most recent first)."""
+	if not history:
 		return ""
-	try:
-		table = _get_airtable_table()
-		formula = f"{{Chat ID}} = '{session_id}'"
-		records = table.all(formula=formula, sort=["-Date de création"])
-		records = records[:max_turns * 2]
-		if not records:
-			return ""
-		lines = []
-		for r in records:
-			role = r["fields"].get("Rôle", "User")
-			msg = r["fields"].get("Message", "")
-			lines.append(f"[{role.upper()}] {msg}")
-		return "\n".join(lines)
-	except Exception as e:
-		print(f"[WEB-CHAT] Airtable read error: {type(e).__name__}: {e}")
-		return ""
-
-
-def _save_airtable_message(session_id: str, role: str, message: str):
-	if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-		return
-	try:
-		table = _get_airtable_table()
-		table.create({
-			"Name": f"{session_id[:8]}_{role}",
-			"Chat ID": session_id,
-			"Rôle": role,
-			"Message": message,
-		})
-	except Exception as e:
-		print(f"[WEB-CHAT] Airtable write error: {type(e).__name__}: {e}")
+	lines = []
+	for turn in reversed(history):
+		lines.append(f"[{turn['role'].upper()}] {turn['text']}")
+	return "\n".join(lines)
 
 
 class WebChatRequest(BaseModel):
@@ -564,15 +531,19 @@ Analyse le message utilisateur et retourne UNIQUEMENT un JSON avec deux champs :
 - "route": une des valeurs suivantes : "decryptage", "checklist", "coach", "education"
 - "ticker": le ticker boursier mentionné (en majuscules), ou "" si aucun
 
-Règles de classification :
-- Si le message contient "checklist" ou "check" + un ticker → route "checklist"
-- Si le message contient "décrypte", "décryptage", "analyse" + un ticker → route "decryptage"
-- Si le message mentionne un ticker (AAPL, MSFT, LVMH.PA, etc.) sans commande spécifique → route "decryptage"
-- Si le message parle de portefeuille, allocation, diversification, PEA, stratégie → route "coach"
-- Si le message pose une question générale sur l'investissement (c'est quoi un ETF, comment fonctionne...) → route "education"
-- En cas de doute → route "education"
+Règles de classification (appliquées dans cet ordre de priorité) :
 
-Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "AAPL"}""",
+1. CHECKLIST : le message contient "checklist" ou "check" + un ticker ou nom d'entreprise → route "checklist"
+
+2. DECRYPTAGE : le message mentionne un ticker (AAPL, MSFT, LVMH.PA, etc.) OU un nom d'entreprise reconnaissable (Microsoft, Apple, LVMH, Tesla, Nvidia, Amazon, etc.) avec une intention d'analyse (analyser, décrypter, regarder, étudier, que penses-tu de, parle-moi de) → route "decryptage". Extrais le ticker correspondant au nom (Microsoft → MSFT, Apple → AAPL, LVMH → MC.PA, Tesla → TSLA, Nvidia → NVDA, Amazon → AMZN, etc.).
+
+3. COACH : le message parle de décision d'investissement, d'argent à placer, ou de stratégie. Mots-clés : portefeuille, allocation, diversification, PEA, CTO, stratégie, investir, budget, j'ai X€, combien, répartir, commencer, premier investissement, comment réfléchir, que faire avec, construire un portefeuille, renforcer, arbitrage, vendre, acheter → route "coach"
+
+4. EDUCATION : le message pose une question purement théorique ou pédagogique sur l'investissement (c'est quoi un ETF, comment fonctionne le P/E, qu'est-ce qu'un moat, etc.) → route "education"
+
+En cas de doute entre coach et education : si le message parle d'argent concret ou de décision d'investissement → "coach". Sinon → "education".
+
+Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "MSFT"}""",
 		messages=[{"role": "user", "content": message}]
 	)
 	raw = response.content[0].text.strip()
@@ -601,8 +572,9 @@ def web_chat(request: WebChatRequest):
 		print(f"[WEB-CHAT ERROR] Classifier failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur classification : {e}"}
 
-	# 2. Get conversation context from Airtable
-	context = _read_airtable_context(session_id)
+	# 2. Get conversation context
+	history = _web_chat_history[session_id]
+	context = _build_context_string(history)
 
 	# 3. Route to the appropriate engine
 	try:
@@ -660,9 +632,11 @@ def web_chat(request: WebChatRequest):
 		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur Claude : {e}", "route_used": route}
 
-	# 5. Save to Airtable
-	_save_airtable_message(session_id, "User", message)
-	_save_airtable_message(session_id, "Assistant", response_text)
+	# 5. Save to history
+	history.append({"role": "user", "text": message})
+	history.append({"role": "assistant", "text": response_text})
+	if len(history) > MAX_HISTORY_TURNS * 2:
+		_web_chat_history[session_id] = history[-(MAX_HISTORY_TURNS * 2):]
 
 	return {
 		"success": True,
