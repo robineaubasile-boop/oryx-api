@@ -5,3 +5,4 @@ requests
 python-dotenv
 yfinance
 anthropic>=0.25.0
+pyairtable

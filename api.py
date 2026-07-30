@@ -498,10 +498,54 @@ def checklist(request: ChecklistRequest):
 
 # --- Web Chat ---
 
-from collections import defaultdict
+import json
+from pyairtable import Api as AirtableApi
 
-_web_chat_history = defaultdict(list)
-MAX_HISTORY_TURNS = 20
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "")
+AIRTABLE_TABLE_HISTORIQUE = "Historique_Messages"
+
+
+def _get_airtable_table():
+	api = AirtableApi(AIRTABLE_API_KEY)
+	return api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_HISTORIQUE)
+
+
+def _read_airtable_context(session_id: str, max_turns: int = 20) -> str:
+	if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+		print("[WEB-CHAT] Airtable non configuré, context vide")
+		return ""
+	try:
+		table = _get_airtable_table()
+		formula = f"{{Chat ID}} = '{session_id}'"
+		records = table.all(formula=formula, sort=["-Date de création"])
+		records = records[:max_turns * 2]
+		if not records:
+			return ""
+		lines = []
+		for r in records:
+			role = r["fields"].get("Rôle", "User")
+			msg = r["fields"].get("Message", "")
+			lines.append(f"[{role.upper()}] {msg}")
+		return "\n".join(lines)
+	except Exception as e:
+		print(f"[WEB-CHAT] Airtable read error: {type(e).__name__}: {e}")
+		return ""
+
+
+def _save_airtable_message(session_id: str, role: str, message: str):
+	if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+		return
+	try:
+		table = _get_airtable_table()
+		table.create({
+			"Name": f"{session_id[:8]}_{role}",
+			"Chat ID": session_id,
+			"Rôle": role,
+			"Message": message,
+		})
+	except Exception as e:
+		print(f"[WEB-CHAT] Airtable write error: {type(e).__name__}: {e}")
 
 
 class WebChatRequest(BaseModel):
@@ -531,22 +575,11 @@ Règles de classification :
 Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "AAPL"}""",
 		messages=[{"role": "user", "content": message}]
 	)
-	import json
 	raw = response.content[0].text.strip()
 	try:
 		return json.loads(raw)
 	except json.JSONDecodeError:
 		return {"route": "education", "ticker": ""}
-
-
-def _build_context_string(history: list) -> str:
-	"""Build context string from history (most recent first)."""
-	if not history:
-		return ""
-	lines = []
-	for turn in reversed(history):
-		lines.append(f"[{turn['role'].upper()}] {turn['text']}")
-	return "\n".join(lines)
 
 
 @app.post("/web-chat")
@@ -568,9 +601,8 @@ def web_chat(request: WebChatRequest):
 		print(f"[WEB-CHAT ERROR] Classifier failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur classification : {e}"}
 
-	# 2. Get conversation context
-	history = _web_chat_history[session_id]
-	context = _build_context_string(history)
+	# 2. Get conversation context from Airtable
+	context = _read_airtable_context(session_id)
 
 	# 3. Route to the appropriate engine
 	try:
@@ -628,11 +660,9 @@ def web_chat(request: WebChatRequest):
 		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur Claude : {e}", "route_used": route}
 
-	# 5. Save to history
-	history.append({"role": "user", "text": message})
-	history.append({"role": "assistant", "text": response_text})
-	if len(history) > MAX_HISTORY_TURNS * 2:
-		_web_chat_history[session_id] = history[-(MAX_HISTORY_TURNS * 2):]
+	# 5. Save to Airtable
+	_save_airtable_message(session_id, "User", message)
+	_save_airtable_message(session_id, "Assistant", response_text)
 
 	return {
 		"success": True,
