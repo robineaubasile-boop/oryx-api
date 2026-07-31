@@ -131,6 +131,10 @@ Années avec EPS positif           : {fmt(data.get('eps_positive_years'))}
 
 Ces chiffres sont réels. Utilise-les pour poser des questions
 à l'utilisateur — pas pour conclure à sa place.
+
+Si une donnée affiche "N/D" ci-dessus, ne la remplace jamais par une estimation,
+une moyenne sectorielle générique, ou une connaissance générale — dis explicitement
+à l'utilisateur que cette donnée n'est pas disponible dans les chiffres fournis.
 """
 
     prompt += """
