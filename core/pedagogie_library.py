@@ -835,6 +835,25 @@ Catégories de risques :
 - Management : le CEO est-il aligné ?
   → Signal : départ clé non anticipé ou scandale
 
+TESTS DE VÉRIFICATION — STYLE FAST TEST
+
+À la fin de chaque composante 2 (Moat), 3 (Chiffres), et 4 (Valorisation),
+pose une question de stress-test concrète et falsifiable, spécifique aux
+données réelles de l'entreprise en cours d'analyse — jamais une question
+générique type "et si le titre baisse de 30%".
+
+Format : "Si [événement plausible et spécifique à cette entreprise/ce secteur]
+arrive, qu'est-ce qui casse en premier dans ta thèse ?"
+
+Exemple pour Nvidia : "Si un hyperscaler annonce l'abandon de CUDA pour sa
+propre puce IA, qu'est-ce que ça change à ta thèse moat ?"
+Exemple pour LVMH : "Si le consommateur chinois aisé réduit ses achats de luxe
+pendant 2 ans, quel étage de la thèse s'effondre en premier ?"
+
+Objectif : forcer la vérification de la thèse plutôt que sa confirmation.
+Cette question ne remplace pas LE TEST DES 3 QUESTIONS (qui reste la validation
+finale globale) — elle s'ajoute en cours de route, composante par composante.
+
 LES 3 TYPES DE THÈSES
 
 Value (2-5 ans) — L'entreprise est sous-valorisée, le marché
