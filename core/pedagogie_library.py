@@ -971,11 +971,6 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
 
     normalized = _normalize(question)
 
-    # Question trop courte : pas de matching fiable
-    if len(normalized.split()) < 2:
-        print(f"[PEDAGOGIE] question too short ('{question}'), no match")
-        return None
-
     # 1. Recherche dans les sous-méthodes prioritaires
     for method_id in SOUS_METHODES_PRIORITAIRES:
         method = METHODES[method_id]
@@ -1004,6 +999,36 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
                 "keywords_matched": matched_keywords,
             }
 
-    # 3. Aucun match
+    # Question trop courte : pas de matching fiable
+    if len(normalized.split()) < 2 and not context:
+        print(f"[PEDAGOGIE] question too short ('{question}'), no match")
+        return None
+
+    # 3. Fallback contexte : message de continuation → méthode déjà en cours
+    marqueurs_continuation = [
+        "etape suivante", "continue", "continuons", "je ne sais pas",
+        "d'accord", "ok", "suite", "on avance", "passe", "resume",
+    ]
+    est_continuation = (
+        len(normalized.split()) <= 4
+        or any(marqueur in normalized for marqueur in marqueurs_continuation)
+    )
+    if est_continuation and context:
+        context_normalized = _normalize(context[:1500])
+        for method_id in SOUS_METHODES_PRIORITAIRES + METHODES_PRINCIPALES:
+            method = METHODES[method_id]
+            matched_keywords = [kw for kw in method["keywords"] if _normalize(kw) in context_normalized]
+            if matched_keywords:
+                print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (via context, matched: {matched_keywords})")
+                return {
+                    "method_id": method_id,
+                    "title": method["title"],
+                    "method_content": method["method_content"],
+                    "example_company": method["example_company"],
+                    "keywords_matched": matched_keywords,
+                    "matched_via": "context",
+                }
+
+    # 4. Aucun match
     print(f"[PEDAGOGIE] '{question}' → no match, Claude répondra librement")
     return None
