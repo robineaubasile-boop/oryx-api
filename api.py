@@ -368,7 +368,7 @@ def decryptage(request: DecryptageRequest):
 	print(f"[DECRYPTAGE] Data OK pour {company_name}")
 
 	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
-	method = lookup_method(lookup_text, context="")
+	method = lookup_method(lookup_text, context=context)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
 	system_prompt = build_system_prompt(data, method)
@@ -408,7 +408,7 @@ def education(request: EducationRequest):
 	print(f"[EDUCATION] question: '{question[:80]}...' " if len(question) > 80 else f"[EDUCATION] question: '{question}'")
 
 	# 1. Détection méthode pédagogique
-	method = lookup_method(question, context="")
+	method = lookup_method(question, context=context)
 	print(f"[EDUCATION] Méthode: {method['method_id'] if method else 'aucune'}")
 
 	# 2. Construction prompts
@@ -445,7 +445,8 @@ def coach(request: CoachRequest):
 	print(f"[COACH] question: '{question[:80]}...' " if len(question) > 80 else f"[COACH] question: '{question}'")
 
 	# 1. Construction prompts
-	system_prompt = build_coach_prompt(tickers, portfolio)
+	method = lookup_method(question, context=context)
+	system_prompt = build_coach_prompt(tickers, portfolio, method)
 	user_message = build_coach_user_message(question, context)
 
 	# 2. Appel Claude
@@ -598,7 +599,7 @@ def web_chat(request: WebChatRequest):
 			data = result["data"]
 			company_name = data.get("name", ticker)
 			lookup_text = message if message else f"analyser bilan états financiers {company_name}"
-			method = lookup_method(lookup_text, context="")
+			method = lookup_method(lookup_text, context=context)
 			system_prompt = build_system_prompt(data, method)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
@@ -612,13 +613,14 @@ def web_chat(request: WebChatRequest):
 			max_tokens = 1500
 
 		elif route == "coach":
-			system_prompt = build_coach_prompt(ticker, "")
+			method = lookup_method(message, context=context)
+			system_prompt = build_coach_prompt(ticker, "", method)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
 			max_tokens = 1500
 
 		else:
-			method = lookup_method(message, context="")
+			method = lookup_method(message, context=context)
 			system_prompt = build_education_prompt(method)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION

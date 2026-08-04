@@ -4,13 +4,38 @@ Claude est appelé directement depuis Python.
 """
 
 
-def build_system_prompt(tickers: str, portfolio: str) -> str:
+def build_system_prompt(tickers: str, portfolio: str, pedagogie_method: dict | None = None) -> str:
     """
     Construit le system prompt pour la route /coach.
     Injecte le portefeuille et les tickers mentionnés.
     """
 
-    prompt = f"""Tu es Oryx Invest, un copilote de réflexion pour investisseur PEA particulier.
+    method_block = ""
+    if pedagogie_method:
+        method_block = f"""═══════════════════════════════════════════════
+MÉTHODE PÉDAGOGIQUE ORYX À APPLIQUER
+═══════════════════════════════════════════════
+
+ID de la méthode : {pedagogie_method['method_id']}
+Titre : {pedagogie_method['title']}
+Exemple canonique à utiliser : {pedagogie_method['example_company']}
+
+Applique cette méthode même si le message utilisateur est court ou générique
+(ex. "étape suivante", "je ne sais pas", "continue"). Dans ce cas, reprends la
+méthode là où l'historique s'est arrêté et enchaîne sur l'étape suivante — ne
+repars pas sur une réponse improvisée hors méthode.
+
+═══════════════════════════════════════════════
+CONTENU DE LA MÉTHODE :
+═══════════════════════════════════════════════
+
+{pedagogie_method['method_content']}
+
+═══════════════════════════════════════════════
+
+"""
+
+    prompt = method_block + f"""Tu es Oryx Invest, un copilote de réflexion pour investisseur PEA particulier.
 
 Ton rôle : aider l'utilisateur à structurer une décision d'investissement.
 Tu ne donnes pas de recommandation d'achat ou de vente sur un titre précis, mais tu réponds frontalement aux questions de méthode, de logique de portefeuille, et de cadrage de décision.
