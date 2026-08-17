@@ -234,6 +234,13 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	cursor: pointer;
 }
 .hub-secondary { margin-top: 4px; text-align: center; font-size: 12.5px; color: var(--ink-faint); }
+.hub-section-label {
+	margin-top: 6px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--ink-faint);
+}
 
 /* --- Chat header (view label + actions) --- */
 .chat-header {
@@ -386,7 +393,68 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 					<button class="hub-card-open" data-hub-open="coach">Ouvrir →</button>
 				</div>
 			</div>
-			<div class="hub-secondary">Besoin d'un autre outil ? Ouvre le menu ☰ en haut à droite.</div>
+			<div class="hub-section-label">Outils</div>
+			<div class="hub-card" data-hub="profil">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">👤</div>
+					<h2 class="serif">Profil</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Bientôt disponible. La gestion de compte arrivera avec l'authentification.</p>
+					<button class="hub-card-open" data-hub-open="profil">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-card" data-hub="portefeuille">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">💼</div>
+					<h2 class="serif">Portefeuille</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Bientôt disponible. Un suivi pédagogique de tes positions — jamais un carnet d'ordres.</p>
+					<button class="hub-card-open" data-hub-open="portefeuille">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-card" data-hub="academie">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">🎓</div>
+					<h2 class="serif">Académie</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Bientôt disponible. Des articles indépendants pour approfondir un sujet précis.</p>
+					<button class="hub-card-open" data-hub-open="academie">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-card" data-hub="rallye">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">🚩</div>
+					<h2 class="serif">Rallye</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Bientôt disponible. Un parcours structuré pour apprendre l'investissement pas à pas, étape par étape.</p>
+					<button class="hub-card-open" data-hub-open="rallye">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-card" data-hub="recherche">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">🔍</div>
+					<h2 class="serif">Recherche</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Consulter le cours d'une action ou d'un ETF, en direct — aucun lien avec la pédagogie.</p>
+					<button class="hub-card-open" data-hub-open="recherche">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-card" data-hub="checklist">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">✅</div>
+					<h2 class="serif">Checklist</h2>
+				</button>
+				<div class="hub-card-detail">
+					<p>Générer une checklist d'analyse structurée pour un ticker précis.</p>
+					<button class="hub-card-open" data-hub-open="checklist">Ouvrir →</button>
+				</div>
+			</div>
+			<div class="hub-secondary">Tous les outils sont aussi accessibles via le menu ☰.</div>
 		</div>
 	</div>
 
