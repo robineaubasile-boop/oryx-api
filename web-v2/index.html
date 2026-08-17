@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Oryx Invest</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+	--ink: #1B2438;
+	--paper: #F1F3F0;
+	--accent: #C17A2E;
+	--success: #3F6B4F;
+	--alert: #B4552F;
+	--ink-soft: rgba(27, 36, 56, 0.62);
+	--ink-faint: rgba(27, 36, 56, 0.38);
+	--line: rgba(27, 36, 56, 0.12);
+	--card: #FAFAF8;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+	font-family: 'Inter', -apple-system, sans-serif;
+	background: var(--paper);
+	color: var(--ink);
+	height: 100vh;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
+.mono { font-family: 'IBM Plex Mono', monospace; }
+
+/* --- Header --- */
+#topbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 14px 18px;
+	border-bottom: 1px solid var(--line);
+	background: var(--paper);
+	flex-shrink: 0;
+}
+#topbar .brand {
+	font-family: 'Fraunces', Georgia, serif;
+	font-weight: 600;
+	font-size: 18px;
+	letter-spacing: -0.01em;
+}
+#topbar .view-label {
+	font-size: 12px;
+	color: var(--ink-soft);
+	margin-top: 1px;
+}
+#menu-btn {
+	width: 38px;
+	height: 38px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--card);
+	font-size: 18px;
+	color: var(--ink);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+#menu-btn.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* --- Views --- */
+#views { flex: 1; overflow: hidden; position: relative; }
+.view { position: absolute; inset: 0; display: none; flex-direction: column; overflow: hidden; }
+.view.visible { display: flex; }
+
+/* --- Chat screens --- */
+.chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 82%; padding: 11px 15px; border-radius: 14px; font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }
+.msg.user { align-self: flex-end; background: var(--ink); color: var(--paper); border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.system { align-self: center; background: transparent; color: var(--ink-soft); font-size: 12.5px; text-align: center; max-width: 90%; }
+.msg .route-tag { font-size: 10.5px; color: var(--ink-faint); margin-top: 6px; display: block; letter-spacing: 0.02em; text-transform: uppercase; }
+.typing { align-self: flex-start; color: var(--ink-soft); font-size: 13px; padding: 4px 15px; font-style: italic; }
+
+.ticker-bar {
+	display: flex;
+	gap: 8px;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--line);
+	background: var(--card);
+	flex-shrink: 0;
+	align-items: center;
+}
+.ticker-bar label { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+.ticker-bar input {
+	flex: 1;
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 8px 10px;
+	font-family: 'IBM Plex Mono', monospace;
+	font-size: 13.5px;
+	background: #fff;
+	color: var(--ink);
+	outline: none;
+	text-transform: uppercase;
+}
+.ticker-bar input:focus { border-color: var(--accent); }
+
+#input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
+#input-bar input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; }
+#input-bar input:focus { border-color: var(--accent); }
+#input-bar button {
+	padding: 11px 18px;
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 10px;
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+}
+#input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* --- Recherche --- */
+.search-wrap { padding: 18px; flex: 1; overflow-y: auto; }
+.search-bar { display: flex; gap: 8px; margin-bottom: 18px; }
+.search-bar input {
+	flex: 1;
+	padding: 13px 15px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	font-size: 15px;
+	background: #fff;
+	color: var(--ink);
+	outline: none;
+	font-family: 'IBM Plex Mono', monospace;
+}
+.search-bar input:focus { border-color: var(--accent); }
+.search-bar button {
+	padding: 13px 20px;
+	background: var(--accent);
+	color: #fff;
+	border: none;
+	border-radius: 10px;
+	font-weight: 500;
+	font-size: 14px;
+	cursor: pointer;
+}
+.search-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.result-card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 20px;
+}
+.result-card .row-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
+.result-card .ticker { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--ink-soft); letter-spacing: 0.03em; }
+.result-card .name { font-family: 'Fraunces', Georgia, serif; font-size: 20px; font-weight: 600; margin-top: 2px; }
+.result-card .type-badge {
+	font-size: 10.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	padding: 4px 9px;
+	border-radius: 20px;
+	background: rgba(27, 36, 56, 0.06);
+	color: var(--ink-soft);
+	white-space: nowrap;
+}
+.result-card .price-row { display: flex; align-items: baseline; gap: 12px; }
+.result-card .price { font-family: 'IBM Plex Mono', monospace; font-size: 32px; font-weight: 500; }
+.result-card .change { font-family: 'IBM Plex Mono', monospace; font-size: 15px; font-weight: 500; }
+.result-card .change.up { color: var(--success); }
+.result-card .change.down { color: var(--alert); }
+.result-card .change.flat { color: var(--ink-soft); }
+.result-card .meta { margin-top: 14px; font-size: 12px; color: var(--ink-faint); }
+.result-card .unverified-note {
+	margin-top: 12px;
+	font-size: 12px;
+	color: var(--alert);
+	background: rgba(180, 85, 47, 0.08);
+	border-radius: 8px;
+	padding: 8px 11px;
+}
+.search-empty, .search-error { text-align: center; color: var(--ink-soft); font-size: 13.5px; margin-top: 40px; padding: 0 20px; }
+.search-error { color: var(--alert); }
+
+/* --- Placeholders --- */
+.placeholder-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; gap: 8px; }
+.placeholder-wrap .icon { font-size: 34px; margin-bottom: 6px; opacity: 0.5; }
+.placeholder-wrap h2 { font-size: 19px; }
+.placeholder-wrap p { font-size: 13.5px; color: var(--ink-soft); max-width: 280px; line-height: 1.5; }
+.placeholder-wrap.dim { opacity: 0.55; }
+
+/* --- Bottom nav --- */
+#bottom-nav {
+	display: flex;
+	border-top: 1px solid var(--line);
+	background: var(--paper);
+	flex-shrink: 0;
+	padding-bottom: env(safe-area-inset-bottom);
+}
+.nav-item {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 3px;
+	padding: 9px 4px 8px;
+	border: none;
+	background: transparent;
+	color: var(--ink-soft);
+	cursor: pointer;
+	font-family: 'Inter', sans-serif;
+}
+.nav-item .nav-icon { font-size: 18px; line-height: 1; }
+.nav-item .nav-label { font-size: 10.5px; font-weight: 500; }
+.nav-item.active { color: var(--accent); }
+
+/* --- Tools menu (drawer) --- */
+#menu-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(27, 36, 56, 0.35);
+	display: none;
+	z-index: 20;
+}
+#menu-overlay.visible { display: block; }
+#tools-menu {
+	position: fixed;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: var(--paper);
+	border-radius: 18px 18px 0 0;
+	padding: 8px 8px calc(14px + env(safe-area-inset-bottom));
+	z-index: 21;
+	transform: translateY(100%);
+	transition: transform 0.22s ease;
+	box-shadow: 0 -6px 24px rgba(27, 36, 56, 0.18);
+}
+#tools-menu.visible { transform: translateY(0); }
+#tools-menu .handle { width: 36px; height: 4px; background: var(--line); border-radius: 4px; margin: 6px auto 10px; }
+#tools-menu .menu-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint); padding: 0 12px 8px; }
+.tool-item {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	width: 100%;
+	padding: 13px 12px;
+	border: none;
+	background: transparent;
+	border-radius: 10px;
+	font-family: 'Inter', sans-serif;
+	font-size: 15px;
+	color: var(--ink);
+	text-align: left;
+	cursor: pointer;
+}
+.tool-item:active { background: rgba(27, 36, 56, 0.05); }
+.tool-item .tool-icon { font-size: 18px; width: 24px; text-align: center; }
+.tool-item .tool-tag { margin-left: auto; font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+.tool-item.disabled { color: var(--ink-faint); cursor: default; }
+.tool-item.disabled:active { background: transparent; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+	<div>
+		<div class="brand">Oryx Invest</div>
+		<div class="view-label" id="view-label">Accueil</div>
+	</div>
+	<button id="menu-btn" aria-label="Outils">☰</button>
+</div>
+
+<div id="views">
+
+	<!-- Accueil -->
+	<div class="view visible" data-view="accueil">
+		<div class="chat-messages" id="msgs-accueil"></div>
+		<div id="input-bar">
+			<input type="text" id="input-accueil" placeholder="Pose ta question..." autocomplete="off">
+			<button id="send-accueil">Envoyer</button>
+		</div>
+	</div>
+
+	<!-- Décrypter -->
+	<div class="view" data-view="decrypter">
+		<div class="ticker-bar">
+			<label for="ticker-decrypter">Ticker</label>
+			<input type="text" id="ticker-decrypter" placeholder="ex. AAPL, MC.PA">
+		</div>
+		<div class="chat-messages" id="msgs-decrypter"></div>
+		<div id="input-bar">
+			<input type="text" id="input-decrypter" placeholder="Ta question sur ce titre..." autocomplete="off">
+			<button id="send-decrypter">Envoyer</button>
+		</div>
+	</div>
+
+	<!-- Éducation -->
+	<div class="view" data-view="education">
+		<div class="chat-messages" id="msgs-education"></div>
+		<div id="input-bar">
+			<input type="text" id="input-education" placeholder="Une notion à éclaircir..." autocomplete="off">
+			<button id="send-education">Envoyer</button>
+		</div>
+	</div>
+
+	<!-- Coach -->
+	<div class="view" data-view="coach">
+		<div class="chat-messages" id="msgs-coach"></div>
+		<div id="input-bar">
+			<input type="text" id="input-coach" placeholder="Parle-moi de ta situation..." autocomplete="off">
+			<button id="send-coach">Envoyer</button>
+		</div>
+	</div>
+
+	<!-- Recherche -->
+	<div class="view" data-view="recherche">
+		<div class="search-wrap">
+			<div class="search-bar">
+				<input type="text" id="search-input" placeholder="Ticker, action, ETF, crypto..." autocomplete="off">
+				<button id="search-btn">Chercher</button>
+			</div>
+			<div id="search-result"></div>
+		</div>
+	</div>
+
+	<!-- Checklist -->
+	<div class="view" data-view="checklist">
+		<div class="ticker-bar">
+			<label for="ticker-checklist">Ticker</label>
+			<input type="text" id="ticker-checklist" placeholder="ex. AAPL, MC.PA">
+		</div>
+		<div class="chat-messages" id="msgs-checklist"></div>
+		<div id="input-bar">
+			<input type="text" id="input-checklist" placeholder="Précise ta demande (optionnel)..." autocomplete="off">
+			<button id="send-checklist">Générer</button>
+		</div>
+	</div>
+
+	<!-- Académie -->
+	<div class="view" data-view="academie">
+		<div class="placeholder-wrap">
+			<div class="icon">🎓</div>
+			<h2 class="serif">Académie</h2>
+			<p>Bientôt disponible. Des parcours structurés pour apprendre l'investissement pas à pas.</p>
+		</div>
+	</div>
+
+	<!-- Leçon -->
+	<div class="view" data-view="lecon">
+		<div class="placeholder-wrap">
+			<div class="icon">📖</div>
+			<h2 class="serif">Leçon</h2>
+			<p>Bientôt disponible. Les leçons individuelles arriveront dans une prochaine mise à jour.</p>
+		</div>
+	</div>
+
+	<!-- Portefeuille -->
+	<div class="view" data-view="portefeuille">
+		<div class="placeholder-wrap dim">
+			<div class="icon">📁</div>
+			<h2 class="serif">Portefeuille</h2>
+			<p>Bientôt disponible. Un suivi pédagogique de vos positions — jamais un carnet d'ordres.</p>
+		</div>
+	</div>
+
+	<!-- Profil -->
+	<div class="view" data-view="profil">
+		<div class="placeholder-wrap">
+			<div class="icon">👤</div>
+			<h2 class="serif">Profil</h2>
+			<p>Bientôt disponible. La gestion de compte arrivera avec l'authentification.</p>
+		</div>
+	</div>
+
+</div>
+
+<div id="bottom-nav">
+	<button class="nav-item active" data-nav="accueil">
+		<span class="nav-icon">🏠</span><span class="nav-label">Accueil</span>
+	</button>
+	<button class="nav-item" data-nav="decrypter">
+		<span class="nav-icon">🔍</span><span class="nav-label">Décrypter</span>
+	</button>
+	<button class="nav-item" data-nav="education">
+		<span class="nav-icon">💡</span><span class="nav-label">Éducation</span>
+	</button>
+	<button class="nav-item" data-nav="coach">
+		<span class="nav-icon">🧭</span><span class="nav-label">Coach</span>
+	</button>
+</div>
+
+<div id="menu-overlay"></div>
+<div id="tools-menu">
+	<div class="handle"></div>
+	<div class="menu-title">Outils</div>
+	<button class="tool-item" data-tool="recherche">
+		<span class="tool-icon">📊</span> Recherche
+	</button>
+	<button class="tool-item" data-tool="academie">
+		<span class="tool-icon">🎓</span> Académie <span class="tool-tag">Bientôt</span>
+	</button>
+	<button class="tool-item" data-tool="lecon">
+		<span class="tool-icon">📖</span> Leçon <span class="tool-tag">Bientôt</span>
+	</button>
+	<button class="tool-item" data-tool="checklist">
+		<span class="tool-icon">✅</span> Checklist
+	</button>
+	<button class="tool-item disabled" data-tool="portefeuille">
+		<span class="tool-icon">📁</span> Portefeuille <span class="tool-tag">Bientôt</span>
+	</button>
+	<button class="tool-item" data-tool="profil">
+		<span class="tool-icon">👤</span> Profil
+	</button>
+</div>
+
+<script>
+// ============================================================
+// Session / state
+// ============================================================
+function getSessionId() {
+	let sid = localStorage.getItem('oryx_v2_session_id');
+	if (!sid) {
+		sid = crypto.randomUUID();
+		localStorage.setItem('oryx_v2_session_id', sid);
+	}
+	return sid;
+}
+const SESSION_ID = getSessionId();
+
+const VIEW_LABELS = {
+	accueil: 'Accueil', decrypter: 'Décrypter', education: 'Éducation', coach: 'Coach',
+	recherche: 'Recherche', academie: 'Académie', lecon: 'Leçon', checklist: 'Checklist',
+	portefeuille: 'Portefeuille', profil: 'Profil',
+};
+const BOTTOM_NAV_VIEWS = ['accueil', 'decrypter', 'education', 'coach'];
+
+// Per-tab in-memory history, used only to build the "context" string
+// for endpoints that don't keep server-side session state.
+const histories = { decrypter: [], education: [], coach: [], checklist: [] };
+
+// ============================================================
+// View switching
+// ============================================================
+function showView(name) {
+	document.querySelectorAll('.view').forEach(v => v.classList.toggle('visible', v.dataset.view === name));
+	document.getElementById('view-label').textContent = VIEW_LABELS[name] || name;
+	document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.nav === name));
+	document.getElementById('menu-btn').classList.toggle('active', !BOTTOM_NAV_VIEWS.includes(name));
+	closeMenu();
+}
+
+document.querySelectorAll('.nav-item').forEach(btn => {
+	btn.addEventListener('click', () => showView(btn.dataset.nav));
+});
+
+function openMenu() {
+	document.getElementById('menu-overlay').classList.add('visible');
+	document.getElementById('tools-menu').classList.add('visible');
+}
+function closeMenu() {
+	document.getElementById('menu-overlay').classList.remove('visible');
+	document.getElementById('tools-menu').classList.remove('visible');
+}
+document.getElementById('menu-btn').addEventListener('click', () => {
+	document.getElementById('tools-menu').classList.contains('visible') ? closeMenu() : openMenu();
+});
+document.getElementById('menu-overlay').addEventListener('click', closeMenu);
+document.querySelectorAll('.tool-item').forEach(btn => {
+	if (btn.classList.contains('disabled')) return;
+	btn.addEventListener('click', () => showView(btn.dataset.tool));
+});
+
+// ============================================================
+// Chat helpers (shared rendering)
+// ============================================================
+function addMessage(containerId, text, role, routeTag) {
+	const container = document.getElementById(containerId);
+	const div = document.createElement('div');
+	div.className = 'msg ' + role;
+	div.textContent = text;
+	if (routeTag) {
+		const tag = document.createElement('span');
+		tag.className = 'route-tag';
+		tag.textContent = '/' + routeTag;
+		div.appendChild(tag);
+	}
+	container.appendChild(div);
+	container.scrollTop = container.scrollHeight;
+}
+
+function showTyping(containerId) {
+	const container = document.getElementById(containerId);
+	const div = document.createElement('div');
+	div.className = 'typing';
+	div.id = containerId + '-typing';
+	div.textContent = 'Oryx réfléchit...';
+	container.appendChild(div);
+	container.scrollTop = container.scrollHeight;
+}
+function hideTyping(containerId) {
+	const el = document.getElementById(containerId + '-typing');
+	if (el) el.remove();
+}
+
+// Mirrors the backend's own context format: most recent turn first.
+function buildContext(history) {
+	if (!history.length) return '';
+	return history.slice().reverse().map(t => `[${t.role.toUpperCase()}] ${t.text}`).join('\n');
+}
+
+// ============================================================
+// Accueil — /web-chat, server-side session history
+// ============================================================
+async function sendAccueil() {
+	const input = document.getElementById('input-accueil');
+	const btn = document.getElementById('send-accueil');
+	const text = input.value.trim();
+	if (!text) return;
+
+	input.value = '';
+	btn.disabled = true;
+	addMessage('msgs-accueil', text, 'user');
+	showTyping('msgs-accueil');
+
+	try {
+		const res = await fetch('/web-chat', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ session_id: SESSION_ID, message: text }),
+		});
+		const data = await res.json();
+		hideTyping('msgs-accueil');
+		if (data.success) {
+			addMessage('msgs-accueil', data.response, 'assistant', data.route_used);
+		} else {
+			addMessage('msgs-accueil', 'Erreur : ' + (data.error || 'inconnue'), 'system');
+		}
+	} catch (err) {
+		hideTyping('msgs-accueil');
+		addMessage('msgs-accueil', 'Erreur réseau : ' + err.message, 'system');
+	}
+	btn.disabled = false;
+	input.focus();
+}
+document.getElementById('send-accueil').addEventListener('click', sendAccueil);
+document.getElementById('input-accueil').addEventListener('keydown', e => { if (e.key === 'Enter') sendAccueil(); });
+
+// ============================================================
+// Simple single-endpoint chat factory — Éducation / Coach
+// (client-side context, no locked ticker)
+// ============================================================
+function makeSimpleChat({ key, endpoint, buildBody }) {
+	const containerId = 'msgs-' + key;
+	const input = document.getElementById('input-' + key);
+	const btn = document.getElementById('send-' + key);
+
+	async function send() {
+		const text = input.value.trim();
+		if (!text) return;
+		input.value = '';
+		btn.disabled = true;
+		addMessage(containerId, text, 'user');
+		showTyping(containerId);
+
+		const context = buildContext(histories[key]);
+		try {
+			const res = await fetch(endpoint, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(buildBody(text, context)),
+			});
+			const data = await res.json();
+			hideTyping(containerId);
+			if (data.success) {
+				addMessage(containerId, data.response || data.analysis, 'assistant');
+				histories[key].push({ role: 'user', text });
+				histories[key].push({ role: 'assistant', text: data.response || data.analysis });
+			} else {
+				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
+			}
+		} catch (err) {
+			hideTyping(containerId);
+			addMessage(containerId, 'Erreur réseau : ' + err.message, 'system');
+		}
+		btn.disabled = false;
+		input.focus();
+	}
+	btn.addEventListener('click', send);
+	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+}
+
+makeSimpleChat({
+	key: 'education',
+	endpoint: '/education',
+	buildBody: (question, context) => ({ question, context }),
+});
+makeSimpleChat({
+	key: 'coach',
+	endpoint: '/coach',
+	buildBody: (question, context) => ({ question, context }),
+});
+
+// ============================================================
+// Ticker-locked chat factory — Décrypter / Checklist
+// ============================================================
+function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
+	const containerId = 'msgs-' + key;
+	const input = document.getElementById('input-' + key);
+	const btn = document.getElementById('send-' + key);
+	const tickerInput = document.getElementById('ticker-' + key);
+
+	async function send() {
+		const ticker = tickerInput.value.trim().toUpperCase();
+		const question = input.value.trim();
+		if (!ticker) {
+			addMessage(containerId, 'Renseigne un ticker avant d\'envoyer.', 'system');
+			return;
+		}
+		input.value = '';
+		btn.disabled = true;
+		addMessage(containerId, question || `(analyse de ${ticker})`, 'user');
+		showTyping(containerId);
+
+		const context = buildContext(histories[key]);
+		try {
+			const res = await fetch(endpoint, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ ticker, question, context }),
+			});
+			const data = await res.json();
+			hideTyping(containerId);
+			if (data.success) {
+				const text = data[resultField];
+				addMessage(containerId, text, 'assistant');
+				histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
+				histories[key].push({ role: 'assistant', text });
+			} else {
+				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
+			}
+		} catch (err) {
+			hideTyping(containerId);
+			addMessage(containerId, 'Erreur réseau : ' + err.message, 'system');
+		}
+		btn.disabled = false;
+		input.focus();
+	}
+	btn.addEventListener('click', send);
+	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+}
+
+makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis' });
+makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
+
+// ============================================================
+// Recherche — GET /web-v2/search, zéro Claude
+// ============================================================
+function renderSearchResult(data) {
+	const el = document.getElementById('search-result');
+	if (!data.success) {
+		el.innerHTML = `<div class="search-error">${data.error || 'Aucun résultat.'}</div>`;
+		return;
+	}
+	const changeVal = data.change_percent;
+	const dir = changeVal > 0 ? 'up' : changeVal < 0 ? 'down' : 'flat';
+	const sign = changeVal > 0 ? '+' : '';
+	const changeStr = (changeVal === null || changeVal === undefined) ? '—' : `${sign}${changeVal.toFixed(2)}%`;
+	const typeLabels = { stock: 'Action', etf: 'ETF', crypto: 'Crypto' };
+
+	el.innerHTML = `
+		<div class="result-card">
+			<div class="row-top">
+				<div>
+					<div class="ticker">${data.ticker}</div>
+					<div class="name">${data.name}</div>
+				</div>
+				<div class="type-badge">${typeLabels[data.type] || data.type}</div>
+			</div>
+			<div class="price-row">
+				<div class="price">${data.price != null ? data.price.toFixed(2) : '—'} ${data.currency || ''}</div>
+				<div class="change ${dir}">${changeStr}</div>
+			</div>
+			<div class="meta">Clôture précédente : ${data.previous_close != null ? data.previous_close.toFixed(2) : '—'} ${data.currency || ''}</div>
+			${data.type === 'crypto' && data.verified === false ? '<div class="unverified-note">Données crypto — source à valider (non confirmée sur ce plan EODHD).</div>' : ''}
+		</div>
+	`;
+}
+
+async function runSearch() {
+	const input = document.getElementById('search-input');
+	const btn = document.getElementById('search-btn');
+	const q = input.value.trim();
+	const el = document.getElementById('search-result');
+	if (!q) return;
+
+	btn.disabled = true;
+	el.innerHTML = '<div class="search-empty">Recherche...</div>';
+	try {
+		const res = await fetch('/web-v2/search?q=' + encodeURIComponent(q));
+		const data = await res.json();
+		renderSearchResult(data);
+	} catch (err) {
+		el.innerHTML = `<div class="search-error">Erreur réseau : ${err.message}</div>`;
+	}
+	btn.disabled = false;
+}
+document.getElementById('search-btn').addEventListener('click', runSearch);
+document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+document.getElementById('search-result').innerHTML = '<div class="search-empty">Cherche une action, un ETF ou une crypto par son ticker.</div>';
+
+// ============================================================
+// Welcome message
+// ============================================================
+addMessage('msgs-accueil', 'Bienvenue sur Oryx Invest. Pose ta question sur une action, un ETF, ou un concept d\'investissement.', 'system');
+</script>
+
+</body>
+</html>
