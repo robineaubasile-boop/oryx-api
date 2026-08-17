@@ -191,21 +191,48 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .hub-intro h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
 .hub-intro p { margin-top: 6px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
 .hub-card {
-	display: flex;
-	align-items: flex-start;
-	gap: 14px;
 	background: var(--card);
 	border: 1px solid var(--line);
 	border-radius: 14px;
+	overflow: hidden;
+}
+.hub-card-toggle {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	width: 100%;
+	background: none;
+	border: none;
 	padding: 18px;
 	text-align: left;
-	font-family: 'Inter', sans-serif;
+	font-family: 'Fraunces', Georgia, serif;
 	cursor: pointer;
 }
-.hub-card:active { background: rgba(27, 36, 56, 0.05); }
-.hub-card .hub-card-icon { font-size: 24px; line-height: 1; margin-top: 2px; }
-.hub-card .hub-card-body h2 { font-size: 17px; font-weight: 600; }
-.hub-card .hub-card-body p { margin-top: 5px; font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.hub-card-toggle:active { background: rgba(27, 36, 56, 0.05); }
+.hub-card-icon { font-size: 24px; line-height: 1; }
+.hub-card-toggle h2 { font-size: 17px; font-weight: 600; }
+.hub-card-detail {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.2s ease;
+	padding: 0 18px;
+}
+.hub-card.expanded .hub-card-detail {
+	max-height: 200px;
+	padding: 0 18px 18px;
+}
+.hub-card-detail p { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.hub-card-open {
+	margin-top: 10px;
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--accent);
+	font-family: 'Inter', sans-serif;
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+}
 .hub-secondary { margin-top: 4px; text-align: center; font-size: 12.5px; color: var(--ink-faint); }
 
 /* --- Chat header (view label + actions) --- */
@@ -329,27 +356,36 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 				<h1 class="serif">Oryx Invest</h1>
 				<p>Trois façons d'avancer. Choisis celle qui correspond à ta question du moment.</p>
 			</div>
-			<button class="hub-card" data-hub="decrypter">
-				<div class="hub-card-icon">🔍</div>
-				<div class="hub-card-body">
+			<div class="hub-card" data-hub="decrypter">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">🔍</div>
 					<h2 class="serif">Décrypter</h2>
+				</button>
+				<div class="hub-card-detail">
 					<p>Analyser une entreprise précise, étape par étape : business, moat, chiffres, valorisation, risques.</p>
+					<button class="hub-card-open" data-hub-open="decrypter">Ouvrir →</button>
 				</div>
-			</button>
-			<button class="hub-card" data-hub="education">
-				<div class="hub-card-icon">💡</div>
-				<div class="hub-card-body">
+			</div>
+			<div class="hub-card" data-hub="education">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">💡</div>
 					<h2 class="serif">Éducation</h2>
+				</button>
+				<div class="hub-card-detail">
 					<p>Comprendre un concept, apprendre à raisonner comme un investisseur.</p>
+					<button class="hub-card-open" data-hub-open="education">Ouvrir →</button>
 				</div>
-			</button>
-			<button class="hub-card" data-hub="coach">
-				<div class="hub-card-icon">🧭</div>
-				<div class="hub-card-body">
+			</div>
+			<div class="hub-card" data-hub="coach">
+				<button class="hub-card-toggle">
+					<div class="hub-card-icon">🧭</div>
 					<h2 class="serif">Coach</h2>
+				</button>
+				<div class="hub-card-detail">
 					<p>Réfléchir à une décision sur ton portefeuille ou une situation concrète.</p>
+					<button class="hub-card-open" data-hub-open="coach">Ouvrir →</button>
 				</div>
-			</button>
+			</div>
 			<div class="hub-secondary">Besoin d'un autre outil ? Ouvre le menu ☰ en haut à droite.</div>
 		</div>
 	</div>
@@ -472,23 +508,23 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 <div id="tools-menu">
 	<div class="handle"></div>
 	<div class="menu-title">Outils</div>
-	<button class="tool-item" data-tool="recherche">
-		<span class="tool-icon">🔍</span> Recherche
+	<button class="tool-item" data-tool="profil">
+		<span class="tool-icon">👤</span> Profil
 	</button>
-	<button class="tool-item" data-tool="rallye">
-		<span class="tool-icon">🚩</span> Rallye <span class="tool-tag">Bientôt</span>
+	<button class="tool-item disabled" data-tool="portefeuille">
+		<span class="tool-icon">💼</span> Portefeuille <span class="tool-tag">Bientôt</span>
 	</button>
 	<button class="tool-item" data-tool="academie">
 		<span class="tool-icon">🎓</span> Académie <span class="tool-tag">Bientôt</span>
 	</button>
+	<button class="tool-item" data-tool="rallye">
+		<span class="tool-icon">🚩</span> Rallye <span class="tool-tag">Bientôt</span>
+	</button>
+	<button class="tool-item" data-tool="recherche">
+		<span class="tool-icon">🔍</span> Recherche
+	</button>
 	<button class="tool-item" data-tool="checklist">
 		<span class="tool-icon">✅</span> Checklist
-	</button>
-	<button class="tool-item disabled" data-tool="portefeuille">
-		<span class="tool-icon">📁</span> Portefeuille <span class="tool-tag">Bientôt</span>
-	</button>
-	<button class="tool-item" data-tool="profil">
-		<span class="tool-icon">👤</span> Profil
 	</button>
 </div>
 
@@ -536,8 +572,16 @@ function showView(name) {
 document.querySelectorAll('.nav-item').forEach(btn => {
 	btn.addEventListener('click', () => showView(btn.dataset.nav));
 });
-document.querySelectorAll('.hub-card').forEach(btn => {
-	btn.addEventListener('click', () => showView(btn.dataset.hub));
+document.querySelectorAll('.hub-card-toggle').forEach(btn => {
+	btn.addEventListener('click', () => {
+		btn.closest('.hub-card').classList.toggle('expanded');
+	});
+});
+document.querySelectorAll('.hub-card-open').forEach(btn => {
+	btn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		showView(btn.dataset.hubOpen);
+	});
 });
 
 function openMenu() {
