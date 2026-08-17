@@ -529,13 +529,14 @@ class WebChatRequest(BaseModel):
 	message: str
 
 
-def _classify_intent(message: str) -> dict:
-	"""Classify user message intent using Claude Haiku."""
+def _classify_intent(message: str, context: str = "") -> dict:
+	"""Classify user message intent using Claude Haiku, aware of session context."""
 	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+	context_block = f"\n\nContexte de la session (messages précédents, du plus récent au plus ancien) :\n{context}" if context else ""
 	response = client.messages.create(
 		model=CLAUDE_MODEL_CLASSIFIER,
 		max_tokens=300,
-		system="""Tu es un classificateur de messages pour un bot d'investissement.
+		system=f"""Tu es un classificateur de messages pour un bot d'investissement.
 Analyse le message utilisateur et retourne UNIQUEMENT un JSON avec deux champs :
 - "route": une des valeurs suivantes : "decryptage", "checklist", "coach", "education"
 - "ticker": le ticker boursier mentionné (en majuscules), ou "" si aucun
@@ -546,13 +547,15 @@ Règles de classification (appliquées dans cet ordre de priorité) :
 
 2. DECRYPTAGE : le message mentionne un ticker (AAPL, MSFT, LVMH.PA, etc.) OU un nom d'entreprise reconnaissable (Microsoft, Apple, LVMH, Tesla, Nvidia, Amazon, etc.) avec une intention d'analyse (analyser, décrypter, regarder, étudier, que penses-tu de, parle-moi de) → route "decryptage". Extrais le ticker correspondant au nom (Microsoft → MSFT, Apple → AAPL, LVMH → MC.PA, Tesla → TSLA, Nvidia → NVDA, Amazon → AMZN, etc.).
 
-3. COACH : le message parle de décision d'investissement, d'argent à placer, ou de stratégie. Mots-clés : portefeuille, allocation, diversification, PEA, CTO, stratégie, investir, budget, j'ai X€, combien, répartir, commencer, premier investissement, comment réfléchir, que faire avec, construire un portefeuille, renforcer, arbitrage, vendre, acheter → route "coach"
+3. CONTINUITÉ DE SESSION : si le contexte de session ci-dessous mentionne déjà un ticker et que le message actuel est une question de suivi sans nouveau ticker explicite (ex: "et niveau dette ?", "et la marge ?", "explique-moi ça"), garde route "decryptage" et réutilise le ticker déjà établi dans le contexte.
 
-4. EDUCATION : le message pose une question purement théorique ou pédagogique sur l'investissement (c'est quoi un ETF, comment fonctionne le P/E, qu'est-ce qu'un moat, etc.) → route "education"
+4. COACH : le message parle de décision d'investissement, d'argent à placer, ou de stratégie. Mots-clés : portefeuille, allocation, diversification, PEA, CTO, stratégie, investir, budget, j'ai X€, combien, répartir, commencer, premier investissement, comment réfléchir, que faire avec, construire un portefeuille, renforcer, arbitrage, vendre, acheter → route "coach"
+
+5. EDUCATION : le message pose une question purement théorique ou pédagogique sur l'investissement (c'est quoi un ETF, comment fonctionne le P/E, qu'est-ce qu'un moat, etc.) → route "education"
 
 En cas de doute entre coach et education : si le message parle d'argent concret ou de décision d'investissement → "coach". Sinon → "education".
 
-Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {"route": "decryptage", "ticker": "MSFT"}""",
+Retourne UNIQUEMENT le JSON, rien d'autre. Exemple : {{"route": "decryptage", "ticker": "MSFT"}}{context_block}""",
 		messages=[{"role": "user", "content": message}]
 	)
 	raw = _extract_text(response).strip()
@@ -575,19 +578,19 @@ def web_chat(request: WebChatRequest):
 
 	print(f"[WEB-CHAT] session={session_id[:8]}... | message: '{message[:80]}'")
 
-	# 1. Classify intent
+	# 1. Get conversation context
+	history = _web_chat_history[session_id]
+	context = _build_context_string(history)
+
+	# 2. Classify intent (context-aware)
 	try:
-		intent = _classify_intent(message)
+		intent = _classify_intent(message, context=context)
 		route = intent.get("route", "education")
 		ticker = intent.get("ticker", "").strip().upper()
 		print(f"[WEB-CHAT] Classified → route={route}, ticker={ticker}")
 	except Exception as e:
 		print(f"[WEB-CHAT ERROR] Classifier failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur classification : {e}"}
-
-	# 2. Get conversation context
-	history = _web_chat_history[session_id]
-	context = _build_context_string(history)
 
 	# 3. Route to the appropriate engine
 	try:
