@@ -415,21 +415,21 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 	</div>
 
+	<!-- Rallye -->
+	<div class="view" data-view="rallye">
+		<div class="placeholder-wrap">
+			<div class="icon">🚩</div>
+			<h2 class="serif">Rallye</h2>
+			<p>Bientôt disponible. Un parcours structuré pour apprendre l'investissement pas à pas, étape par étape.</p>
+		</div>
+	</div>
+
 	<!-- Académie -->
 	<div class="view" data-view="academie">
 		<div class="placeholder-wrap">
 			<div class="icon">🎓</div>
 			<h2 class="serif">Académie</h2>
-			<p>Bientôt disponible. Des parcours structurés pour apprendre l'investissement pas à pas.</p>
-		</div>
-	</div>
-
-	<!-- Leçon -->
-	<div class="view" data-view="lecon">
-		<div class="placeholder-wrap">
-			<div class="icon">📖</div>
-			<h2 class="serif">Leçon</h2>
-			<p>Bientôt disponible. Les leçons individuelles arriveront dans une prochaine mise à jour.</p>
+			<p>Bientôt disponible. Des articles indépendants pour approfondir un sujet précis.</p>
 		</div>
 	</div>
 
@@ -473,13 +473,13 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	<div class="handle"></div>
 	<div class="menu-title">Outils</div>
 	<button class="tool-item" data-tool="recherche">
-		<span class="tool-icon">📊</span> Recherche
+		<span class="tool-icon">🔍</span> Recherche
+	</button>
+	<button class="tool-item" data-tool="rallye">
+		<span class="tool-icon">🚩</span> Rallye <span class="tool-tag">Bientôt</span>
 	</button>
 	<button class="tool-item" data-tool="academie">
 		<span class="tool-icon">🎓</span> Académie <span class="tool-tag">Bientôt</span>
-	</button>
-	<button class="tool-item" data-tool="lecon">
-		<span class="tool-icon">📖</span> Leçon <span class="tool-tag">Bientôt</span>
 	</button>
 	<button class="tool-item" data-tool="checklist">
 		<span class="tool-icon">✅</span> Checklist
@@ -513,7 +513,7 @@ function resetSessionId(viewKey) {
 
 const VIEW_LABELS = {
 	accueil: 'Accueil', decrypter: 'Décrypter', education: 'Éducation', coach: 'Coach',
-	recherche: 'Recherche', academie: 'Académie', lecon: 'Leçon', checklist: 'Checklist',
+	recherche: 'Recherche', rallye: 'Rallye', academie: 'Académie', checklist: 'Checklist',
 	portefeuille: 'Portefeuille', profil: 'Profil',
 };
 const BOTTOM_NAV_VIEWS = ['accueil', 'decrypter', 'education', 'coach'];
