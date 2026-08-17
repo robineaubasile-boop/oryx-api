@@ -185,6 +185,52 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .search-empty, .search-error { text-align: center; color: var(--ink-soft); font-size: 13.5px; margin-top: 40px; padding: 0 20px; }
 .search-error { color: var(--alert); }
 
+/* --- Hub (Accueil) --- */
+.hub-wrap { flex: 1; overflow-y: auto; padding: 22px 18px; display: flex; flex-direction: column; gap: 14px; }
+.hub-intro { margin-bottom: 4px; }
+.hub-intro h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.hub-intro p { margin-top: 6px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
+.hub-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 18px;
+	text-align: left;
+	font-family: 'Inter', sans-serif;
+	cursor: pointer;
+}
+.hub-card:active { background: rgba(27, 36, 56, 0.05); }
+.hub-card .hub-card-icon { font-size: 24px; line-height: 1; margin-top: 2px; }
+.hub-card .hub-card-body h2 { font-size: 17px; font-weight: 600; }
+.hub-card .hub-card-body p { margin-top: 5px; font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.hub-secondary { margin-top: 4px; text-align: center; font-size: 12.5px; color: var(--ink-faint); }
+
+/* --- Chat header (view label + actions) --- */
+.chat-header {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--line);
+	background: var(--card);
+	flex-shrink: 0;
+}
+.new-convo-btn {
+	border: 1px solid var(--line);
+	background: #fff;
+	color: var(--ink-soft);
+	font-family: 'Inter', sans-serif;
+	font-size: 12px;
+	font-weight: 500;
+	padding: 7px 12px;
+	border-radius: 8px;
+	cursor: pointer;
+}
+.new-convo-btn:active { background: rgba(27, 36, 56, 0.05); }
+
 /* --- Placeholders --- */
 .placeholder-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; gap: 8px; }
 .placeholder-wrap .icon { font-size: 34px; margin-bottom: 6px; opacity: 0.5; }
@@ -278,10 +324,33 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Accueil -->
 	<div class="view visible" data-view="accueil">
-		<div class="chat-messages" id="msgs-accueil"></div>
-		<div id="input-bar">
-			<input type="text" id="input-accueil" placeholder="Pose ta question..." autocomplete="off">
-			<button id="send-accueil">Envoyer</button>
+		<div class="hub-wrap">
+			<div class="hub-intro">
+				<h1 class="serif">Oryx Invest</h1>
+				<p>Trois façons d'avancer. Choisis celle qui correspond à ta question du moment.</p>
+			</div>
+			<button class="hub-card" data-hub="decrypter">
+				<div class="hub-card-icon">🔍</div>
+				<div class="hub-card-body">
+					<h2 class="serif">Décrypter</h2>
+					<p>Analyser une entreprise précise, étape par étape : business, moat, chiffres, valorisation, risques.</p>
+				</div>
+			</button>
+			<button class="hub-card" data-hub="education">
+				<div class="hub-card-icon">💡</div>
+				<div class="hub-card-body">
+					<h2 class="serif">Éducation</h2>
+					<p>Comprendre un concept, apprendre à raisonner comme un investisseur.</p>
+				</div>
+			</button>
+			<button class="hub-card" data-hub="coach">
+				<div class="hub-card-icon">🧭</div>
+				<div class="hub-card-body">
+					<h2 class="serif">Coach</h2>
+					<p>Réfléchir à une décision sur ton portefeuille ou une situation concrète.</p>
+				</div>
+			</button>
+			<div class="hub-secondary">Besoin d'un autre outil ? Ouvre le menu ☰ en haut à droite.</div>
 		</div>
 	</div>
 
@@ -300,6 +369,9 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Éducation -->
 	<div class="view" data-view="education">
+		<div class="chat-header">
+			<button class="new-convo-btn" id="new-convo-education">Nouvelle conversation</button>
+		</div>
 		<div class="chat-messages" id="msgs-education"></div>
 		<div id="input-bar">
 			<input type="text" id="input-education" placeholder="Une notion à éclaircir..." autocomplete="off">
@@ -309,6 +381,9 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Coach -->
 	<div class="view" data-view="coach">
+		<div class="chat-header">
+			<button class="new-convo-btn" id="new-convo-coach">Nouvelle conversation</button>
+		</div>
 		<div class="chat-messages" id="msgs-coach"></div>
 		<div id="input-bar">
 			<input type="text" id="input-coach" placeholder="Parle-moi de ta situation..." autocomplete="off">
@@ -421,15 +496,20 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 // ============================================================
 // Session / state
 // ============================================================
-function getSessionId() {
-	let sid = localStorage.getItem('oryx_v2_session_id');
+function getSessionId(viewKey) {
+	const storageKey = 'oryx_v2_session_' + viewKey;
+	let sid = localStorage.getItem(storageKey);
 	if (!sid) {
 		sid = crypto.randomUUID();
-		localStorage.setItem('oryx_v2_session_id', sid);
+		localStorage.setItem(storageKey, sid);
 	}
 	return sid;
 }
-const SESSION_ID = getSessionId();
+function resetSessionId(viewKey) {
+	const sid = crypto.randomUUID();
+	localStorage.setItem('oryx_v2_session_' + viewKey, sid);
+	return sid;
+}
 
 const VIEW_LABELS = {
 	accueil: 'Accueil', decrypter: 'Décrypter', education: 'Éducation', coach: 'Coach',
@@ -440,7 +520,7 @@ const BOTTOM_NAV_VIEWS = ['accueil', 'decrypter', 'education', 'coach'];
 
 // Per-tab in-memory history, used only to build the "context" string
 // for endpoints that don't keep server-side session state.
-const histories = { decrypter: [], education: [], coach: [], checklist: [] };
+const histories = { decrypter: [], checklist: [] };
 
 // ============================================================
 // View switching
@@ -455,6 +535,9 @@ function showView(name) {
 
 document.querySelectorAll('.nav-item').forEach(btn => {
 	btn.addEventListener('click', () => showView(btn.dataset.nav));
+});
+document.querySelectorAll('.hub-card').forEach(btn => {
+	btn.addEventListener('click', () => showView(btn.dataset.hub));
 });
 
 function openMenu() {
@@ -513,50 +596,15 @@ function buildContext(history) {
 }
 
 // ============================================================
-// Accueil — /web-chat, server-side session history
+// Session chat factory — Éducation / Coach via /web-chat
+// (dynamic routing, server-side history per view session_id)
 // ============================================================
-async function sendAccueil() {
-	const input = document.getElementById('input-accueil');
-	const btn = document.getElementById('send-accueil');
-	const text = input.value.trim();
-	if (!text) return;
-
-	input.value = '';
-	btn.disabled = true;
-	addMessage('msgs-accueil', text, 'user');
-	showTyping('msgs-accueil');
-
-	try {
-		const res = await fetch('/web-chat', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ session_id: SESSION_ID, message: text }),
-		});
-		const data = await res.json();
-		hideTyping('msgs-accueil');
-		if (data.success) {
-			addMessage('msgs-accueil', data.response, 'assistant', data.route_used);
-		} else {
-			addMessage('msgs-accueil', 'Erreur : ' + (data.error || 'inconnue'), 'system');
-		}
-	} catch (err) {
-		hideTyping('msgs-accueil');
-		addMessage('msgs-accueil', 'Erreur réseau : ' + err.message, 'system');
-	}
-	btn.disabled = false;
-	input.focus();
-}
-document.getElementById('send-accueil').addEventListener('click', sendAccueil);
-document.getElementById('input-accueil').addEventListener('keydown', e => { if (e.key === 'Enter') sendAccueil(); });
-
-// ============================================================
-// Simple single-endpoint chat factory — Éducation / Coach
-// (client-side context, no locked ticker)
-// ============================================================
-function makeSimpleChat({ key, endpoint, buildBody }) {
+function makeSessionChat({ key }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
+	const newConvoBtn = document.getElementById('new-convo-' + key);
+	let sessionId = getSessionId(key);
 
 	async function send() {
 		const text = input.value.trim();
@@ -566,19 +614,16 @@ function makeSimpleChat({ key, endpoint, buildBody }) {
 		addMessage(containerId, text, 'user');
 		showTyping(containerId);
 
-		const context = buildContext(histories[key]);
 		try {
-			const res = await fetch(endpoint, {
+			const res = await fetch('/web-chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(buildBody(text, context)),
+				body: JSON.stringify({ session_id: sessionId, message: text }),
 			});
 			const data = await res.json();
 			hideTyping(containerId);
 			if (data.success) {
-				addMessage(containerId, data.response || data.analysis, 'assistant');
-				histories[key].push({ role: 'user', text });
-				histories[key].push({ role: 'assistant', text: data.response || data.analysis });
+				addMessage(containerId, data.response, 'assistant', data.route_used);
 			} else {
 				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
 			}
@@ -591,18 +636,15 @@ function makeSimpleChat({ key, endpoint, buildBody }) {
 	}
 	btn.addEventListener('click', send);
 	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+	newConvoBtn.addEventListener('click', () => {
+		sessionId = resetSessionId(key);
+		document.getElementById(containerId).innerHTML = '';
+	});
 }
 
-makeSimpleChat({
-	key: 'education',
-	endpoint: '/education',
-	buildBody: (question, context) => ({ question, context }),
-});
-makeSimpleChat({
-	key: 'coach',
-	endpoint: '/coach',
-	buildBody: (question, context) => ({ question, context }),
-});
+makeSessionChat({ key: 'education' });
+makeSessionChat({ key: 'coach' });
 
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
@@ -711,11 +753,6 @@ async function runSearch() {
 document.getElementById('search-btn').addEventListener('click', runSearch);
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 document.getElementById('search-result').innerHTML = '<div class="search-empty">Cherche une action, un ETF ou une crypto par son ticker.</div>';
-
-// ============================================================
-// Welcome message
-// ============================================================
-addMessage('msgs-accueil', 'Bienvenue sur Oryx Invest. Pose ta question sur une action, un ETF, ou un concept d\'investissement.', 'system');
 </script>
 
 </body>
