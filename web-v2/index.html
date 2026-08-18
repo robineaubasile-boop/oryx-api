@@ -276,6 +276,80 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .placeholder-wrap p { font-size: 13.5px; color: var(--ink-soft); max-width: 280px; line-height: 1.5; }
 .placeholder-wrap.dim { opacity: 0.55; }
 
+.academie-tabs {
+	display: flex;
+	gap: 8px;
+	padding: 0 0 4px;
+}
+.academie-tab {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 10px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ink-soft);
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.academie-tab.active {
+	background: var(--ink);
+	border-color: var(--ink);
+	color: var(--paper);
+}
+.academie-panel { display: none; }
+.academie-panel.active { display: block; }
+.lexique-group-label {
+	margin: 20px 0 4px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--ink-faint);
+}
+.lexique-group-label:first-child { margin-top: 0; }
+.lexique-item {
+	display: flex;
+	gap: 14px;
+	padding: 14px 0;
+	border-bottom: 1px solid var(--line);
+}
+.lexique-item:last-child { border-bottom: none; }
+.lexique-number {
+	flex-shrink: 0;
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	background: var(--card);
+	border: 1px solid var(--line);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-family: 'Inter', sans-serif;
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--accent);
+}
+.lexique-body h3 {
+	margin: 0 0 4px;
+	font-size: 14.5px;
+	font-weight: 600;
+	color: var(--ink);
+	font-family: 'Fraunces', Georgia, serif;
+}
+.lexique-body p {
+	margin: 0;
+	font-size: 13px;
+	color: var(--ink-soft);
+	line-height: 1.5;
+}
+
 /* --- Bottom nav --- */
 #bottom-nav {
 	display: flex;
@@ -534,10 +608,126 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Académie -->
 	<div class="view" data-view="academie">
-		<div class="placeholder-wrap">
-			<div class="icon">🎓</div>
-			<h2 class="serif">Académie</h2>
-			<p>Bientôt disponible. Des articles indépendants pour approfondir un sujet précis.</p>
+		<div class="hub-wrap">
+			<div class="lesson-intro">
+				<h1 class="serif">Académie</h1>
+				<p>Des leçons pour comprendre, un lexique pour ne jamais rester bloqué sur un mot.</p>
+			</div>
+
+			<div class="academie-tabs">
+				<button class="academie-tab active" data-academie-tab="cours">📖 Cours</button>
+				<button class="academie-tab" data-academie-tab="lexique">🔤 Lexique</button>
+			</div>
+
+			<div class="academie-panel active" data-academie-panel="cours">
+				<div class="placeholder-wrap">
+					<div class="icon">📖</div>
+					<h2 class="serif">Cours</h2>
+					<p>Bientôt disponible. Les premières leçons arrivent très vite.</p>
+				</div>
+			</div>
+
+			<div class="academie-panel" data-academie-panel="lexique">
+				<div class="lexique-group-label">Bases</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">1</div>
+					<div class="lexique-body">
+						<h3>Action</h3>
+						<p>Une part du capital d'une entreprise. En détenir une fait de toi copropriétaire de la société, avec un droit potentiel aux dividendes.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">2</div>
+					<div class="lexique-body">
+						<h3>Obligation</h3>
+						<p>Un titre de créance émis par une entreprise ou un gouvernement. En achetant une obligation, tu prêtes de l'argent à l'émetteur en échange d'intérêts réguliers et du remboursement du capital à l'échéance.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">3</div>
+					<div class="lexique-body">
+						<h3>ETF</h3>
+						<p>Un fonds qui regroupe plusieurs actions en une seule ligne, pour investir dans un marché entier plutôt que dans une seule entreprise.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">4</div>
+					<div class="lexique-body">
+						<h3>Bourse</h3>
+						<p>Le marché où s'achètent et se vendent les actions et autres titres financiers, à un prix fixé par l'offre et la demande.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">5</div>
+					<div class="lexique-body">
+						<h3>IPO</h3>
+						<p>Le processus par lequel une entreprise privée devient publique, en vendant ses actions pour la première fois sur une bourse (marché primaire), avant les échanges quotidiens entre investisseurs (marché secondaire).</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">6</div>
+					<div class="lexique-body">
+						<h3>Dividende</h3>
+						<p>La part des bénéfices qu'une entreprise reverse à ses actionnaires, généralement une ou plusieurs fois par an. Toutes les entreprises n'en versent pas.</p>
+					</div>
+				</div>
+
+				<div class="lexique-group-label">Vocabulaire Oryx (analyse)</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">7</div>
+					<div class="lexique-body">
+						<h3>Marge brute (Gross Margin)</h3>
+						<p>Le pourcentage du chiffre d'affaires qui reste après les coûts directs de production. Une marge élevée et stable est souvent le signe d'un moat.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">8</div>
+					<div class="lexique-body">
+						<h3>FCF (Free Cash Flow)</h3>
+						<p>Le cash réellement disponible après investissements. Le chiffre le plus difficile à manipuler comptablement, donc l'un des plus fiables pour juger la santé d'une entreprise.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">9</div>
+					<div class="lexique-body">
+						<h3>Moat</h3>
+						<p>L'avantage compétitif durable qui permet à une entreprise de défendre ses marges face à la concurrence dans le temps. Sans moat, les profits s'érodent mécaniquement.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">10</div>
+					<div class="lexique-body">
+						<h3>P/E (Price-to-Earnings)</h3>
+						<p>Le prix de l'action divisé par le bénéfice par action. Indique combien les investisseurs sont prêts à payer pour 1€ de bénéfice net.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">11</div>
+					<div class="lexique-body">
+						<h3>ROIC</h3>
+						<p>Le rendement généré par le capital investi dans l'entreprise. Si le ROIC dépasse le coût du capital, l'entreprise crée réellement de la valeur.</p>
+					</div>
+				</div>
+
+				<div class="lexique-item">
+					<div class="lexique-number">12</div>
+					<div class="lexique-body">
+						<h3>Thèse d'investissement</h3>
+						<p>Une argumentation structurée et chiffrée qui explique pourquoi une entreprise vaut, selon toi, plus (ou moins) que ce que le marché en pense aujourd'hui.</p>
+					</div>
+				</div>
+			</div>
 		</div>
 	</div>
 
@@ -653,6 +843,13 @@ document.querySelectorAll('.hub-card-open').forEach(btn => {
 	btn.addEventListener('click', (e) => {
 		e.stopPropagation();
 		showView(btn.dataset.hubOpen);
+	});
+});
+document.querySelectorAll('.academie-tab').forEach(btn => {
+	btn.addEventListener('click', () => {
+		const target = btn.dataset.academieTab;
+		document.querySelectorAll('.academie-tab').forEach(b => b.classList.toggle('active', b === btn));
+		document.querySelectorAll('.academie-panel').forEach(p => p.classList.toggle('active', p.dataset.academiePanel === target));
 	});
 });
 
