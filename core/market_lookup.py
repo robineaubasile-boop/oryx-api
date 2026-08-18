@@ -13,7 +13,7 @@ tant que ce n'est pas confirmé manuellement.
 import re
 
 from core.data_fetcher import _eod_get, _currency_from_ticker, _num
-from core.ticker_resolver import _eodhd_search, normalize_ticker
+from core.ticker_resolver import _eodhd_search, normalize_ticker, get_known_name_override
 
 # Alias courants -> ticker crypto EODHD (format non confirmé, cf. note ci-dessus)
 _CRYPTO_ALIASES = {
@@ -107,14 +107,29 @@ def search_market(raw_query: str) -> dict:
             }
         # Pas de résultat crypto : on retente comme action/ETF ci-dessous.
 
-    # --- Action / ETF : réutilise la recherche + résolution EODHD existantes ---
-    search_results = _eodhd_search(cleaned)
-    match_item = None
-    if search_results:
-        stock_matches = [r for r in search_results if r.get("Type") in _STOCK_ETF_TYPES]
-        match_item = stock_matches[0] if stock_matches else None
-
+    # --- Action / ETF : ticker résolu d'abord, nom aligné dessus ensuite ---
     ticker = normalize_ticker(cleaned)
+    search_results = _eodhd_search(cleaned)
+
+    # Le nom doit correspondre au ticker réellement résolu — jamais au
+    # premier résultat brut de la recherche, qui peut être un
+    # instrument différent (cf. bug LVMH CDR / ASML ADR : ticker
+    # correct, nom d'un autre instrument affiché à côté).
+    match_item = None
+    name_override = get_known_name_override(cleaned)
+    if name_override:
+        name = name_override
+    else:
+        want_code, _, want_exchange = ticker.partition(".")
+        if not want_exchange:
+            want_exchange = "US"
+        if search_results:
+            for r in search_results:
+                if r.get("Code", "").upper() == want_code.upper() and r.get("Exchange", "") == want_exchange:
+                    match_item = r
+                    break
+        name = (match_item.get("Name") if match_item else None) or ticker
+
     quote = _quote_with_eod_fallback(ticker)
     if not quote:
         return {
@@ -129,7 +144,7 @@ def search_market(raw_query: str) -> dict:
         "success": True,
         "query": raw_query,
         "ticker": ticker,
-        "name": (match_item.get("Name") if match_item else None) or ticker,
+        "name": name,
         "type": asset_type,
         "currency": _currency_from_ticker(ticker),
         "verified": True,
