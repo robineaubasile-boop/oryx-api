@@ -361,6 +361,93 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	color: var(--ink-soft);
 	line-height: 1.5;
 }
+.quiz-wrap {
+	flex: 1;
+	overflow-y: auto;
+	padding: 22px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+.quiz-progress-label {
+	font-family: 'Inter', sans-serif;
+	font-size: 12px;
+	color: var(--ink-faint);
+}
+.quiz-progress-bar {
+	height: 6px;
+	background: var(--line);
+	border-radius: 3px;
+	overflow: hidden;
+}
+.quiz-progress-fill {
+	height: 100%;
+	background: var(--accent);
+	transition: width 0.2s ease;
+}
+.quiz-question {
+	font-size: 19px;
+	font-weight: 600;
+	line-height: 1.35;
+	margin-top: 4px;
+}
+.quiz-options {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.quiz-option {
+	text-align: left;
+	padding: 14px 16px;
+	border-radius: 12px;
+	border: 1px solid var(--line);
+	background: var(--card);
+	font-family: 'Inter', sans-serif;
+	font-size: 14px;
+	color: var(--ink);
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.quiz-option.selected { border-color: var(--ink); border-width: 2px; }
+.quiz-option.correct { border-color: var(--success); border-width: 2px; background: rgba(63, 107, 79, 0.08); color: var(--success); }
+.quiz-option.incorrect { border-color: var(--alert); border-width: 2px; background: rgba(180, 85, 47, 0.08); color: var(--alert); }
+.quiz-option:disabled { cursor: default; }
+.quiz-action-btn {
+	margin-top: 4px;
+	padding: 14px;
+	border-radius: 12px;
+	border: none;
+	background: var(--ink);
+	color: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 14px;
+	font-weight: 600;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.quiz-action-btn:disabled {
+	background: var(--line);
+	color: var(--ink-faint);
+	cursor: default;
+}
+.quiz-result {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 10px;
+}
+.quiz-result-icon { font-size: 40px; }
+.quiz-result-score {
+	font-family: 'IBM Plex Mono', monospace;
+	font-size: 32px;
+	font-weight: 600;
+	margin: 6px 0 14px;
+}
 .lesson-card {
 	background: var(--card);
 	border: 1px solid var(--line);
@@ -653,11 +740,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Rallye -->
 	<div class="view" data-view="rallye">
-		<div class="placeholder-wrap">
-			<div class="icon">🚩</div>
-			<h2 class="serif">Rallye</h2>
-			<p>Bientôt disponible. Un parcours structuré pour apprendre l'investissement pas à pas, étape par étape.</p>
-		</div>
+		<div class="quiz-wrap" id="quiz-wrap"></div>
 	</div>
 
 	<!-- Académie -->
@@ -1227,6 +1310,100 @@ async function runSearch() {
 document.getElementById('search-btn').addEventListener('click', runSearch);
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 document.getElementById('search-result').innerHTML = '<div class="search-empty">Cherche une action, un ETF ou une crypto par son ticker.</div>';
+
+// ============================================================
+// Rallye — quiz en mémoire, une question à la fois
+// ============================================================
+const RALLYE_QUIZ = [
+	{ q: "Qui fixe le prix d'une action à un instant donné ?", options: ["Le gouvernement du pays où l'entreprise est cotée", "L'entreprise elle-même, chaque matin", "La rencontre entre l'offre et la demande"], correct: 2 },
+	{ q: "Si plus d'investisseurs veulent vendre une action que l'acheter, que se passe-t-il ?", options: ["Le prix reste stable jusqu'à la clôture", "Le prix baisse", "L'action est automatiquement retirée du marché"], correct: 1 },
+	{ q: "Comment un particulier accède-t-il à la Bourse ?", options: ["En contactant directement Euronext", "Via un courtier, avec une enveloppe comme le PEA ou le CTO", "En achetant directement auprès de l'entreprise"], correct: 1 },
+	{ q: "Que représente une action ?", options: ["Un prêt fait à une entreprise", "Une part de propriété d'une entreprise", "Une garantie de gain assurée par l'État"], correct: 1 },
+	{ q: "De quelles façons peux-tu gagner de l'argent avec une action ?", options: ["Uniquement via le dividende", "Le dividende et la plus-value", "Uniquement via la plus-value"], correct: 1 },
+	{ q: "Que peut-il arriver à ton capital si l'entreprise fait faillite ?", options: ["Il est automatiquement remboursé", "Il peut valoir zéro", "Il est transformé en obligation"], correct: 1 },
+	{ q: "Quand tu achètes une obligation, tu deviens...", options: ["Copropriétaire de l'entreprise", "Créancier de l'émetteur", "Salarié de l'entreprise"], correct: 1 },
+	{ q: "Que reçois-tu en échange d'une obligation ?", options: ["Des dividendes variables", "Un coupon et le remboursement du capital à l'échéance", "Un droit de vote en assemblée"], correct: 1 },
+	{ q: "Différence principale entre une action et une obligation ?", options: ["Une obligation est toujours plus risquée", "Action = propriétaire, obligation = créancier", "Une obligation ne peut être émise que par l'État"], correct: 1 },
+	{ q: "Qu'est-ce qu'un ETF ?", options: ["Une action très diversifiée d'une seule entreprise", "Un fonds qui regroupe plusieurs actions en une ligne", "Un type d'obligation d'État"], correct: 1 },
+	{ q: "Quel est l'objectif d'un ETF qui suit un indice ?", options: ["Battre le marché chaque année", "Refléter la performance du marché suivi", "Investir dans une seule entreprise leader"], correct: 1 },
+	{ q: "Quel avantage est souvent cité pour les ETF ?", options: ["Des frais généralement plus élevés qu'un fonds actif", "Une diversification immédiate en une ligne", "Une garantie de gain annuel"], correct: 1 },
+	{ q: "Que permet le PEA ?", options: ["D'investir partout dans le monde sans restriction", "Investir en actions européennes, avantage fiscal après 5 ans", "Prêter de l'argent à des entreprises"], correct: 1 },
+	{ q: "Quelle est la différence principale entre PEA et CTO ?", options: ["Le CTO n'a aucune restriction géographique, pas le PEA", "Le PEA permet d'investir partout dans le monde", "Le CTO offre toujours un meilleur avantage fiscal"], correct: 0 },
+	{ q: "Qui exécute concrètement tes ordres en Bourse ?", options: ["Toi-même, directement sur Euronext", "Ton courtier", "La Banque de France"], correct: 1 },
+];
+
+let quizIndex = 0;
+let quizScore = 0;
+let quizSelected = null;
+let quizRevealed = false;
+
+function renderQuizQuestion() {
+	const q = RALLYE_QUIZ[quizIndex];
+	const wrap = document.getElementById('quiz-wrap');
+	const progress = Math.round((quizIndex / RALLYE_QUIZ.length) * 100);
+	wrap.innerHTML = `
+		<div class="quiz-progress-label">Question ${quizIndex + 1}/${RALLYE_QUIZ.length}</div>
+		<div class="quiz-progress-bar"><div class="quiz-progress-fill" style="width:${progress}%"></div></div>
+		<h2 class="serif quiz-question">${q.q}</h2>
+		<div class="quiz-options">
+			${q.options.map((opt, i) => `
+				<button class="quiz-option${quizSelected === i ? ' selected' : ''}${quizRevealed ? (i === q.correct ? ' correct' : (i === quizSelected ? ' incorrect' : '')) : ''}" data-option="${i}" ${quizRevealed ? 'disabled' : ''}>${opt}</button>
+			`).join('')}
+		</div>
+		<button class="quiz-action-btn" id="quiz-action-btn" ${quizSelected === null ? 'disabled' : ''}>
+			${quizRevealed ? (quizIndex === RALLYE_QUIZ.length - 1 ? 'Voir le résultat' : 'Suivant') : 'Vérifier la réponse'}
+		</button>
+	`;
+	wrap.querySelectorAll('.quiz-option').forEach(btn => {
+		btn.addEventListener('click', () => {
+			if (quizRevealed) return;
+			quizSelected = parseInt(btn.dataset.option, 10);
+			renderQuizQuestion();
+		});
+	});
+	document.getElementById('quiz-action-btn').addEventListener('click', () => {
+		if (quizSelected === null) return;
+		if (!quizRevealed) {
+			quizRevealed = true;
+			if (quizSelected === q.correct) quizScore++;
+			renderQuizQuestion();
+		} else {
+			quizIndex++;
+			quizSelected = null;
+			quizRevealed = false;
+			renderQuiz();
+		}
+	});
+}
+
+function renderQuizResult() {
+	const wrap = document.getElementById('quiz-wrap');
+	wrap.innerHTML = `
+		<div class="quiz-result">
+			<div class="quiz-result-icon">🏁</div>
+			<h2 class="serif">Quiz terminé</h2>
+			<p class="quiz-result-score">${quizScore} / ${RALLYE_QUIZ.length}</p>
+			<button class="quiz-action-btn" id="quiz-restart-btn">Recommencer</button>
+		</div>
+	`;
+	document.getElementById('quiz-restart-btn').addEventListener('click', () => {
+		quizIndex = 0;
+		quizScore = 0;
+		quizSelected = null;
+		quizRevealed = false;
+		renderQuiz();
+	});
+}
+
+function renderQuiz() {
+	if (quizIndex < RALLYE_QUIZ.length) {
+		renderQuizQuestion();
+	} else {
+		renderQuizResult();
+	}
+}
+
+renderQuiz();
 </script>
 
 </body>
