@@ -52,6 +52,10 @@ def _quote_from_realtime(quote: dict | None) -> dict | None:
         "change": _num(quote.get("change")),
         "change_percent": _num(quote.get("change_p")),
         "previous_close": _num(quote.get("previousClose")),
+        "open": _num(quote.get("open")),
+        "day_high": _num(quote.get("high")),
+        "day_low": _num(quote.get("low")),
+        "volume": _num(quote.get("volume")),
         "as_of": quote.get("timestamp"),
     }
 
@@ -71,6 +75,10 @@ def _quote_with_eod_fallback(ticker: str) -> dict | None:
                 "change": None,
                 "change_percent": None,
                 "previous_close": None,
+                "open": _num(eod_daily[0].get("open")),
+                "day_high": _num(eod_daily[0].get("high")),
+                "day_low": _num(eod_daily[0].get("low")),
+                "volume": _num(eod_daily[0].get("volume")),
                 "as_of": eod_daily[0].get("date"),
             }
     return None

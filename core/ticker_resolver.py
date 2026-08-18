@@ -54,6 +54,18 @@ def _looks_like_us_ticker(s: str) -> bool:
     return bool(US_TICKER_PATTERN.match(s))
 
 
+_OTC_ADR_SUFFIX_PATTERN = re.compile(r"^[A-Z]{3,5}[YF]$")
+
+
+def _is_likely_otc_adr(code: str) -> bool:
+    """
+    Détecte un ticker suivant la convention OTC/ADR US (se termine par
+    Y ou F, ex: LVMHF, RNLSY). Ces certificats ne sont presque jamais
+    la cotation principale d'une entreprise étrangère.
+    """
+    return bool(_OTC_ADR_SUFFIX_PATTERN.match(code or ""))
+
+
 def _eodhd_search(query: str) -> Optional[list]:
     """Appelle EODHD Search et retourne la liste brute des résultats."""
     if not EODHD_API_KEY:
@@ -71,7 +83,7 @@ def _eodhd_search(query: str) -> Optional[list]:
         return None
 
 
-def _pick_best_match(results: list, prefer_us: bool = False) -> Optional[str]:
+def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") -> Optional[str]:
     """
     Sélectionne le meilleur résultat selon la priorité.
 
@@ -89,23 +101,32 @@ def _pick_best_match(results: list, prefer_us: bool = False) -> Optional[str]:
     def rank(item):
         exchange = item.get("Exchange", "")
         country = item.get("Country", "")
-        # Si l'entreprise est américaine, on veut le listing US
+        code = item.get("Code", "")
+
+        # Correspondance exacte avec la requête tapée : intention
+        # explicite de l'utilisateur, gagne toujours.
+        if code.upper() == query.upper():
+            return -1000
+
+        # Certificat OTC/ADR détecté (suffixe Y/F) : fortement
+        # pénalisé, sauf s'il n'y a rien d'autre. On ne l'exclut pas
+        # totalement pour ne pas retourner "aucun résultat" si c'est
+        # vraiment le seul match disponible.
+        otc_penalty = 500 if (exchange == "US" and _is_likely_otc_adr(code)) else 0
+
         if country == "USA":
             if exchange == "US":
-                return 0
-            return 100  # autres listings US-companies (ADR etc) en dernier
-        # Sinon priorité PEA
+                return 0 + otc_penalty
+            return 100 + otc_penalty
         if exchange in PEA_EXCHANGES:
             return 1 + PEA_EXCHANGES.index(exchange)
         if exchange in OTHER_EXCHANGES:
             return 50 + OTHER_EXCHANGES.index(exchange)
         return 999
 
-    # Si l'utilisateur a tapé un ticker US pur, on force la préférence US
-    if prefer_us:
-        us_matches = [r for r in filtered if r.get("Exchange") == "US"]
-        if us_matches:
-            filtered = us_matches
+    # prefer_us influence désormais uniquement le classement via rank(),
+    # plus de pré-filtrage strict qui excluait les bonnes cotations
+    # européennes en cas de faux positif (voir _is_likely_otc_adr).
 
     filtered.sort(key=rank)
     best = filtered[0]
@@ -160,13 +181,13 @@ def normalize_ticker(raw: str) -> str:
     if _looks_like_us_ticker(cleaned):
         results = _eodhd_search(cleaned)
         if results:
-            us_match = _pick_best_match(results, prefer_us=True)
+            us_match = _pick_best_match(results, prefer_us=True, query=cleaned)
             if us_match:
                 _RESOLUTION_CACHE[cleaned] = us_match
                 return us_match
         # Si pas trouvé en US, fallback recherche normale
         if results:
-            generic_match = _pick_best_match(results, prefer_us=False)
+            generic_match = _pick_best_match(results, prefer_us=False, query=cleaned)
             if generic_match:
                 _RESOLUTION_CACHE[cleaned] = generic_match
                 return generic_match
@@ -174,7 +195,7 @@ def normalize_ticker(raw: str) -> str:
     # 4. Recherche EODHD générique (priorité pays d'origine)
     results = _eodhd_search(cleaned)
     if results:
-        match = _pick_best_match(results, prefer_us=False)
+        match = _pick_best_match(results, prefer_us=False, query=cleaned)
         if match:
             _RESOLUTION_CACHE[cleaned] = match
             return match
