@@ -98,6 +98,12 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
     if not filtered:
         filtered = results
 
+    print(f"[RESOLVER-DEBUG] query={query!r} prefer_us={prefer_us} — {len(results)} résultats bruts EODHD :")
+    for r in results:
+        print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
+              f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r}")
+    print(f"[RESOLVER-DEBUG] → {len(filtered)} candidats après filtrage par type (ALLOWED_TYPES)")
+
     def rank(item):
         exchange = item.get("Exchange", "")
         country = item.get("Country", "")
