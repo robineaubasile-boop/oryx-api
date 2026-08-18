@@ -77,6 +77,7 @@ def _eodhd_search(query: str) -> Optional[list]:
         params = {"api_token": EODHD_API_KEY, "limit": 15}
         r = requests.get(url, params=params, timeout=5)
         r.raise_for_status()
+        r.encoding = "utf-8"
         return r.json()
     except Exception as e:
         print(f"[RESOLVER] EODHD search failed for '{query}': {type(e).__name__}: {e}")
@@ -88,7 +89,8 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
     Sélectionne le meilleur résultat selon la priorité.
 
     Si prefer_us=True : on cherche d'abord un listing US.
-    Sinon : on priorise par pays de l'entreprise (USA → US, sinon PEA → autres).
+    Sinon : priorité PEA d'abord, puis US authentique, indépendamment
+    du champ Country d'EODHD.
     """
     if not results:
         return None
@@ -98,37 +100,39 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
     if not filtered:
         filtered = results
 
-    print(f"[RESOLVER-DEBUG] query={query!r} prefer_us={prefer_us} — {len(results)} résultats bruts EODHD :")
-    for r in results:
-        print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
-              f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r}")
-    print(f"[RESOLVER-DEBUG] → {len(filtered)} candidats après filtrage par type (ALLOWED_TYPES)")
-
     def rank(item):
         exchange = item.get("Exchange", "")
-        country = item.get("Country", "")
         code = item.get("Code", "")
+        item_type = item.get("Type", "")
 
         # Correspondance exacte avec la requête tapée : intention
         # explicite de l'utilisateur, gagne toujours.
         if code.upper() == query.upper():
             return -1000
 
-        # Certificat OTC/ADR détecté (suffixe Y/F) : fortement
-        # pénalisé, sauf s'il n'y a rien d'autre. On ne l'exclut pas
-        # totalement pour ne pas retourner "aucun résultat" si c'est
-        # vraiment le seul match disponible.
-        otc_penalty = 500 if (exchange == "US" and _is_likely_otc_adr(code)) else 0
-
-        if country == "USA":
-            if exchange == "US":
-                return 0 + otc_penalty
-            return 100 + otc_penalty
+        # Priorité 1 : cotation sur une place PEA-éligible — c'est le
+        # public principal d'Oryx (investisseurs français/européens).
+        # On ne se fie plus au champ "Country" d'EODHD pour décider :
+        # un certificat OTC/ADR coté aux US peut être étiqueté
+        # "Country: USA" alors que l'entreprise est européenne, et un
+        # ETF américain sans rapport peut porter le même mot dans son
+        # nom (ex: recherche "Hermès" → ETF "Federated Hermes").
         if exchange in PEA_EXCHANGES:
             return 1 + PEA_EXCHANGES.index(exchange)
-        if exchange in OTHER_EXCHANGES:
+
+        # Priorité 2 : autres places boursières reconnues hors PEA
+        # (hors US, traité séparément juste après).
+        if exchange in OTHER_EXCHANGES and exchange != "US":
             return 50 + OTHER_EXCHANGES.index(exchange)
-        return 999
+
+        # Priorité 3 : action ordinaire cotée US authentique — pas un
+        # certificat OTC/ADR (suffixe Y/F), pas un fonds sans rapport.
+        if exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
+            return 100
+
+        # Priorité 4 : tout le reste (ADR/OTC, ETF homonymes, cotations
+        # exotiques hors PEA/US) — dernier recours seulement.
+        return 500
 
     # prefer_us influence désormais uniquement le classement via rank(),
     # plus de pré-filtrage strict qui excluait les bonnes cotations
