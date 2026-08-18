@@ -194,7 +194,6 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	background: var(--card);
 	border: 1px solid var(--line);
 	border-radius: 14px;
-	overflow: hidden;
 }
 .hub-card-toggle {
 	display: flex;
@@ -206,11 +205,14 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	padding: 18px;
 	text-align: left;
 	font-family: 'Fraunces', Georgia, serif;
+	color: var(--ink);
 	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
 }
 .hub-card-toggle:active { background: rgba(27, 36, 56, 0.05); }
-.hub-card-icon { font-size: 24px; line-height: 1; }
-.hub-card-toggle h2 { font-size: 17px; font-weight: 600; }
+.hub-card-icon { font-size: 24px; line-height: 1; flex-shrink: 0; }
+.hub-card-toggle h2 { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); }
 .hub-card-detail {
 	max-height: 0;
 	overflow: hidden;
@@ -221,7 +223,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	max-height: 200px;
 	padding: 0 18px 18px;
 }
-.hub-card-detail p { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.hub-card-detail p { margin: 0; font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
 .hub-card-open {
 	margin-top: 10px;
 	background: none;
@@ -232,6 +234,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	font-size: 13px;
 	font-weight: 600;
 	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
 }
 .hub-secondary { margin-top: 4px; text-align: center; font-size: 12.5px; color: var(--ink-faint); }
 .hub-section-label {
