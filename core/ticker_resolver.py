@@ -20,6 +20,12 @@ EODHD_SEARCH_URL = "https://eodhd.com/api/search/{query}"
 # Cache en mémoire : input_normalisé → ticker_résolu
 _RESOLUTION_CACHE: dict = {}
 
+# Watchlist de debug : ajoute une requête ici (en majuscules) pour
+# voir tous les candidats EODHD bruts dans les logs lors du prochain
+# test. Vide par défaut — à remplir ponctuellement, pas laissé actif
+# en continu.
+_DEBUG_QUERIES: set = {"LVMH"}
+
 # Exchanges PEA-éligibles (priorité haute si entreprise européenne)
 PEA_EXCHANGES = ["PA", "AS", "BR", "LS", "MC", "MI", "XETRA", "DE", "F",
                   "IR", "HE", "CO", "ST", "VI"]
@@ -28,6 +34,16 @@ PEA_EXCHANGES = ["PA", "AS", "BR", "LS", "MC", "MI", "XETRA", "DE", "F",
 OTHER_EXCHANGES = ["LSE", "L", "SW", "OL", "US"]
 
 ALLOWED_TYPES = ("Common Stock", "Preferred Stock", "ETF", "Fund", "Mutual Fund")
+
+# Filet de sécurité : entreprises connues pour lesquelles la recherche
+# EODHD ne renvoie pas fiablement la bonne cotation principale (CDR
+# étranger, ADR homonyme, etc.). Vérifié manuellement. Étends cette
+# table au cas par cas si un nouveau cas est découvert — ne devine pas
+# un ticker sans l'avoir confirmé.
+_KNOWN_TICKER_OVERRIDES = {
+    "LVMH": "MC.PA",
+    "ASML": "ASML.AS",
+}
 
 # Pattern ticker US pur : 1-5 lettres majuscules, optionnellement avec un point
 # pour classes d'actions (BRK.B, BF.B), pas de chiffres.
@@ -66,6 +82,22 @@ def _is_likely_otc_adr(code: str) -> bool:
     return bool(_OTC_ADR_SUFFIX_PATTERN.match(code or ""))
 
 
+def _fix_mojibake(text: str) -> str:
+    """
+    Répare le cas classique de double-encodage : du texte UTF-8 source
+    mal interprété comme Latin-1 puis ré-encodé (ex: "HermÃ¨s" au lieu
+    de "Hermès"). Défensif : si la réparation échoue ou ne change
+    rien, retourne le texte original tel quel.
+    """
+    if not text:
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+        return repaired
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
 def _eodhd_search(query: str) -> Optional[list]:
     """Appelle EODHD Search et retourne la liste brute des résultats."""
     if not EODHD_API_KEY:
@@ -77,8 +109,12 @@ def _eodhd_search(query: str) -> Optional[list]:
         params = {"api_token": EODHD_API_KEY, "limit": 15}
         r = requests.get(url, params=params, timeout=5)
         r.raise_for_status()
-        r.encoding = "utf-8"
-        return r.json()
+        data = r.json()
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "Name" in item:
+                    item["Name"] = _fix_mojibake(item["Name"])
+        return data
     except Exception as e:
         print(f"[RESOLVER] EODHD search failed for '{query}': {type(e).__name__}: {e}")
         return None
@@ -100,15 +136,16 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
     if not filtered:
         filtered = results
 
+    if query.upper() in _DEBUG_QUERIES:
+        print(f"[RESOLVER-DEBUG] query={query!r} — {len(results)} résultats bruts EODHD :")
+        for r in results:
+            print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
+                  f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r}")
+
     def rank(item):
         exchange = item.get("Exchange", "")
         code = item.get("Code", "")
         item_type = item.get("Type", "")
-
-        # Correspondance exacte avec la requête tapée : intention
-        # explicite de l'utilisateur, gagne toujours.
-        if code.upper() == query.upper():
-            return -1000
 
         # Priorité 1 : cotation sur une place PEA-éligible — c'est le
         # public principal d'Oryx (investisseurs français/européens).
@@ -118,21 +155,33 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         # ETF américain sans rapport peut porter le même mot dans son
         # nom (ex: recherche "Hermès" → ETF "Federated Hermes").
         if exchange in PEA_EXCHANGES:
-            return 1 + PEA_EXCHANGES.index(exchange)
+            base_rank = 1 + PEA_EXCHANGES.index(exchange)
 
         # Priorité 2 : autres places boursières reconnues hors PEA
         # (hors US, traité séparément juste après).
-        if exchange in OTHER_EXCHANGES and exchange != "US":
-            return 50 + OTHER_EXCHANGES.index(exchange)
+        elif exchange in OTHER_EXCHANGES and exchange != "US":
+            base_rank = 50 + OTHER_EXCHANGES.index(exchange)
 
         # Priorité 3 : action ordinaire cotée US authentique — pas un
         # certificat OTC/ADR (suffixe Y/F), pas un fonds sans rapport.
-        if exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
-            return 100
+        elif exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
+            base_rank = 100
 
         # Priorité 4 : tout le reste (ADR/OTC, ETF homonymes, cotations
         # exotiques hors PEA/US) — dernier recours seulement.
-        return 500
+        else:
+            base_rank = 500
+
+        # Correspondance exacte avec la requête tapée : bonus fort,
+        # mais appliqué EN PLUS du rang de base — pas un remplacement.
+        # Ça évite qu'une égalité de Code entre deux places (ex: "ASML"
+        # coté à la fois à Amsterdam et comme ADR US) ne se départage
+        # au hasard de l'ordre brut renvoyé par EODHD : la priorité
+        # PEA reste décisive même en cas d'égalité de ticker.
+        if code.upper() == query.upper():
+            return base_rank - 1000
+
+        return base_rank
 
     # prefer_us influence désormais uniquement le classement via rank(),
     # plus de pré-filtrage strict qui excluait les bonnes cotations
@@ -178,6 +227,14 @@ def normalize_ticker(raw: str) -> str:
     # 1. Cache
     if cleaned in _RESOLUTION_CACHE:
         return _RESOLUTION_CACHE[cleaned]
+
+    # 1.5 Override codé en dur pour les cas connus non fiables via
+    # la recherche EODHD (voir _KNOWN_TICKER_OVERRIDES).
+    if cleaned in _KNOWN_TICKER_OVERRIDES:
+        resolved = _KNOWN_TICKER_OVERRIDES[cleaned]
+        _RESOLUTION_CACHE[cleaned] = resolved
+        print(f"[RESOLVER] '{cleaned}' → override codé en dur → '{resolved}'")
+        return resolved
 
     # 2. Ticker EU déjà formé (contient un suffixe d'exchange connu) → passthrough
     if _looks_like_eu_ticker(cleaned):
