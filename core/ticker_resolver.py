@@ -45,6 +45,23 @@ _KNOWN_TICKER_OVERRIDES = {
     "ASML": "ASML.AS",
 }
 
+_KNOWN_NAME_OVERRIDES = {
+    "LVMH": "LVMH Moët Hennessy Louis Vuitton",
+    "ASML": "ASML Holding N.V.",
+}
+
+
+def get_known_name_override(raw: str) -> str | None:
+    """
+    Nom correct pour les entrées de _KNOWN_TICKER_OVERRIDES. Utilisé
+    par market_lookup.py pour garantir que le nom affiché correspond
+    toujours au ticker réellement résolu, sans dépendre d'une
+    recherche EODHD séparée qui peut pointer vers un autre instrument.
+    """
+    cleaned = (raw or "").strip().upper()
+    return _KNOWN_NAME_OVERRIDES.get(cleaned)
+
+
 # Pattern ticker US pur : 1-5 lettres majuscules, optionnellement avec un point
 # pour classes d'actions (BRK.B, BF.B), pas de chiffres.
 US_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
