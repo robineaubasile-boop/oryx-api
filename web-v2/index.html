@@ -448,6 +448,120 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	font-weight: 600;
 	margin: 6px 0 14px;
 }
+.portfolio-wrap {
+	flex: 1;
+	overflow-y: auto;
+	padding: 22px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+.portfolio-loading {
+	text-align: center;
+	padding: 30px 0;
+	color: var(--ink-faint);
+	font-size: 13px;
+}
+.portfolio-empty {
+	text-align: center;
+	padding: 20px 0;
+	color: var(--ink-soft);
+	font-size: 13.5px;
+}
+.portfolio-summary {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 16px 18px;
+}
+.portfolio-summary-label {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--ink-faint);
+}
+.portfolio-summary-value {
+	font-size: 26px;
+	font-weight: 600;
+	margin-top: 4px;
+}
+.position-card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 16px 18px;
+}
+.position-card-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+}
+.position-card-name {
+	font-family: 'Fraunces', Georgia, serif;
+	font-size: 15px;
+	font-weight: 600;
+}
+.position-card-ticker {
+	font-size: 11.5px;
+	color: var(--ink-faint);
+	margin-top: 2px;
+}
+.position-card-delete {
+	background: none;
+	border: none;
+	color: var(--ink-faint);
+	font-size: 15px;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+	padding: 2px 6px;
+}
+.position-stats-grid {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 10px 16px;
+}
+.position-stat-item { display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; }
+.position-stat-item .position-stat-label { color: var(--ink-faint); }
+.position-stat-value { color: var(--ink-soft); }
+.position-stat-value.up { color: var(--success); }
+.position-stat-value.down { color: var(--alert); }
+.portfolio-add-form {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.portfolio-add-form h3 { font-size: 14px; margin-bottom: 2px; }
+.portfolio-add-form input {
+	padding: 11px 12px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 13.5px;
+	color: var(--ink);
+}
+.portfolio-add-btn {
+	padding: 12px;
+	border-radius: 10px;
+	border: none;
+	background: var(--ink);
+	color: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 13.5px;
+	font-weight: 600;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
 .lesson-card {
 	background: var(--card);
 	border: 1px solid var(--line);
@@ -629,7 +743,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 					<h2 class="serif">Portefeuille</h2>
 				</button>
 				<div class="hub-card-detail">
-					<p>Bientôt disponible. Un suivi pédagogique de tes positions — jamais un carnet d'ordres.</p>
+					<p>Tes positions, leur valeur actuelle, et l'écart avec tes objectifs de répartition.</p>
 					<button class="hub-card-open" data-hub-open="portefeuille">Ouvrir →</button>
 				</div>
 			</div>
@@ -947,11 +1061,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 	<!-- Portefeuille -->
 	<div class="view" data-view="portefeuille">
-		<div class="placeholder-wrap dim">
-			<div class="icon">📁</div>
-			<h2 class="serif">Portefeuille</h2>
-			<p>Bientôt disponible. Un suivi pédagogique de vos positions — jamais un carnet d'ordres.</p>
-		</div>
+		<div class="portfolio-wrap" id="portfolio-wrap"></div>
 	</div>
 
 	<!-- Profil -->
@@ -987,8 +1097,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	<button class="tool-item" data-tool="profil">
 		<span class="tool-icon">👤</span> Profil
 	</button>
-	<button class="tool-item disabled" data-tool="portefeuille">
-		<span class="tool-icon">💼</span> Portefeuille <span class="tool-tag">Bientôt</span>
+	<button class="tool-item" data-tool="portefeuille">
+		<span class="tool-icon">💼</span> Portefeuille
 	</button>
 	<button class="tool-item" data-tool="academie">
 		<span class="tool-icon">🎓</span> Académie
@@ -1404,6 +1514,156 @@ function renderQuiz() {
 }
 
 renderQuiz();
+
+// ============================================================
+// Portefeuille — positions manuelles, prix live via /web-v2/search,
+// sauvegarde localStorage. Jamais de montant achat/vente : uniquement
+// des écarts en % entre répartition réelle et cible.
+// ============================================================
+const PORTFOLIO_STORAGE_KEY = 'oryx_v2_portfolio';
+
+function loadPortfolio() {
+	try {
+		const raw = localStorage.getItem(PORTFOLIO_STORAGE_KEY);
+		return raw ? JSON.parse(raw) : [];
+	} catch (e) {
+		return [];
+	}
+}
+
+function savePortfolio(positions) {
+	localStorage.setItem(PORTFOLIO_STORAGE_KEY, JSON.stringify(positions));
+}
+
+let portfolioPositions = loadPortfolio();
+let portfolioQuotes = {};
+
+async function fetchPortfolioQuote(ticker) {
+	try {
+		const res = await fetch(`/web-v2/search?q=${encodeURIComponent(ticker)}`);
+		const data = await res.json();
+		if (data.success) {
+			return { name: data.name, currency: data.currency, price: data.price };
+		}
+	} catch (e) {}
+	return null;
+}
+
+function pfFmt(v, decimals = 2) {
+	return (v != null && !isNaN(v)) ? v.toFixed(decimals) : '—';
+}
+
+function portfolioAddFormHTML() {
+	return `
+		<div class="portfolio-add-form">
+			<h3 class="serif">Ajouter une position</h3>
+			<input type="text" id="pf-ticker" placeholder="Ticker (ex: LVMH)">
+			<input type="number" id="pf-quantite" placeholder="Quantité" step="any">
+			<input type="number" id="pf-prix-achat" placeholder="Prix d'achat (optionnel)" step="any">
+			<input type="number" id="pf-cible" placeholder="Cible en % (optionnel)" step="any">
+			<button class="portfolio-add-btn" id="pf-add-btn">Ajouter</button>
+		</div>
+	`;
+}
+
+function wirePortfolioAddForm() {
+	const btn = document.getElementById('pf-add-btn');
+	if (!btn) return;
+	btn.addEventListener('click', () => {
+		const ticker = document.getElementById('pf-ticker').value.trim().toUpperCase();
+		const quantite = parseFloat(document.getElementById('pf-quantite').value);
+		const prixAchatRaw = parseFloat(document.getElementById('pf-prix-achat').value);
+		const cibleRaw = parseFloat(document.getElementById('pf-cible').value);
+		if (!ticker || isNaN(quantite) || quantite <= 0) return;
+		portfolioPositions.push({
+			id: Date.now() + Math.random(),
+			ticker,
+			quantite,
+			prixAchat: isNaN(prixAchatRaw) ? null : prixAchatRaw,
+			cible: isNaN(cibleRaw) ? null : cibleRaw,
+		});
+		savePortfolio(portfolioPositions);
+		renderPortfolio();
+	});
+}
+
+async function renderPortfolio() {
+	const wrap = document.getElementById('portfolio-wrap');
+	if (!wrap) return;
+
+	if (portfolioPositions.length === 0) {
+		wrap.innerHTML = `
+			<div class="portfolio-empty">Aucune position enregistrée pour l'instant.</div>
+			${portfolioAddFormHTML()}
+		`;
+		wirePortfolioAddForm();
+		return;
+	}
+
+	wrap.innerHTML = `<div class="portfolio-loading">Chargement des cours...</div>`;
+
+	const uniqueTickers = [...new Set(portfolioPositions.map(p => p.ticker))];
+	const results = await Promise.all(uniqueTickers.map(t => fetchPortfolioQuote(t)));
+	uniqueTickers.forEach((t, i) => { portfolioQuotes[t] = results[i]; });
+
+	let totalValue = 0;
+	portfolioPositions.forEach(p => {
+		const q = portfolioQuotes[p.ticker];
+		if (q && q.price != null) totalValue += p.quantite * q.price;
+	});
+
+	const cardsHTML = portfolioPositions.map(p => {
+		const q = portfolioQuotes[p.ticker];
+		const prixActuel = q ? q.price : null;
+		const valeur = (prixActuel != null) ? p.quantite * prixActuel : null;
+		const gainPct = (prixActuel != null && p.prixAchat) ? ((prixActuel - p.prixAchat) / p.prixAchat) * 100 : null;
+		const reparReelle = (valeur != null && totalValue > 0) ? (valeur / totalValue) * 100 : null;
+		const ecart = (reparReelle != null && p.cible != null) ? (reparReelle - p.cible) : null;
+
+		return `
+			<div class="position-card">
+				<div class="position-card-header">
+					<div>
+						<div class="position-card-name">${q ? q.name : p.ticker}</div>
+						<div class="position-card-ticker mono">${p.ticker}${q ? ' · ' + q.currency : ''}</div>
+					</div>
+					<button class="position-card-delete" data-id="${p.id}">✕</button>
+				</div>
+				<div class="position-stats-grid">
+					<div class="position-stat-item"><span class="position-stat-label">Quantité</span><span class="position-stat-value">${pfFmt(p.quantite, 4)}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Prix d'achat</span><span class="position-stat-value">${p.prixAchat != null ? pfFmt(p.prixAchat) : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Prix actuel</span><span class="position-stat-value">${prixActuel != null ? pfFmt(prixActuel) : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Valeur</span><span class="position-stat-value">${valeur != null ? pfFmt(valeur) : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Gain/Perte</span><span class="position-stat-value ${gainPct != null ? (gainPct >= 0 ? 'up' : 'down') : ''}">${gainPct != null ? (gainPct >= 0 ? '+' : '') + pfFmt(gainPct, 1) + '%' : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Cible</span><span class="position-stat-value">${p.cible != null ? pfFmt(p.cible, 1) + '%' : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Réel</span><span class="position-stat-value">${reparReelle != null ? pfFmt(reparReelle, 1) + '%' : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Écart vs Cible</span><span class="position-stat-value ${ecart != null ? (ecart >= 0 ? 'up' : 'down') : ''}">${ecart != null ? (ecart >= 0 ? '+' : '') + pfFmt(ecart, 1) + '%' : '—'}</span></div>
+				</div>
+			</div>
+		`;
+	}).join('');
+
+	wrap.innerHTML = `
+		<div class="portfolio-summary">
+			<div class="portfolio-summary-label">Valeur totale</div>
+			<div class="portfolio-summary-value mono">${pfFmt(totalValue)}</div>
+		</div>
+		${cardsHTML}
+		${portfolioAddFormHTML()}
+	`;
+
+	wrap.querySelectorAll('.position-card-delete').forEach(btn => {
+		btn.addEventListener('click', () => {
+			const id = btn.dataset.id;
+			portfolioPositions = portfolioPositions.filter(p => String(p.id) !== id);
+			savePortfolio(portfolioPositions);
+			renderPortfolio();
+		});
+	});
+	wirePortfolioAddForm();
+}
+
+renderPortfolio();
 </script>
 
 </body>
