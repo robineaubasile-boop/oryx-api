@@ -349,6 +349,48 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	color: var(--ink-soft);
 	line-height: 1.5;
 }
+.lesson-card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	margin-bottom: 10px;
+}
+.lesson-card-toggle {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	width: 100%;
+	background: none;
+	border: none;
+	padding: 18px;
+	text-align: left;
+	font-family: 'Fraunces', Georgia, serif;
+	color: var(--ink);
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.lesson-card-toggle:active { background: rgba(27, 36, 56, 0.05); }
+.lesson-card-toggle h2 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
+.lesson-card-detail {
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.25s ease;
+	padding: 0 18px;
+}
+.lesson-card.expanded .lesson-card-detail {
+	max-height: 900px;
+	padding: 0 18px 18px;
+}
+.lesson-card-detail p { margin: 0 0 12px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.6; }
+.lesson-card-detail p:last-child { margin-bottom: 0; }
+.lesson-card-detail h3 {
+	margin: 16px 0 6px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ink);
+}
+.lesson-card-detail h3:first-child { margin-top: 0; }
 
 /* --- Bottom nav --- */
 #bottom-nav {
@@ -620,11 +662,88 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 			</div>
 
 			<div class="academie-panel active" data-academie-panel="cours">
-				<div class="placeholder-wrap">
-					<div class="icon">📖</div>
-					<h2 class="serif">Cours</h2>
-					<p>Bientôt disponible. Les premières leçons arrivent très vite.</p>
+
+				<div class="lesson-card">
+					<button class="lesson-card-toggle">
+						<h2>Comment fonctionne la Bourse ?</h2>
+					</button>
+					<div class="lesson-card-detail">
+						<p>La Bourse est un marché — aujourd'hui entièrement électronique — où des acheteurs et des vendeurs d'actions se rencontrent pour échanger, à un prix qui évolue en continu.</p>
+						<h3>D'où vient le prix ?</h3>
+						<p>Le prix d'une action n'est fixé par personne en particulier — il résulte de la confrontation entre l'offre et la demande. Plus de monde veut acheter que vendre : le prix monte. L'inverse : il baisse.</p>
+						<h3>Comment tu y accèdes</h3>
+						<p>Tu ne peux pas passer un ordre directement sur Euronext — tu passes par un intermédiaire (courtier ou banque en ligne), via une enveloppe fiscale comme le PEA ou le CTO en France.</p>
+						<h3>Ce qu'il faut retenir</h3>
+						<p>La Bourse n'est pas un casino ni une entité qui "décide" — c'est un marché où le prix reflète, à chaque instant, ce que les acheteurs et vendeurs pensent qu'une entreprise vaut.</p>
+					</div>
 				</div>
+
+				<div class="lesson-card">
+					<button class="lesson-card-toggle">
+						<h2>C'est quoi une action ?</h2>
+					</button>
+					<div class="lesson-card-detail">
+						<p>Une action, c'est une part de propriété d'une entreprise. Quand tu achètes une action Total ou LVMH, tu deviens littéralement copropriétaire — à hauteur infinitésimale — de l'entreprise.</p>
+						<h3>Comment tu gagnes de l'argent avec une action</h3>
+						<p>Deux façons : le dividende (une part des bénéfices reversée, pas systématique) et la plus-value (si le prix monte entre ton achat et ta revente).</p>
+						<h3>Le risque, à ne jamais oublier</h3>
+						<p>Contrairement à un livret d'épargne, ton capital n'est pas garanti. Le prix peut baisser — et si l'entreprise fait faillite, ton action peut valoir zéro.</p>
+						<h3>Ce qu'il faut retenir</h3>
+						<p>Une action n'est pas un ticket de loterie — c'est une part réelle d'une entreprise réelle. Sa valeur suit, sur le long terme, la santé de cette entreprise.</p>
+					</div>
+				</div>
+
+				<div class="lesson-card">
+					<button class="lesson-card-toggle">
+						<h2>C'est quoi une obligation ?</h2>
+					</button>
+					<div class="lesson-card-detail">
+						<p>Une obligation, c'est un prêt que tu accordes à une entreprise ou à un État, en échange d'intérêts réguliers et du remboursement de ton capital à une date fixée à l'avance.</p>
+						<h3>Comment ça fonctionne</h3>
+						<p>Quand une entreprise ou un État a besoin d'argent, il peut émettre des obligations plutôt que d'emprunter à une banque. Toi, tu deviens son créancier — pas son propriétaire, contrairement à une action.</p>
+						<h3>Ce que tu reçois en échange</h3>
+						<p>Le coupon (un intérêt versé régulièrement, fixé à l'émission), et le remboursement du capital à l'échéance.</p>
+						<h3>Actions vs obligations</h3>
+						<p>Une action te rend copropriétaire (risque plus élevé, potentiel de gain plus large). Une obligation te rend créancier (généralement plus stable, mais rendement plafonné).</p>
+						<h3>Le risque existe quand même</h3>
+						<p>Si l'émetteur fait faillite, tu peux perdre une partie de ton capital (risque de crédit). Plus l'émetteur est fragile, plus le taux proposé est élevé pour compenser.</p>
+						<h3>Ce qu'il faut retenir</h3>
+						<p>Une obligation, c'est un prêt aux règles fixées à l'avance — son rôle dans un portefeuille est de stabiliser, pas de faire croître.</p>
+					</div>
+				</div>
+
+				<div class="lesson-card">
+					<button class="lesson-card-toggle">
+						<h2>C'est quoi un ETF ?</h2>
+					</button>
+					<div class="lesson-card-detail">
+						<p>Un ETF (Exchange Traded Fund, ou "tracker") est un fonds qui regroupe plusieurs actions — parfois des milliers — en une seule ligne que tu achètes.</p>
+						<h3>Le principe</h3>
+						<p>Plutôt que d'acheter Apple, LVMH et Total séparément, tu achètes un ETF qui les contient toutes, dans des proportions données. Un ETF "World" regroupe plus de 1500 entreprises.</p>
+						<h3>Pourquoi c'est populaire</h3>
+						<p>Diversification immédiate, coûts de gestion généralement bas, et simplicité — une ligne au lieu de dizaines.</p>
+						<h3>La contrepartie</h3>
+						<p>Un ETF suit un indice — il ne cherche pas à faire "mieux que le marché", juste à le refléter.</p>
+						<h3>Ce qu'il faut retenir</h3>
+						<p>Un ETF, c'est un panier diversifié en une ligne. Souvent le point de départ avant de se former à l'analyse d'entreprises individuelles.</p>
+					</div>
+				</div>
+
+				<div class="lesson-card">
+					<button class="lesson-card-toggle">
+						<h2>Choisir son enveloppe et son courtier</h2>
+					</button>
+					<div class="lesson-card-detail">
+						<p>Avant d'acheter ta première action, deux décisions : une enveloppe, un intermédiaire.</p>
+						<h3>L'enveloppe : PEA ou CTO</h3>
+						<p>Le PEA (Plan d'Épargne en Actions) : réservé aux actions européennes, avantage fiscal après 5 ans, plafonné à 150 000€. Le CTO (Compte-Titres Ordinaire) : aucune restriction géographique, mais fiscalité moins avantageuse.</p>
+						<h3>L'intermédiaire : ton courtier</h3>
+						<p>Tu ne peux pas acheter directement sur Euronext — tu passes par un courtier qui exécute tes ordres, moyennant des frais.</p>
+						<h3>Ce qu'il faut retenir</h3>
+						<p>L'enveloppe détermine ce que tu peux acheter et comment c'est fiscalisé ; le courtier est juste la porte d'entrée. Les deux choix se font une fois, au début.</p>
+					</div>
+				</div>
+
 			</div>
 
 			<div class="academie-panel" data-academie-panel="lexique">
@@ -850,6 +969,11 @@ document.querySelectorAll('.academie-tab').forEach(btn => {
 		const target = btn.dataset.academieTab;
 		document.querySelectorAll('.academie-tab').forEach(b => b.classList.toggle('active', b === btn));
 		document.querySelectorAll('.academie-panel').forEach(p => p.classList.toggle('active', p.dataset.academiePanel === target));
+	});
+});
+document.querySelectorAll('.lesson-card-toggle').forEach(btn => {
+	btn.addEventListener('click', () => {
+		btn.closest('.lesson-card').classList.toggle('expanded');
 	});
 });
 
