@@ -549,6 +549,15 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	font-size: 13.5px;
 	color: var(--ink);
 }
+.portfolio-add-form select {
+	padding: 11px 12px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 13.5px;
+	color: var(--ink);
+}
 .portfolio-add-btn {
 	padding: 12px;
 	border-radius: 10px;
@@ -562,6 +571,53 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	-webkit-appearance: none;
 	appearance: none;
 }
+.portfolio-analyze-btn {
+	padding: 13px;
+	border-radius: 12px;
+	border: none;
+	background: var(--accent);
+	color: var(--paper);
+	font-family: 'Inter', sans-serif;
+	font-size: 13.5px;
+	font-weight: 600;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.portfolio-analyze-btn:disabled {
+	background: var(--line);
+	color: var(--ink-faint);
+	cursor: default;
+}
+.portfolio-analysis-loading {
+	text-align: center;
+	padding: 20px 0;
+	color: var(--ink-faint);
+	font-size: 13px;
+}
+.portfolio-analysis {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 18px;
+}
+.portfolio-analysis h3 {
+	margin: 16px 0 6px;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--ink);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	font-family: 'Inter', sans-serif;
+}
+.portfolio-analysis h3:first-child { margin-top: 0; }
+.portfolio-analysis p {
+	margin: 0 0 10px;
+	font-size: 13.5px;
+	color: var(--ink-soft);
+	line-height: 1.6;
+}
+.portfolio-analysis p:last-child { margin-bottom: 0; }
 .lesson-card {
 	background: var(--card);
 	border: 1px solid var(--line);
@@ -1561,6 +1617,11 @@ function portfolioAddFormHTML() {
 			<input type="number" id="pf-quantite" placeholder="Quantité" step="any">
 			<input type="number" id="pf-prix-achat" placeholder="Prix d'achat (optionnel)" step="any">
 			<input type="number" id="pf-cible" placeholder="Cible en % (optionnel)" step="any">
+			<select id="pf-enveloppe">
+				<option value="">Enveloppe (optionnel)</option>
+				<option value="PEA">PEA</option>
+				<option value="CTO">CTO</option>
+			</select>
 			<button class="portfolio-add-btn" id="pf-add-btn">Ajouter</button>
 		</div>
 	`;
@@ -1574,6 +1635,7 @@ function wirePortfolioAddForm() {
 		const quantite = parseFloat(document.getElementById('pf-quantite').value);
 		const prixAchatRaw = parseFloat(document.getElementById('pf-prix-achat').value);
 		const cibleRaw = parseFloat(document.getElementById('pf-cible').value);
+		const enveloppeRaw = document.getElementById('pf-enveloppe').value;
 		if (!ticker || isNaN(quantite) || quantite <= 0) return;
 		portfolioPositions.push({
 			id: Date.now() + Math.random(),
@@ -1581,6 +1643,7 @@ function wirePortfolioAddForm() {
 			quantite,
 			prixAchat: isNaN(prixAchatRaw) ? null : prixAchatRaw,
 			cible: isNaN(cibleRaw) ? null : cibleRaw,
+			enveloppe: enveloppeRaw || null,
 		});
 		savePortfolio(portfolioPositions);
 		renderPortfolio();
@@ -1625,7 +1688,7 @@ async function renderPortfolio() {
 				<div class="position-card-header">
 					<div>
 						<div class="position-card-name">${q ? q.name : p.ticker}</div>
-						<div class="position-card-ticker mono">${p.ticker}${q ? ' · ' + q.currency : ''}</div>
+						<div class="position-card-ticker mono">${p.ticker}${q ? ' · ' + q.currency : ''}${p.enveloppe ? ' · ' + p.enveloppe : ''}</div>
 					</div>
 					<button class="position-card-delete" data-id="${p.id}">✕</button>
 				</div>
@@ -1648,6 +1711,8 @@ async function renderPortfolio() {
 			<div class="portfolio-summary-label">Valeur totale</div>
 			<div class="portfolio-summary-value mono">${pfFmt(totalValue)}</div>
 		</div>
+		<button class="portfolio-analyze-btn" id="pf-analyze-btn">Analyser mon portefeuille</button>
+		<div id="pf-analysis-zone"></div>
 		${cardsHTML}
 		${portfolioAddFormHTML()}
 	`;
@@ -1661,6 +1726,66 @@ async function renderPortfolio() {
 		});
 	});
 	wirePortfolioAddForm();
+
+	const analyzeBtn = document.getElementById('pf-analyze-btn');
+	if (analyzeBtn) {
+		analyzeBtn.addEventListener('click', async () => {
+			analyzeBtn.disabled = true;
+			const zone = document.getElementById('pf-analysis-zone');
+			zone.innerHTML = `<div class="portfolio-analysis-loading">Analyse en cours...</div>`;
+			const summary = buildPortfolioAnalysisSummary(totalValue);
+			try {
+				const res = await fetch('/web-v2/portfolio-analyze', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ portfolio_summary: summary }),
+				});
+				const data = await res.json();
+				if (data.success) {
+					zone.innerHTML = `<div class="portfolio-analysis">${formatPortfolioAnalysis(data.response)}</div>`;
+				} else {
+					zone.innerHTML = `<div class="portfolio-analysis-loading">Erreur : ${escapeHtml(data.error || 'inconnue')}</div>`;
+				}
+			} catch (e) {
+				zone.innerHTML = `<div class="portfolio-analysis-loading">Erreur réseau, réessaie.</div>`;
+			}
+			analyzeBtn.disabled = false;
+		});
+	}
+}
+
+function buildPortfolioAnalysisSummary(totalValue) {
+	const lines = portfolioPositions.map(p => {
+		const q = portfolioQuotes[p.ticker];
+		const valeur = (q && q.price != null) ? p.quantite * q.price : null;
+		const poids = (valeur != null && totalValue > 0) ? ((valeur / totalValue) * 100).toFixed(1) : null;
+		const parts = [`${p.ticker}${q ? ' (' + q.name + ')' : ''}`];
+		parts.push(`${p.quantite} unités`);
+		if (valeur != null) parts.push(`valeur ${valeur.toFixed(2)} ${q.currency || 'EUR'}`);
+		if (poids != null) parts.push(`${poids}% du total`);
+		if (p.enveloppe) parts.push(`enveloppe ${p.enveloppe}`);
+		if (p.cible != null) parts.push(`cible ${p.cible}%`);
+		return `- ${parts.join(', ')}`;
+	});
+	return `Patrimoine total : ${pfFmt(totalValue)} EUR\n\nPositions :\n${lines.join('\n')}`;
+}
+
+function escapeHtml(s) {
+	return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function formatPortfolioAnalysis(text) {
+	const blocks = text.split(/\n-{3,}\n/).map(b => b.trim()).filter(Boolean);
+	return blocks.map(block => {
+		const lines = block.split('\n');
+		const firstLine = lines[0].trim();
+		const isHeader = firstLine.length > 0 && firstLine.length < 40 && firstLine === firstLine.toUpperCase() && /[A-ZÀ-Ü]/.test(firstLine);
+		const bodyLines = isHeader ? lines.slice(1) : lines;
+		const bodyText = bodyLines.join('\n').trim();
+		const paragraphsHTML = bodyText.split(/\n\n+/).filter(Boolean).map(p => `<p>${escapeHtml(p).replace(/\n/g, '<br>')}</p>`).join('');
+		const headerHTML = isHeader ? `<h3 class="serif">${escapeHtml(firstLine)}</h3>` : '';
+		return headerHTML + paragraphsHTML;
+	}).join('');
 }
 
 renderPortfolio();

@@ -16,6 +16,7 @@ import anthropic
 from core.decryptage_engine import build_system_prompt, build_user_message
 from core.education_engine import build_system_prompt as build_education_prompt, build_user_message as build_education_user_message
 from core.coach_engine import build_system_prompt as build_coach_prompt, build_user_message as build_coach_user_message
+from core.portfolio_analysis_engine import build_system_prompt as build_portfolio_analysis_prompt, build_user_message as build_portfolio_analysis_user_message
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market
 
@@ -26,6 +27,7 @@ CLAUDE_MODEL_EDUCATION = os.getenv("CLAUDE_MODEL_EDUCATION", "claude-sonnet-4-6"
 CLAUDE_MODEL_COACH = os.getenv("CLAUDE_MODEL_COACH", "claude-sonnet-4-6")
 CLAUDE_MODEL_CHECKLIST = os.getenv("CLAUDE_MODEL_CHECKLIST", "claude-sonnet-4-6")
 CLAUDE_MODEL_CLASSIFIER = os.getenv("CLAUDE_MODEL_CLASSIFIER", "claude-haiku-4-5-20251001")
+CLAUDE_MODEL_PORTFOLIO = os.getenv("CLAUDE_MODEL_PORTFOLIO", "claude-sonnet-4-6")
 
 
 def _extract_text(response) -> str:
@@ -679,6 +681,33 @@ def serve_web_v2():
 @app.get("/web-v2/search")
 def web_v2_search(q: str = ""):
 	return search_market(q)
+
+
+class PortfolioAnalyzeRequest(BaseModel):
+	portfolio_summary: str = ""
+
+
+@app.post("/web-v2/portfolio-analyze")
+def portfolio_analyze(request: PortfolioAnalyzeRequest):
+	portfolio_summary = request.portfolio_summary.strip()
+	system_prompt = build_portfolio_analysis_prompt()
+	user_message = build_portfolio_analysis_user_message(portfolio_summary)
+
+	try:
+		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+		response = client.messages.create(
+			model=CLAUDE_MODEL_PORTFOLIO,
+			max_tokens=1500,
+			system=system_prompt,
+			messages=[{"role": "user", "content": user_message}]
+		)
+		response_text = _extract_text(response)
+		print(f"[PORTFOLIO-ANALYZE] Claude OK — {len(response_text)} chars")
+	except Exception as e:
+		print(f"[PORTFOLIO-ANALYZE ERROR] Claude failed: {type(e).__name__}: {e}")
+		return {"success": False, "error": f"Erreur Claude : {e}"}
+
+	return {"success": True, "response": response_text}
 
 
 if __name__ == "__main__":
