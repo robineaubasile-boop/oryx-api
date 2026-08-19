@@ -903,6 +903,9 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 			<label for="ticker-decrypter">Ticker</label>
 			<input type="text" id="ticker-decrypter" placeholder="ex. AAPL, MC.PA">
 		</div>
+		<div class="chat-header">
+			<button class="new-convo-btn" id="new-convo-decrypter">Nouvelle conversation</button>
+		</div>
 		<div class="chat-messages" id="msgs-decrypter"></div>
 		<div id="input-bar">
 			<input type="text" id="input-decrypter" placeholder="Ta question sur ce titre..." autocomplete="off">
@@ -1497,6 +1500,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
 	const tickerInput = document.getElementById('ticker-' + key);
+	const newConvoBtn = document.getElementById('new-convo-' + key);
 
 	async function send() {
 		const ticker = tickerInput.value.trim().toUpperCase();
@@ -1536,6 +1540,14 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
 	}
 	btn.addEventListener('click', send);
 	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+	if (newConvoBtn) {
+		newConvoBtn.addEventListener('click', () => {
+			histories[key] = [];
+			document.getElementById(containerId).innerHTML = '';
+			input.focus();
+		});
+	}
 }
 
 makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis' });
