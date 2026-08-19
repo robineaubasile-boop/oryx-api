@@ -448,6 +448,56 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	font-weight: 600;
 	margin: 6px 0 14px;
 }
+.quiz-selector {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+.quiz-selector-intro p {
+	font-size: 13.5px;
+	color: var(--ink-soft);
+	margin-top: 6px;
+}
+.quiz-level-card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	padding: 18px;
+	text-align: left;
+	font-family: 'Inter', sans-serif;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.quiz-level-card:active { background: rgba(27, 36, 56, 0.05); }
+.quiz-level-card h2 { font-size: 16px; font-weight: 600; color: var(--ink); }
+.quiz-level-count {
+	font-size: 11.5px;
+	color: var(--ink-faint);
+	font-family: 'IBM Plex Mono', monospace;
+}
+.quiz-back-link {
+	align-self: flex-start;
+	background: none;
+	border: none;
+	color: var(--ink-faint);
+	font-family: 'Inter', sans-serif;
+	font-size: 12px;
+	cursor: pointer;
+	padding: 0;
+	margin-bottom: -6px;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.quiz-secondary-btn {
+	margin-top: 8px;
+	background: none;
+	border: 1px solid var(--line);
+	color: var(--ink-soft);
+}
 .portfolio-wrap {
 	flex: 1;
 	overflow-y: auto;
@@ -1575,35 +1625,93 @@ document.getElementById('search-result').innerHTML = '<div class="search-empty">
 // ============================================================
 // Rallye — quiz en mémoire, une question à la fois
 // ============================================================
-const RALLYE_QUIZ = [
-	{ q: "Qui fixe le prix d'une action à un instant donné ?", options: ["Le gouvernement du pays où l'entreprise est cotée", "L'entreprise elle-même, chaque matin", "La rencontre entre l'offre et la demande"], correct: 2 },
-	{ q: "Si plus d'investisseurs veulent vendre une action que l'acheter, que se passe-t-il ?", options: ["Le prix reste stable jusqu'à la clôture", "Le prix baisse", "L'action est automatiquement retirée du marché"], correct: 1 },
-	{ q: "Comment un particulier accède-t-il à la Bourse ?", options: ["En contactant directement Euronext", "Via un courtier, avec une enveloppe comme le PEA ou le CTO", "En achetant directement auprès de l'entreprise"], correct: 1 },
-	{ q: "Que représente une action ?", options: ["Un prêt fait à une entreprise", "Une part de propriété d'une entreprise", "Une garantie de gain assurée par l'État"], correct: 1 },
-	{ q: "De quelles façons peux-tu gagner de l'argent avec une action ?", options: ["Uniquement via le dividende", "Le dividende et la plus-value", "Uniquement via la plus-value"], correct: 1 },
-	{ q: "Que peut-il arriver à ton capital si l'entreprise fait faillite ?", options: ["Il est automatiquement remboursé", "Il peut valoir zéro", "Il est transformé en obligation"], correct: 1 },
-	{ q: "Quand tu achètes une obligation, tu deviens...", options: ["Copropriétaire de l'entreprise", "Créancier de l'émetteur", "Salarié de l'entreprise"], correct: 1 },
-	{ q: "Que reçois-tu en échange d'une obligation ?", options: ["Des dividendes variables", "Un coupon et le remboursement du capital à l'échéance", "Un droit de vote en assemblée"], correct: 1 },
-	{ q: "Différence principale entre une action et une obligation ?", options: ["Une obligation est toujours plus risquée", "Action = propriétaire, obligation = créancier", "Une obligation ne peut être émise que par l'État"], correct: 1 },
-	{ q: "Qu'est-ce qu'un ETF ?", options: ["Une action très diversifiée d'une seule entreprise", "Un fonds qui regroupe plusieurs actions en une ligne", "Un type d'obligation d'État"], correct: 1 },
-	{ q: "Quel est l'objectif d'un ETF qui suit un indice ?", options: ["Battre le marché chaque année", "Refléter la performance du marché suivi", "Investir dans une seule entreprise leader"], correct: 1 },
-	{ q: "Quel avantage est souvent cité pour les ETF ?", options: ["Des frais généralement plus élevés qu'un fonds actif", "Une diversification immédiate en une ligne", "Une garantie de gain annuel"], correct: 1 },
-	{ q: "Que permet le PEA ?", options: ["D'investir partout dans le monde sans restriction", "Investir en actions européennes, avantage fiscal après 5 ans", "Prêter de l'argent à des entreprises"], correct: 1 },
-	{ q: "Quelle est la différence principale entre PEA et CTO ?", options: ["Le CTO n'a aucune restriction géographique, pas le PEA", "Le PEA permet d'investir partout dans le monde", "Le CTO offre toujours un meilleur avantage fiscal"], correct: 0 },
-	{ q: "Qui exécute concrètement tes ordres en Bourse ?", options: ["Toi-même, directement sur Euronext", "Ton courtier", "La Banque de France"], correct: 1 },
+const RALLYE_QUIZZES = [
+	{
+		id: 'niveau1',
+		title: 'Niveau 1 — Pourquoi et comment',
+		questions: [
+			{ q: "Qui fixe le prix d'une action à un instant donné ?", options: ["Le gouvernement du pays où l'entreprise est cotée", "L'entreprise elle-même, chaque matin", "La rencontre entre l'offre et la demande"], correct: 2 },
+			{ q: "Si plus d'investisseurs veulent vendre une action que l'acheter, que se passe-t-il ?", options: ["Le prix reste stable jusqu'à la clôture", "Le prix baisse", "L'action est automatiquement retirée du marché"], correct: 1 },
+			{ q: "Comment un particulier accède-t-il à la Bourse ?", options: ["En contactant directement Euronext", "Via un courtier, avec une enveloppe comme le PEA ou le CTO", "En achetant directement auprès de l'entreprise"], correct: 1 },
+			{ q: "Que représente une action ?", options: ["Un prêt fait à une entreprise", "Une part de propriété d'une entreprise", "Une garantie de gain assurée par l'État"], correct: 1 },
+			{ q: "De quelles façons peux-tu gagner de l'argent avec une action ?", options: ["Uniquement via le dividende", "Le dividende et la plus-value", "Uniquement via la plus-value"], correct: 1 },
+			{ q: "Que peut-il arriver à ton capital si l'entreprise fait faillite ?", options: ["Il est automatiquement remboursé", "Il peut valoir zéro", "Il est transformé en obligation"], correct: 1 },
+			{ q: "Quand tu achètes une obligation, tu deviens...", options: ["Copropriétaire de l'entreprise", "Créancier de l'émetteur", "Salarié de l'entreprise"], correct: 1 },
+			{ q: "Que reçois-tu en échange d'une obligation ?", options: ["Des dividendes variables", "Un coupon et le remboursement du capital à l'échéance", "Un droit de vote en assemblée"], correct: 1 },
+			{ q: "Différence principale entre une action et une obligation ?", options: ["Une obligation est toujours plus risquée", "Action = propriétaire, obligation = créancier", "Une obligation ne peut être émise que par l'État"], correct: 1 },
+			{ q: "Qu'est-ce qu'un ETF ?", options: ["Une action très diversifiée d'une seule entreprise", "Un fonds qui regroupe plusieurs actions en une ligne", "Un type d'obligation d'État"], correct: 1 },
+			{ q: "Quel est l'objectif d'un ETF qui suit un indice ?", options: ["Battre le marché chaque année", "Refléter la performance du marché suivi", "Investir dans une seule entreprise leader"], correct: 1 },
+			{ q: "Quel avantage est souvent cité pour les ETF ?", options: ["Des frais généralement plus élevés qu'un fonds actif", "Une diversification immédiate en une ligne", "Une garantie de gain annuel"], correct: 1 },
+			{ q: "Que permet le PEA ?", options: ["D'investir partout dans le monde sans restriction", "Investir en actions européennes, avantage fiscal après 5 ans", "Prêter de l'argent à des entreprises"], correct: 1 },
+			{ q: "Quelle est la différence principale entre PEA et CTO ?", options: ["Le CTO n'a aucune restriction géographique, pas le PEA", "Le PEA permet d'investir partout dans le monde", "Le CTO offre toujours un meilleur avantage fiscal"], correct: 0 },
+			{ q: "Qui exécute concrètement tes ordres en Bourse ?", options: ["Toi-même, directement sur Euronext", "Ton courtier", "La Banque de France"], correct: 1 },
+		]
+	},
+	{
+		id: 'niveau2',
+		title: "Niveau 2 — L'argent, avant d'investir",
+		questions: [
+			{ q: "Quelle est la différence entre épargne de précaution et épargne de projet ?", options: ["Aucune, ce sont deux noms pour la même chose", "L'épargne de précaution doit rester disponible immédiatement, l'épargne de projet vise un objectif daté", "L'épargne de projet est toujours plus risquée"], correct: 1 },
+			{ q: "Combien de mois de dépenses courantes recommande-t-on en épargne de précaution avant d'investir ?", options: ["3 à 6 mois", "1 mois", "24 mois"], correct: 0 },
+			{ q: "Pourquoi ne faut-il pas investir son épargne de précaution ?", options: ["Parce que c'est interdit par la loi", "Parce qu'elle doit rester stable et accessible immédiatement", "Parce que les banques le refusent"], correct: 1 },
+			{ q: "Dans la méthode 50/30/20, que représentent les 20% ?", options: ["Les dépenses essentielles", "Les envies et loisirs", "L'épargne et les objectifs"], correct: 2 },
+			{ q: "Quel est le piège du \"j'épargne ce qu'il reste en fin de mois\" ?", options: ["Le résultat est presque toujours proche de zéro", "C'est illégal", "Ça marche très bien pour la plupart des gens"], correct: 0 },
+			{ q: "Que faut-il faire pour éviter ce piège ?", options: ["Ne jamais suivre ses dépenses", "Mettre de côté d'abord, dépenser ensuite avec ce qu'il reste", "Attendre d'avoir un gros salaire"], correct: 1 },
+			{ q: "Que signifie l'inflation ?", options: ["Une baisse générale des prix", "Une hausse générale et durable des prix", "Une hausse ponctuelle d'un seul produit"], correct: 1 },
+			{ q: "Autour de quel niveau la BCE vise-t-elle l'inflation en zone euro ?", options: ["2% par an", "10% par an", "0% par an"], correct: 0 },
+			{ q: "Pourquoi l'argent qui dort sur un compte non rémunéré perd-il de la valeur ?", options: ["Les banques prélèvent des frais cachés", "À cause de l'inflation, le pouvoir d'achat réel diminue même si le chiffre affiché ne bouge pas", "Ce n'est pas vrai, l'argent ne perd jamais de valeur"], correct: 1 },
+			{ q: "Que signale un rendement anormalement élevé pour un risque annoncé comme faible ?", options: ["Une opportunité rare à saisir vite", "Un signal d'alerte", "Rien de particulier"], correct: 1 },
+			{ q: "Que veut vraiment dire \"risque\" en investissement ?", options: ["La certitude de perdre de l'argent", "La probabilité que la valeur fluctue, y compris à la baisse", "Un terme marketing sans réel sens"], correct: 1 },
+			{ q: "Comment l'horizon de temps influence-t-il la tolérance au risque ?", options: ["Un horizon long permet généralement d'accepter plus de volatilité à court terme", "L'horizon n'a aucun lien avec le risque", "Un horizon court permet de prendre plus de risques"], correct: 0 },
+			{ q: "Que provoque une création excessive de monnaie par une banque centrale ?", options: ["Une baisse des prix", "Une inflation dite \"monétaire\"", "Aucun effet sur les prix"], correct: 1 },
+			{ q: "Quel événement de 2021 illustre l'inflation par la demande ?", options: ["La guerre en Ukraine", "La reprise post-Covid, avec l'épargne accumulée déversée sur la consommation", "La création de l'euro"], correct: 1 },
+			{ q: "Comment des taux d'intérêt plus élevés affectent-ils la Bourse à court terme ?", options: ["Ils la font généralement monter", "Ils pèsent sur la Bourse, notamment sur les valeurs de croissance", "Ils n'ont aucun effet"], correct: 1 },
+		]
+	},
 ];
 
+let currentQuizId = null;
 let quizIndex = 0;
 let quizScore = 0;
 let quizSelected = null;
 let quizRevealed = false;
 
-function renderQuizQuestion() {
-	const q = RALLYE_QUIZ[quizIndex];
+function renderQuizSelector() {
 	const wrap = document.getElementById('quiz-wrap');
-	const progress = Math.round((quizIndex / RALLYE_QUIZ.length) * 100);
 	wrap.innerHTML = `
-		<div class="quiz-progress-label">Question ${quizIndex + 1}/${RALLYE_QUIZ.length}</div>
+		<div class="quiz-selector">
+			<div class="quiz-selector-intro">
+				<h1 class="serif">Rallye</h1>
+				<p>Choisis un niveau pour tester ce que tu as retenu.</p>
+			</div>
+			${RALLYE_QUIZZES.map(quiz => `
+				<button class="quiz-level-card" data-quiz-id="${quiz.id}">
+					<h2 class="serif">${quiz.title}</h2>
+					<span class="quiz-level-count">${quiz.questions.length} questions</span>
+				</button>
+			`).join('')}
+		</div>
+	`;
+	wrap.querySelectorAll('.quiz-level-card').forEach(btn => {
+		btn.addEventListener('click', () => {
+			currentQuizId = btn.dataset.quizId;
+			quizIndex = 0;
+			quizScore = 0;
+			quizSelected = null;
+			quizRevealed = false;
+			renderQuiz();
+		});
+	});
+}
+
+function renderQuizQuestion() {
+	const quiz = RALLYE_QUIZZES.find(x => x.id === currentQuizId);
+	const q = quiz.questions[quizIndex];
+	const wrap = document.getElementById('quiz-wrap');
+	const progress = Math.round((quizIndex / quiz.questions.length) * 100);
+	wrap.innerHTML = `
+		<button class="quiz-back-link" id="quiz-back-link">← Niveaux</button>
+		<div class="quiz-progress-label">Question ${quizIndex + 1}/${quiz.questions.length}</div>
 		<div class="quiz-progress-bar"><div class="quiz-progress-fill" style="width:${progress}%"></div></div>
 		<h2 class="serif quiz-question">${q.q}</h2>
 		<div class="quiz-options">
@@ -1612,9 +1720,13 @@ function renderQuizQuestion() {
 			`).join('')}
 		</div>
 		<button class="quiz-action-btn" id="quiz-action-btn" ${quizSelected === null ? 'disabled' : ''}>
-			${quizRevealed ? (quizIndex === RALLYE_QUIZ.length - 1 ? 'Voir le résultat' : 'Suivant') : 'Vérifier la réponse'}
+			${quizRevealed ? (quizIndex === quiz.questions.length - 1 ? 'Voir le résultat' : 'Suivant') : 'Vérifier la réponse'}
 		</button>
 	`;
+	document.getElementById('quiz-back-link').addEventListener('click', () => {
+		currentQuizId = null;
+		renderQuiz();
+	});
 	wrap.querySelectorAll('.quiz-option').forEach(btn => {
 		btn.addEventListener('click', () => {
 			if (quizRevealed) return;
@@ -1638,13 +1750,15 @@ function renderQuizQuestion() {
 }
 
 function renderQuizResult() {
+	const quiz = RALLYE_QUIZZES.find(x => x.id === currentQuizId);
 	const wrap = document.getElementById('quiz-wrap');
 	wrap.innerHTML = `
 		<div class="quiz-result">
 			<div class="quiz-result-icon">🏁</div>
 			<h2 class="serif">Quiz terminé</h2>
-			<p class="quiz-result-score">${quizScore} / ${RALLYE_QUIZ.length}</p>
-			<button class="quiz-action-btn" id="quiz-restart-btn">Recommencer</button>
+			<p class="quiz-result-score">${quizScore} / ${quiz.questions.length}</p>
+			<button class="quiz-action-btn" id="quiz-restart-btn">Recommencer ce niveau</button>
+			<button class="quiz-action-btn quiz-secondary-btn" id="quiz-back-btn">Retour aux niveaux</button>
 		</div>
 	`;
 	document.getElementById('quiz-restart-btn').addEventListener('click', () => {
@@ -1654,10 +1768,19 @@ function renderQuizResult() {
 		quizRevealed = false;
 		renderQuiz();
 	});
+	document.getElementById('quiz-back-btn').addEventListener('click', () => {
+		currentQuizId = null;
+		renderQuiz();
+	});
 }
 
 function renderQuiz() {
-	if (quizIndex < RALLYE_QUIZ.length) {
+	if (currentQuizId === null) {
+		renderQuizSelector();
+		return;
+	}
+	const quiz = RALLYE_QUIZZES.find(x => x.id === currentQuizId);
+	if (quizIndex < quiz.questions.length) {
 		renderQuizQuestion();
 	} else {
 		renderQuizResult();
