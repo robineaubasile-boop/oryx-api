@@ -1680,6 +1680,8 @@ async function renderPortfolio() {
 		const prixActuel = q ? q.price : null;
 		const valeur = (prixActuel != null) ? p.quantite * prixActuel : null;
 		const gainPct = (prixActuel != null && p.prixAchat) ? ((prixActuel - p.prixAchat) / p.prixAchat) * 100 : null;
+		const investi = (p.prixAchat != null) ? p.quantite * p.prixAchat : null;
+		const gainAbs = (valeur != null && investi != null) ? (valeur - investi) : null;
 		const reparReelle = (valeur != null && totalValue > 0) ? (valeur / totalValue) * 100 : null;
 		const ecart = (reparReelle != null && p.cible != null) ? (reparReelle - p.cible) : null;
 
@@ -1695,9 +1697,11 @@ async function renderPortfolio() {
 				<div class="position-stats-grid">
 					<div class="position-stat-item"><span class="position-stat-label">Quantité</span><span class="position-stat-value">${pfFmt(p.quantite, 4)}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Prix d'achat</span><span class="position-stat-value">${p.prixAchat != null ? pfFmt(p.prixAchat) : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Investi</span><span class="position-stat-value">${investi != null ? pfFmt(investi) : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Prix actuel</span><span class="position-stat-value">${prixActuel != null ? pfFmt(prixActuel) : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Valeur</span><span class="position-stat-value">${valeur != null ? pfFmt(valeur) : '—'}</span></div>
-					<div class="position-stat-item"><span class="position-stat-label">Gain/Perte</span><span class="position-stat-value ${gainPct != null ? (gainPct >= 0 ? 'up' : 'down') : ''}">${gainPct != null ? (gainPct >= 0 ? '+' : '') + pfFmt(gainPct, 1) + '%' : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Plus-value</span><span class="position-stat-value ${gainAbs != null ? (gainAbs >= 0 ? 'up' : 'down') : ''}">${gainAbs != null ? (gainAbs >= 0 ? '+' : '') + pfFmt(gainAbs) : '—'}</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Plus-value %</span><span class="position-stat-value ${gainPct != null ? (gainPct >= 0 ? 'up' : 'down') : ''}">${gainPct != null ? (gainPct >= 0 ? '+' : '') + pfFmt(gainPct, 1) + '%' : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Cible</span><span class="position-stat-value">${p.cible != null ? pfFmt(p.cible, 1) + '%' : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Réel</span><span class="position-stat-value">${reparReelle != null ? pfFmt(reparReelle, 1) + '%' : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Écart vs Cible</span><span class="position-stat-value ${ecart != null ? (ecart >= 0 ? 'up' : 'down') : ''}">${ecart != null ? (ecart >= 0 ? '+' : '') + pfFmt(ecart, 1) + '%' : '—'}</span></div>
