@@ -652,7 +652,16 @@ def web_chat(request: WebChatRequest):
 		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
 		return {"success": False, "error": f"Erreur Claude : {e}", "route_used": route}
 
-	# 5. Save to history
+	# 5. Save to history (skip empty responses — don't pollute context)
+	if not response_text.strip():
+		print(f"[WEB-CHAT WARNING] Empty response — route={route}, message='{message[:80]}'")
+		return {
+			"success": True,
+			"response": "Je n'ai pas bien compris ta question, tu peux la reformuler ?",
+			"route_used": route,
+			"ticker": ticker if ticker else None,
+		}
+
 	history.append({"role": "user", "text": message})
 	history.append({"role": "assistant", "text": response_text})
 	if len(history) > MAX_HISTORY_TURNS * 2:

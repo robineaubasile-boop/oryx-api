@@ -13,6 +13,7 @@ Pipeline de détection :
 4. Si aucun match : retourne None (Claude répond librement)
 """
 
+import re
 import unicodedata
 from typing import Optional
 
@@ -25,6 +26,14 @@ def _normalize(text: str) -> str:
     nfd = unicodedata.normalize("NFD", text)
     without_accents = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
     return without_accents.lower()
+
+
+def _keyword_matches(keyword: str, normalized_text: str) -> bool:
+    """Teste si un keyword (mot/expression entière) matche dans un texte déjà normalisé,
+    avec limite de mot (\\b) pour éviter les faux positifs sur des sous-chaînes
+    (ex: "per" ne doit pas matcher dans "permet")."""
+    pattern = r"\b" + re.escape(_normalize(keyword)) + r"\b"
+    return re.search(pattern, normalized_text) is not None
 
 
 # Bibliothèque de méthodes pédagogiques canoniques Oryx
@@ -974,7 +983,7 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
     # 1. Recherche dans les sous-méthodes prioritaires
     for method_id in SOUS_METHODES_PRIORITAIRES:
         method = METHODES[method_id]
-        matched_keywords = [kw for kw in method["keywords"] if _normalize(kw) in normalized]
+        matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, normalized)]
         if matched_keywords:
             print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
             return {
@@ -988,7 +997,7 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
     # 2. Recherche dans les méthodes principales
     for method_id in METHODES_PRINCIPALES:
         method = METHODES[method_id]
-        matched_keywords = [kw for kw in method["keywords"] if _normalize(kw) in normalized]
+        matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, normalized)]
         if matched_keywords:
             print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
             return {
@@ -1017,7 +1026,7 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
         context_normalized = _normalize(context[:1500])
         for method_id in SOUS_METHODES_PRIORITAIRES + METHODES_PRINCIPALES:
             method = METHODES[method_id]
-            matched_keywords = [kw for kw in method["keywords"] if _normalize(kw) in context_normalized]
+            matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, context_normalized)]
             if matched_keywords:
                 print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (via context, matched: {matched_keywords})")
                 return {
