@@ -11,7 +11,7 @@ from core.pedagogie import generate_analysis
 from core.valuation import compute_valuation, valuation_verdict
 from core.data_fetcher import fetch_financial_data, fetch_etf_data
 from core.ticker_resolver import normalize_ticker
-from core.pedagogie_library import lookup_method
+from core.pedagogie_library import lookup_method, METHODES
 import anthropic
 from core.decryptage_engine import build_system_prompt, build_user_message
 from core.education_engine import build_system_prompt as build_education_prompt, build_user_message as build_education_user_message
@@ -349,6 +349,21 @@ def pedagogie_lookup(request: PedagogieRequest):
 	}
 
 
+def _force_construction_these_method() -> dict:
+	"""Retourne directement la méthode construction_these (Méthode 8), sans
+	passer par le matching par mot-clé de lookup_method(). Utilisé pour
+	garantir cette méthode sur le message déclencheur initial d'une analyse
+	decryptage (context vide = pas d'historique de conversation)."""
+	m = METHODES["construction_these"]
+	return {
+		"method_id": "construction_these",
+		"title": m["title"],
+		"method_content": m["method_content"],
+		"example_company": m["example_company"],
+		"keywords_matched": [],
+	}
+
+
 @app.post("/decryptage")
 def decryptage(request: DecryptageRequest):
 	raw_ticker = request.ticker
@@ -371,7 +386,10 @@ def decryptage(request: DecryptageRequest):
 	print(f"[DECRYPTAGE] Data OK pour {company_name}")
 
 	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
-	method = lookup_method(lookup_text, context=context)
+	if not context:
+		method = _force_construction_these_method()
+	else:
+		method = lookup_method(lookup_text, context=context)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
 	system_prompt = build_system_prompt(data, method)
@@ -605,7 +623,10 @@ def web_chat(request: WebChatRequest):
 			data = result["data"]
 			company_name = data.get("name", ticker)
 			lookup_text = message if message else f"analyser bilan états financiers {company_name}"
-			method = lookup_method(lookup_text, context=context)
+			if not context:
+				method = _force_construction_these_method()
+			else:
+				method = lookup_method(lookup_text, context=context)
 			system_prompt = build_system_prompt(data, method)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
