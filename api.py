@@ -532,6 +532,7 @@ import json
 from collections import defaultdict
 
 _web_chat_history = defaultdict(list)
+_web_chat_last_method = {}
 MAX_HISTORY_TURNS = 20
 
 
@@ -602,6 +603,7 @@ def web_chat(request: WebChatRequest):
 	# 1. Get conversation context
 	history = _web_chat_history[session_id]
 	context = _build_context_string(history)
+	last_method_id = _web_chat_last_method.get(session_id)
 
 	# 2. Classify intent (context-aware)
 	try:
@@ -626,7 +628,9 @@ def web_chat(request: WebChatRequest):
 			if not context:
 				method = _force_construction_these_method()
 			else:
-				method = lookup_method(lookup_text, context=context)
+				method = lookup_method(lookup_text, context=context, last_method_id=last_method_id)
+			if method:
+				_web_chat_last_method[session_id] = method["method_id"]
 			system_prompt = build_system_prompt(data, method)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
@@ -640,14 +644,18 @@ def web_chat(request: WebChatRequest):
 			max_tokens = 1500
 
 		elif route == "coach":
-			method = lookup_method(message, context=context)
+			method = lookup_method(message, context=context, last_method_id=last_method_id)
+			if method:
+				_web_chat_last_method[session_id] = method["method_id"]
 			system_prompt = build_coach_prompt(ticker, "", method)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
 			max_tokens = 1500
 
 		else:
-			method = lookup_method(message, context=context)
+			method = lookup_method(message, context=context, last_method_id=last_method_id)
+			if method:
+				_web_chat_last_method[session_id] = method["method_id"]
 			system_prompt = build_education_prompt(method)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION

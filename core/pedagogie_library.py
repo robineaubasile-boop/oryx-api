@@ -955,7 +955,7 @@ METHODES_PRINCIPALES = [
 ]
 
 
-def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict]:
+def lookup_method(question: str, context: Optional[str] = None, last_method_id: Optional[str] = None) -> Optional[dict]:
     """
     Détecte la méthode pédagogique Oryx pertinente pour une question.
 
@@ -967,8 +967,12 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
 
     Args:
         question: question utilisateur brute
-        context: historique conversationnel (optionnel, non utilisé pour l'instant
-                 mais accepté pour évolution future)
+        context: historique conversationnel (optionnel, conservé pour compat
+                 des appelants ; non lu par la passe 3, voir last_method_id)
+        last_method_id: method_id déjà actif dans la session (optionnel).
+                 Utilisé en passe 3 pour reprendre directement la méthode
+                 en cours sur un message de continuation vague, sans
+                 rescanner le texte du contexte.
 
     Returns:
         dict contenant method_id, title, method_content, example_company,
@@ -1009,11 +1013,11 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
             }
 
     # Question trop courte : pas de matching fiable
-    if len(normalized.split()) < 2 and not context:
+    if len(normalized.split()) < 2 and not last_method_id:
         print(f"[PEDAGOGIE] question too short ('{question}'), no match")
         return None
 
-    # 3. Fallback contexte : message de continuation → méthode déjà en cours
+    # 3. Fallback session : message de continuation → réutilise le dernier method_id actif
     marqueurs_continuation = [
         "etape suivante", "continue", "continuons", "je ne sais pas",
         "d'accord", "ok", "suite", "on avance", "passe", "resume",
@@ -1022,21 +1026,17 @@ def lookup_method(question: str, context: Optional[str] = None) -> Optional[dict
         len(normalized.split()) <= 4
         or any(marqueur in normalized for marqueur in marqueurs_continuation)
     )
-    if est_continuation and context:
-        context_normalized = _normalize(context[:1500])
-        for method_id in SOUS_METHODES_PRIORITAIRES + METHODES_PRINCIPALES:
-            method = METHODES[method_id]
-            matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, context_normalized)]
-            if matched_keywords:
-                print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (via context, matched: {matched_keywords})")
-                return {
-                    "method_id": method_id,
-                    "title": method["title"],
-                    "method_content": method["method_content"],
-                    "example_company": method["example_company"],
-                    "keywords_matched": matched_keywords,
-                    "matched_via": "context",
-                }
+    if est_continuation and last_method_id and last_method_id in METHODES:
+        method = METHODES[last_method_id]
+        print(f"[PEDAGOGIE] '{question}' → method_id='{last_method_id}' (reprise du dernier method_id actif de la session)")
+        return {
+            "method_id": last_method_id,
+            "title": method["title"],
+            "method_content": method["method_content"],
+            "example_company": method["example_company"],
+            "keywords_matched": [],
+            "matched_via": "session",
+        }
 
     # 4. Aucun match
     print(f"[PEDAGOGIE] '{question}' → no match, Claude répondra librement")
