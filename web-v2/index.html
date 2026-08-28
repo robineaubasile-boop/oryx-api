@@ -281,6 +281,29 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 }
 .new-convo-btn:active { background: rgba(27, 36, 56, 0.05); }
 
+.chip-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--line);
+	background: var(--card);
+	flex-shrink: 0;
+}
+.chip-btn {
+	border: 1px solid var(--line);
+	background: #fff;
+	color: var(--ink-soft);
+	font-family: 'Inter', sans-serif;
+	font-size: 12px;
+	font-weight: 500;
+	padding: 7px 12px;
+	border-radius: 8px;
+	cursor: pointer;
+	text-align: left;
+}
+.chip-btn:active { background: rgba(27, 36, 56, 0.05); }
+
 /* --- Placeholders --- */
 .placeholder-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; gap: 8px; }
 .placeholder-wrap .icon { font-size: 34px; margin-bottom: 6px; opacity: 0.5; }
@@ -906,6 +929,11 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-decrypter">Nouvelle conversation</button>
 		</div>
+		<div class="chip-row" id="chips-decrypter">
+			<button type="button" class="chip-btn" data-ticker="MC.PA">LVMH</button>
+			<button type="button" class="chip-btn" data-ticker="NVDA">Nvidia</button>
+			<button type="button" class="chip-btn" data-ticker="TTE.PA">TotalEnergies</button>
+		</div>
 		<div class="chat-messages" id="msgs-decrypter"></div>
 		<div id="input-bar">
 			<input type="text" id="input-decrypter" placeholder="Ta question sur ce titre..." autocomplete="off">
@@ -918,6 +946,12 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-education">Nouvelle conversation</button>
 		</div>
+		<div class="chip-row" id="chips-education">
+			<button type="button" class="chip-btn">Pourquoi je dois investir en bourse ?</button>
+			<button type="button" class="chip-btn">C'est quoi un ETF ?</button>
+			<button type="button" class="chip-btn">Explique-moi ce qu'est le marché</button>
+			<button type="button" class="chip-btn">Comment lire un bilan ?</button>
+		</div>
 		<div class="chat-messages" id="msgs-education"></div>
 		<div id="input-bar">
 			<input type="text" id="input-education" placeholder="Une notion à éclaircir..." autocomplete="off">
@@ -929,6 +963,11 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	<div class="view" data-view="coach">
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-coach">Nouvelle conversation</button>
+		</div>
+		<div class="chip-row" id="chips-coach">
+			<button type="button" class="chip-btn">Comment investir pour la première fois ?</button>
+			<button type="button" class="chip-btn">Comment réfléchir à mon allocation ?</button>
+			<button type="button" class="chip-btn">J'ai une somme à placer, comment structurer ma réflexion ?</button>
 		</div>
 		<div class="chat-messages" id="msgs-coach"></div>
 		<div id="input-bar">
@@ -1534,6 +1573,11 @@ function addMessage(containerId, text, role, routeTag) {
 	}
 	container.appendChild(div);
 	container.scrollTop = container.scrollHeight;
+
+	if (containerId.startsWith('msgs-')) {
+		const chipRow = document.getElementById('chips-' + containerId.slice('msgs-'.length));
+		if (chipRow) chipRow.style.display = 'none';
+	}
 }
 
 function showTyping(containerId) {
@@ -1601,11 +1645,14 @@ function makeSessionChat({ key }) {
 	newConvoBtn.addEventListener('click', () => {
 		sessionId = resetSessionId(key);
 		document.getElementById(containerId).innerHTML = '';
+		const chipRow = document.getElementById('chips-' + key);
+		if (chipRow) chipRow.style.display = '';
 	});
+	return { send };
 }
 
-makeSessionChat({ key: 'education' });
-makeSessionChat({ key: 'coach' });
+const educationChat = makeSessionChat({ key: 'education' });
+const coachChat = makeSessionChat({ key: 'coach' });
 
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
@@ -1660,13 +1707,40 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
 		newConvoBtn.addEventListener('click', () => {
 			histories[key] = [];
 			document.getElementById(containerId).innerHTML = '';
+			const chipRow = document.getElementById('chips-' + key);
+			if (chipRow) chipRow.style.display = '';
 			input.focus();
 		});
 	}
+	return { send };
 }
 
-makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis' });
+const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis' });
 makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
+
+// ============================================================
+// Suggestion chips — pré-remplissent l'input et déclenchent l'envoi
+// ============================================================
+function wireChips(rowId, onChipClick) {
+	const row = document.getElementById(rowId);
+	if (!row) return;
+	row.querySelectorAll('.chip-btn').forEach(btn => {
+		btn.addEventListener('click', () => onChipClick(btn));
+	});
+}
+
+wireChips('chips-education', btn => {
+	document.getElementById('input-education').value = btn.textContent;
+	educationChat.send();
+});
+wireChips('chips-coach', btn => {
+	document.getElementById('input-coach').value = btn.textContent;
+	coachChat.send();
+});
+wireChips('chips-decrypter', btn => {
+	document.getElementById('ticker-decrypter').value = btn.dataset.ticker;
+	decrypterChat.send();
+});
 
 // ============================================================
 // Recherche — GET /web-v2/search, zéro Claude
