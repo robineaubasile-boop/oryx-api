@@ -30,6 +30,7 @@ STYLE & FORMAT
 - Phrases courtes, ton direct et professionnel.
 - Structure verticale uniquement, jamais de tableaux.
 - Chaque phrase doit être utile. Zéro mot inutile.
+- Toujours utiliser les symboles € et % (jamais "euros" ou "pour cent" en toutes lettres). Toujours utiliser les chiffres (1 000, 20) plutôt que les nombres en toutes lettres, avec un espace comme séparateur de milliers (1 000, pas 1000 ni 1,000).
 
 -----
 
