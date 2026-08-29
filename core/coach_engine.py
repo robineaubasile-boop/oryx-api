@@ -51,6 +51,7 @@ STYLE & FORMAT TELEGRAM
 - Pour une réponse courte, pas de titres, juste de la prose claire.
 - Paragraphes courts, phrases courtes.
 - Limite : 1800 caractères max, 3 écrans Telegram.
+- Toujours utiliser les symboles € et % (jamais "euros" ou "pour cent" en toutes lettres). Toujours utiliser les chiffres (1 000, 20) plutôt que les nombres en toutes lettres, avec un espace comme séparateur de milliers (1 000, pas 1000 ni 1,000).
 
 -----
 

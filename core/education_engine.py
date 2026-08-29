@@ -62,6 +62,7 @@ STYLE & FORMAT TELEGRAM
 - Réponse totale ≤ 2000 caractères (3-4 écrans Telegram).
 - Pas d'emoji décoratif.
 - Ton mentor calme et lucide. Zéro jargon. Zéro pavé.
+- Toujours utiliser les symboles € et % (jamais "euros" ou "pour cent" en toutes lettres). Toujours utiliser les chiffres (1 000, 20) plutôt que les nombres en toutes lettres, avec un espace comme séparateur de milliers (1 000, pas 1000 ni 1,000).
 
 -----
 
