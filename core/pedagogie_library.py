@@ -984,6 +984,25 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
 
     normalized = _normalize(question)
 
+    # 0. Verrouillage de continuité : si une thèse d'investissement est en cours
+    # (last_method_id == "construction_these"), on reste dessus quoi qu'il arrive.
+    # C'est la seule méthode à séquence multi-tours du système ; la laisser basculer
+    # vers une autre méthode sur un mot-clé générique de la réponse utilisateur casse
+    # la séquence en plein milieu (ex : "per" dans une réponse à l'Étape 4 Valorisation
+    # bascule vers ratios_valorisation sans ce verrou, et la session ne revient jamais
+    # à construction_these ensuite).
+    if last_method_id == "construction_these":
+        method = METHODES["construction_these"]
+        print(f"[PEDAGOGIE] '{question}' → method_id='construction_these' (verrouillage thèse en cours)")
+        return {
+            "method_id": "construction_these",
+            "title": method["title"],
+            "method_content": method["method_content"],
+            "example_company": method["example_company"],
+            "keywords_matched": [],
+            "matched_via": "these_lock",
+        }
+
     # 1. Recherche dans les sous-méthodes prioritaires
     for method_id in SOUS_METHODES_PRIORITAIRES:
         method = METHODES[method_id]
