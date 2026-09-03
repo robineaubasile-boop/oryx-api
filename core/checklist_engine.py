@@ -11,7 +11,7 @@ def build_system_prompt(ticker: str) -> str:
 - Ne jamais utiliser ** pour mettre en gras.
 - Ne jamais utiliser * pour l'italique.
 - Ne jamais utiliser > pour les citations.
-- Ne jamais utiliser de markdown. Texte brut uniquement.
+- Tu peux utiliser **gras** pour un mot ou une expression clé, et des listes à puces (-) ou numérotées (1., 2.) pour structurer une énumération. Pas de ##, pas de tableaux, reste sobre.
 - Limiter la reponse totale a 2000 caracteres maximum.
 
 -----
