@@ -806,6 +806,7 @@ def _currency_from_ticker(ticker: str) -> str:
         ".BR": "EUR",   # Euronext Brussels
         ".LI": "EUR",   # Euronext Lisbon
         ".DE": "EUR",   # XETRA Frankfurt
+        ".F": "EUR",    # Frankfurt Börse (parquet, hors XETRA)
         ".MI": "EUR",   # Milan
         ".MC": "EUR",   # Madrid
         ".HE": "EUR",   # Helsinki
