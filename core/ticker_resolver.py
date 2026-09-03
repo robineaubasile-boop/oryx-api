@@ -27,7 +27,13 @@ _RESOLUTION_CACHE: dict = {}
 _DEBUG_QUERIES: set = {"LVMH"}
 
 # Exchanges PEA-éligibles (priorité haute si entreprise européenne)
-PEA_EXCHANGES = ["PA", "AS", "BR", "LS", "MC", "MI", "XETRA", "DE", "F",
+# "F" (Frankfurt Börse) est volontairement exclu : ce suffixe sert
+# quasi exclusivement de cotation secondaire peu liquide pour des
+# entreprises étrangères (souvent américaines), jamais la cotation
+# principale d'une entreprise réellement européenne/PEA-éligible —
+# contrairement à XETRA ("DE") qui reste la place principale des
+# grandes entreprises allemandes.
+PEA_EXCHANGES = ["PA", "AS", "BR", "LS", "MC", "MI", "XETRA", "DE",
                   "IR", "HE", "CO", "ST", "VI"]
 
 # Exchanges acceptables hors PEA
@@ -164,6 +170,14 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         code = item.get("Code", "")
         item_type = item.get("Type", "")
 
+        # Priorité 0 : si prefer_us est demandé et que ce résultat est
+        # une action US authentique, elle passe avant même la priorité
+        # PEA (cas des entreprises US résolues via une recherche par
+        # nom, où on veut le vrai ticker US plutôt qu'une cotation
+        # secondaire européenne comme Frankfurt).
+        if prefer_us and exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
+            base_rank = 0
+
         # Priorité 1 : cotation sur une place PEA-éligible — c'est le
         # public principal d'Oryx (investisseurs français/européens).
         # On ne se fie plus au champ "Country" d'EODHD pour décider :
@@ -171,7 +185,7 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         # "Country: USA" alors que l'entreprise est européenne, et un
         # ETF américain sans rapport peut porter le même mot dans son
         # nom (ex: recherche "Hermès" → ETF "Federated Hermes").
-        if exchange in PEA_EXCHANGES:
+        elif exchange in PEA_EXCHANGES:
             base_rank = 1 + PEA_EXCHANGES.index(exchange)
 
         # Priorité 2 : autres places boursières reconnues hors PEA
