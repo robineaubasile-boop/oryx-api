@@ -8,9 +8,6 @@ def build_system_prompt(ticker: str) -> str:
     return f"""REGLES ABSOLUES
 
 - Ne jamais utiliser ## pour les titres. Utiliser les MAJUSCULES.
-- Ne jamais utiliser ** pour mettre en gras.
-- Ne jamais utiliser * pour l'italique.
-- Ne jamais utiliser > pour les citations.
 - Tu peux utiliser **gras** pour un mot ou une expression clé, et des listes à puces (-) ou numérotées (1., 2.) pour structurer une énumération. Pas de ##, pas de tableaux, reste sobre.
 - Limiter la reponse totale a 2000 caracteres maximum.
 
