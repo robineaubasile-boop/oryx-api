@@ -1687,9 +1687,10 @@ function hideTyping(containerId) {
 }
 
 // Mirrors the backend's own context format: most recent turn first.
-function buildContext(history) {
+function buildContext(history, maxTurns = null) {
 	if (!history.length) return '';
-	return history.slice().reverse().map(t => `[${t.role.toUpperCase()}] ${t.text}`).join('\n');
+	const slice = maxTurns ? history.slice(-maxTurns) : history.slice();
+	return slice.reverse().map(t => `[${t.role.toUpperCase()}] ${t.text}`).join('\n');
 }
 
 // ============================================================
@@ -1749,7 +1750,7 @@ const coachChat = makeSessionChat({ key: 'coach' });
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
 // ============================================================
-function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
+function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
@@ -1768,7 +1769,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
 		addMessage(containerId, question || `(analyse de ${ticker})`, 'user');
 		showTyping(containerId);
 
-		const context = buildContext(histories[key]);
+		const context = buildContext(histories[key], maxHistoryTurns);
 		try {
 			const res = await fetch(endpoint, {
 				method: 'POST',
@@ -1807,7 +1808,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion }) {
 	return { send };
 }
 
-const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis' });
+const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20 });
 makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
 
 // ============================================================
