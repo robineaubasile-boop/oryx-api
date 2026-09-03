@@ -402,7 +402,7 @@ def decryptage(request: DecryptageRequest):
 		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 		response = client.messages.create(
 			model=CLAUDE_MODEL_DECRYPTAGE,
-			max_tokens=1200,
+			max_tokens=1500,
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
@@ -411,6 +411,17 @@ def decryptage(request: DecryptageRequest):
 	except Exception as e:
 		print(f"[DECRYPTAGE ERROR] Claude failed: {type(e).__name__}: {e}")
 		return {"success": False, "ticker": ticker, "error": f"Erreur Claude : {e}"}
+
+	if not analysis_text.strip():
+		print(f"[DECRYPTAGE WARNING] Empty response — ticker={ticker}, question='{question[:80]}'")
+		return {
+			"success": True,
+			"ticker": ticker,
+			"name": company_name,
+			"method_used": method["method_id"] if method else None,
+			"analysis": "Je n'ai pas bien compris, tu peux reformuler ta question ?",
+			"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
+		}
 
 	return {
 		"success": True,
