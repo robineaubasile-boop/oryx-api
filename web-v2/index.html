@@ -1750,12 +1750,13 @@ const coachChat = makeSessionChat({ key: 'coach' });
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
 // ============================================================
-function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null }) {
+function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null, trackMethodId = false }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
 	const tickerInput = document.getElementById('ticker-' + key);
 	const newConvoBtn = document.getElementById('new-convo-' + key);
+	let lastMethodId = null;
 
 	async function send() {
 		const ticker = tickerInput.value.trim().toUpperCase();
@@ -1774,7 +1775,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			const res = await fetch(endpoint, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ ticker, question, context }),
+				body: JSON.stringify(trackMethodId ? { ticker, question, context, last_method_id: lastMethodId } : { ticker, question, context }),
 			});
 			const data = await res.json();
 			hideTyping(containerId);
@@ -1783,6 +1784,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 				addMessage(containerId, text, 'assistant');
 				histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
 				histories[key].push({ role: 'assistant', text });
+				if (trackMethodId) lastMethodId = data.method_used || null;
 			} else {
 				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
 			}
@@ -1799,6 +1801,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	if (newConvoBtn) {
 		newConvoBtn.addEventListener('click', () => {
 			histories[key] = [];
+			lastMethodId = null;
 			document.getElementById(containerId).innerHTML = '';
 			const chipRow = document.getElementById('chips-' + key);
 			if (chipRow) chipRow.style.display = '';
@@ -1808,7 +1811,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	return { send };
 }
 
-const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20 });
+const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true });
 makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
 
 // ============================================================

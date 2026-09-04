@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -280,6 +281,7 @@ class DecryptageRequest(BaseModel):
 	ticker: str
 	question: str = ""
 	context: str = ""
+	last_method_id: Optional[str] = None
 
 	@field_validator("ticker")
 	@classmethod
@@ -389,7 +391,7 @@ def decryptage(request: DecryptageRequest):
 	if not context:
 		method = _force_construction_these_method()
 	else:
-		method = lookup_method(lookup_text, context=context)
+		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
 	system_prompt = build_system_prompt(data, method)
@@ -402,7 +404,7 @@ def decryptage(request: DecryptageRequest):
 		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 		response = client.messages.create(
 			model=CLAUDE_MODEL_DECRYPTAGE,
-			max_tokens=1500,
+			max_tokens=2000,
 			system=system_prompt,
 			messages=[{"role": "user", "content": user_message}]
 		)
