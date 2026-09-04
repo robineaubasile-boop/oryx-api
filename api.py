@@ -431,6 +431,8 @@ def decryptage(request: DecryptageRequest):
 		"name": company_name,
 		"method_used": method["method_id"] if method else None,
 		"analysis": analysis_text,
+		"price": data.get("current_price"),
+		"currency": data.get("currency", "USD"),
 		"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
 	}
 

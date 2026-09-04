@@ -106,6 +106,10 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 }
 .ticker-bar input:focus { border-color: var(--accent); }
 
+.price-banner { display: none; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); flex-shrink: 0; }
+.price-banner.visible { display: flex; align-items: baseline; gap: 10px; }
+.price-banner .price { font-family: 'IBM Plex Mono', monospace; font-size: 32px; font-weight: 500; }
+
 #input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
 #input-bar input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; }
 #input-bar input:focus { border-color: var(--accent); }
@@ -926,6 +930,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 			<label for="ticker-decrypter">Ticker</label>
 			<input type="text" id="ticker-decrypter" placeholder="ex. AAPL, MC.PA">
 		</div>
+		<div class="price-banner" id="price-banner-decrypter"></div>
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-decrypter">Nouvelle conversation</button>
 		</div>
@@ -1750,7 +1755,7 @@ const coachChat = makeSessionChat({ key: 'coach' });
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
 // ============================================================
-function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null, trackMethodId = false }) {
+function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null, trackMethodId = false, priceBannerId = null }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
@@ -1785,6 +1790,13 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 				histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
 				histories[key].push({ role: 'assistant', text });
 				if (trackMethodId) lastMethodId = data.method_used || null;
+				if (priceBannerId && data.price != null) {
+					const banner = document.getElementById(priceBannerId);
+					if (banner) {
+						banner.innerHTML = `<span class="name">${data.name || ''}</span><span class="price">${data.price.toFixed(2)} ${data.currency || ''}</span>`;
+						banner.classList.add('visible');
+					}
+				}
 			} else {
 				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
 			}
@@ -1805,13 +1817,20 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			document.getElementById(containerId).innerHTML = '';
 			const chipRow = document.getElementById('chips-' + key);
 			if (chipRow) chipRow.style.display = '';
+			if (priceBannerId) {
+				const banner = document.getElementById(priceBannerId);
+				if (banner) {
+					banner.innerHTML = '';
+					banner.classList.remove('visible');
+				}
+			}
 			input.focus();
 		});
 	}
 	return { send };
 }
 
-const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true });
+const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true, priceBannerId: 'price-banner-decrypter' });
 makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
 
 // ============================================================
