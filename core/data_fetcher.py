@@ -417,6 +417,8 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         if rev is not None and rev > 0 and gp is not None:
             gross_margins.append(round((gp / rev) * 100, 2))
 
+    gross_margin_latest = gross_margins[0] if gross_margins else None
+
     gross_margin_trend = None
     if len(gross_margins) >= 3:
         decline_total = gross_margins[0] - gross_margins[-1]
@@ -621,6 +623,7 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
         "margin_stability": margin_stability,
         "eps_positive_years": eps_positive_years,
         "fcf_vs_net_income": fcf_vs_net_income,
+        "gross_margin_latest": gross_margin_latest,
         "gross_margin_trend": gross_margin_trend,
         "receivables_vs_revenue": receivables_vs_revenue,
     }
