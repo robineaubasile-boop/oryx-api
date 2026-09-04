@@ -140,6 +140,7 @@ Debt-to-Equity   : {fmt(data.get('debt_to_equity'))}
 
 SIGNAUX QUALITÉ COMPTABLE (3 ans)
 FCF vs Résultat net  : {fmt(data.get('fcf_vs_net_income'))}
+Marge brute (dernière année) : {fmt(data.get('gross_margin_latest'))}%
 Tendance marge brute : {fmt(data.get('gross_margin_trend'))}
 Créances vs CA       : {fmt(data.get('receivables_vs_revenue'))}
 

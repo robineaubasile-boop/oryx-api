@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Optional
 import uvicorn
 from fastapi import FastAPI
@@ -400,19 +401,32 @@ def decryptage(request: DecryptageRequest):
 		context
 	)
 
-	try:
-		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-		response = client.messages.create(
-			model=CLAUDE_MODEL_DECRYPTAGE,
-			max_tokens=2000,
-			system=system_prompt,
-			messages=[{"role": "user", "content": user_message}]
-		)
-		analysis_text = _extract_text(response)
-		print(f"[DECRYPTAGE] Claude OK — {len(analysis_text)} chars")
-	except Exception as e:
-		print(f"[DECRYPTAGE ERROR] Claude failed: {type(e).__name__}: {e}")
-		return {"success": False, "ticker": ticker, "error": f"Erreur Claude : {e}"}
+	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+	analysis_text = None
+	last_error = None
+	for attempt in range(2):
+		try:
+			response = client.messages.create(
+				model=CLAUDE_MODEL_DECRYPTAGE,
+				max_tokens=2000,
+				system=system_prompt,
+				messages=[{"role": "user", "content": user_message}]
+			)
+			analysis_text = _extract_text(response)
+			print(f"[DECRYPTAGE] Claude OK — {len(analysis_text)} chars — stop_reason={response.stop_reason}")
+			break
+		except Exception as e:
+			last_error = e
+			print(f"[DECRYPTAGE ERROR] Claude failed (tentative {attempt + 1}/2): {type(e).__name__}: {e}")
+			if attempt == 0:
+				time.sleep(1.5)
+	if analysis_text is None:
+		print(f"[DECRYPTAGE ERROR] Échec définitif après 2 tentatives: {last_error}")
+		return {
+			"success": False,
+			"ticker": ticker,
+			"error": "Je n'ai pas réussi à générer une réponse, réessaie dans quelques instants.",
+		}
 
 	if not analysis_text.strip():
 		print(f"[DECRYPTAGE WARNING] Empty response — ticker={ticker}, question='{question[:80]}'")
