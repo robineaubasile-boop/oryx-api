@@ -408,7 +408,7 @@ def decryptage(request: DecryptageRequest):
 		try:
 			response = client.messages.create(
 				model=CLAUDE_MODEL_DECRYPTAGE,
-				max_tokens=2000,
+				max_tokens=2500,
 				system=system_prompt,
 				messages=[{"role": "user", "content": user_message}]
 			)
