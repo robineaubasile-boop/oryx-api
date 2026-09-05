@@ -106,8 +106,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 }
 .ticker-bar input:focus { border-color: var(--accent); }
 
-.price-banner { display: none; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--card); flex-shrink: 0; }
-.price-banner.visible { display: block; }
+.price-banner { display: none; align-items: center; gap: 8px; margin-right: auto; }
+.price-banner.visible { display: flex; }
 .price-banner .price-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(193, 122, 46, 0.12); color: var(--accent); font-size: 12.5px; font-weight: 500; }
 
 #input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
@@ -930,8 +930,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 			<label for="ticker-decrypter">Ticker</label>
 			<input type="text" id="ticker-decrypter" placeholder="ex. AAPL, MC.PA">
 		</div>
-		<div class="price-banner" id="price-banner-decrypter"></div>
 		<div class="chat-header">
+			<div class="price-banner" id="price-banner-decrypter"></div>
 			<button class="new-convo-btn" id="new-convo-decrypter">Nouvelle conversation</button>
 		</div>
 		<div class="chip-row" id="chips-decrypter">
@@ -1793,7 +1793,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 				if (priceBannerId && data.price != null) {
 					const banner = document.getElementById(priceBannerId);
 					if (banner) {
-						banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span> — ${data.name || ''} cote actuellement à ce niveau`;
+						banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span> ${data.name || ''}`;
 						banner.classList.add('visible');
 					}
 				}
