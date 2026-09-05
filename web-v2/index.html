@@ -113,8 +113,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .price-banner .price-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(193, 122, 46, 0.12); color: var(--accent); font-size: 12.5px; font-weight: 500; }
 
 #input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
-#input-bar input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; }
-#input-bar input:focus { border-color: var(--accent); }
+#input-bar input, #input-bar textarea { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; resize: none; }
+#input-bar input:focus, #input-bar textarea:focus { border-color: var(--accent); }
 #input-bar button {
 	padding: 11px 18px;
 	background: var(--accent);
@@ -943,7 +943,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div class="chat-messages" id="msgs-decrypter"></div>
 		<div id="input-bar">
-			<input type="text" id="input-decrypter" placeholder="Ta question sur ce titre..." autocomplete="off">
+			<textarea id="input-decrypter" placeholder="Ta question sur ce titre..." rows="1"></textarea>
 			<button id="send-decrypter">Envoyer</button>
 		</div>
 	</div>
@@ -961,7 +961,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div class="chat-messages" id="msgs-education"></div>
 		<div id="input-bar">
-			<input type="text" id="input-education" placeholder="Une notion à éclaircir..." autocomplete="off">
+			<textarea id="input-education" placeholder="Une notion à éclaircir..." rows="1"></textarea>
 			<button id="send-education">Envoyer</button>
 		</div>
 	</div>
@@ -978,7 +978,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div class="chat-messages" id="msgs-coach"></div>
 		<div id="input-bar">
-			<input type="text" id="input-coach" placeholder="Parle-moi de ta situation..." autocomplete="off">
+			<textarea id="input-coach" placeholder="Parle-moi de ta situation..." rows="1"></textarea>
 			<button id="send-coach">Envoyer</button>
 		</div>
 	</div>
@@ -1740,7 +1740,6 @@ function makeSessionChat({ key }) {
 		input.focus();
 	}
 	btn.addEventListener('click', send);
-	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
 	newConvoBtn.addEventListener('click', () => {
 		sessionId = resetSessionId(key);
@@ -1810,7 +1809,6 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 		input.focus();
 	}
 	btn.addEventListener('click', send);
-	input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
 	if (newConvoBtn) {
 		newConvoBtn.addEventListener('click', () => {
