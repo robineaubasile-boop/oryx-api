@@ -414,7 +414,11 @@ def decryptage(request: DecryptageRequest):
 			)
 			analysis_text = _extract_text(response)
 			print(f"[DECRYPTAGE] Claude OK — {len(analysis_text)} chars — stop_reason={response.stop_reason}")
-			break
+			if analysis_text.strip():
+				break
+			print(f"[DECRYPTAGE WARNING] Réponse vide (tentative {attempt + 1}/2)")
+			if attempt == 0:
+				time.sleep(1.5)
 		except Exception as e:
 			last_error = e
 			print(f"[DECRYPTAGE ERROR] Claude failed (tentative {attempt + 1}/2): {type(e).__name__}: {e}")
