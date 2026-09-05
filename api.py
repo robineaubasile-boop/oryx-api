@@ -667,14 +667,14 @@ def web_chat(request: WebChatRequest):
 			system_prompt = build_system_prompt(data, method)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
-			max_tokens = 1200
+			max_tokens = 2000
 
 		elif route == "checklist" and ticker:
 			ticker = normalize_ticker(ticker)
 			system_prompt = build_checklist_prompt(ticker)
 			user_message = build_checklist_user_message(message, context)
 			model = CLAUDE_MODEL_CHECKLIST
-			max_tokens = 1500
+			max_tokens = 2000
 
 		elif route == "coach":
 			method = lookup_method(message, context=context, last_method_id=last_method_id)
@@ -683,7 +683,7 @@ def web_chat(request: WebChatRequest):
 			system_prompt = build_coach_prompt(ticker, "", method)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
-			max_tokens = 1500
+			max_tokens = 2000
 
 		else:
 			method = lookup_method(message, context=context, last_method_id=last_method_id)
@@ -692,27 +692,40 @@ def web_chat(request: WebChatRequest):
 			system_prompt = build_education_prompt(method)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION
-			max_tokens = 1500
+			max_tokens = 2000
 			route = "education"
 
 	except Exception as e:
 		print(f"[WEB-CHAT ERROR] Engine setup failed: {type(e).__name__}: {e}")
-		return {"success": False, "error": str(e), "route_used": route}
+		return {"success": False, "error": "Je n'ai pas réussi à traiter ta demande, réessaie.", "route_used": route}
 
 	# 4. Call Claude
-	try:
-		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-		response = client.messages.create(
-			model=model,
-			max_tokens=max_tokens,
-			system=system_prompt,
-			messages=[{"role": "user", "content": user_message}]
-		)
-		response_text = _extract_text(response)
-		print(f"[WEB-CHAT] Claude OK — route={route}, {len(response_text)} chars")
-	except Exception as e:
-		print(f"[WEB-CHAT ERROR] Claude failed: {type(e).__name__}: {e}")
-		return {"success": False, "error": f"Erreur Claude : {e}", "route_used": route}
+	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+	response_text = None
+	last_error = None
+	for attempt in range(2):
+		try:
+			response = client.messages.create(
+				model=model,
+				max_tokens=max_tokens,
+				system=system_prompt,
+				messages=[{"role": "user", "content": user_message}]
+			)
+			response_text = _extract_text(response)
+			print(f"[WEB-CHAT] Claude OK — route={route}, {len(response_text)} chars — stop_reason={response.stop_reason}")
+			if response_text.strip():
+				break
+			print(f"[WEB-CHAT WARNING] Réponse vide (tentative {attempt + 1}/2)")
+			if attempt == 0:
+				time.sleep(1.5)
+		except Exception as e:
+			last_error = e
+			print(f"[WEB-CHAT ERROR] Claude failed (tentative {attempt + 1}/2): {type(e).__name__}: {e}")
+			if attempt == 0:
+				time.sleep(1.5)
+	if response_text is None:
+		print(f"[WEB-CHAT ERROR] Échec définitif après 2 tentatives: {last_error}")
+		return {"success": False, "error": "Je n'ai pas réussi à générer une réponse, réessaie dans quelques instants.", "route_used": route}
 
 	# 5. Save to history (skip empty responses — don't pollute context)
 	if not response_text.strip():
