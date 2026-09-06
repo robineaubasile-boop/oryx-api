@@ -994,7 +994,7 @@ METHODES_PRINCIPALES = [
 ]
 
 
-def lookup_method(question: str, context: Optional[str] = None, last_method_id: Optional[str] = None) -> Optional[dict]:
+def lookup_method(question: str, context: Optional[str] = None, last_method_id: Optional[str] = None, allow_these_lock: bool = True) -> Optional[dict]:
     """
     Détecte la méthode pédagogique Oryx pertinente pour une question.
 
@@ -1012,6 +1012,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
                  Utilisé en passe 3 pour reprendre directement la méthode
                  en cours sur un message de continuation vague, sans
                  rescanner le texte du contexte.
+        allow_these_lock: Si False, désactive le verrouillage construction_these
+                 (utilisé hors du flux Décrypter, où ce verrou n'a pas de sens).
 
     Returns:
         dict contenant method_id, title, method_content, example_company,
@@ -1030,7 +1032,7 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
     # la séquence en plein milieu (ex : "per" dans une réponse à l'Étape 4 Valorisation
     # bascule vers ratios_valorisation sans ce verrou, et la session ne revient jamais
     # à construction_these ensuite).
-    if last_method_id == "construction_these":
+    if allow_these_lock and last_method_id == "construction_these":
         method = METHODES["construction_these"]
         print(f"[PEDAGOGIE] '{question}' → method_id='construction_these' (verrouillage thèse en cours)")
         return {
