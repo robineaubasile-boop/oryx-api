@@ -22,7 +22,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 body {
 	font-family: 'Inter', -apple-system, sans-serif;
-	background: var(--paper);
+	background: linear-gradient(180deg, #5C3A1E 0%, #F5E6D3 100%);
 	color: var(--ink);
 	height: 100vh;
 	display: flex;
@@ -36,11 +36,12 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 #topbar {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
+	justify-content: flex-start;
 	padding: 9px 18px;
-	background: var(--ink);
+	background: transparent;
 	flex-shrink: 0;
 }
+#topbar .brand, #topbar .view-label { display: none; }
 #topbar .brand {
 	font-family: 'Fraunces', Georgia, serif;
 	font-weight: 600;
@@ -54,11 +55,13 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	margin-top: 1px;
 }
 #menu-btn {
-	width: 34px;
-	height: 34px;
-	border-radius: 9px;
-	border: 1px solid rgba(255, 255, 255, 0.25);
-	background: rgba(255, 255, 255, 0.08);
+	width: 38px;
+	height: 38px;
+	border-radius: 14px;
+	border: 1px solid rgba(255, 255, 255, 0.35);
+	background: rgba(255, 255, 255, 0.15);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
 	font-size: 16px;
 	color: var(--paper);
 	cursor: pointer;
@@ -79,7 +82,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .msg ul, .msg ol { padding-left: 20px; margin: 6px 0; }
 .msg li { margin-bottom: 4px; }
 .msg.user { align-self: flex-end; background: var(--ink); color: var(--paper); border-bottom-right-radius: 4px; }
-.msg.assistant { align-self: flex-start; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.assistant { align-self: stretch; background: transparent; color: var(--ink); max-width: 100%; padding: 2px 4px; }
 .msg.system { align-self: center; background: transparent; color: var(--ink-soft); font-size: 12.5px; text-align: center; max-width: 90%; }
 .msg .route-tag { font-size: 10.5px; color: var(--ink-faint); margin-top: 6px; display: block; letter-spacing: 0.02em; text-transform: uppercase; }
 .typing { align-self: flex-start; color: var(--ink-soft); font-size: 13px; padding: 4px 15px; font-style: italic; }
@@ -115,22 +118,30 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 
 .price-banner { display: none; align-items: center; gap: 8px; margin-right: auto; }
 .price-banner.visible { display: flex; }
-.price-banner .price-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(193, 122, 46, 0.12); color: var(--accent); font-size: 12.5px; font-weight: 500; }
-.price-banner .next-step-btn { border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 12.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; cursor: pointer; }
+.price-banner .price-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(193, 122, 46, 0.18); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); color: var(--accent); font-size: 12.5px; font-weight: 500; }
+.price-banner .next-step-btn { border: 1px solid var(--accent); background: rgba(255, 255, 255, 0.25); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); color: var(--accent); font-size: 12.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; cursor: pointer; }
 
 #input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
 #input-bar input, #input-bar textarea { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; resize: none; }
 #input-bar input:focus, #input-bar textarea:focus { border-color: var(--accent); }
 #input-bar button {
-	padding: 11px 18px;
+	width: 42px;
+	height: 42px;
+	padding: 0;
 	background: var(--accent);
 	color: #fff;
 	border: none;
 	border-radius: 10px;
-	font-size: 14px;
-	font-weight: 500;
+	transform: rotate(45deg);
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	cursor: pointer;
+	flex-shrink: 0;
 }
+#input-bar button svg { transform: rotate(-45deg); }
+#input-bar button.text-btn { width: auto; height: auto; padding: 11px 18px; transform: none; border-radius: 10px; font-size: 14px; font-weight: 500; }
+#input-bar button.text-btn svg { display: none; }
 #input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* --- Recherche --- */
@@ -274,21 +285,24 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .chat-header {
 	display: flex;
 	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
 	justify-content: flex-end;
 	padding: 10px 16px;
-	border-bottom: 1px solid var(--line);
-	background: var(--card);
+	background: transparent;
 	flex-shrink: 0;
 }
 .new-convo-btn {
-	border: 1px solid var(--line);
-	background: #fff;
-	color: var(--ink-soft);
+	border: 1px solid rgba(255, 255, 255, 0.4);
+	background: rgba(255, 255, 255, 0.3);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
+	color: var(--ink);
 	font-family: 'Inter', sans-serif;
 	font-size: 12px;
 	font-weight: 500;
 	padding: 7px 12px;
-	border-radius: 8px;
+	border-radius: 14px;
 	cursor: pointer;
 }
 .new-convo-btn:active { background: rgba(27, 36, 56, 0.05); }
@@ -298,23 +312,28 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	flex-wrap: wrap;
 	gap: 8px;
 	padding: 12px 16px;
-	border-bottom: 1px solid var(--line);
-	background: var(--card);
+	background: transparent;
 	flex-shrink: 0;
 }
 .chip-btn {
-	border: 1px solid var(--line);
-	background: #fff;
-	color: var(--ink-soft);
+	border: 1px solid rgba(255, 255, 255, 0.4);
+	background: rgba(255, 255, 255, 0.3);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px);
+	color: var(--ink);
 	font-family: 'Inter', sans-serif;
 	font-size: 12px;
 	font-weight: 500;
 	padding: 7px 12px;
-	border-radius: 8px;
+	border-radius: 14px;
 	cursor: pointer;
 	text-align: left;
 }
 .chip-btn:active { background: rgba(27, 36, 56, 0.05); }
+.empty-hero { display: none; position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; pointer-events: none; }
+.empty-hero.visible { display: flex; }
+.empty-hero .hero-title { font-family: 'Fraunces', Georgia, serif; font-size: 26px; color: var(--ink); margin-bottom: 6px; }
+.empty-hero .hero-sub { font-size: 14.5px; color: var(--ink-soft); }
 
 /* --- Placeholders --- */
 .placeholder-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; gap: 8px; }
@@ -951,7 +970,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div id="input-bar">
 			<textarea id="input-decrypter" placeholder="Ta question sur ce titre..." rows="1"></textarea>
-			<button id="send-decrypter">Envoyer</button>
+			<button id="send-decrypter" aria-label="Envoyer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
 		</div>
 	</div>
 
@@ -959,6 +978,10 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	<div class="view" data-view="education">
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-education">Nouvelle conversation</button>
+		</div>
+		<div class="empty-hero visible" id="empty-hero-education">
+			<p class="hero-title">Salut, je suis Oryx</p>
+			<p class="hero-sub">Par où veux-tu commencer ?</p>
 		</div>
 		<div class="chat-messages" id="msgs-education"></div>
 		<div class="chip-row" id="chips-education">
@@ -969,7 +992,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div id="input-bar">
 			<textarea id="input-education" placeholder="Une notion à éclaircir..." rows="1"></textarea>
-			<button id="send-education">Envoyer</button>
+			<button id="send-education" aria-label="Envoyer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
 		</div>
 	</div>
 
@@ -977,6 +1000,10 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	<div class="view" data-view="coach">
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-coach">Nouvelle conversation</button>
+		</div>
+		<div class="empty-hero visible" id="empty-hero-coach">
+			<p class="hero-title">Salut, je suis Oryx</p>
+			<p class="hero-sub">Par où veux-tu commencer ?</p>
 		</div>
 		<div class="chat-messages" id="msgs-coach"></div>
 		<div class="chip-row" id="chips-coach">
@@ -986,7 +1013,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		</div>
 		<div id="input-bar">
 			<textarea id="input-coach" placeholder="Parle-moi de ta situation..." rows="1"></textarea>
-			<button id="send-coach">Envoyer</button>
+			<button id="send-coach" aria-label="Envoyer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
 		</div>
 	</div>
 
@@ -1010,7 +1037,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="chat-messages" id="msgs-checklist"></div>
 		<div id="input-bar">
 			<input type="text" id="input-checklist" placeholder="Précise ta demande (optionnel)..." autocomplete="off">
-			<button id="send-checklist">Générer</button>
+			<button id="send-checklist" class="text-btn">Générer</button>
 		</div>
 	</div>
 
@@ -1711,7 +1738,7 @@ function buildContext(history, maxTurns = null) {
 // Session chat factory — Éducation / Coach via /web-chat
 // (dynamic routing, server-side history per view session_id)
 // ============================================================
-function makeSessionChat({ key }) {
+function makeSessionChat({ key, emptyHeroId = null }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
@@ -1721,6 +1748,10 @@ function makeSessionChat({ key }) {
 	async function send() {
 		const text = input.value.trim();
 		if (!text) return;
+		if (emptyHeroId) {
+			const hero = document.getElementById(emptyHeroId);
+			if (hero) hero.classList.remove('visible');
+		}
 		input.value = '';
 		btn.disabled = true;
 		addMessage(containerId, text, 'user');
@@ -1753,12 +1784,16 @@ function makeSessionChat({ key }) {
 		document.getElementById(containerId).innerHTML = '';
 		const chipRow = document.getElementById('chips-' + key);
 		if (chipRow) chipRow.style.display = '';
+		if (emptyHeroId) {
+			const hero = document.getElementById(emptyHeroId);
+			if (hero) hero.classList.add('visible');
+		}
 	});
 	return { send };
 }
 
-const educationChat = makeSessionChat({ key: 'education' });
-const coachChat = makeSessionChat({ key: 'coach' });
+const educationChat = makeSessionChat({ key: 'education', emptyHeroId: 'empty-hero-education' });
+const coachChat = makeSessionChat({ key: 'coach', emptyHeroId: 'empty-hero-coach' });
 
 // ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
