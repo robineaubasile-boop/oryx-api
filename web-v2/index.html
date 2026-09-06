@@ -83,6 +83,11 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .msg.system { align-self: center; background: transparent; color: var(--ink-soft); font-size: 12.5px; text-align: center; max-width: 90%; }
 .msg .route-tag { font-size: 10.5px; color: var(--ink-faint); margin-top: 6px; display: block; letter-spacing: 0.02em; text-transform: uppercase; }
 .typing { align-self: flex-start; color: var(--ink-soft); font-size: 13px; padding: 4px 15px; font-style: italic; }
+.typing-dots { display: inline-flex; gap: 4px; align-items: center; }
+.typing-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: bounce 1.2s infinite ease-in-out; }
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-6px); opacity: 1; } }
 
 .ticker-bar {
 	display: flex;
@@ -1686,7 +1691,7 @@ function showTyping(containerId) {
 	const div = document.createElement('div');
 	div.className = 'typing';
 	div.id = containerId + '-typing';
-	div.textContent = 'Oryx réfléchit...';
+	div.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
 	container.appendChild(div);
 	container.scrollTop = container.scrollHeight;
 }
