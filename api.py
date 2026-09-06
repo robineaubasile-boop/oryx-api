@@ -679,7 +679,7 @@ def web_chat(request: WebChatRequest):
 			max_tokens = 2000
 
 		elif route == "coach":
-			method = lookup_method(message, context=context, last_method_id=last_method_id)
+			method = lookup_method(message, context=context, last_method_id=last_method_id, allow_these_lock=False)
 			if method:
 				_web_chat_last_method[session_id] = method["method_id"]
 			else:
@@ -690,7 +690,7 @@ def web_chat(request: WebChatRequest):
 			max_tokens = 2500
 
 		else:
-			method = lookup_method(message, context=context, last_method_id=last_method_id)
+			method = lookup_method(message, context=context, last_method_id=last_method_id, allow_these_lock=False)
 			if method:
 				_web_chat_last_method[session_id] = method["method_id"]
 			else:
