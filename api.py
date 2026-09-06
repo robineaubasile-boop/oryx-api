@@ -664,6 +664,8 @@ def web_chat(request: WebChatRequest):
 				method = lookup_method(lookup_text, context=context, last_method_id=last_method_id)
 			if method:
 				_web_chat_last_method[session_id] = method["method_id"]
+			else:
+				_web_chat_last_method[session_id] = None
 			system_prompt = build_system_prompt(data, method)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
@@ -680,6 +682,8 @@ def web_chat(request: WebChatRequest):
 			method = lookup_method(message, context=context, last_method_id=last_method_id)
 			if method:
 				_web_chat_last_method[session_id] = method["method_id"]
+			else:
+				_web_chat_last_method[session_id] = None
 			system_prompt = build_coach_prompt(ticker, "", method)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
@@ -689,6 +693,8 @@ def web_chat(request: WebChatRequest):
 			method = lookup_method(message, context=context, last_method_id=last_method_id)
 			if method:
 				_web_chat_last_method[session_id] = method["method_id"]
+			else:
+				_web_chat_last_method[session_id] = None
 			system_prompt = build_education_prompt(method)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION
