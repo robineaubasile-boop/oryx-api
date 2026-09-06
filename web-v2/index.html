@@ -111,6 +111,7 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .price-banner { display: none; align-items: center; gap: 8px; margin-right: auto; }
 .price-banner.visible { display: flex; }
 .price-banner .price-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(193, 122, 46, 0.12); color: var(--accent); font-size: 12.5px; font-weight: 500; }
+.price-banner .next-step-btn { border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 12.5px; font-weight: 500; padding: 3px 10px; border-radius: 999px; cursor: pointer; }
 
 #input-bar { display: flex; padding: 12px; background: var(--card); border-top: 1px solid var(--line); gap: 8px; flex-shrink: 0; }
 #input-bar input, #input-bar textarea { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14.5px; outline: none; background: #fff; color: var(--ink); font-family: 'Inter', sans-serif; resize: none; }
@@ -936,12 +937,12 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 			<div class="price-banner" id="price-banner-decrypter"></div>
 			<button class="new-convo-btn" id="new-convo-decrypter">Nouvelle conversation</button>
 		</div>
+		<div class="chat-messages" id="msgs-decrypter"></div>
 		<div class="chip-row" id="chips-decrypter">
 			<button type="button" class="chip-btn" data-ticker="MC.PA">LVMH</button>
 			<button type="button" class="chip-btn" data-ticker="NVDA">Nvidia</button>
 			<button type="button" class="chip-btn" data-ticker="TTE.PA">TotalEnergies</button>
 		</div>
-		<div class="chat-messages" id="msgs-decrypter"></div>
 		<div id="input-bar">
 			<textarea id="input-decrypter" placeholder="Ta question sur ce titre..." rows="1"></textarea>
 			<button id="send-decrypter">Envoyer</button>
@@ -953,13 +954,13 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-education">Nouvelle conversation</button>
 		</div>
+		<div class="chat-messages" id="msgs-education"></div>
 		<div class="chip-row" id="chips-education">
 			<button type="button" class="chip-btn">Pourquoi je dois investir en bourse ?</button>
 			<button type="button" class="chip-btn">Comment fonctionne la bourse ?</button>
 			<button type="button" class="chip-btn">C'est quoi un ETF ?</button>
 			<button type="button" class="chip-btn">Comment lire un bilan ?</button>
 		</div>
-		<div class="chat-messages" id="msgs-education"></div>
 		<div id="input-bar">
 			<textarea id="input-education" placeholder="Une notion à éclaircir..." rows="1"></textarea>
 			<button id="send-education">Envoyer</button>
@@ -971,12 +972,12 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="chat-header">
 			<button class="new-convo-btn" id="new-convo-coach">Nouvelle conversation</button>
 		</div>
+		<div class="chat-messages" id="msgs-coach"></div>
 		<div class="chip-row" id="chips-coach">
 			<button type="button" class="chip-btn">Comment investir pour la première fois ?</button>
 			<button type="button" class="chip-btn">Comment réfléchir à mon allocation ?</button>
 			<button type="button" class="chip-btn">J'ai une somme à placer, comment structurer ma réflexion ?</button>
 		</div>
-		<div class="chat-messages" id="msgs-coach"></div>
 		<div id="input-bar">
 			<textarea id="input-coach" placeholder="Parle-moi de ta situation..." rows="1"></textarea>
 			<button id="send-coach">Envoyer</button>
@@ -1794,7 +1795,17 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 				if (priceBannerId && data.price != null) {
 					const banner = document.getElementById(priceBannerId);
 					if (banner) {
-						banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span> ${data.name || ''}`;
+						const assistantCount = histories[key].filter(h => h.role === 'assistant').length;
+						if (assistantCount >= 2) {
+							banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span> <button type="button" class="next-step-btn">Étape suivante</button>`;
+							const nextBtn = banner.querySelector('.next-step-btn');
+							if (nextBtn) nextBtn.addEventListener('click', () => {
+								input.value = "Je veux passer directement à l'étape suivante.";
+								send();
+							});
+						} else {
+							banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span> ${data.name || ''}`;
+						}
 						banner.classList.add('visible');
 					}
 				}
