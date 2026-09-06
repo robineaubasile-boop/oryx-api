@@ -683,7 +683,7 @@ def web_chat(request: WebChatRequest):
 			system_prompt = build_coach_prompt(ticker, "", method)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
-			max_tokens = 2000
+			max_tokens = 2500
 
 		else:
 			method = lookup_method(message, context=context, last_method_id=last_method_id)
@@ -692,7 +692,7 @@ def web_chat(request: WebChatRequest):
 			system_prompt = build_education_prompt(method)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION
-			max_tokens = 2000
+			max_tokens = 2500
 			route = "education"
 
 	except Exception as e:
