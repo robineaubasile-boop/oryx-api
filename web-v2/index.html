@@ -2483,7 +2483,6 @@ function formatChatMessage(text) {
 			if (listType !== 'ol') { flushList(); listType = 'ol'; }
 			listBuffer.push(inlineBold(numberedMatch[1]));
 		} else if (line === '') {
-			flushList();
 			flushParagraph();
 		} else {
 			flushList();
