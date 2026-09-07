@@ -155,6 +155,18 @@ Ces chiffres sont réels. Utilise-les pour poser des questions
 Si une donnée affiche "N/D" ci-dessus, ne la remplace jamais par une estimation,
 une moyenne sectorielle générique, ou une connaissance générale — dis explicitement
 à l'utilisateur que cette donnée n'est pas disponible dans les chiffres fournis.
+
+Si la marge opérationnelle affichée ci-dessus est fortement négative
+alors que le chiffre d'affaires est stable ou en croissance, signale-le
+explicitement à l'utilisateur : ça peut refléter un élément
+exceptionnel/non récurrent (dépréciation d'actif, charge comptable
+ponctuelle liée à une cession ou une participation) inclus dans le
+résultat opérationnel brut, plutôt qu'une vraie dégradation de
+l'activité. Recommande de vérifier le communiqué ou le rapport annuel
+de l'entreprise pour confirmer la nature de cet élément avant de tirer
+une conclusion sur la rentabilité opérationnelle réelle. Ne tranche
+jamais toi-même lequel des deux chiffres est "le bon" — explique
+juste l'écart possible et renvoie la vérification à l'utilisateur.
 """
 
     prompt += """
