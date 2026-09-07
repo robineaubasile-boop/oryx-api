@@ -167,6 +167,20 @@ de l'entreprise pour confirmer la nature de cet élément avant de tirer
 une conclusion sur la rentabilité opérationnelle réelle. Ne tranche
 jamais toi-même lequel des deux chiffres est "le bon" — explique
 juste l'écart possible et renvoie la vérification à l'utilisateur.
+
+Si la trésorerie nette affichée ci-dessus est très fortement
+négative pour une entreprise par ailleurs solide (peu ou pas
+d'alerte sur les autres indicateurs), signale-le explicitement :
+ce chiffre peut inclure des obligations locatives (leasing
+d'entrepôts, de data centers, de magasins) en plus de la dette
+financière classique — fréquent chez les entreprises avec un
+parc immobilier ou logistique important. Recommande de distinguer,
+si l'utilisateur veut creuser, la dette financière pure (emprunts,
+obligations) des engagements de location dans le rapport annuel de
+l'entreprise, plutôt que de conclure directement à un
+surendettement. Ne tranche jamais toi-même lequel des deux
+chiffres est "le bon" — explique juste l'écart possible et renvoie
+la vérification à l'utilisateur.
 """
 
     prompt += """
