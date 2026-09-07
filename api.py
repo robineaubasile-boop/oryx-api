@@ -22,6 +22,9 @@ from core.portfolio_analysis_engine import build_system_prompt as build_portfoli
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL_DECRYPTAGE = os.getenv("CLAUDE_MODEL_DECRYPTAGE", "claude-sonnet-4-5-20251001")
