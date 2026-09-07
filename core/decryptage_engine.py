@@ -164,7 +164,9 @@ ponctuelle liée à une cession ou une participation) inclus dans le
 résultat opérationnel brut, plutôt qu'une vraie dégradation de
 l'activité. Recommande de vérifier le communiqué ou le rapport annuel
 de l'entreprise pour confirmer la nature de cet élément avant de tirer
-une conclusion sur la rentabilité opérationnelle réelle.
+une conclusion sur la rentabilité opérationnelle réelle. Ne tranche
+jamais toi-même lequel des deux chiffres est "le bon" — explique
+juste l'écart possible et renvoie la vérification à l'utilisateur.
 """
 
     prompt += """
