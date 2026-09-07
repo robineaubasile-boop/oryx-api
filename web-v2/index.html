@@ -18,12 +18,14 @@
 	--ink-faint: rgba(27, 36, 56, 0.38);
 	--line: rgba(27, 36, 56, 0.12);
 	--card: #FAFAF8;
-	--dark-brown: #5C3A1E;
+	--dark-brown: #B5651D;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 body {
 	font-family: 'Inter', -apple-system, sans-serif;
-	background: linear-gradient(180deg, #5C3A1E 0%, #F5E6D3 100%);
+	background:
+		radial-gradient(ellipse 80% 30% at 50% 0%, rgba(255, 255, 255, 0.35), transparent 70%),
+		linear-gradient(180deg, #B5651D 0%, #FDECD8 100%);
 	color: var(--ink);
 	height: 100vh;
 	display: flex;
