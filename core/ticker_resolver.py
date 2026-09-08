@@ -24,7 +24,7 @@ _RESOLUTION_CACHE: dict = {}
 # voir tous les candidats EODHD bruts dans les logs lors du prochain
 # test. Vide par défaut — à remplir ponctuellement, pas laissé actif
 # en continu.
-_DEBUG_QUERIES: set = {"LVMH"}
+_DEBUG_QUERIES: set = {"LVMH", "AMAZON"}
 
 # Exchanges PEA-éligibles (priorité haute si entreprise européenne)
 # "F" (Frankfurt Börse) est volontairement exclu : ce suffixe sert
