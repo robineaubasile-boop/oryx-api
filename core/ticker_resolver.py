@@ -163,7 +163,8 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         print(f"[RESOLVER-DEBUG] query={query!r} — {len(results)} résultats bruts EODHD :")
         for r in results:
             print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
-                  f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r}")
+                  f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r} "
+                  f"isin={r.get('Isin')!r}")
 
     def rank(item):
         exchange = item.get("Exchange", "")
