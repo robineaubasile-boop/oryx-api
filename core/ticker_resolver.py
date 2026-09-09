@@ -303,6 +303,18 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         else:
             base_rank = 500
 
+        # Les codes LSE qui commencent par un chiffre (ex: "0QR4", "0QLR")
+        # sont des certificats IOB (International Order Book) — une
+        # catégorie de cotations internationales à Londres généralement
+        # peu liquides. On les déclasse au niveau le plus bas plutôt que
+        # de les laisser gagner via la priorité OTHER_EXCHANGES.
+        # Limite connue : ne détecte que ce format précis (LSE + code
+        # numérique) — une cotation croisée illiquide sur une autre place
+        # (ex: XETRA pour une entreprise non-allemande) n'est pas couverte
+        # par cette règle.
+        if exchange == "LSE" and code[:1].isdigit():
+            base_rank = 900
+
         # Correspondance exacte avec la requête tapée : sert UNIQUEMENT
         # à départager deux candidats déjà dans le même palier (ex:
         # "ASML" coté à la fois à Amsterdam et comme ADR US, tous deux
