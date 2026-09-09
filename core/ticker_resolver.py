@@ -12,6 +12,7 @@ Pipeline :
 import os
 import re
 import requests
+import unicodedata
 from typing import Optional
 
 EODHD_API_KEY = os.environ.get("EOD_API_KEY", "")
@@ -78,6 +79,40 @@ def get_known_name_override(raw: str) -> str | None:
 # Pattern ticker US pur : 1-5 lettres majuscules, optionnellement avec un point
 # pour classes d'actions (BRK.B, BF.B), pas de chiffres.
 US_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+
+_LEGAL_SUFFIX_PATTERN = re.compile(
+    r"\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|SE|PLC|SA|NV|AG|"
+    r"LTD|LIMITED|LLC|LP|HOLDING|HOLDINGS|AKTIENGESELLSCHAFT|"
+    r"GMBH|KGAA|SPA|BV|OYJ|ASA|CEDEAR|ADR|CDR|CLASS [A-Z]|CL [A-Z])\b"
+)
+_RATIO_SUFFIX_PATTERN = re.compile(r"\b\d+\s*/\s*\d+\b")
+_CAD_HEDGED_PATTERN = re.compile(r"\(CAD HEDGED\)", re.IGNORECASE)
+
+
+def _normalize_company_name(name: str) -> str:
+    """
+    Réduit un nom d'entreprise à son identité de base, pour regrouper
+    les différentes cotations d'UNE MÊME entreprise et les distinguer
+    d'une entreprise différente qui porte un nom proche (filiale,
+    homonyme, société sans rapport). Ne retire QUE les suffixes
+    juridiques génériques (Inc, SE, PLC, Ltd, AG...) — jamais un mot
+    porteur de sens (un nom de pays, "Energy", "Healthineers"...),
+    car c'est justement ce qui permet de distinguer "Siemens AG"
+    (Allemagne) de "Siemens Energy AG" ou de "Siemens Limited" (Inde,
+    une filiale cotée séparément qui n'a rien à voir).
+    """
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    n = n.upper()
+    n = re.sub(r"^\s*THE\s+", "", n)
+    n = re.sub(r"\b([A-Z])\.([A-Z])\.?", r"\1\2", n)
+    n = re.sub(r"[.,'()]", " ", n)
+    n = _RATIO_SUFFIX_PATTERN.sub(" ", n)
+    n = _CAD_HEDGED_PATTERN.sub(" ", n)
+    n = _LEGAL_SUFFIX_PATTERN.sub(" ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
 
 
 def _looks_like_eu_ticker(s: str) -> bool:
@@ -173,6 +208,45 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
                   f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r} "
                   f"isin={r.get('Isin')!r}")
 
+    # --- Étape 1 : identifier la bonne ENTREPRISE avant de choisir sa
+    # cotation. On regroupe les candidats par nom normalisé (identité
+    # d'entreprise) pour ne jamais laisser une filiale ou une entreprise
+    # homonyme prendre le pas sur la vraie entreprise demandée juste
+    # parce qu'elle est mieux placée géographiquement.
+    normalized_query = _normalize_company_name(query)
+    groups: dict = {}
+    for r in filtered:
+        key = _normalize_company_name(r.get("Name", ""))
+        groups.setdefault(key, []).append(r)
+
+    if normalized_query and len(groups) > 1:
+        def _breadth(items):
+            return len({it.get("Country", "") for it in items})
+
+        # Un groupe est "apparenté" à la requête si son nom normalisé
+        # correspond exactement, ou commence par la requête suivie d'un
+        # mot supplémentaire (ex: requête "AIRBUS" → groupe "AIRBUS
+        # GROUP" reste apparenté, car c'est la même entreprise sous un
+        # autre nom enregistré — mais requête "FERRARI" → groupe
+        # "FERRARI GROUP" est UNE AUTRE entreprise : c'est le nombre de
+        # pays qui tranche ensuite, pas la simple présence du mot).
+        related = {
+            k: v for k, v in groups.items()
+            if k == normalized_query
+            or k.startswith(normalized_query + " ")
+            or normalized_query.startswith(k + " ")
+        }
+        pool = related if related else groups
+        if len(pool) == 1:
+            filtered = next(iter(pool.values()))
+        else:
+            best_key = max(pool, key=lambda k: _breadth(pool[k]))
+            filtered = pool[best_key]
+
+    # --- Étape 2 : parmi les cotations de LA bonne entreprise (ou de
+    # tous les candidats si l'identité n'a pas pu être départagée),
+    # choisir la cotation la plus pertinente pour notre audience.
+
     def rank(item):
         exchange = item.get("Exchange", "")
         code = item.get("Code", "")
@@ -211,16 +285,16 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         else:
             base_rank = 500
 
-        # Correspondance exacte avec la requête tapée : bonus fort,
-        # mais appliqué EN PLUS du rang de base — pas un remplacement.
-        # Ça évite qu'une égalité de Code entre deux places (ex: "ASML"
-        # coté à la fois à Amsterdam et comme ADR US) ne se départage
-        # au hasard de l'ordre brut renvoyé par EODHD : la priorité
-        # PEA reste décisive même en cas d'égalité de ticker.
-        if code.upper() == query.upper():
-            return base_rank - 1000
-
-        return base_rank
+        # Correspondance exacte avec la requête tapée : sert UNIQUEMENT
+        # à départager deux candidats déjà dans le même palier (ex:
+        # "ASML" coté à la fois à Amsterdam et comme ADR US, tous deux
+        # PEA ou tous deux hors PEA) — jamais à dépasser un palier plus
+        # prioritaire. Une coïncidence de code sur une filiale sans
+        # rapport (ex: "BASF" tapé par nom, qui matche par hasard le
+        # code d'une cotation secondaire à Budapest) ne doit jamais
+        # devancer la vraie cotation principale de l'entreprise.
+        exact_match = 0 if code.upper() == query.upper() else 1
+        return (base_rank, exact_match)
 
     # prefer_us influence désormais uniquement le classement via rank(),
     # plus de pré-filtrage strict qui excluait les bonnes cotations
