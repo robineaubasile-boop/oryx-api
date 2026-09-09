@@ -12,6 +12,7 @@ Pipeline :
 import os
 import re
 import requests
+import unicodedata
 from typing import Optional
 
 EODHD_API_KEY = os.environ.get("EOD_API_KEY", "")
@@ -78,6 +79,39 @@ def get_known_name_override(raw: str) -> str | None:
 # Pattern ticker US pur : 1-5 lettres majuscules, optionnellement avec un point
 # pour classes d'actions (BRK.B, BF.B), pas de chiffres.
 US_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+
+_LEGAL_SUFFIX_PATTERN = re.compile(
+    r"\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|SE|PLC|SA|NV|AG|"
+    r"LTD|LIMITED|LLC|LP|HOLDING|HOLDINGS|GROUP|AKTIENGESELLSCHAFT|"
+    r"GMBH|KGAA|SPA|BV|OYJ|ASA|CEDEAR|ADR|CDR|CLASS [A-Z]|CL [A-Z])\b"
+)
+_RATIO_SUFFIX_PATTERN = re.compile(r"\b\d+\s*/\s*\d+\b")
+_CAD_HEDGED_PATTERN = re.compile(r"\(CAD HEDGED\)", re.IGNORECASE)
+
+
+def _normalize_company_name(name: str) -> str:
+    """
+    Réduit un nom d'entreprise à son identité de base, pour regrouper
+    les différentes cotations d'UNE MÊME entreprise et les distinguer
+    d'une entreprise différente qui porte un nom proche (filiale,
+    homonyme, société sans rapport). Ne retire QUE les suffixes
+    juridiques génériques (Inc, SE, PLC, Ltd, AG...) — jamais un mot
+    porteur de sens (un nom de pays, "Energy", "Healthineers"...),
+    car c'est justement ce qui permet de distinguer "Siemens AG"
+    (Allemagne) de "Siemens Energy AG" ou de "Siemens Limited" (Inde,
+    une filiale cotée séparément qui n'a rien à voir).
+    """
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    n = n.upper()
+    n = re.sub(r"^\s*THE\s+", "", n)
+    n = re.sub(r"[.,'()]", " ", n)
+    n = _RATIO_SUFFIX_PATTERN.sub(" ", n)
+    n = _CAD_HEDGED_PATTERN.sub(" ", n)
+    n = _LEGAL_SUFFIX_PATTERN.sub(" ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
 
 
 def _looks_like_eu_ticker(s: str) -> bool:
@@ -172,6 +206,32 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
             print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
                   f"country={r.get('Country')!r} type={r.get('Type')!r} name={r.get('Name')!r} "
                   f"isin={r.get('Isin')!r}")
+
+    # --- Étape 1 : identifier la bonne ENTREPRISE avant de choisir sa
+    # cotation. On regroupe les candidats par nom normalisé (identité
+    # d'entreprise) pour ne jamais laisser une filiale ou une entreprise
+    # homonyme prendre le pas sur la vraie entreprise demandée juste
+    # parce qu'elle est mieux placée géographiquement.
+    normalized_query = _normalize_company_name(query)
+    groups: dict = {}
+    for r in filtered:
+        key = _normalize_company_name(r.get("Name", ""))
+        groups.setdefault(key, []).append(r)
+
+    if normalized_query and len(groups) > 1:
+        exact_groups = {k: v for k, v in groups.items() if k == normalized_query}
+        pool = exact_groups if exact_groups else groups
+        if len(pool) == 1:
+            filtered = next(iter(pool.values()))
+        else:
+            def _breadth(items):
+                return len({it.get("Country", "") for it in items})
+            best_key = max(pool, key=lambda k: _breadth(pool[k]))
+            filtered = pool[best_key]
+
+    # --- Étape 2 : parmi les cotations de LA bonne entreprise (ou de
+    # tous les candidats si l'identité n'a pas pu être départagée),
+    # choisir la cotation la plus pertinente pour notre audience.
 
     def rank(item):
         exchange = item.get("Exchange", "")
