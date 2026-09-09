@@ -82,7 +82,7 @@ US_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 _LEGAL_SUFFIX_PATTERN = re.compile(
     r"\b(INC|INCORPORATED|CORP|CORPORATION|CO|COMPANY|SE|PLC|SA|NV|AG|"
-    r"LTD|LIMITED|LLC|LP|HOLDING|HOLDINGS|GROUP|AKTIENGESELLSCHAFT|"
+    r"LTD|LIMITED|LLC|LP|HOLDING|HOLDINGS|AKTIENGESELLSCHAFT|"
     r"GMBH|KGAA|SPA|BV|OYJ|ASA|CEDEAR|ADR|CDR|CLASS [A-Z]|CL [A-Z])\b"
 )
 _RATIO_SUFFIX_PATTERN = re.compile(r"\b\d+\s*/\s*\d+\b")
@@ -106,6 +106,7 @@ def _normalize_company_name(name: str) -> str:
     n = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     n = n.upper()
     n = re.sub(r"^\s*THE\s+", "", n)
+    n = re.sub(r"\b([A-Z])\.([A-Z])\.?", r"\1\2", n)
     n = re.sub(r"[.,'()]", " ", n)
     n = _RATIO_SUFFIX_PATTERN.sub(" ", n)
     n = _CAD_HEDGED_PATTERN.sub(" ", n)
@@ -219,13 +220,26 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         groups.setdefault(key, []).append(r)
 
     if normalized_query and len(groups) > 1:
-        exact_groups = {k: v for k, v in groups.items() if k == normalized_query}
-        pool = exact_groups if exact_groups else groups
+        def _breadth(items):
+            return len({it.get("Country", "") for it in items})
+
+        # Un groupe est "apparenté" à la requête si son nom normalisé
+        # correspond exactement, ou commence par la requête suivie d'un
+        # mot supplémentaire (ex: requête "AIRBUS" → groupe "AIRBUS
+        # GROUP" reste apparenté, car c'est la même entreprise sous un
+        # autre nom enregistré — mais requête "FERRARI" → groupe
+        # "FERRARI GROUP" est UNE AUTRE entreprise : c'est le nombre de
+        # pays qui tranche ensuite, pas la simple présence du mot).
+        related = {
+            k: v for k, v in groups.items()
+            if k == normalized_query
+            or k.startswith(normalized_query + " ")
+            or normalized_query.startswith(k + " ")
+        }
+        pool = related if related else groups
         if len(pool) == 1:
             filtered = next(iter(pool.values()))
         else:
-            def _breadth(items):
-                return len({it.get("Country", "") for it in items})
             best_key = max(pool, key=lambda k: _breadth(pool[k]))
             filtered = pool[best_key]
 
@@ -271,16 +285,16 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         else:
             base_rank = 500
 
-        # Correspondance exacte avec la requête tapée : bonus fort,
-        # mais appliqué EN PLUS du rang de base — pas un remplacement.
-        # Ça évite qu'une égalité de Code entre deux places (ex: "ASML"
-        # coté à la fois à Amsterdam et comme ADR US) ne se départage
-        # au hasard de l'ordre brut renvoyé par EODHD : la priorité
-        # PEA reste décisive même en cas d'égalité de ticker.
-        if code.upper() == query.upper():
-            return base_rank - 1000
-
-        return base_rank
+        # Correspondance exacte avec la requête tapée : sert UNIQUEMENT
+        # à départager deux candidats déjà dans le même palier (ex:
+        # "ASML" coté à la fois à Amsterdam et comme ADR US, tous deux
+        # PEA ou tous deux hors PEA) — jamais à dépasser un palier plus
+        # prioritaire. Une coïncidence de code sur une filiale sans
+        # rapport (ex: "BASF" tapé par nom, qui matche par hasard le
+        # code d'une cotation secondaire à Budapest) ne doit jamais
+        # devancer la vraie cotation principale de l'entreprise.
+        exact_match = 0 if code.upper() == query.upper() else 1
+        return (base_rank, exact_match)
 
     # prefer_us influence désormais uniquement le classement via rank(),
     # plus de pré-filtrage strict qui excluait les bonnes cotations
