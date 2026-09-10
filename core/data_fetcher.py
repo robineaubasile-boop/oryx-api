@@ -808,13 +808,21 @@ def _currency_from_ticker(ticker: str) -> str:
         ".AS": "EUR",   # Euronext Amsterdam
         ".BR": "EUR",   # Euronext Brussels
         ".LI": "EUR",   # Euronext Lisbon
-        ".DE": "EUR",   # XETRA Frankfurt
+        ".DE": "EUR",   # XETRA Frankfurt (suffixe alternatif)
+        ".XETRA": "EUR", # XETRA Frankfurt (suffixe réel produit par le resolver)
         ".F": "EUR",    # Frankfurt Börse (parquet, hors XETRA)
+        ".STU": "EUR",  # Stuttgart
+        ".MU": "EUR",   # Munich
+        ".DU": "EUR",   # Dusseldorf
+        ".HM": "EUR",   # Hambourg
+        ".HA": "EUR",   # Hanovre
         ".MI": "EUR",   # Milan
         ".MC": "EUR",   # Madrid
         ".HE": "EUR",   # Helsinki
         ".VI": "EUR",   # Vienna
-        ".L": "GBP",    # London
+        ".L": "GBP",    # London (suffixe alternatif)
+        ".LSE": "GBP",  # London (suffixe réel produit par le resolver)
+        ".SW": "CHF",   # Suisse (SIX)
         ".TO": "CAD",   # Toronto
         ".HK": "HKD",   # Hong Kong
         ".T": "JPY",    # Tokyo
