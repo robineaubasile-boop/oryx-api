@@ -286,10 +286,10 @@ def _parse_eod_data(fundamentals: dict, realtime: dict, ticker: str, yearly_pric
     """
     # --- Price from real-time ---
     current_price = _num_or_zero(realtime.get("close")) if realtime else 0
-    currency = _currency_from_ticker(ticker)
 
     # --- Sector from General ---
     general = fundamentals.get("General", {}) if fundamentals else {}
+    current_price, currency = _resolve_currency_and_price(ticker, general, current_price)
     sector = general.get("Sector", "Unknown")
     industry = general.get("Industry", "Unknown")
     logger.info(f"[SECTOR] {ticker}: Sector={sector}, Industry={industry}")
@@ -659,7 +659,7 @@ def _parse_etf_data(fundamentals: dict, realtime: dict, ticker: str, eod_close: 
         else:
             logger.warning(f"[ETF PRICE] No price available for {ticker} (realtime={rt_close}, eod_close={eod_close}, 50DMA={ma50})")
 
-    currency = _currency_from_ticker(ticker)
+    current_price, currency = _resolve_currency_and_price(ticker, general, current_price)
 
     # --- General info ---
     name = general.get("Name", ticker)
@@ -834,6 +834,22 @@ def _currency_from_ticker(ticker: str) -> str:
             return currency
     logger.info(f"[CURRENCY] {ticker} → USD (default)")
     return "USD"
+
+
+def _resolve_currency_and_price(ticker: str, general: dict, price: float | None) -> tuple:
+    """
+    Détermine la vraie devise à partir du champ EODHD
+    General.CurrencyCode (fiable), avec repli sur la déduction par
+    suffixe de ticker si absent. Convertit les prix en pence
+    sterling (GBX) vers des livres (GBP), car "GBX" n'est pas une
+    devise que les utilisateurs reconnaissent.
+    """
+    currency = (general or {}).get("CurrencyCode") or _currency_from_ticker(ticker)
+    if currency == "GBX":
+        if price is not None:
+            price = price / 100
+        currency = "GBP"
+    return price, currency
 
 
 def _fetch_eod(ticker: str) -> dict | None:
