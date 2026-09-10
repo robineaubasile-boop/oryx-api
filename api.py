@@ -286,6 +286,7 @@ class DecryptageRequest(BaseModel):
 	question: str = ""
 	context: str = ""
 	last_method_id: Optional[str] = None
+	level: str = "debutant"
 
 	@field_validator("ticker")
 	@classmethod
@@ -398,7 +399,7 @@ def decryptage(request: DecryptageRequest):
 		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
-	system_prompt = build_system_prompt(data, method)
+	system_prompt = build_system_prompt(data, method, request.level)
 	user_message = build_user_message(
 		question if question else f"Aide-moi à analyser {company_name} ({ticker}).",
 		context
@@ -585,6 +586,7 @@ def _build_context_string(history: list) -> str:
 class WebChatRequest(BaseModel):
 	session_id: str
 	message: str
+	level: str = "debutant"
 
 
 def _classify_intent(message: str, context: str = "") -> dict:
@@ -669,7 +671,7 @@ def web_chat(request: WebChatRequest):
 				_web_chat_last_method[session_id] = method["method_id"]
 			else:
 				_web_chat_last_method[session_id] = None
-			system_prompt = build_system_prompt(data, method)
+			system_prompt = build_system_prompt(data, method, request.level)
 			user_message = build_user_message(message, context)
 			model = CLAUDE_MODEL_DECRYPTAGE
 			max_tokens = 2000
@@ -687,7 +689,7 @@ def web_chat(request: WebChatRequest):
 				_web_chat_last_method[session_id] = method["method_id"]
 			else:
 				_web_chat_last_method[session_id] = None
-			system_prompt = build_coach_prompt(ticker, "", method)
+			system_prompt = build_coach_prompt(ticker, "", method, request.level)
 			user_message = build_coach_user_message(message, context)
 			model = CLAUDE_MODEL_COACH
 			max_tokens = 2500
@@ -698,7 +700,7 @@ def web_chat(request: WebChatRequest):
 				_web_chat_last_method[session_id] = method["method_id"]
 			else:
 				_web_chat_last_method[session_id] = None
-			system_prompt = build_education_prompt(method)
+			system_prompt = build_education_prompt(method, request.level)
 			user_message = build_education_user_message(message, context)
 			model = CLAUDE_MODEL_EDUCATION
 			max_tokens = 2500
