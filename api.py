@@ -788,19 +788,30 @@ def portfolio_analyze(request: PortfolioAnalyzeRequest):
 	system_prompt = build_portfolio_analysis_prompt()
 	user_message = build_portfolio_analysis_user_message(portfolio_summary)
 
-	try:
-		client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-		response = client.messages.create(
-			model=CLAUDE_MODEL_PORTFOLIO,
-			max_tokens=1500,
-			system=system_prompt,
-			messages=[{"role": "user", "content": user_message}]
-		)
-		response_text = _extract_text(response)
-		print(f"[PORTFOLIO-ANALYZE] Claude OK — {len(response_text)} chars")
-	except Exception as e:
-		print(f"[PORTFOLIO-ANALYZE ERROR] Claude failed: {type(e).__name__}: {e}")
-		return {"success": False, "error": f"Erreur Claude : {e}"}
+	client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+	response_text = ""
+	for attempt in range(2):
+		try:
+			response = client.messages.create(
+				model=CLAUDE_MODEL_PORTFOLIO,
+				max_tokens=2500,
+				system=system_prompt,
+				messages=[{"role": "user", "content": user_message}]
+			)
+			response_text = _extract_text(response)
+			print(f"[PORTFOLIO-ANALYZE] Claude OK — {len(response_text)} chars, stop_reason={response.stop_reason}")
+			if response_text.strip():
+				break
+			print(f"[PORTFOLIO-ANALYZE] Réponse vide, tentative {attempt + 1}/2")
+		except Exception as e:
+			print(f"[PORTFOLIO-ANALYZE ERROR] Claude failed (tentative {attempt + 1}/2): {type(e).__name__}: {e}")
+			if attempt == 0:
+				time.sleep(1.5)
+				continue
+			return {"success": False, "error": f"Erreur Claude : {e}"}
+
+	if not response_text.strip():
+		return {"success": False, "error": "Réponse vide de Claude après 2 tentatives."}
 
 	return {"success": True, "response": response_text}
 
