@@ -221,7 +221,9 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
     if not filtered:
         filtered = results
 
-    if query.upper() in _DEBUG_QUERIES:
+    if _normalize_company_name(query) and any(
+        _normalize_company_name(query) == _normalize_company_name(q) for q in _DEBUG_QUERIES
+    ) or query.upper() in _DEBUG_QUERIES:
         print(f"[RESOLVER-DEBUG] query={query!r} — {len(results)} résultats bruts EODHD :")
         for r in results:
             print(f"[RESOLVER-DEBUG]   code={r.get('Code')!r} exchange={r.get('Exchange')!r} "
