@@ -75,6 +75,8 @@ ALLOWED_TYPES = ("Common Stock", "Preferred Stock", "ETF", "Fund", "Mutual Fund"
 _KNOWN_TICKER_OVERRIDES = {
     "LVMH": "MC.PA",
     "ASML": "ASML.AS",
+    "ASTRAZENECA": "AZN.LSE",
+    "BAYER": "BAYN.XETRA",
 }
 
 _KNOWN_NAME_OVERRIDES = {
