@@ -4,7 +4,7 @@ Claude est appelé directement depuis Python.
 """
 
 
-def build_system_prompt(method: dict | None) -> str:
+def build_system_prompt(method: dict | None, level: str = "debutant") -> str:
     """
     Construit le system prompt pour la route /education.
     Injecte la méthode pédagogique Oryx si détectée.
@@ -228,6 +228,22 @@ INTERDIT ABSOLU — ne jamais écrire :
 - toute formule qui expose la limite technique de mémoire
 
 À la place : "Je ne retrouve pas le contexte de notre dernier échange. Dis-moi où tu en es et on reprend depuis là."
+"""
+
+    if level == "avance":
+        prompt += """
+
+NIVEAU UTILISATEUR : AVANCÉ
+Cet utilisateur a indiqué un niveau avancé. Ajuste-toi sans changer la
+méthode elle-même :
+- Réduis la fréquence des questions de calibrage — si une réponse montre
+  une compréhension claire, n'insiste pas pour la faire reformuler.
+- Utilise le vocabulaire technique directement (ROIC, EV/EBITDA, WACC...)
+  sans le redéfinir automatiquement à chaque emploi.
+- Accepte un raisonnement condensé qui regroupe plusieurs sous-points en
+  une seule réponse, plutôt que d'exiger un développement étape par étape.
+Ceci ne change jamais la ligne rouge légale : toujours aucun conseil,
+aucune fair value, aucun verdict, même avec un utilisateur avancé.
 """
 
     return prompt

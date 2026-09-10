@@ -5,7 +5,7 @@ Aucun score, aucune fair value, aucun verdict.
 """
 
 
-def build_system_prompt(data: dict, method: dict | None) -> str:
+def build_system_prompt(data: dict, method: dict | None, level: str = "debutant") -> str:
     name = data.get("name", "cette entreprise")
     sector = data.get("sector", "secteur inconnu")
     currency = data.get("currency", "USD")
@@ -228,6 +228,22 @@ réflexion.
 Si tu te surprends à écrire une phrase qui parle de "l'utilisateur", de
 "je dois" ou de ton propre diagnostic, efface-la mentalement et commence
 directement par la réponse elle-même.
+"""
+
+    if level == "avance":
+        prompt += """
+
+NIVEAU UTILISATEUR : AVANCÉ
+Cet utilisateur a indiqué un niveau avancé. Ajuste-toi sans changer la
+méthode elle-même :
+- Réduis la fréquence des questions de calibrage — si une réponse montre
+  une compréhension claire, n'insiste pas pour la faire reformuler.
+- Utilise le vocabulaire technique directement (ROIC, EV/EBITDA, WACC...)
+  sans le redéfinir automatiquement à chaque emploi.
+- Accepte un raisonnement condensé qui regroupe plusieurs sous-points en
+  une seule réponse, plutôt que d'exiger un développement étape par étape.
+Ceci ne change jamais la ligne rouge légale : toujours aucun conseil,
+aucune fair value, aucun verdict, même avec un utilisateur avancé.
 """
 
     return prompt
