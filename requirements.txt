@@ -5,3 +5,5 @@ requests
 python-dotenv
 yfinance
 anthropic>=0.25.0
+sqlalchemy
+psycopg2-binary

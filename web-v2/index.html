@@ -2267,6 +2267,48 @@ function savePortfolio(positions) {
 	localStorage.setItem(PORTFOLIO_STORAGE_KEY, JSON.stringify(positions));
 }
 
+async function initOryxUserSync() {
+	const userId = getOryxUserId();
+	if (!localStorage.getItem('oryx_migrated_v1')) {
+		try {
+			const localLevel = getUserLevel();
+			await fetch(`/api/user/${userId}/level`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ level: localLevel }),
+			});
+			const localPositions = loadPortfolio();
+			for (const p of localPositions) {
+				await fetch(`/api/user/${userId}/portfolio`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						ticker: p.ticker,
+						quantity: p.quantite,
+						purchase_price: p.prixAchat ?? null,
+						target_percent: p.cible ?? null,
+						envelope: p.enveloppe ?? null,
+					}),
+				});
+			}
+		} catch (e) {}
+		localStorage.setItem('oryx_migrated_v1', 'true');
+	}
+	try {
+		const res = await fetch(`/api/user/${userId}`);
+		const data = await res.json();
+		if (data && data.level) {
+			localStorage.setItem('oryx_level', data.level);
+			document.querySelectorAll('.level-btn').forEach(b => b.classList.toggle('active', b.dataset.level === data.level));
+		}
+		if (data && Array.isArray(data.portfolio)) {
+			portfolioPositions = data.portfolio;
+			savePortfolio(portfolioPositions);
+			renderPortfolio();
+		}
+	} catch (e) {}
+}
+
 let portfolioPositions = loadPortfolio();
 let portfolioQuotes = {};
 
@@ -2306,21 +2348,32 @@ function portfolioAddFormHTML() {
 function wirePortfolioAddForm() {
 	const btn = document.getElementById('pf-add-btn');
 	if (!btn) return;
-	btn.addEventListener('click', () => {
+	btn.addEventListener('click', async () => {
 		const ticker = document.getElementById('pf-ticker').value.trim().toUpperCase();
 		const quantite = parseFloat(document.getElementById('pf-quantite').value);
 		const prixAchatRaw = parseFloat(document.getElementById('pf-prix-achat').value);
 		const cibleRaw = parseFloat(document.getElementById('pf-cible').value);
 		const enveloppeRaw = document.getElementById('pf-enveloppe').value;
 		if (!ticker || isNaN(quantite) || quantite <= 0) return;
-		portfolioPositions.push({
-			id: Date.now() + Math.random(),
+		const payload = {
 			ticker,
-			quantite,
-			prixAchat: isNaN(prixAchatRaw) ? null : prixAchatRaw,
-			cible: isNaN(cibleRaw) ? null : cibleRaw,
-			enveloppe: enveloppeRaw || null,
-		});
+			quantity: quantite,
+			purchase_price: isNaN(prixAchatRaw) ? null : prixAchatRaw,
+			target_percent: isNaN(cibleRaw) ? null : cibleRaw,
+			envelope: enveloppeRaw || null,
+		};
+		let newPosition;
+		try {
+			const res = await fetch(`/api/user/${getOryxUserId()}/portfolio`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload),
+			});
+			newPosition = await res.json();
+		} catch (e) {
+			newPosition = { id: Date.now() + Math.random(), ticker, quantite, prixAchat: payload.purchase_price, cible: payload.target_percent, enveloppe: payload.envelope };
+		}
+		portfolioPositions.push(newPosition);
 		savePortfolio(portfolioPositions);
 		renderPortfolio();
 	});
@@ -2398,8 +2451,11 @@ async function renderPortfolio() {
 	`;
 
 	wrap.querySelectorAll('.position-card-delete').forEach(btn => {
-		btn.addEventListener('click', () => {
+		btn.addEventListener('click', async () => {
 			const id = btn.dataset.id;
+			try {
+				await fetch(`/api/user/${getOryxUserId()}/portfolio/${id}`, { method: 'DELETE' });
+			} catch (e) {}
 			portfolioPositions = portfolioPositions.filter(p => String(p.id) !== id);
 			savePortfolio(portfolioPositions);
 			renderPortfolio();
@@ -2522,17 +2578,31 @@ function formatPortfolioAnalysis(text) {
 
 renderPortfolio();
 
+function getOryxUserId() {
+	let id = localStorage.getItem('oryx_user_id');
+	if (!id) {
+		id = crypto.randomUUID();
+		localStorage.setItem('oryx_user_id', id);
+	}
+	return id;
+}
 function getUserLevel() {
 	return localStorage.getItem('oryx_level') || 'debutant';
 }
 function setUserLevel(level) {
 	localStorage.setItem('oryx_level', level);
 	document.querySelectorAll('.level-btn').forEach(b => b.classList.toggle('active', b.dataset.level === level));
+	fetch(`/api/user/${getOryxUserId()}/level`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ level }),
+	}).catch(() => {});
 }
 document.querySelectorAll('.level-btn').forEach(b => {
 	b.addEventListener('click', () => setUserLevel(b.dataset.level));
 });
 setUserLevel(getUserLevel());
+initOryxUserSync();
 </script>
 
 </body>
