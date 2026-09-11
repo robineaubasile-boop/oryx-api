@@ -1861,7 +1861,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			const res = await fetch(endpoint, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(trackMethodId ? { ticker, question, context, last_method_id: lastMethodId, level: getUserLevel() } : { ticker, question, context, level: getUserLevel() }),
+				body: JSON.stringify(trackMethodId ? { ticker, question, context, last_method_id: lastMethodId, level: getUserLevel(), user_id: getOryxUserId() } : { ticker, question, context, level: getUserLevel(), user_id: getOryxUserId() }),
 			});
 			const data = await res.json();
 			hideTyping(containerId);
