@@ -21,6 +21,10 @@ from core.coach_engine import build_system_prompt as build_coach_prompt, build_u
 from core.portfolio_analysis_engine import build_system_prompt as build_portfolio_analysis_prompt, build_user_message as build_portfolio_analysis_user_message
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market
+from core.db import get_db, init_db
+from core.models import User, PortfolioPosition
+from sqlalchemy.orm import Session
+from fastapi import Depends
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -80,6 +84,12 @@ def _format_aum(value, currency="USD"):
 
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def _startup_init_db():
+    init_db()
+
 
 app.add_middleware(
 	CORSMiddleware,
@@ -776,6 +786,109 @@ def serve_web_v2():
 @app.get("/web-v2/search")
 def web_v2_search(q: str = ""):
 	return search_market(q)
+
+
+class UserLevelRequest(BaseModel):
+	level: str
+
+
+class PortfolioPositionRequest(BaseModel):
+	ticker: str
+	quantity: float
+	purchase_price: Optional[float] = None
+	target_percent: Optional[float] = None
+	envelope: Optional[str] = None
+
+
+@app.get("/api/user/{user_id}")
+def get_user(user_id: str, db: Session = Depends(get_db)):
+	user = db.query(User).filter(User.id == user_id).first()
+	if not user:
+		user = User(id=user_id, level="debutant")
+		db.add(user)
+		db.commit()
+	positions = db.query(PortfolioPosition).filter(PortfolioPosition.user_id == user_id).all()
+	return {
+		"level": user.level,
+		"portfolio": [
+			{
+				"id": p.id,
+				"ticker": p.ticker,
+				"quantite": p.quantity,
+				"prixAchat": p.purchase_price,
+				"cible": p.target_percent,
+				"enveloppe": p.envelope,
+			}
+			for p in positions
+		],
+	}
+
+
+@app.put("/api/user/{user_id}/level")
+def set_user_level(user_id: str, request: UserLevelRequest, db: Session = Depends(get_db)):
+	user = db.query(User).filter(User.id == user_id).first()
+	if not user:
+		user = User(id=user_id, level=request.level)
+		db.add(user)
+	else:
+		user.level = request.level
+	db.commit()
+	return {"success": True}
+
+
+@app.get("/api/user/{user_id}/portfolio")
+def get_portfolio(user_id: str, db: Session = Depends(get_db)):
+	positions = db.query(PortfolioPosition).filter(PortfolioPosition.user_id == user_id).all()
+	return [
+		{
+			"id": p.id,
+			"ticker": p.ticker,
+			"quantite": p.quantity,
+			"prixAchat": p.purchase_price,
+			"cible": p.target_percent,
+			"enveloppe": p.envelope,
+		}
+		for p in positions
+	]
+
+
+@app.post("/api/user/{user_id}/portfolio")
+def add_portfolio_position(user_id: str, request: PortfolioPositionRequest, db: Session = Depends(get_db)):
+	user = db.query(User).filter(User.id == user_id).first()
+	if not user:
+		user = User(id=user_id, level="debutant")
+		db.add(user)
+		db.commit()
+	position = PortfolioPosition(
+		user_id=user_id,
+		ticker=request.ticker,
+		quantity=request.quantity,
+		purchase_price=request.purchase_price,
+		target_percent=request.target_percent,
+		envelope=request.envelope,
+	)
+	db.add(position)
+	db.commit()
+	db.refresh(position)
+	return {
+		"id": position.id,
+		"ticker": position.ticker,
+		"quantite": position.quantity,
+		"prixAchat": position.purchase_price,
+		"cible": position.target_percent,
+		"enveloppe": position.envelope,
+	}
+
+
+@app.delete("/api/user/{user_id}/portfolio/{position_id}")
+def delete_portfolio_position(user_id: str, position_id: int, db: Session = Depends(get_db)):
+	position = db.query(PortfolioPosition).filter(
+		PortfolioPosition.id == position_id, PortfolioPosition.user_id == user_id
+	).first()
+	if position:
+		db.delete(position)
+		db.commit()
+	return {"success": True}
 
 
 class PortfolioAnalyzeRequest(BaseModel):
