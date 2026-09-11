@@ -23,3 +23,23 @@ class PortfolioPosition(Base):
     envelope = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CompanyAnalysis(Base):
+    __tablename__ = "company_analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    current_step = Column(String, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class InvestmentThesis(Base):
+    __tablename__ = "investment_theses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    thesis_text = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

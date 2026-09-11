@@ -297,6 +297,7 @@ class DecryptageRequest(BaseModel):
 	context: str = ""
 	last_method_id: Optional[str] = None
 	level: str = "debutant"
+	user_id: Optional[str] = None
 
 	@field_validator("ticker")
 	@classmethod
@@ -381,6 +382,40 @@ def _force_construction_these_method() -> dict:
 	}
 
 
+import re
+
+_STEP_MARKER_RE = re.compile(r"<!--ORYX_STEP:(\w+)-->")
+
+
+def _track_construction_these_progress(user_id, ticker, step, thesis_text=None):
+	"""Enregistre la progression dans construction_these. Ne doit jamais
+	faire planter la réponse principale : toute erreur est journalisée
+	et avalée silencieusement."""
+	from core.db import SessionLocal
+	from core.models import CompanyAnalysis, InvestmentThesis
+	if not SessionLocal or not user_id:
+		return
+	try:
+		session = SessionLocal()
+		try:
+			analysis = session.query(CompanyAnalysis).filter(
+				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
+			).first()
+			is_new_swot = step == "swot_final" and (not analysis or analysis.current_step != "swot_final")
+			if analysis:
+				analysis.current_step = step
+			else:
+				analysis = CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step)
+				session.add(analysis)
+			if is_new_swot and thesis_text:
+				session.add(InvestmentThesis(user_id=user_id, ticker=ticker, thesis_text=thesis_text))
+			session.commit()
+		finally:
+			session.close()
+	except Exception as e:
+		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
+
+
 @app.post("/decryptage")
 def decryptage(request: DecryptageRequest):
 	raw_ticker = request.ticker
@@ -456,6 +491,12 @@ def decryptage(request: DecryptageRequest):
 			"analysis": "Je n'ai pas bien compris, tu peux reformuler ta question ?",
 			"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
 		}
+
+	if method and method.get("method_id") == "construction_these":
+		marker_match = _STEP_MARKER_RE.search(analysis_text)
+		if marker_match:
+			analysis_text = _STEP_MARKER_RE.sub("", analysis_text).rstrip()
+			_track_construction_these_progress(request.user_id, ticker, marker_match.group(1), thesis_text=question)
 
 	return {
 		"success": True,
