@@ -410,6 +410,7 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None):
 			if is_new_swot and thesis_text:
 				session.add(InvestmentThesis(user_id=user_id, ticker=ticker, thesis_text=thesis_text))
 			session.commit()
+			print(f"[DB-TRACKING] Écrit : user={user_id}, ticker={ticker}, étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}")
 		finally:
 			session.close()
 	except Exception as e:
