@@ -26,9 +26,12 @@ _RESOLUTION_CACHE: dict = {}
 # test. Vide par défaut — à remplir ponctuellement, pas laissé actif
 # en continu.
 _DEBUG_QUERIES: set = {
-    "AMUNDI PEA S&P 500 UCITS ETF ACC",
-    "BNP PARIBAS EASY STOXX EUROPE 600 UCITS ETF CAPITALISATION",
-    "AMUNDI PEA MSCI EMERGING ESG TRANSITION UCITS ETF S-ACC",
+    "L'OREAL",
+    "TOYOTA",
+    "SIEMENS",
+    "NETFLIX",
+    "MERCK",
+    "ESSILORLUXOTTICA",
 }
 
 # Exchanges PEA-éligibles (priorité haute si entreprise européenne)
