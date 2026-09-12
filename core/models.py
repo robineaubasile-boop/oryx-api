@@ -43,3 +43,25 @@ class InvestmentThesis(Base):
     ticker = Column(String, nullable=False)
     thesis_text = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AnalysisFact(Base):
+    __tablename__ = "analysis_facts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    fact_date = Column(DateTime, default=datetime.utcnow)
+    fact_type = Column(String, nullable=False)
+    fact_value = Column(Float, nullable=True)
+
+
+class UserStatement(Base):
+    __tablename__ = "user_statements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    step = Column(String, nullable=True)
+    statement_date = Column(DateTime, default=datetime.utcnow)
+    statement_text = Column(String, nullable=False)

@@ -387,12 +387,12 @@ import re
 _STEP_MARKER_RE = re.compile(r"<!--ORYX_STEP:(\w+)-->")
 
 
-def _track_construction_these_progress(user_id, ticker, step, thesis_text=None):
+def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, data=None):
 	"""Enregistre la progression dans construction_these. Ne doit jamais
 	faire planter la réponse principale : toute erreur est journalisée
 	et avalée silencieusement."""
 	from core.db import SessionLocal
-	from core.models import CompanyAnalysis, InvestmentThesis
+	from core.models import CompanyAnalysis, InvestmentThesis, AnalysisFact, UserStatement
 	if not SessionLocal or not user_id:
 		return
 	try:
@@ -401,16 +401,34 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None):
 			analysis = session.query(CompanyAnalysis).filter(
 				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
 			).first()
+			is_new_analysis = analysis is None
 			is_new_swot = step == "swot_final" and (not analysis or analysis.current_step != "swot_final")
 			if analysis:
 				analysis.current_step = step
 			else:
 				analysis = CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step)
 				session.add(analysis)
+
+			if thesis_text:
+				session.add(UserStatement(user_id=user_id, ticker=ticker, step=step, statement_text=thesis_text))
+
 			if is_new_swot and thesis_text:
 				session.add(InvestmentThesis(user_id=user_id, ticker=ticker, thesis_text=thesis_text))
+
+			facts_written = False
+			if is_new_analysis and data:
+				fact_fields = [
+					"operating_margin", "roe", "roic", "gross_margin_latest",
+					"fcf_per_share", "revenue_growth", "net_cash", "eps",
+				]
+				for field in fact_fields:
+					value = data.get(field)
+					if value is not None:
+						session.add(AnalysisFact(user_id=user_id, ticker=ticker, fact_type=field, fact_value=value))
+						facts_written = True
+
 			session.commit()
-			print(f"[DB-TRACKING] Écrit : user={user_id}, ticker={ticker}, étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}")
+			print(f"[DB-TRACKING] Écrit : user={user_id}, ticker={ticker}, étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
 		finally:
 			session.close()
 	except Exception as e:
@@ -497,7 +515,7 @@ def decryptage(request: DecryptageRequest):
 		marker_match = _STEP_MARKER_RE.search(analysis_text)
 		if marker_match:
 			analysis_text = _STEP_MARKER_RE.sub("", analysis_text).rstrip()
-			_track_construction_these_progress(request.user_id, ticker, marker_match.group(1), thesis_text=question)
+			_track_construction_these_progress(request.user_id, ticker, marker_match.group(1), thesis_text=question, data=data)
 
 	return {
 		"success": True,
