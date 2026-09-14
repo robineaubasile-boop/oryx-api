@@ -387,6 +387,30 @@ import re
 _STEP_MARKER_RE = re.compile(r"<!--ORYX_STEP:(\w+)-->")
 
 
+def _get_latest_thesis(user_id, ticker):
+	"""Retourne la dernière thèse enregistrée pour cet utilisateur et
+	ce ticker, ou None. Ne doit jamais faire planter la réponse
+	principale : toute erreur est journalisée et avalée silencieusement."""
+	from core.db import SessionLocal
+	from core.models import InvestmentThesis
+	if not SessionLocal or not user_id:
+		return None
+	try:
+		session = SessionLocal()
+		try:
+			thesis = session.query(InvestmentThesis).filter(
+				InvestmentThesis.user_id == user_id, InvestmentThesis.ticker == ticker
+			).order_by(InvestmentThesis.created_at.desc()).first()
+			if thesis:
+				return {"text": thesis.thesis_text, "date": thesis.created_at.strftime("%d/%m/%Y")}
+			return None
+		finally:
+			session.close()
+	except Exception as e:
+		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
+		return None
+
+
 def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, data=None):
 	"""Enregistre la progression dans construction_these. Ne doit jamais
 	faire planter la réponse principale : toute erreur est journalisée
@@ -457,13 +481,15 @@ def decryptage(request: DecryptageRequest):
 	print(f"[DECRYPTAGE] Data OK pour {company_name}")
 
 	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
+	existing_thesis = None
 	if not context:
 		method = _force_construction_these_method()
+		existing_thesis = _get_latest_thesis(request.user_id, ticker)
 	else:
 		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
-	system_prompt = build_system_prompt(data, method, request.level)
+	system_prompt = build_system_prompt(data, method, request.level, existing_thesis)
 	user_message = build_user_message(
 		question if question else f"Aide-moi à analyser {company_name} ({ticker}).",
 		context

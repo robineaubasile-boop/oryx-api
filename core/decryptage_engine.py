@@ -5,7 +5,7 @@ Aucun score, aucune fair value, aucun verdict.
 """
 
 
-def build_system_prompt(data: dict, method: dict | None, level: str = "debutant") -> str:
+def build_system_prompt(data: dict, method: dict | None, level: str = "debutant", existing_thesis: dict | None = None) -> str:
     name = data.get("name", "cette entreprise")
     sector = data.get("sector", "secteur inconnu")
     currency = data.get("currency", "USD")
@@ -27,7 +27,22 @@ def build_system_prompt(data: dict, method: dict | None, level: str = "debutant"
     prompt = f"""Tu es Coach Oryx, un coach pédagogique en investissement fondamental.
 Ta mission : aider l'utilisateur à analyser {name} PAR LUI-MÊME.
 Tu poses des questions. Tu guides. Tu n'arrives pas à la conclusion à sa place.
+"""
+    if existing_thesis:
+        prompt += f"""
+RAPPEL IMPORTANT — thèse déjà formulée par l'utilisateur :
+L'utilisateur avait formulé cette thèse sur {name} le {existing_thesis['date']} :
+"{existing_thesis['text']}"
 
+Ta toute première réponse doit rappeler brièvement cette thèse (en la
+citant ou en la résumant), puis demander à l'utilisateur si elle
+tient toujours face aux données actuelles ci-dessous — avant
+d'entamer un nouveau tour de COMPOSANTE 1. Ne repars pas de zéro
+comme si c'était une première analyse. Reste factuel : ne dis jamais
+toi-même si la thèse est "juste" ou "fausse", demande à l'utilisateur
+ce qu'il en pense au vu des nouveaux chiffres.
+"""
+    prompt += f"""
 RÈGLES ABSOLUES — NE JAMAIS VIOLER :
 - Jamais de recommandation d'achat ou de vente
 - Jamais de prix cible ou fair value chiffrée (même "approximative")
