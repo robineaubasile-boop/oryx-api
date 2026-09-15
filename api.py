@@ -994,6 +994,14 @@ def get_theses(user_id: str, db: Session = Depends(get_db)):
 	return result
 
 
+@app.delete("/api/user/{user_id}/theses/{ticker}")
+def delete_thesis(user_id: str, ticker: str, db: Session = Depends(get_db)):
+	db.query(InvestmentThesis).filter(InvestmentThesis.user_id == user_id, InvestmentThesis.ticker == ticker).delete()
+	db.query(CompanyAnalysis).filter(CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker).delete()
+	db.commit()
+	return {"success": True}
+
+
 class PortfolioAnalyzeRequest(BaseModel):
 	portfolio_summary: str = ""
 
