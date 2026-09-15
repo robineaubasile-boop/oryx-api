@@ -748,6 +748,16 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	line-height: 1.6;
 }
 .portfolio-analysis p:last-child { margin-bottom: 0; }
+.theses-wrap { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.theses-empty, .theses-loading { color: var(--ink-soft); font-size: 14px; text-align: center; padding: 32px 16px; }
+.thesis-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.thesis-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.thesis-card-header h3 { font-family: 'Fraunces', Georgia, serif; font-size: 16px; margin: 0; }
+.thesis-badge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; }
+.thesis-badge.done { background: rgba(34, 139, 34, 0.12); color: #228B22; }
+.thesis-badge.in-progress { background: rgba(193, 122, 46, 0.12); color: var(--accent); }
+.thesis-text { font-size: 14px; color: var(--ink); line-height: 1.5; margin: 8px 0 4px; white-space: pre-wrap; }
+.thesis-date { font-size: 12px; color: var(--ink-faint); }
 .lesson-card {
 	background: var(--card);
 	border: 1px solid var(--line);
@@ -1585,6 +1595,10 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 		<div class="portfolio-wrap" id="portfolio-wrap"></div>
 	</div>
 
+	<div class="view" data-view="theses">
+		<div class="theses-wrap" id="theses-wrap"></div>
+	</div>
+
 	<!-- Profil -->
 	<div class="view" data-view="profil">
 		<div class="placeholder-wrap">
@@ -1624,6 +1638,9 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	</button>
 	<button class="tool-item" data-tool="portefeuille">
 		<span class="tool-icon">💼</span> Portefeuille
+	</button>
+	<button class="tool-item" data-tool="theses">
+		<span class="tool-icon">📝</span> Thèses
 	</button>
 	<button class="tool-item" data-tool="academie">
 		<span class="tool-icon">🎓</span> Académie
@@ -2305,6 +2322,7 @@ async function initOryxUserSync() {
 			portfolioPositions = data.portfolio;
 			savePortfolio(portfolioPositions);
 			renderPortfolio();
+			renderTheses();
 		}
 	} catch (e) {}
 }
@@ -2603,6 +2621,42 @@ document.querySelectorAll('.level-btn').forEach(b => {
 });
 setUserLevel(getUserLevel());
 initOryxUserSync();
+
+function escapeHtml(s) {
+	const div = document.createElement('div');
+	div.textContent = s || '';
+	return div.innerHTML;
+}
+
+async function renderTheses() {
+	const wrap = document.getElementById('theses-wrap');
+	if (!wrap) return;
+	wrap.innerHTML = '<p class="theses-loading">Chargement...</p>';
+	try {
+		const res = await fetch(`/api/user/${getOryxUserId()}/theses`);
+		const data = await res.json();
+		if (!Array.isArray(data) || data.length === 0) {
+			wrap.innerHTML = '<p class="theses-empty">Aucune analyse en cours pour le moment. Lance une analyse sur Décrypter pour commencer.</p>';
+			return;
+		}
+		const STEP_LABELS = {
+			business: 'Business', moat: 'Moat', chiffres: 'Chiffres',
+			valorisation: 'Valorisation', risques: 'Risques', swot_final: 'Terminée',
+		};
+		wrap.innerHTML = data.map(item => {
+			const isDone = item.theses && item.theses.length > 0;
+			const badge = isDone
+				? '<span class="thesis-badge done">Terminée</span>'
+				: `<span class="thesis-badge in-progress">En cours — ${escapeHtml(STEP_LABELS[item.current_step] || item.current_step)}</span>`;
+			const thesisBlock = isDone
+				? `<p class="thesis-text">${escapeHtml(item.theses[0].text)}</p><p class="thesis-date">${new Date(item.theses[0].created_at).toLocaleDateString('fr-FR')}</p>`
+				: '';
+			return `<div class="thesis-card"><div class="thesis-card-header"><h3>${escapeHtml(item.ticker)}</h3>${badge}</div>${thesisBlock}</div>`;
+		}).join('');
+	} catch (e) {
+		wrap.innerHTML = '<p class="theses-empty">Impossible de charger les thèses pour le moment.</p>';
+	}
+}
 </script>
 
 </body>

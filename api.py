@@ -22,7 +22,7 @@ from core.portfolio_analysis_engine import build_system_prompt as build_portfoli
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market
 from core.db import get_db, init_db
-from core.models import User, PortfolioPosition
+from core.models import User, PortfolioPosition, CompanyAnalysis, InvestmentThesis
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
@@ -975,6 +975,23 @@ def delete_portfolio_position(user_id: str, position_id: int, db: Session = Depe
 		db.delete(position)
 		db.commit()
 	return {"success": True}
+
+
+@app.get("/api/user/{user_id}/theses")
+def get_theses(user_id: str, db: Session = Depends(get_db)):
+	analyses = db.query(CompanyAnalysis).filter(CompanyAnalysis.user_id == user_id).all()
+	result = []
+	for a in analyses:
+		theses = db.query(InvestmentThesis).filter(
+			InvestmentThesis.user_id == user_id, InvestmentThesis.ticker == a.ticker
+		).order_by(InvestmentThesis.created_at.desc()).all()
+		result.append({
+			"ticker": a.ticker,
+			"current_step": a.current_step,
+			"updated_at": a.updated_at.isoformat() if a.updated_at else None,
+			"theses": [{"text": t.thesis_text, "created_at": t.created_at.isoformat()} for t in theses],
+		})
+	return result
 
 
 class PortfolioAnalyzeRequest(BaseModel):
