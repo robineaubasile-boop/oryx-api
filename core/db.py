@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -20,7 +20,25 @@ def init_db():
         return
     from core import models  # noqa: enregistre les modèles avant create_all
     Base.metadata.create_all(bind=engine)
+    _migrate_add_columns()
     print("[DB] Tables créées/vérifiées avec succès.")
+
+
+def _migrate_add_columns():
+    """Migrations légères pour les colonnes ajoutées après la création
+    initiale d'une table (create_all ne touche jamais une table déjà
+    existante). Volontairement sans DEFAULT SQL : les lignes existantes
+    doivent rester NULL, pas être backfillées à la date du déploiement
+    (voir CompanyAnalysis.created_at). Idempotent, ne doit jamais
+    bloquer le démarrage."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE company_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMP"
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[DB-MIGRATION ERROR] {type(e).__name__}: {e}")
 
 
 def get_db():

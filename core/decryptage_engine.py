@@ -5,7 +5,7 @@ Aucun score, aucune fair value, aucun verdict.
 """
 
 
-def build_system_prompt(data: dict, method: dict | None, level: str = "debutant", existing_thesis: dict | None = None) -> str:
+def build_system_prompt(data: dict, method: dict | None, level: str = "debutant", existing_thesis: dict | None = None, in_progress_analysis: dict | None = None) -> str:
     name = data.get("name", "cette entreprise")
     sector = data.get("sector", "secteur inconnu")
     currency = data.get("currency", "USD")
@@ -41,6 +41,67 @@ d'entamer un nouveau tour de COMPOSANTE 1. Ne repars pas de zéro
 comme si c'était une première analyse. Reste factuel : ne dis jamais
 toi-même si la thèse est "juste" ou "fausse", demande à l'utilisateur
 ce qu'il en pense au vu des nouveaux chiffres.
+"""
+    elif in_progress_analysis:
+        step_labels = {
+            "business": "Composante 1 (Business)",
+            "moat": "Composante 2 (Moat)",
+            "chiffres": "Composante 3 (Chiffres clés)",
+            "valorisation": "Composante 4 (Valorisation)",
+            "risques": "Composante 5 (Risques)",
+        }
+        next_step_labels = {
+            "business": "Composante 2 (Moat)",
+            "moat": "Composante 3 (Chiffres clés)",
+            "chiffres": "Composante 4 (Valorisation)",
+            "valorisation": "Composante 5 (Risques)",
+            "risques": "la Thèse en 3 phrases (clôture)",
+        }
+        current_step = in_progress_analysis["current_step"]
+        current_label = step_labels.get(current_step, current_step)
+        next_label = next_step_labels.get(current_step, "la suite")
+
+        recap_lines = []
+        for s in in_progress_analysis.get("statements", []):
+            label = step_labels.get(s["step"], s["step"])
+            text = (s["text"] or "").strip()
+            if text:
+                recap_lines.append(f'- ({label}) "{text}"')
+        recap_block = "\n".join(recap_lines) if recap_lines else "(pas de réponse détaillée enregistrée)"
+
+        fact_labels = {
+            "operating_margin": "Marge opérationnelle",
+            "roe": "ROE",
+            "roic": "ROIC",
+            "gross_margin_latest": "Marge brute",
+            "fcf_per_share": "FCF par action",
+            "revenue_growth": "Croissance CA (CAGR)",
+            "net_cash": "Trésorerie nette",
+            "eps": "EPS",
+        }
+        facts = in_progress_analysis.get("facts", {})
+        fact_lines = [f"- {label} : {facts[key]}" for key, label in fact_labels.items() if key in facts]
+        facts_block = "\n".join(fact_lines) if fact_lines else "(aucun instantané enregistré)"
+
+        prompt += f"""
+RAPPEL IMPORTANT — analyse déjà EN COURS sur {name} (thèse pas encore terminée) :
+L'utilisateur avait déjà commencé la construction de sa thèse sur {name}.
+Dernière étape atteinte : {current_label}.
+
+Ce qu'il avait déjà dit aux étapes précédentes (dans l'ordre) :
+{recap_block}
+
+Chiffres déjà vus lors de cette analyse (instantané pris au démarrage) :
+{facts_block}
+
+Ta toute première réponse doit :
+1. Résumer en 2-3 phrases où en était l'utilisateur (reste factuel sur
+   le contenu, n'expose jamais une limite technique de mémoire).
+2. Reprendre DIRECTEMENT à {next_label} — ne repars jamais à la
+   Composante 1 (Business) si l'historique ci-dessus montre qu'elle a
+   déjà été traitée.
+Si un des chiffres ci-dessus a changé depuis (prix, marge...), signale
+la mise à jour, mais ne redémarre pas la séquence pour autant.
 """
     prompt += f"""
 RÈGLES ABSOLUES — NE JAMAIS VIOLER :
