@@ -411,6 +411,67 @@ def _get_latest_thesis(user_id, ticker):
 		return None
 
 
+def _get_analysis_progress(user_id, ticker):
+	"""Retourne l'état d'une analyse construction_these EN COURS (pas
+	encore de thèse terminée) pour ce user+ticker, ou None si aucune
+	analyse en cours, ou si elle est déjà terminée (swot_final —
+	_get_latest_thesis prend le relai dans ce cas).
+
+	Filtre les AnalysisFact/UserStatement sur analysis.created_at :
+	décision explicite (2026-09) pour exclure les lignes orphelines
+	d'une tentative précédemment supprimée sur le même ticker (le
+	DELETE ne nettoie que InvestmentThesis + CompanyAnalysis, pas ces
+	deux tables). C'est un pis-aller assumé, pas la solution finale :
+	sans un vrai analysis_id/session_id (à introduire avec Chemin
+	Oryx), on ne peut distinguer deux tentatives qu'en excluant tout
+	ce qui précède la date de création de la tentative actuelle.
+	created_at est NULL pour les analyses créées avant cette migration
+	— dans ce cas on ne filtre pas (rien à exclure, elles n'ont jamais
+	été supprimées/recréées).
+
+	Ne doit jamais faire planter la réponse principale : toute erreur
+	est journalisée et avalée silencieusement."""
+	from core.db import SessionLocal
+	from core.models import CompanyAnalysis, AnalysisFact, UserStatement
+	if not SessionLocal or not user_id:
+		return None
+	try:
+		session = SessionLocal()
+		try:
+			analysis = session.query(CompanyAnalysis).filter(
+				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
+			).first()
+			if not analysis or not analysis.current_step or analysis.current_step == "swot_final":
+				return None
+
+			since = analysis.created_at
+
+			statements_q = session.query(UserStatement).filter(
+				UserStatement.user_id == user_id, UserStatement.ticker == ticker
+			)
+			facts_q = session.query(AnalysisFact).filter(
+				AnalysisFact.user_id == user_id, AnalysisFact.ticker == ticker
+			)
+			if since:
+				statements_q = statements_q.filter(UserStatement.statement_date >= since)
+				facts_q = facts_q.filter(AnalysisFact.fact_date >= since)
+
+			statements = statements_q.order_by(UserStatement.statement_date.asc()).all()
+			facts = facts_q.order_by(AnalysisFact.fact_date.asc()).all()
+			facts_by_type = {f.fact_type: f.fact_value for f in facts}
+
+			return {
+				"current_step": analysis.current_step,
+				"statements": [{"step": s.step, "text": s.statement_text} for s in statements if s.step],
+				"facts": facts_by_type,
+			}
+		finally:
+			session.close()
+	except Exception as e:
+		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
+		return None
+
+
 def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, data=None):
 	"""Enregistre la progression dans construction_these. Ne doit jamais
 	faire planter la réponse principale : toute erreur est journalisée
@@ -426,6 +487,7 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
 			).first()
 			is_new_analysis = analysis is None
+			previous_step = analysis.current_step if analysis else None
 			is_new_swot = step == "swot_final" and (not analysis or analysis.current_step != "swot_final")
 			if analysis:
 				analysis.current_step = step
@@ -433,8 +495,15 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 				analysis = CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step)
 				session.add(analysis)
 
-			if thesis_text:
-				session.add(UserStatement(user_id=user_id, ticker=ticker, step=step, statement_text=thesis_text))
+			# Le texte reçu à ce tour (thesis_text=question) répond à l'étape
+			# PRÉCÉDENTE (previous_step), pas à l'étape que ce marqueur (step)
+			# annonce : le marqueur reflète l'étape que la réponse de
+			# l'assistant vient de traiter/entamer, toujours un tour d'avance
+			# sur ce que l'utilisateur vient de dire. Au tout premier tour
+			# (previous_step=None), le texte reçu est le message déclencheur,
+			# pas une vraie réponse : on ne l'enregistre pas.
+			if thesis_text and previous_step:
+				session.add(UserStatement(user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text))
 
 			if is_new_swot and thesis_text:
 				session.add(InvestmentThesis(user_id=user_id, ticker=ticker, thesis_text=thesis_text))
@@ -482,14 +551,17 @@ def decryptage(request: DecryptageRequest):
 
 	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
 	existing_thesis = None
+	in_progress_analysis = None
 	if not context:
 		method = _force_construction_these_method()
 		existing_thesis = _get_latest_thesis(request.user_id, ticker)
+		if not existing_thesis:
+			in_progress_analysis = _get_analysis_progress(request.user_id, ticker)
 	else:
 		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
 	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
 
-	system_prompt = build_system_prompt(data, method, request.level, existing_thesis)
+	system_prompt = build_system_prompt(data, method, request.level, existing_thesis, in_progress_analysis)
 	user_message = build_user_message(
 		question if question else f"Aide-moi à analyser {company_name} ({ticker}).",
 		context
