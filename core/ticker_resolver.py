@@ -61,6 +61,22 @@ _KNOWN_TICKER_OVERRIDES = {
     "BAYER": "BAYN.XETRA",
     "EXXON MOBIL": "XOM.US",
     "NETFLIX": "NFLX.US",
+    # Ajoutés 2026-09 : ces 3 entreprises US se faisaient router vers leur
+    # cotation croisée XETRA (Francfort) au lieu de leur cotation primaire
+    # US quand on les recherche par nom (confirmé en prod pour Amazon :
+    # résolu en AMZ.XETRA/EUR au lieu de AMZN.US/USD, alors que le champ
+    # PrimaryTicker d'EODHD indique bien AMZN.US). Cause racine non
+    # traitée ici : XETRA fait partie de PEA_EXCHANGES et prend priorité
+    # sur "US Common Stock" dans _pick_best_match, sans distinguer une
+    # vraie place principale allemande (Siemens, BASF...) d'une simple
+    # cotation secondaire chez une boîte US. Voir aussi Microsoft/
+    # Alphabet, même symptôme. Ne pas retirer XETRA de PEA_EXCHANGES pour
+    # régler ça : ça casserait la résolution des vraies entreprises
+    # allemandes.
+    "AMAZON": "AMZN.US",
+    "MICROSOFT": "MSFT.US",
+    "GOOGLE": "GOOGL.US",
+    "ALPHABET": "GOOGL.US",
 }
 
 _KNOWN_NAME_OVERRIDES = {
