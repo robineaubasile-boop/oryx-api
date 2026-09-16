@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 from typing import Optional
 import uvicorn
 from fastapi import FastAPI
@@ -483,6 +484,7 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 	try:
 		session = SessionLocal()
 		try:
+			now = datetime.utcnow()
 			analysis = session.query(CompanyAnalysis).filter(
 				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
 			).first()
@@ -492,7 +494,7 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 			if analysis:
 				analysis.current_step = step
 			else:
-				analysis = CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step)
+				analysis = CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step, created_at=now)
 				session.add(analysis)
 
 			# Le texte reçu à ce tour (thesis_text=question) répond à l'étape
@@ -517,7 +519,7 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 				for field in fact_fields:
 					value = data.get(field)
 					if value is not None:
-						session.add(AnalysisFact(user_id=user_id, ticker=ticker, fact_type=field, fact_value=value))
+						session.add(AnalysisFact(user_id=user_id, ticker=ticker, fact_type=field, fact_value=value, fact_date=now))
 						facts_written = True
 
 			session.commit()
