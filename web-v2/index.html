@@ -762,6 +762,8 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 .thesis-card-actions { display: flex; align-items: center; gap: 8px; }
 .thesis-delete { background: none; border: none; color: var(--ink-faint); font-size: 16px; cursor: pointer; padding: 2px 6px; line-height: 1; }
 .thesis-delete:hover { color: var(--ink); }
+.thesis-resume { background: none; border: 1px solid var(--accent); color: var(--accent); font-size: 12px; font-weight: 600; border-radius: 999px; cursor: pointer; padding: 3px 10px; line-height: 1.4; }
+.thesis-resume:hover { background: var(--accent); color: #fff; }
 .thesis-detail { display: none; }
 .thesis-card.expanded .thesis-detail { display: block; }
 .thesis-text-empty { color: var(--ink-faint); font-style: italic; }
@@ -1930,28 +1932,27 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	}
 	btn.addEventListener('click', send);
 
-	if (newConvoBtn) {
-		newConvoBtn.addEventListener('click', () => {
-			histories[key] = [];
-			lastMethodId = null;
-			document.getElementById(containerId).innerHTML = '';
-			const chipRow = document.getElementById('chips-' + key);
-			if (chipRow) chipRow.style.display = '';
-			if (priceBannerId) {
-				const banner = document.getElementById(priceBannerId);
-				if (banner) {
-					banner.innerHTML = '';
-					banner.classList.remove('visible');
-				}
+	function reset() {
+		histories[key] = [];
+		lastMethodId = null;
+		document.getElementById(containerId).innerHTML = '';
+		const chipRow = document.getElementById('chips-' + key);
+		if (chipRow) chipRow.style.display = '';
+		if (priceBannerId) {
+			const banner = document.getElementById(priceBannerId);
+			if (banner) {
+				banner.innerHTML = '';
+				banner.classList.remove('visible');
 			}
-			if (nextStepWrapId) {
-				const wrap = document.getElementById(nextStepWrapId);
-				if (wrap) wrap.innerHTML = '';
-			}
-			input.focus();
-		});
+		}
+		if (nextStepWrapId) {
+			const wrap = document.getElementById(nextStepWrapId);
+			if (wrap) wrap.innerHTML = '';
+		}
+		input.focus();
 	}
-	return { send };
+	if (newConvoBtn) newConvoBtn.addEventListener('click', reset);
+	return { send, reset };
 }
 
 const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true, priceBannerId: 'price-banner-decrypter', nextStepWrapId: 'next-step-wrap-decrypter' });
@@ -2635,6 +2636,13 @@ function escapeHtml(s) {
 	return div.innerHTML;
 }
 
+function resumeThesis(ticker) {
+	showView('decrypter');
+	decrypterChat.reset();
+	document.getElementById('ticker-decrypter').value = ticker;
+	decrypterChat.send();
+}
+
 async function renderTheses() {
 	const wrap = document.getElementById('theses-wrap');
 	if (!wrap) return;
@@ -2658,13 +2666,20 @@ async function renderTheses() {
 			const thesisBlock = isDone
 				? `<p class="thesis-text">${escapeHtml(item.theses[0].text)}</p><p class="thesis-date">${new Date(item.theses[0].created_at).toLocaleDateString('fr-FR')}</p>`
 				: '<p class="thesis-text thesis-text-empty">Pas encore de thèse formulée pour cette analyse.</p>';
-			return `<div class="thesis-card"><div class="thesis-card-header"><h3>${escapeHtml(item.ticker)}</h3><div class="thesis-card-actions">${badge}<button class="thesis-delete" data-ticker="${escapeHtml(item.ticker)}" aria-label="Supprimer">✕</button></div></div><div class="thesis-detail">${thesisBlock}</div></div>`;
+			return `<div class="thesis-card"><div class="thesis-card-header"><h3>${escapeHtml(item.ticker)}</h3><div class="thesis-card-actions">${badge}<button class="thesis-resume" data-ticker="${escapeHtml(item.ticker)}">Reprendre</button><button class="thesis-delete" data-ticker="${escapeHtml(item.ticker)}" aria-label="Supprimer">✕</button></div></div><div class="thesis-detail">${thesisBlock}</div></div>`;
 		}).join('');
 
 		wrap.querySelectorAll('.thesis-card-header').forEach(header => {
 			header.addEventListener('click', (e) => {
-				if (e.target.classList.contains('thesis-delete')) return;
+				if (e.target.classList.contains('thesis-delete') || e.target.classList.contains('thesis-resume')) return;
 				header.closest('.thesis-card').classList.toggle('expanded');
+			});
+		});
+
+		wrap.querySelectorAll('.thesis-resume').forEach(btn => {
+			btn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				resumeThesis(btn.dataset.ticker);
 			});
 		});
 
