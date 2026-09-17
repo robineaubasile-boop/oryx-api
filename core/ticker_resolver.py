@@ -265,6 +265,26 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
             best_key = max(pool, key=lambda k: _breadth(pool[k]))
             filtered = pool[best_key]
 
+    # --- Étape 1.5 : une fois LA bonne entreprise identifiée
+    # ci-dessus, si elle a sa PROPRE cotation "Common Stock" sur une
+    # place US qui n'est pas un certificat ADR/OTC (voir
+    # _is_likely_otc_adr, suffixe Y/F), elle a un accès direct au
+    # marché américain — pas seulement un certificat dérivé. On la
+    # traite alors comme prioritaire même si prefer_us=False, sinon sa
+    # propre cotation croisée XETRA/PEA la devance systématiquement.
+    # Bug trouvé sur Amazon/Microsoft/Alphabet en 2026-09 (voir
+    # _KNOWN_TICKER_OVERRIDES, laissés en place en filet de sécurité).
+    # Ne concerne PAS les entreprises dont le seul accès US est un ADR
+    # (Siemens "SIEGY", Merck KGaA "MKGAY"...) : ces codes finissent en
+    # Y/F et restent exclus par _is_likely_otc_adr, donc leur priorité
+    # PEA reste intacte. Vérifié par tests/test_ticker_resolver.py.
+    effective_prefer_us = prefer_us or any(
+        item.get("Exchange") == "US"
+        and item.get("Type") == "Common Stock"
+        and not _is_likely_otc_adr(item.get("Code", ""))
+        for item in filtered
+    )
+
     # --- Étape 2 : parmi les cotations de LA bonne entreprise (ou de
     # tous les candidats si l'identité n'a pas pu être départagée),
     # choisir la cotation la plus pertinente pour notre audience.
@@ -274,12 +294,8 @@ def _pick_best_match(results: list, prefer_us: bool = False, query: str = "") ->
         code = item.get("Code", "")
         item_type = item.get("Type", "")
 
-        # Priorité 0 : si prefer_us est demandé et que ce résultat est
-        # une action US authentique, elle passe avant même la priorité
-        # PEA (cas des entreprises US résolues via une recherche par
-        # nom, où on veut le vrai ticker US plutôt qu'une cotation
-        # secondaire européenne comme Frankfurt).
-        if prefer_us and exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
+        # Priorité 0 : voir effective_prefer_us ci-dessus.
+        if effective_prefer_us and exchange == "US" and item_type == "Common Stock" and not _is_likely_otc_adr(code):
             base_rank = 0
 
         # Priorité 1 : cotation sur une place PEA-éligible — c'est le
