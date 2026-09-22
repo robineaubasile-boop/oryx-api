@@ -84,6 +84,14 @@ def _quote_with_eod_fallback(ticker: str) -> dict | None:
     return None
 
 
+def get_eur_usd_rate() -> float | None:
+    """Taux EUR->USD (nombre de USD pour 1 EUR), via EODHD FOREX. None si
+    indisponible — l'appelant doit renoncer à la conversion plutôt que
+    d'inventer un taux."""
+    quote = _quote_with_eod_fallback("EURUSD.FOREX")
+    return quote["price"] if quote else None
+
+
 def search_market(raw_query: str) -> dict:
     """Recherche un ticker (action, ETF ou crypto) et retourne prix + variation bruts."""
     cleaned = (raw_query or "").strip().upper()

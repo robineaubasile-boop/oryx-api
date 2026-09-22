@@ -655,14 +655,27 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	appearance: none;
 	padding: 2px 6px;
 }
+.position-card-header { cursor: pointer; }
+.position-card-summary {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	margin-top: 10px;
+	font-family: 'IBM Plex Mono', monospace;
+}
+.position-card-summary-value { font-size: 17px; font-weight: 600; color: var(--ink); }
+.position-card-summary-pct { font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+.position-card-summary-pct.up { color: var(--success); }
+.position-card-summary-pct.down { color: var(--alert); }
 .position-stats-grid {
 	margin-top: 14px;
 	padding-top: 14px;
 	border-top: 1px solid var(--line);
-	display: grid;
+	display: none;
 	grid-template-columns: repeat(2, 1fr);
 	gap: 10px 16px;
 }
+.position-card.expanded .position-stats-grid { display: grid; }
 .position-stat-item { display: flex; justify-content: space-between; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; }
 .position-stat-item .position-stat-label { color: var(--ink-faint); }
 .position-stat-value { color: var(--ink-soft); }
@@ -2645,6 +2658,26 @@ async function fetchPortfolioQuote(ticker) {
 	return null;
 }
 
+async function fetchFxRate() {
+	try {
+		const res = await fetch('/web-v2/fx-rate');
+		const data = await res.json();
+		return (data.success && data.eur_usd) ? data.eur_usd : null;
+	} catch (e) {}
+	return null;
+}
+
+// Convertit un montant en EUR. EUR -> inchangé. USD -> divisé par le taux
+// EUR/USD (nombre de USD pour 1 EUR). Toute autre devise (GBP, CHF...) ou
+// taux indisponible -> null : on exclut la position du total plutôt que
+// de mélanger des devises sans conversion connue.
+function toEur(amount, currency, fxRate) {
+	if (amount == null) return null;
+	if (!currency || currency === 'EUR') return amount;
+	if (currency === 'USD') return (fxRate != null) ? amount / fxRate : null;
+	return null;
+}
+
 function pfFmt(v, decimals = 2) {
 	return (v != null && !isNaN(v)) ? v.toFixed(decimals) : '—';
 }
@@ -2717,24 +2750,34 @@ async function renderPortfolio() {
 	wrap.innerHTML = `<div class="portfolio-loading">Chargement des cours...</div>`;
 
 	const uniqueTickers = [...new Set(portfolioPositions.map(p => p.ticker))];
-	const results = await Promise.all(uniqueTickers.map(t => fetchPortfolioQuote(t)));
+	const [results, fxRate] = await Promise.all([
+		Promise.all(uniqueTickers.map(t => fetchPortfolioQuote(t))),
+		fetchFxRate(),
+	]);
 	uniqueTickers.forEach((t, i) => { portfolioQuotes[t] = results[i]; });
 
 	let totalValue = 0;
 	portfolioPositions.forEach(p => {
 		const q = portfolioQuotes[p.ticker];
-		if (q && q.price != null) totalValue += p.quantite * q.price;
+		if (q && q.price != null) {
+			const valeurEur = toEur(p.quantite * q.price, q.currency, fxRate);
+			if (valeurEur != null) totalValue += valeurEur;
+		}
 	});
 
 	const cardsHTML = portfolioPositions.map(p => {
 		const q = portfolioQuotes[p.ticker];
 		const prixActuel = q ? q.price : null;
 		const valeur = (prixActuel != null) ? p.quantite * prixActuel : null;
+		const valeurEur = valeur != null ? toEur(valeur, q ? q.currency : null, fxRate) : null;
 		const gainPct = (prixActuel != null && p.prixAchat) ? ((prixActuel - p.prixAchat) / p.prixAchat) * 100 : null;
 		const investi = (p.prixAchat != null) ? p.quantite * p.prixAchat : null;
 		const gainAbs = (valeur != null && investi != null) ? (valeur - investi) : null;
-		const reparReelle = (valeur != null && totalValue > 0) ? (valeur / totalValue) * 100 : null;
+		const reparReelle = (valeurEur != null && totalValue > 0) ? (valeurEur / totalValue) * 100 : null;
 		const ecart = (reparReelle != null && p.cible != null) ? (reparReelle - p.cible) : null;
+		const cibleBlock = p.cible != null ? `
+					<div class="position-stat-item"><span class="position-stat-label">Cible</span><span class="position-stat-value">${pfFmt(p.cible, 1)}%</span></div>
+					<div class="position-stat-item"><span class="position-stat-label">Écart vs Cible</span><span class="position-stat-value ${ecart != null ? (ecart >= 0 ? 'up' : 'down') : ''}">${ecart != null ? (ecart >= 0 ? '+' : '') + pfFmt(ecart, 1) + '%' : '—'}</span></div>` : '';
 
 		return `
 			<div class="position-card">
@@ -2745,6 +2788,10 @@ async function renderPortfolio() {
 					</div>
 					<button class="position-card-delete" data-id="${p.id}">✕</button>
 				</div>
+				<div class="position-card-summary">
+					<span class="position-card-summary-value">${valeurEur != null ? pfFmt(valeurEur) + ' €' : '—'}</span>
+					<span class="position-card-summary-pct ${gainPct != null ? (gainPct >= 0 ? 'up' : 'down') : ''}">${gainPct != null ? (gainPct >= 0 ? '+' : '') + pfFmt(gainPct, 1) + '%' : '—'}</span>
+				</div>
 				<div class="position-stats-grid">
 					<div class="position-stat-item"><span class="position-stat-label">Quantité</span><span class="position-stat-value">${pfFmt(p.quantite, 4)}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Prix d'achat</span><span class="position-stat-value">${p.prixAchat != null ? pfFmt(p.prixAchat) : '—'}</span></div>
@@ -2753,9 +2800,8 @@ async function renderPortfolio() {
 					<div class="position-stat-item"><span class="position-stat-label">Valeur</span><span class="position-stat-value">${valeur != null ? pfFmt(valeur) : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Plus-value</span><span class="position-stat-value ${gainAbs != null ? (gainAbs >= 0 ? 'up' : 'down') : ''}">${gainAbs != null ? (gainAbs >= 0 ? '+' : '') + pfFmt(gainAbs) : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Plus-value %</span><span class="position-stat-value ${gainPct != null ? (gainPct >= 0 ? 'up' : 'down') : ''}">${gainPct != null ? (gainPct >= 0 ? '+' : '') + pfFmt(gainPct, 1) + '%' : '—'}</span></div>
-					<div class="position-stat-item"><span class="position-stat-label">Cible</span><span class="position-stat-value">${p.cible != null ? pfFmt(p.cible, 1) + '%' : '—'}</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Réel</span><span class="position-stat-value">${reparReelle != null ? pfFmt(reparReelle, 1) + '%' : '—'}</span></div>
-					<div class="position-stat-item"><span class="position-stat-label">Écart vs Cible</span><span class="position-stat-value ${ecart != null ? (ecart >= 0 ? 'up' : 'down') : ''}">${ecart != null ? (ecart >= 0 ? '+' : '') + pfFmt(ecart, 1) + '%' : '—'}</span></div>
+					${cibleBlock}
 				</div>
 			</div>
 		`;
@@ -2764,13 +2810,20 @@ async function renderPortfolio() {
 	wrap.innerHTML = `
 		<div class="portfolio-summary">
 			<div class="portfolio-summary-label">Valeur totale</div>
-			<div class="portfolio-summary-value mono">${pfFmt(totalValue)}</div>
+			<div class="portfolio-summary-value mono">${pfFmt(totalValue)} €</div>
 		</div>
 		<button class="portfolio-analyze-btn" id="pf-analyze-btn">Analyser mon portefeuille</button>
 		<div id="pf-analysis-zone"></div>
 		${cardsHTML}
 		${portfolioAddFormHTML()}
 	`;
+
+	wrap.querySelectorAll('.position-card-header').forEach(header => {
+		header.addEventListener('click', (e) => {
+			if (e.target.classList.contains('position-card-delete')) return;
+			header.closest('.position-card').classList.toggle('expanded');
+		});
+	});
 
 	wrap.querySelectorAll('.position-card-delete').forEach(btn => {
 		btn.addEventListener('click', async () => {
