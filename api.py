@@ -21,7 +21,7 @@ from core.education_engine import build_system_prompt as build_education_prompt,
 from core.coach_engine import build_system_prompt as build_coach_prompt, build_user_message as build_coach_user_message
 from core.portfolio_analysis_engine import build_system_prompt as build_portfolio_analysis_prompt, build_user_message as build_portfolio_analysis_user_message
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
-from core.market_lookup import search_market
+from core.market_lookup import search_market, get_eur_usd_rate
 from core.db import get_db, init_db
 from core.models import User, PortfolioPosition, CompanyAnalysis, InvestmentThesis
 from sqlalchemy.orm import Session
@@ -946,6 +946,14 @@ def serve_web_v2():
 @app.get("/web-v2/search")
 def web_v2_search(q: str = ""):
 	return search_market(q)
+
+
+@app.get("/web-v2/fx-rate")
+def web_v2_fx_rate():
+	rate = get_eur_usd_rate()
+	if rate is None:
+		return {"success": False}
+	return {"success": True, "eur_usd": rate}
 
 
 class UserLevelRequest(BaseModel):
