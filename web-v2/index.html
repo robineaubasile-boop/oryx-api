@@ -655,6 +655,32 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 	appearance: none;
 	padding: 2px 6px;
 }
+.position-card-actions { display: flex; gap: 2px; }
+.position-card-edit {
+	background: none;
+	border: none;
+	color: var(--ink-faint);
+	font-size: 14px;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+	padding: 2px 6px;
+}
+.position-edit-actions { display: flex; gap: 8px; margin-top: 4px; }
+.position-edit-cancel {
+	flex: 1;
+	padding: 12px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: none;
+	color: var(--ink-soft);
+	font-family: 'Inter', sans-serif;
+	font-size: 13.5px;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+.position-edit-save { flex: 1; }
 .position-card-header { cursor: pointer; }
 .position-card-summary {
 	display: flex;
@@ -2645,6 +2671,7 @@ async function initOryxUserSync() {
 }
 
 let portfolioPositions = loadPortfolio();
+let editingPositionId = null;
 let portfolioQuotes = {};
 
 async function fetchPortfolioQuote(ticker) {
@@ -2780,6 +2807,33 @@ async function renderPortfolio() {
 					<div class="position-stat-item"><span class="position-stat-label">Cible</span><span class="position-stat-value">${pfFmt(p.cible, 1)}%</span></div>
 					<div class="position-stat-item"><span class="position-stat-label">Écart vs Cible</span><span class="position-stat-value ${ecart != null ? (ecart >= 0 ? 'up' : 'down') : ''}">${ecart != null ? (ecart >= 0 ? '+' : '') + pfFmt(ecart, 1) + '%' : '—'}</span></div>` : '';
 
+		if (String(p.id) === editingPositionId) {
+			return `
+				<div class="position-card expanded">
+					<div class="position-card-header">
+						<div>
+							<div class="position-card-name">${q ? q.name : p.ticker}</div>
+							<div class="position-card-ticker mono">${p.ticker}${q ? ' · ' + q.currency : ''}</div>
+						</div>
+					</div>
+					<div class="portfolio-add-form">
+						<input type="number" id="pf-edit-quantite-${p.id}" placeholder="Quantité" step="any" value="${p.quantite}">
+						<input type="number" id="pf-edit-prix-achat-${p.id}" placeholder="Prix d'achat (optionnel)" step="any" value="${p.prixAchat ?? ''}">
+						<input type="number" id="pf-edit-cible-${p.id}" placeholder="Cible en % (optionnel)" step="any" value="${p.cible ?? ''}">
+						<select id="pf-edit-enveloppe-${p.id}">
+							<option value="" ${!p.enveloppe ? 'selected' : ''}>Enveloppe (optionnel)</option>
+							<option value="PEA" ${p.enveloppe === 'PEA' ? 'selected' : ''}>PEA</option>
+							<option value="CTO" ${p.enveloppe === 'CTO' ? 'selected' : ''}>CTO</option>
+						</select>
+						<div class="position-edit-actions">
+							<button class="portfolio-add-btn position-edit-save" data-id="${p.id}">Enregistrer</button>
+							<button class="position-edit-cancel" data-id="${p.id}">Annuler</button>
+						</div>
+					</div>
+				</div>
+			`;
+		}
+
 		return `
 			<div class="position-card">
 				<div class="position-card-header">
@@ -2787,7 +2841,10 @@ async function renderPortfolio() {
 						<div class="position-card-name">${q ? q.name : p.ticker}</div>
 						<div class="position-card-ticker mono">${p.ticker}${q ? ' · ' + q.currency : ''}${p.enveloppe ? ' · ' + p.enveloppe : ''}</div>
 					</div>
-					<button class="position-card-delete" data-id="${p.id}">✕</button>
+					<div class="position-card-actions">
+						<button class="position-card-edit" data-id="${p.id}">✎</button>
+						<button class="position-card-delete" data-id="${p.id}">✕</button>
+					</div>
 				</div>
 				<div class="position-card-summary">
 					<span class="position-card-summary-value">${valeurEur != null ? pfFmt(valeurEur) + ' €' : '—'}</span>
@@ -2821,7 +2878,7 @@ async function renderPortfolio() {
 
 	wrap.querySelectorAll('.position-card-header').forEach(header => {
 		header.addEventListener('click', (e) => {
-			if (e.target.classList.contains('position-card-delete')) return;
+			if (e.target.classList.contains('position-card-delete') || e.target.classList.contains('position-card-edit')) return;
 			header.closest('.position-card').classList.toggle('expanded');
 		});
 	});
@@ -2834,6 +2891,51 @@ async function renderPortfolio() {
 			} catch (e) {}
 			portfolioPositions = portfolioPositions.filter(p => String(p.id) !== id);
 			savePortfolio(portfolioPositions);
+			renderPortfolio();
+		});
+	});
+	wrap.querySelectorAll('.position-card-edit').forEach(btn => {
+		btn.addEventListener('click', () => {
+			editingPositionId = btn.dataset.id;
+			renderPortfolio();
+		});
+	});
+	wrap.querySelectorAll('.position-edit-cancel').forEach(btn => {
+		btn.addEventListener('click', () => {
+			editingPositionId = null;
+			renderPortfolio();
+		});
+	});
+	wrap.querySelectorAll('.position-edit-save').forEach(btn => {
+		btn.addEventListener('click', async () => {
+			const id = btn.dataset.id;
+			const position = portfolioPositions.find(p => String(p.id) === id);
+			if (!position) return;
+			const quantite = parseFloat(document.getElementById(`pf-edit-quantite-${id}`).value);
+			const prixAchatRaw = parseFloat(document.getElementById(`pf-edit-prix-achat-${id}`).value);
+			const cibleRaw = parseFloat(document.getElementById(`pf-edit-cible-${id}`).value);
+			const enveloppeRaw = document.getElementById(`pf-edit-enveloppe-${id}`).value;
+			if (isNaN(quantite) || quantite <= 0) return;
+			const payload = {
+				ticker: position.ticker,
+				quantity: quantite,
+				purchase_price: isNaN(prixAchatRaw) ? null : prixAchatRaw,
+				target_percent: isNaN(cibleRaw) ? null : cibleRaw,
+				envelope: enveloppeRaw || null,
+			};
+			try {
+				await fetch(`/api/user/${getOryxUserId()}/portfolio/${id}`, {
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload),
+				});
+			} catch (e) {}
+			position.quantite = quantite;
+			position.prixAchat = payload.purchase_price;
+			position.cible = payload.target_percent;
+			position.enveloppe = payload.envelope;
+			savePortfolio(portfolioPositions);
+			editingPositionId = null;
 			renderPortfolio();
 		});
 	});
