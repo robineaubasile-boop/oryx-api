@@ -1,0 +1,10 @@
+{
+  "name": "oryx-web-v2-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}
