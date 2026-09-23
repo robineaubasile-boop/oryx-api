@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 from typing import Optional
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1057,6 +1057,30 @@ def delete_portfolio_position(user_id: str, position_id: int, db: Session = Depe
 		db.delete(position)
 		db.commit()
 	return {"success": True}
+
+
+@app.put("/api/user/{user_id}/portfolio/{position_id}")
+def update_portfolio_position(user_id: str, position_id: int, request: PortfolioPositionRequest, db: Session = Depends(get_db)):
+	position = db.query(PortfolioPosition).filter(
+		PortfolioPosition.id == position_id, PortfolioPosition.user_id == user_id
+	).first()
+	if not position:
+		raise HTTPException(status_code=404, detail="Position introuvable.")
+	position.ticker = request.ticker
+	position.quantity = request.quantity
+	position.purchase_price = request.purchase_price
+	position.target_percent = request.target_percent
+	position.envelope = request.envelope
+	db.commit()
+	db.refresh(position)
+	return {
+		"id": position.id,
+		"ticker": position.ticker,
+		"quantite": position.quantity,
+		"prixAchat": position.purchase_price,
+		"cible": position.target_percent,
+		"enveloppe": position.envelope,
+	}
 
 
 @app.get("/api/user/{user_id}/theses")
