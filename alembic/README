@@ -48,6 +48,52 @@ NE JAMAIS lancer `alembic upgrade` contre elle à ce stade.
          alembic stamp 0001_current_oryx_baseline
 
 
+T0-C : préflight de schéma (scripts/schema_preflight.py)
+----------------------------------------------------------
+
+scripts/schema_preflight.py compare le schéma PostgreSQL réellement
+présent en base au manifeste figé de 0001_current_oryx_baseline (6 tables
+métier : users, portfolio_positions, company_analyses, investment_theses,
+analysis_facts, user_statements). Ce manifeste est une recopie explicite
+de la baseline dans le script — il n'est jamais dérivé automatiquement
+d'un futur état de core/models.py.
+
+Règles :
+
+  - Strictement READ-ONLY. La connexion force
+    `default_transaction_read_only=on`, exécute `SET TRANSACTION READ
+    ONLY`, puis vérifie via `SHOW transaction_read_only` que PostgreSQL a
+    bien confirmé le mode read-only avant toute introspection. Le script
+    refuse de continuer si ce n'est pas le cas. Aucune ligne métier n'est
+    jamais lue (aucun SELECT/COUNT sur users, portfolio_positions,
+    company_analyses, investment_theses, analysis_facts,
+    user_statements) : uniquement des métadonnées de catalogue système
+    (tables, colonnes, types, PK, FK, index, contraintes UNIQUE/CHECK) via
+    `sqlalchemy.inspect()`. DATABASE_URL n'est jamais affiché ni loggé.
+  - À exécuter AVANT tout `alembic stamp` de production.
+  - MATCH ("SCHEMA MATCH — production compatible avec
+    0001_current_oryx_baseline", exit code 0) autorise seulement à
+    *envisager* T0-D — ce script ne fait lui-même jamais de stamp.
+  - MISMATCH ("SCHEMA MISMATCH" + liste explicite des écarts, exit code 1)
+    interdit tout stamp tant que l'écart n'a pas été compris et traité.
+  - Une erreur opérationnelle (connexion impossible, mode read-only non
+    confirmé, DATABASE_URL absent, dialecte non PostgreSQL...) sort en
+    exit code 2, avec un message qui ne contient jamais de secret.
+  - Si la table `alembic_version` existe déjà, le préflight s'arrête en
+    MISMATCH et l'indique explicitement (Alembic a peut-être déjà touché
+    cette base, hors de ce chantier).
+
+Exécution locale (offline, sans DATABASE_URL réel) :
+
+    python -m pytest tests/test_schema_preflight.py
+
+Exécution réelle contre Railway — méthode préférée : depuis le conteneur
+backend Railway lui-même (où DATABASE_URL est déjà l'URL interne
+correcte), jamais depuis un poste local :
+
+    railway ssh --service <backend-service> -- python scripts/schema_preflight.py
+
+
 Transition
 ----------
 
