@@ -20,6 +20,7 @@ from scripts.schema_preflight import (
 	PreflightError,
 	PreflightResult,
 	collect_raw_snapshot,
+	column_has_unexpected_server_default,
 	column_is_autoincrement,
 	compare_snapshot,
 	format_report,
@@ -53,10 +54,10 @@ def _pk(*columns):
 	return {"constrained_columns": list(columns), "name": None}
 
 
-def _fk(columns, ref_table, ref_columns):
+def _fk(columns, ref_table, ref_columns, ref_schema="public"):
 	return {
 		"constrained_columns": list(columns),
-		"referred_schema": "public",
+		"referred_schema": ref_schema,
 		"referred_table": ref_table,
 		"referred_columns": list(ref_columns),
 		"name": None,
@@ -220,6 +221,67 @@ def test_wrong_type():
 	assert "wrong type: users.level (expected STRING, got INTEGER)" in mismatches
 
 
+def test_text_instead_of_varchar_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["type"] = pg.TEXT()
+	mismatches = _mismatches_for(tables)
+	assert "wrong type: users.level (expected STRING, got UNKNOWN:TEXT)" in mismatches
+
+
+def test_char_instead_of_varchar_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["type"] = pg.CHAR(10)
+	mismatches = _mismatches_for(tables)
+	assert "wrong type: users.level (expected STRING, got UNKNOWN:CHAR)" in mismatches
+
+
+def test_bigint_instead_of_integer_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "id":
+			c["type"] = pg.BIGINT()
+	mismatches = _mismatches_for(tables)
+	assert "wrong type: portfolio_positions.id (expected INTEGER, got UNKNOWN:BIGINT)" in mismatches
+
+
+def test_smallint_instead_of_integer_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "id":
+			c["type"] = pg.SMALLINT()
+	mismatches = _mismatches_for(tables)
+	assert "wrong type: portfolio_positions.id (expected INTEGER, got UNKNOWN:SMALLINT)" in mismatches
+
+
+def test_real_instead_of_double_precision_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "quantity":
+			c["type"] = pg.REAL()
+	mismatches = _mismatches_for(tables)
+	assert "wrong type: portfolio_positions.quantity (expected FLOAT, got UNKNOWN:REAL)" in mismatches
+
+
+def test_double_precision_pg_specific_type_matches_expected_float():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "quantity":
+			c["type"] = pg.DOUBLE_PRECISION()
+	assert _mismatches_for(tables) == []
+
+
+def test_varchar_pg_specific_type_matches_expected_string():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["type"] = pg.VARCHAR()
+	assert _mismatches_for(tables) == []
+
+
 def test_wrong_nullable():
 	tables = _perfect_tables()
 	for c in tables["users"]["columns"]:
@@ -253,15 +315,33 @@ def test_missing_fk():
 	tables = _perfect_tables()
 	tables["portfolio_positions"]["foreign_keys"] = []
 	mismatches = _mismatches_for(tables)
-	assert "missing FK: portfolio_positions.user_id -> users.id" in mismatches
+	assert "missing FK: portfolio_positions.user_id -> public.users.id" in mismatches
 
 
 def test_incorrect_fk_target_is_missing_and_unexpected():
 	tables = _perfect_tables()
 	tables["portfolio_positions"]["foreign_keys"] = [_fk(["user_id"], "wrong_table", ["id"])]
 	mismatches = _mismatches_for(tables)
-	assert "missing FK: portfolio_positions.user_id -> users.id" in mismatches
-	assert "unexpected FK: portfolio_positions.user_id -> wrong_table.id" in mismatches
+	assert "missing FK: portfolio_positions.user_id -> public.users.id" in mismatches
+	assert "unexpected FK: portfolio_positions.user_id -> public.wrong_table.id" in mismatches
+
+
+def test_fk_pointing_to_a_different_schema_is_mismatch():
+	tables = _perfect_tables()
+	tables["portfolio_positions"]["foreign_keys"] = [
+		_fk(["user_id"], "users", ["id"], ref_schema="other_schema")
+	]
+	mismatches = _mismatches_for(tables)
+	assert "missing FK: portfolio_positions.user_id -> public.users.id" in mismatches
+	assert "unexpected FK: portfolio_positions.user_id -> other_schema.users.id" in mismatches
+
+
+def test_fk_referred_schema_none_is_equivalent_to_public():
+	tables = _perfect_tables()
+	# SQLAlchemy renvoie parfois referred_schema=None quand la table
+	# référencée est dans le même schéma que la table inspectée.
+	tables["portfolio_positions"]["foreign_keys"] = [_fk(["user_id"], "users", ["id"], ref_schema=None)]
+	assert _mismatches_for(tables) == []
 
 
 # --------------------------------------------------------------------------
@@ -289,6 +369,65 @@ def test_unexpected_check():
 	]
 	mismatches = _mismatches_for(tables)
 	assert any(m.startswith("unexpected check: users:") for m in mismatches)
+
+
+# --------------------------------------------------------------------------
+# Server defaults — la baseline n'en déclare aucun hors auto-incrément
+# --------------------------------------------------------------------------
+
+def test_unexpected_literal_default_on_business_column_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["default"] = "'debutant'::character varying"
+	mismatches = _mismatches_for(tables)
+	assert "unexpected server default: users.level" in mismatches
+
+
+def test_unexpected_now_default_on_business_column_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "created_at":
+			c["default"] = "now()"
+	mismatches = _mismatches_for(tables)
+	assert "unexpected server default: users.created_at" in mismatches
+
+
+def test_unexpected_default_on_non_id_column_of_another_table_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "ticker":
+			c["default"] = "'AAPL'::character varying"
+	mismatches = _mismatches_for(tables)
+	assert "unexpected server default: portfolio_positions.ticker" in mismatches
+
+
+def test_no_default_anywhere_matches():
+	assert _mismatches_for(_perfect_tables()) == []
+
+
+def test_nextval_default_on_autoincrement_id_is_not_an_unexpected_default():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "id":
+			assert c["default"] == "nextval('id_seq'::regclass)"  # posé par la fixture
+	assert column_has_unexpected_server_default(
+		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id")
+	) is False
+	assert _mismatches_for(tables) == []
+
+
+def test_identity_on_autoincrement_id_is_not_an_unexpected_default():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "id":
+			c["autoincrement"] = False
+			c["default"] = None
+			c["identity"] = {"always": False}
+	assert column_has_unexpected_server_default(
+		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id")
+	) is False
+	assert _mismatches_for(tables) == []
 
 
 # --------------------------------------------------------------------------
@@ -387,6 +526,26 @@ def test_autoincrement_via_sequence_default():
 
 def test_autoincrement_absent():
 	assert column_is_autoincrement({"autoincrement": False, "default": None, "identity": None}) is False
+
+
+# --------------------------------------------------------------------------
+# column_has_unexpected_server_default()
+# --------------------------------------------------------------------------
+
+def test_no_default_is_not_unexpected():
+	assert column_has_unexpected_server_default({"default": None}) is False
+
+
+def test_nextval_default_is_not_unexpected():
+	assert column_has_unexpected_server_default({"default": "nextval('foo_id_seq'::regclass)"}) is False
+
+
+def test_literal_default_is_unexpected():
+	assert column_has_unexpected_server_default({"default": "'debutant'::character varying"}) is True
+
+
+def test_now_default_is_unexpected():
+	assert column_has_unexpected_server_default({"default": "now()"}) is True
 
 
 # --------------------------------------------------------------------------

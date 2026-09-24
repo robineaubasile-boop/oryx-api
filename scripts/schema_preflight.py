@@ -78,22 +78,38 @@ EXPECTED_SCHEMA = "public"
 FORBIDDEN_TABLES = {"alembic_version"}
 
 
+# Comparaison par NOM DE CLASSE EXACT (pas isinstance) : Integer est la
+# classe de base commune à INTEGER/BIGINT/SMALLINT, Float à
+# FLOAT/DOUBLE_PRECISION/REAL, String à VARCHAR/CHAR/TEXT — un isinstance()
+# accepterait donc silencieusement des types PostgreSQL réellement
+# différents de ceux de la baseline. La baseline (sa.String()/sa.Integer()/
+# sa.Float()) est créée SANS longueur/précision explicite ; sur PostgreSQL
+# cela produit respectivement VARCHAR (sans longueur), INTEGER et DOUBLE
+# PRECISION — jamais TEXT, CHAR, BIGINT, SMALLINT ou REAL, qui doivent donc
+# être rejetés comme un type différent, pas acceptés comme "compatibles".
+_STRING_TYPE_NAMES = {"String", "VARCHAR"}
+_INTEGER_TYPE_NAMES = {"Integer", "INTEGER"}
+_FLOAT_TYPE_NAMES = {"Float", "DOUBLE_PRECISION"}
+
+
 def semantic_type(type_obj: object) -> str:
     """Traduit un type SQLAlchemy/PostgreSQL introspecté en catégorie
     sémantique stable, plutôt que de comparer des chaînes au caractère
-    près (VARCHAR(255) vs character varying, etc.)."""
+    près (VARCHAR(255) vs character varying, etc.) — mais sans élargir la
+    comparaison à des types PostgreSQL distincts (TEXT, CHAR, BIGINT,
+    SMALLINT, REAL) même s'ils héritent de la même classe de base
+    SQLAlchemy. Un type non reconnu retombe sur une catégorie UNKNOWN:*,
+    qui ne correspond jamais à un type attendu de la baseline."""
     if isinstance(type_obj, sa_types.DateTime):
         return DATETIME_TZ if getattr(type_obj, "timezone", False) else DATETIME_NAIVE
-    if isinstance(type_obj, sa_types.Float):
-        # Couvre Float, DOUBLE_PRECISION, REAL (tous des sous-classes de Float).
+    type_name = type(type_obj).__name__
+    if type_name in _FLOAT_TYPE_NAMES:
         return FLOAT
-    if isinstance(type_obj, sa_types.Integer):
-        # Couvre INTEGER, BIGINT, SMALLINT (sous-classes d'Integer).
+    if type_name in _INTEGER_TYPE_NAMES:
         return INTEGER
-    if isinstance(type_obj, sa_types.String):
-        # Couvre VARCHAR, CHAR, TEXT (sous-classes de String).
+    if type_name in _STRING_TYPE_NAMES:
         return STRING
-    return f"UNKNOWN:{type_obj.__class__.__name__}"
+    return f"UNKNOWN:{type_name}"
 
 
 def column_is_autoincrement(column_info: dict) -> bool:
@@ -115,13 +131,36 @@ def column_is_autoincrement(column_info: dict) -> bool:
     return False
 
 
+def column_has_unexpected_server_default(column_info: dict) -> bool:
+    """La baseline 0001 ne déclare aucun server_default métier (les
+    default=/onupdate=datetime.utcnow de core/models.py sont des defaults
+    applicatifs Python, jamais des DEFAULT SQL). Un DEFAULT SQL n'est donc
+    légitime que s'il fait partie du mécanisme d'auto-incrément d'un id
+    (séquence nextval(...) ou IDENTITY, cf. column_is_autoincrement) : tout
+    autre DEFAULT (littéral, now(), ...), sur n'importe quelle colonne, est
+    un écart avec la baseline.
+    """
+    default = column_info.get("default")
+    if default is None:
+        return False
+    if isinstance(default, str) and "nextval(" in default:
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Manifeste attendu — recopie figée de 0001_current_oryx_baseline
 # --------------------------------------------------------------------------
 
-def _fk(columns: Sequence[str], ref_table: str, ref_columns: Sequence[str]) -> dict:
+def _fk(
+    columns: Sequence[str],
+    ref_table: str,
+    ref_columns: Sequence[str],
+    ref_schema: str = EXPECTED_SCHEMA,
+) -> dict:
     return {
         "columns": list(columns),
+        "ref_schema": ref_schema,
         "ref_table": ref_table,
         "ref_columns": list(ref_columns),
     }
@@ -249,6 +288,18 @@ def collect_raw_snapshot(inspector, schema: str = EXPECTED_SCHEMA) -> dict:
 # Étape 2 : normalisation (pure, aucune dépendance à une connexion)
 # --------------------------------------------------------------------------
 
+def _normalize_ref_schema(referred_schema: Optional[str]) -> str:
+    """SQLAlchemy renvoie parfois referred_schema=None quand la table
+    référencée est dans le même schéma que la table inspectée (ici
+    toujours `public`, cf. EXPECTED_SCHEMA) : None et "public" désignent
+    donc le même schéma courant et sont traités comme équivalents. Toute
+    autre valeur (un schéma réellement différent) est conservée telle
+    quelle."""
+    if referred_schema in (None, ""):
+        return EXPECTED_SCHEMA
+    return referred_schema
+
+
 def normalize_snapshot(raw: dict) -> dict:
     """Convertit l'instantané brut en une structure normalisée,
     déterministe (listes triées) et comparable sémantiquement, sans
@@ -261,6 +312,7 @@ def normalize_snapshot(raw: dict) -> dict:
             columns[col["name"]] = {
                 "type": semantic_type(col["type"]),
                 "nullable": bool(col.get("nullable", True)),
+                "has_unexpected_server_default": column_has_unexpected_server_default(col),
             }
             if column_is_autoincrement(col):
                 autoincrement_cols.append(col["name"])
@@ -271,12 +323,13 @@ def normalize_snapshot(raw: dict) -> dict:
             (
                 {
                     "columns": sorted(fk.get("constrained_columns") or []),
+                    "ref_schema": _normalize_ref_schema(fk.get("referred_schema")),
                     "ref_table": fk.get("referred_table"),
                     "ref_columns": sorted(fk.get("referred_columns") or []),
                 }
                 for fk in info["foreign_keys"]
             ),
-            key=lambda fk: (fk["columns"], fk["ref_table"] or "", fk["ref_columns"]),
+            key=lambda fk: (fk["columns"], fk["ref_schema"], fk["ref_table"] or "", fk["ref_columns"]),
         )
 
         unique_constraints = sorted(
@@ -377,6 +430,8 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
                 f"wrong nullable: {table_name}.{c} "
                 f"(expected nullable={exp_col['nullable']}, got {act_col['nullable']})"
             )
+        if act_col["has_unexpected_server_default"]:
+            out.append(f"unexpected server default: {table_name}.{c}")
 
     expected_pk = sorted(expected["primary_key"])
     if actual["primary_key"] != expected_pk:
@@ -387,9 +442,11 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
     expected_fks = expected["foreign_keys"]
     for exp_fk in expected_fks:
         exp_cols = sorted(exp_fk["columns"])
+        exp_ref_schema = _normalize_ref_schema(exp_fk.get("ref_schema"))
         exp_ref_cols = sorted(exp_fk["ref_columns"])
         found = any(
             act_fk["columns"] == exp_cols
+            and act_fk["ref_schema"] == exp_ref_schema
             and act_fk["ref_table"] == exp_fk["ref_table"]
             and act_fk["ref_columns"] == exp_ref_cols
             for act_fk in actual["foreign_keys"]
@@ -397,18 +454,34 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
         if not found:
             out.append(
                 f"missing FK: {table_name}.{','.join(exp_cols)} -> "
-                f"{exp_fk['ref_table']}.{','.join(exp_ref_cols)}"
+                f"{exp_ref_schema}.{exp_fk['ref_table']}.{','.join(exp_ref_cols)}"
             )
 
+    # Comparaison sur les 4 composantes (colonnes liées, schéma référencé
+    # normalisé, table référencée, colonnes référencées) : une FK qui
+    # pointerait vers le bon (table, colonnes) mais un schéma différent —
+    # ou vice versa — doit être détectée comme inattendue, pas confondue
+    # avec la FK attendue.
     expected_fk_keys = {
-        (tuple(sorted(fk["columns"])), fk["ref_table"]) for fk in expected_fks
+        (
+            tuple(sorted(fk["columns"])),
+            _normalize_ref_schema(fk.get("ref_schema")),
+            fk["ref_table"],
+            tuple(sorted(fk["ref_columns"])),
+        )
+        for fk in expected_fks
     }
     for act_fk in actual["foreign_keys"]:
-        key = (tuple(act_fk["columns"]), act_fk["ref_table"])
+        key = (
+            tuple(act_fk["columns"]),
+            act_fk["ref_schema"],
+            act_fk["ref_table"],
+            tuple(act_fk["ref_columns"]),
+        )
         if key not in expected_fk_keys:
             out.append(
                 f"unexpected FK: {table_name}.{','.join(act_fk['columns'])} -> "
-                f"{act_fk['ref_table']}.{','.join(act_fk['ref_columns'])}"
+                f"{act_fk['ref_schema']}.{act_fk['ref_table']}.{','.join(act_fk['ref_columns'])}"
             )
 
     for unique_cols in actual["unique_constraints"]:
