@@ -1,1 +1,67 @@
-Generic single-database configuration.
+Migrations Alembic d'Oryx
+=========================
+
+Configuration : une seule base PostgreSQL. L'URL est lue depuis la variable
+d'environnement DATABASE_URL (voir alembic/env.py) ; aucune URL ni secret
+dans alembic.ini.
+
+
+Baseline : 0001_current_oryx_baseline
+-------------------------------------
+
+alembic/versions/0001_current_oryx_baseline.py représente le schéma
+historique d'Oryx AVANT Alembic, tel que produit par core/models.py via
+Base.metadata.create_all() + _migrate_add_columns() :
+
+  users, portfolio_positions, company_analyses, investment_theses,
+  analysis_facts, user_statements
+
+Elle reproduit ce schéma à l'identique (VARCHAR, FLOAT, TIMESTAMP WITHOUT
+TIME ZONE, PK et FK vers users.id), sans aucun server_default, index,
+UNIQUE ou CHECK : les default=/onupdate=datetime.utcnow des modèles restent
+des defaults applicatifs Python.
+
+Son downgrade() lève volontairement une RuntimeError : c'est le plancher
+historique. Les migrations futures pourront redescendre jusqu'à elle, jamais
+en dessous (pas de DROP TABLE accidentel).
+
+
+Base NEUVE (vide, locale / test)
+--------------------------------
+
+    alembic upgrade head
+
+crée le schéma complet.
+
+
+Base Railway EXISTANTE (production) — NE PAS exécuter la baseline
+------------------------------------------------------------------
+
+La production a été créée par create_all() : ses tables existent déjà.
+NE JAMAIS lancer `alembic upgrade` contre elle à ce stade.
+
+  1. T0-C : préflight — inspection en lecture seule du schéma de production
+     et comparaison avec la baseline.
+  2. T0-D : seulement si le schéma correspond, marquer la base sans rien
+     exécuter :
+
+         alembic stamp 0001_current_oryx_baseline
+
+
+Transition
+----------
+
+Tant que la bascule n'est pas terminée, init_db() (core/db.py) continue
+d'appeler Base.metadata.create_all() et _migrate_add_columns() au démarrage
+de l'application. Ils restent actifs TEMPORAIREMENT et seront retirés dans
+un chantier ultérieur, une fois la production stampée.
+
+
+Vérifier le SQL sans se connecter (mode offline)
+------------------------------------------------
+
+    DATABASE_URL=postgresql://offline@localhost/offline \
+        alembic upgrade head --sql
+
+L'URL n'est utilisée que pour choisir le dialecte PostgreSQL ; aucune
+connexion n'est ouverte.
