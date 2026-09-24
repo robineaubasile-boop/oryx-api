@@ -282,6 +282,34 @@ def test_varchar_pg_specific_type_matches_expected_string():
 	assert _mismatches_for(tables) == []
 
 
+def test_varchar_without_length_matches():
+	tables = _perfect_tables()
+	for table in tables.values():
+		for c in table["columns"]:
+			if isinstance(c["type"], sa.String):
+				c["type"] = pg.VARCHAR(length=None)
+	assert _mismatches_for(tables) == []
+
+
+def test_varchar_255_instead_of_unbounded_varchar_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["type"] = pg.VARCHAR(255)
+	mismatches = _mismatches_for(tables)
+	assert "wrong length: users.level (expected VARCHAR, got VARCHAR(255))" in mismatches
+	assert not any(m.startswith("wrong type: users.level") for m in mismatches)
+
+
+def test_varchar_100_instead_of_unbounded_varchar_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "ticker":
+			c["type"] = sa.String(100)
+	mismatches = _mismatches_for(tables)
+	assert "wrong length: portfolio_positions.ticker (expected VARCHAR, got VARCHAR(100))" in mismatches
+
+
 def test_wrong_nullable():
 	tables = _perfect_tables()
 	for c in tables["users"]["columns"]:
@@ -334,6 +362,66 @@ def test_fk_pointing_to_a_different_schema_is_mismatch():
 	mismatches = _mismatches_for(tables)
 	assert "missing FK: portfolio_positions.user_id -> public.users.id" in mismatches
 	assert "unexpected FK: portfolio_positions.user_id -> other_schema.users.id" in mismatches
+
+
+def test_fk_without_options_matches():
+	tables = _perfect_tables()
+	for table in tables.values():
+		for fk in table["foreign_keys"]:
+			assert fk["options"] == {}
+	assert _mismatches_for(tables) == []
+
+
+def test_fk_with_explicit_postgres_default_options_matches():
+	tables = _perfect_tables()
+	fk = _fk(["user_id"], "users", ["id"])
+	fk["options"] = {"ondelete": "NO ACTION", "onupdate": "NO ACTION", "deferrable": False}
+	tables["portfolio_positions"]["foreign_keys"] = [fk]
+	assert _mismatches_for(tables) == []
+
+
+def test_fk_on_delete_cascade_is_mismatch():
+	tables = _perfect_tables()
+	fk = _fk(["user_id"], "users", ["id"])
+	fk["options"] = {"ondelete": "CASCADE"}
+	tables["portfolio_positions"]["foreign_keys"] = [fk]
+	mismatches = _mismatches_for(tables)
+	assert (
+		"unexpected FK options: portfolio_positions.user_id -> public.users.id (ondelete=CASCADE)"
+		in mismatches
+	)
+	# la FK elle-même est bien reconnue : pas de "missing FK" ni "unexpected FK"
+	assert not any(m.startswith("missing FK: portfolio_positions") for m in mismatches)
+	assert not any(m.startswith("unexpected FK: portfolio_positions") for m in mismatches)
+
+
+def test_fk_on_delete_set_null_is_mismatch():
+	tables = _perfect_tables()
+	fk = _fk(["user_id"], "users", ["id"])
+	fk["options"] = {"ondelete": "SET NULL"}
+	tables["company_analyses"]["foreign_keys"] = [fk]
+	mismatches = _mismatches_for(tables)
+	assert (
+		"unexpected FK options: company_analyses.user_id -> public.users.id (ondelete=SET NULL)"
+		in mismatches
+	)
+
+
+def test_fk_on_update_deferrable_initially_match_are_mismatch():
+	tables = _perfect_tables()
+	fk = _fk(["user_id"], "users", ["id"])
+	fk["options"] = {
+		"onupdate": "CASCADE",
+		"deferrable": True,
+		"initially": "DEFERRED",
+		"match": "FULL",
+	}
+	tables["user_statements"]["foreign_keys"] = [fk]
+	mismatches = _mismatches_for(tables)
+	assert (
+		"unexpected FK options: user_statements.user_id -> public.users.id "
+		"(deferrable=True, initially=DEFERRED, match=FULL, onupdate=CASCADE)"
+	) in mismatches
 
 
 def test_fk_referred_schema_none_is_equivalent_to_public():
@@ -412,7 +500,8 @@ def test_nextval_default_on_autoincrement_id_is_not_an_unexpected_default():
 		if c["name"] == "id":
 			assert c["default"] == "nextval('id_seq'::regclass)"  # posé par la fixture
 	assert column_has_unexpected_server_default(
-		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id")
+		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id"),
+		autoincrement_expected=True,
 	) is False
 	assert _mismatches_for(tables) == []
 
@@ -425,9 +514,20 @@ def test_identity_on_autoincrement_id_is_not_an_unexpected_default():
 			c["default"] = None
 			c["identity"] = {"always": False}
 	assert column_has_unexpected_server_default(
-		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id")
+		next(c for c in tables["portfolio_positions"]["columns"] if c["name"] == "id"),
+		autoincrement_expected=True,
 	) is False
 	assert _mismatches_for(tables) == []
+
+
+def test_nextval_default_on_business_column_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["portfolio_positions"]["columns"]:
+		if c["name"] == "ticker":
+			c["default"] = "nextval('ticker_seq'::regclass)"
+	mismatches = _mismatches_for(tables)
+	assert "unexpected server default: portfolio_positions.ticker" in mismatches
+	assert "unexpected autoincrement: portfolio_positions.ticker" in mismatches
 
 
 # --------------------------------------------------------------------------
@@ -443,6 +543,28 @@ def test_missing_autoincrement():
 			c["identity"] = None
 	mismatches = _mismatches_for(tables)
 	assert "missing autoincrement: portfolio_positions.id" in mismatches
+
+
+def test_expected_autoincrement_present_matches():
+	assert _mismatches_for(_perfect_tables()) == []
+
+
+def test_unexpected_identity_on_business_column_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["identity"] = {"always": False}
+	mismatches = _mismatches_for(tables)
+	assert "unexpected autoincrement: users.level" in mismatches
+
+
+def test_unexpected_autoincrement_flag_on_business_column_is_mismatch():
+	tables = _perfect_tables()
+	for c in tables["users"]["columns"]:
+		if c["name"] == "level":
+			c["autoincrement"] = True
+	mismatches = _mismatches_for(tables)
+	assert "unexpected autoincrement: users.level" in mismatches
 
 
 def test_autoincrement_detected_via_identity_column():
@@ -533,19 +655,33 @@ def test_autoincrement_absent():
 # --------------------------------------------------------------------------
 
 def test_no_default_is_not_unexpected():
-	assert column_has_unexpected_server_default({"default": None}) is False
+	assert column_has_unexpected_server_default({"default": None}, autoincrement_expected=False) is False
 
 
-def test_nextval_default_is_not_unexpected():
-	assert column_has_unexpected_server_default({"default": "nextval('foo_id_seq'::regclass)"}) is False
+def test_nextval_default_is_not_unexpected_on_expected_autoincrement_column():
+	assert column_has_unexpected_server_default(
+		{"default": "nextval('foo_id_seq'::regclass)"}, autoincrement_expected=True
+	) is False
+
+
+def test_nextval_default_is_unexpected_on_non_autoincrement_column():
+	assert column_has_unexpected_server_default(
+		{"default": "nextval('foo_id_seq'::regclass)"}, autoincrement_expected=False
+	) is True
 
 
 def test_literal_default_is_unexpected():
-	assert column_has_unexpected_server_default({"default": "'debutant'::character varying"}) is True
+	assert column_has_unexpected_server_default(
+		{"default": "'debutant'::character varying"}, autoincrement_expected=False
+	) is True
+
+
+def test_literal_default_is_unexpected_even_on_expected_autoincrement_column():
+	assert column_has_unexpected_server_default({"default": "42"}, autoincrement_expected=True) is True
 
 
 def test_now_default_is_unexpected():
-	assert column_has_unexpected_server_default({"default": "now()"}) is True
+	assert column_has_unexpected_server_default({"default": "now()"}, autoincrement_expected=False) is True
 
 
 # --------------------------------------------------------------------------

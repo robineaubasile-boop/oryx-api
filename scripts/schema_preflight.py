@@ -131,19 +131,18 @@ def column_is_autoincrement(column_info: dict) -> bool:
     return False
 
 
-def column_has_unexpected_server_default(column_info: dict) -> bool:
+def column_has_unexpected_server_default(column_info: dict, *, autoincrement_expected: bool) -> bool:
     """La baseline 0001 ne déclare aucun server_default métier (les
     default=/onupdate=datetime.utcnow de core/models.py sont des defaults
-    applicatifs Python, jamais des DEFAULT SQL). Un DEFAULT SQL n'est donc
-    légitime que s'il fait partie du mécanisme d'auto-incrément d'un id
-    (séquence nextval(...) ou IDENTITY, cf. column_is_autoincrement) : tout
-    autre DEFAULT (littéral, now(), ...), sur n'importe quelle colonne, est
-    un écart avec la baseline.
+    applicatifs Python, jamais des DEFAULT SQL). Un DEFAULT nextval(...)
+    n'est légitime que sur une colonne que le manifeste attend
+    auto-incrémentée ; sur toute autre colonne, et pour tout autre DEFAULT
+    (littéral, now(), ...), c'est un écart avec la baseline.
     """
     default = column_info.get("default")
     if default is None:
         return False
-    if isinstance(default, str) and "nextval(" in default:
+    if autoincrement_expected and isinstance(default, str) and "nextval(" in default:
         return False
     return True
 
@@ -163,6 +162,7 @@ def _fk(
         "ref_schema": ref_schema,
         "ref_table": ref_table,
         "ref_columns": list(ref_columns),
+        "options": {},
     }
 
 
@@ -300,6 +300,30 @@ def _normalize_ref_schema(referred_schema: Optional[str]) -> str:
     return referred_schema
 
 
+# Valeurs par défaut PostgreSQL d'une FK : les écrire explicitement ne
+# change rien au comportement, elles sont donc retirées avant comparaison.
+_FK_OPTION_DEFAULTS = {
+    "ondelete": "NO ACTION",
+    "onupdate": "NO ACTION",
+    "deferrable": False,
+    "initially": "IMMEDIATE",
+    "match": "SIMPLE",
+}
+
+
+def _normalize_fk_options(options: Optional[dict]) -> Dict[str, object]:
+    normalized: Dict[str, object] = {}
+    for key, value in (options or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip().upper()
+        if key in _FK_OPTION_DEFAULTS and value == _FK_OPTION_DEFAULTS[key]:
+            continue
+        normalized[key] = value
+    return normalized
+
+
 def normalize_snapshot(raw: dict) -> dict:
     """Convertit l'instantané brut en une structure normalisée,
     déterministe (listes triées) et comparable sémantiquement, sans
@@ -309,10 +333,12 @@ def normalize_snapshot(raw: dict) -> dict:
         columns: Dict[str, dict] = {}
         autoincrement_cols: List[str] = []
         for col in info["columns"]:
+            sem_type = semantic_type(col["type"])
             columns[col["name"]] = {
-                "type": semantic_type(col["type"]),
+                "type": sem_type,
+                "length": getattr(col["type"], "length", None) if sem_type == STRING else None,
                 "nullable": bool(col.get("nullable", True)),
-                "has_unexpected_server_default": column_has_unexpected_server_default(col),
+                "default": col.get("default"),
             }
             if column_is_autoincrement(col):
                 autoincrement_cols.append(col["name"])
@@ -326,6 +352,7 @@ def normalize_snapshot(raw: dict) -> dict:
                     "ref_schema": _normalize_ref_schema(fk.get("referred_schema")),
                     "ref_table": fk.get("referred_table"),
                     "ref_columns": sorted(fk.get("referred_columns") or []),
+                    "options": _normalize_fk_options(fk.get("options")),
                 }
                 for fk in info["foreign_keys"]
             ),
@@ -417,6 +444,8 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
     for c in sorted(set(actual_cols) - set(expected_cols)):
         out.append(f"unexpected column: {table_name}.{c}")
 
+    expected_autoincrement = set(expected.get("autoincrement", []))
+
     for c in sorted(set(expected_cols) & set(actual_cols)):
         exp_col = expected_cols[c]
         act_col = actual_cols[c]
@@ -425,12 +454,20 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
                 f"wrong type: {table_name}.{c} "
                 f"(expected {exp_col['type']}, got {act_col['type']})"
             )
+        elif act_col["type"] == STRING and act_col["length"] != exp_col.get("length"):
+            out.append(
+                f"wrong length: {table_name}.{c} "
+                f"(expected {_varchar_label(exp_col.get('length'))}, "
+                f"got {_varchar_label(act_col['length'])})"
+            )
         if act_col["nullable"] != exp_col["nullable"]:
             out.append(
                 f"wrong nullable: {table_name}.{c} "
                 f"(expected nullable={exp_col['nullable']}, got {act_col['nullable']})"
             )
-        if act_col["has_unexpected_server_default"]:
+        if column_has_unexpected_server_default(
+            act_col, autoincrement_expected=c in expected_autoincrement
+        ):
             out.append(f"unexpected server default: {table_name}.{c}")
 
     expected_pk = sorted(expected["primary_key"])
@@ -444,18 +481,28 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
         exp_cols = sorted(exp_fk["columns"])
         exp_ref_schema = _normalize_ref_schema(exp_fk.get("ref_schema"))
         exp_ref_cols = sorted(exp_fk["ref_columns"])
-        found = any(
-            act_fk["columns"] == exp_cols
-            and act_fk["ref_schema"] == exp_ref_schema
-            and act_fk["ref_table"] == exp_fk["ref_table"]
-            and act_fk["ref_columns"] == exp_ref_cols
-            for act_fk in actual["foreign_keys"]
+        fk_label = (
+            f"{table_name}.{','.join(exp_cols)} -> "
+            f"{exp_ref_schema}.{exp_fk['ref_table']}.{','.join(exp_ref_cols)}"
         )
-        if not found:
-            out.append(
-                f"missing FK: {table_name}.{','.join(exp_cols)} -> "
-                f"{exp_ref_schema}.{exp_fk['ref_table']}.{','.join(exp_ref_cols)}"
-            )
+        found = next(
+            (
+                act_fk
+                for act_fk in actual["foreign_keys"]
+                if act_fk["columns"] == exp_cols
+                and act_fk["ref_schema"] == exp_ref_schema
+                and act_fk["ref_table"] == exp_fk["ref_table"]
+                and act_fk["ref_columns"] == exp_ref_cols
+            ),
+            None,
+        )
+        if found is None:
+            out.append(f"missing FK: {fk_label}")
+            continue
+        exp_options = _normalize_fk_options(exp_fk.get("options"))
+        if found["options"] != exp_options:
+            options_label = ", ".join(f"{k}={v}" for k, v in sorted(found["options"].items()))
+            out.append(f"unexpected FK options: {fk_label} ({options_label})")
 
     # Comparaison sur les 4 composantes (colonnes liées, schéma référencé
     # normalisé, table référencée, colonnes référencées) : une FK qui
@@ -493,12 +540,17 @@ def _compare_table(table_name: str, actual: dict, expected: dict) -> List[str]:
     for idx in actual["indexes"]:
         out.append(f"unexpected index: {table_name}.{idx['name']} ({','.join(idx['columns'])})")
 
-    expected_autoincrement = set(expected.get("autoincrement", []))
     actual_autoincrement = set(actual["autoincrement"])
     for c in sorted(expected_autoincrement - actual_autoincrement):
         out.append(f"missing autoincrement: {table_name}.{c}")
+    for c in sorted(actual_autoincrement - expected_autoincrement):
+        out.append(f"unexpected autoincrement: {table_name}.{c}")
 
     return out
+
+
+def _varchar_label(length: Optional[int]) -> str:
+    return "VARCHAR" if length is None else f"VARCHAR({length})"
 
 
 # --------------------------------------------------------------------------
