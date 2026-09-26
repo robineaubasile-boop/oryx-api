@@ -22,7 +22,7 @@ from core.coach_engine import build_system_prompt as build_coach_prompt, build_u
 from core.portfolio_analysis_engine import build_system_prompt as build_portfolio_analysis_prompt, build_user_message as build_portfolio_analysis_user_message
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market, get_eur_usd_rate
-from core.db import get_db, init_db
+from core.db import get_db
 from core.models import User, PortfolioPosition, CompanyAnalysis, InvestmentThesis
 from sqlalchemy.orm import Session
 from fastapi import Depends
@@ -85,11 +85,6 @@ def _format_aum(value, currency="USD"):
 
 
 app = FastAPI()
-
-
-@app.on_event("startup")
-def _startup_init_db():
-    init_db()
 
 
 app.add_middleware(
