@@ -2,7 +2,8 @@
 
 L'URL de la base est lue depuis DATABASE_URL, exactement comme l'application :
 on réutilise core.db.DATABASE_URL, qui applique déjà la normalisation
-postgres:// → postgresql:// (format fourni par Railway). Aucune URL n'est
+postgres:// → postgresql:// (format fourni par Railway) puis rend le
+driver psycopg2 explicite (postgresql+psycopg2://). Aucune URL n'est
 stockée dans alembic.ini.
 
 L'URL est passée directement à SQLAlchemy plutôt que via
