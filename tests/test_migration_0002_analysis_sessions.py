@@ -82,12 +82,14 @@ def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess:
 # --------------------------------------------------------------------------
 
 def test_revision_chain_is_baseline_then_analysis_sessions():
+    # La tête de chaîne évolue avec les migrations suivantes (T1-B1 : voir
+    # tests/test_migration_0003_analysis_session_links.py) ; on vérifie ici
+    # seulement le maillon 0001 -> 0002.
     script = _script_directory()
-    assert script.get_heads() == [T1A]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A}
+    assert {BASELINE, T1A} <= set(revisions)
     assert revisions[T1A].down_revision == BASELINE
     assert revisions[BASELINE].down_revision is None
 
@@ -199,7 +201,10 @@ def test_model_constraints():
 
 def test_model_does_not_touch_historical_tables():
     assert set(Base.metadata.tables) == HISTORICAL_TABLES | {"analysis_sessions"}
-    for name in HISTORICAL_TABLES:
+    # analysis_facts, user_statements et investment_theses reçoivent
+    # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables
+    # historiques ne doivent jamais le recevoir.
+    for name in ("users", "portfolio_positions", "company_analyses"):
         assert "analysis_session_id" not in Base.metadata.tables[name].c, name
 
 
@@ -262,9 +267,9 @@ def _tables(engine) -> set:
     return set(sa.inspect(engine).get_table_names())
 
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
+def test_pg_upgrade_from_empty_database_to_0002(pg_url, pg_engine):
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T1A)
     assert _version(pg_engine) == T1A
     assert _tables(pg_engine) == HISTORICAL_TABLES | {"analysis_sessions", "alembic_version"}
 
@@ -338,11 +343,20 @@ def test_pg_upgrade_0001_to_0002_then_downgrade(pg_url, pg_engine):
         enums = conn.execute(sa.text("SELECT count(*) FROM pg_type WHERE typtype = 'e'")).scalar_one()
         assert enums == 0
 
-    # Le modèle SQLAlchemy correspond à la base migrée (autogenerate vide).
+    # Le modèle AnalysisSession correspond à la table migrée (autogenerate
+    # vide). La comparaison est limitée à analysis_sessions : les modèles
+    # historiques portent aussi les colonnes de T1-B1 (0003), absentes en 0002.
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
+
+    def only_analysis_sessions(obj, name, type_, reflected, compare_to):
+        return type_ != "table" or name == "analysis_sessions"
+
     with pg_engine.connect() as conn:
-        ctx = MigrationContext.configure(conn, opts={"compare_type": True})
+        ctx = MigrationContext.configure(conn, opts={
+            "compare_type": True,
+            "include_object": only_analysis_sessions,
+        })
         diff = compare_metadata(ctx, Base.metadata)
     assert diff == []
 
@@ -399,6 +413,6 @@ def test_pg_upgrade_0001_to_0002_then_downgrade(pg_url, pg_engine):
     assert _snapshot(pg_engine, HISTORICAL_TABLES) == historical_before
 
     # --- ré-upgrade : la migration est rejouable --------------------------
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T1A)
     assert _version(pg_engine) == T1A
     assert _snapshot(pg_engine, HISTORICAL_TABLES) == historical_before

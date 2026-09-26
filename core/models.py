@@ -57,6 +57,9 @@ class InvestmentThesis(Base):
     ticker = Column(String, nullable=False)
     thesis_text = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # T1-B1 : rattachement à une AnalysisSession. NULL = provenance de
+    # session non établie (lignes historiques, jamais backfillées).
+    analysis_session_id = Column(Uuid, ForeignKey("analysis_sessions.id"), nullable=True)
 
 
 class AnalysisFact(Base):
@@ -68,6 +71,9 @@ class AnalysisFact(Base):
     fact_date = Column(DateTime, default=datetime.utcnow)
     fact_type = Column(String, nullable=False)
     fact_value = Column(Float, nullable=True)
+    # T1-B1 : rattachement à une AnalysisSession. NULL = provenance de
+    # session non établie (lignes historiques, jamais backfillées).
+    analysis_session_id = Column(Uuid, ForeignKey("analysis_sessions.id"), nullable=True)
 
 
 class UserStatement(Base):
@@ -79,6 +85,9 @@ class UserStatement(Base):
     step = Column(String, nullable=True)
     statement_date = Column(DateTime, default=datetime.utcnow)
     statement_text = Column(String, nullable=False)
+    # T1-B1 : rattachement à une AnalysisSession. NULL = provenance de
+    # session non établie (lignes historiques, jamais backfillées).
+    analysis_session_id = Column(Uuid, ForeignKey("analysis_sessions.id"), nullable=True)
 
 
 def _utcnow_aware():
