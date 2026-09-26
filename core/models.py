@@ -1,5 +1,6 @@
-from datetime import datetime
-from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey, Uuid, CheckConstraint
 from core.db import Base
 
 
@@ -78,3 +79,38 @@ class UserStatement(Base):
     step = Column(String, nullable=True)
     statement_date = Column(DateTime, default=datetime.utcnow)
     statement_text = Column(String, nullable=False)
+
+
+def _utcnow_aware():
+    return datetime.now(timezone.utc)
+
+
+class AnalysisSession(Base):
+    """Une tentative distincte d'analyse fondamentale d'une entreprise par
+    un utilisateur (T1-A). Plusieurs sessions peuvent exister pour un même
+    (user_id, ticker) : pas de UNIQUE(user_id, ticker).
+
+    T1-A (EXPAND) : table créée par la migration 0002_analysis_sessions
+    mais encore inutilisée par l'application. CompanyAnalysis reste la
+    source de vérité de Décrypte tant que T1-B/T1-C ne sont pas faits.
+
+    Conventions des nouvelles tables : id UUID généré par l'application
+    (aucun server_default), timestamps TIMESTAMPTZ. Seul status est
+    contraint en SQL ; la cohérence status ↔ completed_at et les valeurs
+    de current_step relèvent de la couche applicative."""
+    __tablename__ = "analysis_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('in_progress', 'completed', 'abandoned')",
+            name="ck_analysis_sessions_status",
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    current_step = Column(String, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware, onupdate=_utcnow_aware)

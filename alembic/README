@@ -104,6 +104,37 @@ l'unique mécanisme autorisé à faire évoluer le schéma PostgreSQL ;
 l'application se contente de s'y connecter.
 
 
+T1-A : 0002_analysis_sessions (EXPAND)
+--------------------------------------
+
+Première migration post-baseline (down_revision = 0001_current_oryx_baseline).
+Strictement additive : crée uniquement la table analysis_sessions (une
+tentative distincte d'analyse d'une entreprise par un utilisateur ; plusieurs
+sessions possibles par (user_id, ticker)). Aucune table historique n'est
+modifiée, aucune donnée n'est migrée, et l'application ne lit ni n'écrit
+encore cette table : l'ancien code reste valide sur ce schéma.
+
+Conventions des nouvelles tables : id UUID natif (généré par l'application,
+aucun server_default ni extension uuid-ossp/pgcrypto), timestamps
+TIMESTAMPTZ, CHECK nommé sur status (pas d'ENUM PostgreSQL), FK vers
+users.id sans ON DELETE CASCADE.
+
+Son downgrade supprime analysis_sessions (vide en T1-A). Le rollback normal
+en production reste le rollback applicatif.
+
+Note : scripts/schema_preflight.py compare au manifeste figé de la baseline
+(outil pré-stamp T0-C) ; il signalera analysis_sessions comme table
+inattendue sur une base en 0002, ce qui est attendu.
+
+Tests PostgreSQL réels (base dédiée dont le nom contient "test", son schéma
+public est détruit/recréé) :
+
+    ORYX_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost/oryx_t1a_test \
+        python -m pytest tests/test_migration_0002_analysis_sessions.py
+
+Sans ORYX_TEST_DATABASE_URL, ces tests sont skippés (les tests sans base
+tournent toujours).
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 
