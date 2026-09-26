@@ -97,10 +97,11 @@ correcte), jamais depuis un poste local :
 Transition
 ----------
 
-Tant que la bascule n'est pas terminée, init_db() (core/db.py) continue
-d'appeler Base.metadata.create_all() et _migrate_add_columns() au démarrage
-de l'application. Ils restent actifs TEMPORAIREMENT et seront retirés dans
-un chantier ultérieur, une fois la production stampée.
+T0-G a retiré init_db(), Base.metadata.create_all() et
+_migrate_add_columns() de core/db.py, ainsi que leur appel au démarrage de
+l'application (api.py). Alembic (via le Pre-Deploy Railway) est désormais
+l'unique mécanisme autorisé à faire évoluer le schéma PostgreSQL ;
+l'application se contente de s'y connecter.
 
 
 Vérifier le SQL sans se connecter (mode offline)
