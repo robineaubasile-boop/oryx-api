@@ -99,9 +99,11 @@ class AnalysisSession(Base):
     un utilisateur (T1-A). Plusieurs sessions peuvent exister pour un même
     (user_id, ticker) : pas de UNIQUE(user_id, ticker).
 
-    T1-A (EXPAND) : table créée par la migration 0002_analysis_sessions
-    mais encore inutilisée par l'application. CompanyAnalysis reste la
-    source de vérité de Décrypte tant que T1-B/T1-C ne sont pas faits.
+    T1-A (EXPAND) : table créée par la migration 0002_analysis_sessions.
+    T1-B2 : identité réelle de toute nouvelle tentative construction_these
+    (voir _track_construction_these_progress dans api.py). CompanyAnalysis
+    reste maintenu comme miroir de compatibilité jusqu'à T1-C ; les
+    tentatives commencées avant T1-B2 terminent sans session (legacy).
 
     Conventions des nouvelles tables : id UUID généré par l'application
     (aucun server_default), timestamps TIMESTAMPTZ. Seul status est
