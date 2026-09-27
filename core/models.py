@@ -27,18 +27,15 @@ class PortfolioPosition(Base):
 
 
 class CompanyAnalysis(Base):
-    """État courant d'une tentative d'analyse construction_these pour un
-    (user_id, ticker). Ne représente PAS une session/version d'analyse
-    distincte : une nouvelle tentative sur le même ticker remplace la
-    précédente dans cette table (voir DELETE /api/user/{user_id}/theses/{ticker}
-    qui supprime cette ligne mais laisse AnalysisFact/UserStatement en place).
-    created_at marque le début de la tentative EN COURS et sert de filtre
-    transitoire pour exclure les AnalysisFact/UserStatement orphelins d'une
-    tentative précédemment supprimée (voir _get_analysis_progress dans
-    api.py). Décision explicite de Basile (2026-09) : accepter cette dette
-    plutôt que de préempter le vrai versionnement d'analyses que Chemin
-    Oryx devra introduire (analysis_id / session_id). À remplacer à ce
-    moment-là, pas avant."""
+    """OBSOLÈTE — non utilisé par l'application depuis T1-C1.
+
+    Ancien état courant (une ligne par user_id+ticker) d'une tentative
+    construction_these, remplacé par AnalysisSession. Plus aucun code
+    applicatif ne lit ni n'écrit ce modèle.
+
+    Conservé uniquement parce que la table company_analyses existe encore
+    physiquement dans le schéma Alembic 0003 : Base.metadata doit y rester
+    fidèle. À supprimer avec la table en T1-C2 (DROP TABLE)."""
     __tablename__ = "company_analyses"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -101,9 +98,9 @@ class AnalysisSession(Base):
 
     T1-A (EXPAND) : table créée par la migration 0002_analysis_sessions.
     T1-B2 : identité réelle de toute nouvelle tentative construction_these
-    (voir _track_construction_these_progress dans api.py). CompanyAnalysis
-    reste maintenu comme miroir de compatibilité jusqu'à T1-C ; les
-    tentatives commencées avant T1-B2 terminent sans session (legacy).
+    (voir _track_construction_these_progress dans api.py).
+    T1-C1 : unique identité d'une tentative ; CompanyAnalysis n'est plus
+    utilisé par l'application.
 
     Conventions des nouvelles tables : id UUID généré par l'application
     (aucun server_default), timestamps TIMESTAMPTZ. Seul status est
