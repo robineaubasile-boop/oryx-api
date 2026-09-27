@@ -155,6 +155,37 @@ Le downgrade retire les trois FK puis les trois colonnes (retour exact à
 0002). Tests : tests/test_migration_0003_analysis_session_links.py (même
 variable ORYX_TEST_DATABASE_URL que pour T1-A).
 
+T2-A : 0005_cognitive_support_traces (EXPAND)
+---------------------------------------------
+
+down_revision = 0004_drop_company_analyses. Strictement additive : crée
+cognitive_events et support_traces (couche de données de niveau 2 du futur
+système pédagogique). Aucune autre table touchée, aucun backfill ;
+l'application ne lit ni n'écrit encore ces tables (capture en T2-B).
+
+Couche descriptive/historique, sans aucune évaluation :
+  - cognitive_events : capsule d'un problème cognitif pouvant couvrir
+    plusieurs tours (événement != message) ; stimulus_snapshot (ce que
+    l'utilisateur a réellement vu) et user_work_snapshot (ses productions,
+    dans l'ordre) en JSONB NOT NULL, sans schéma interne imposé ; seul
+    status est contraint (CHECK ck_cognitive_events_status : open /
+    finalized / abandoned). event_origin et task_kind sont extensibles
+    (pas de CHECK). Seuls les événements finalized seront évaluables (T3).
+  - support_traces : aides réellement visibles fournies pendant un
+    événement (jamais une preuve de compétence ; jamais de raisonnement
+    interne ni de prompt système), ordonnées par
+    UNIQUE(cognitive_event_id, sequence_no)
+    (uq_support_traces_event_sequence). support_kind est extensible.
+
+Mêmes conventions que analysis_sessions (UUID applicatif, TIMESTAMPTZ,
+aucun server_default, pas d'ENUM, FK sans cascade). Aucun index hors PK et
+UNIQUE, aucun trigger. Identifiant de révision court : alembic_version.
+version_num est un VARCHAR(32).
+
+Le downgrade supprime support_traces puis cognitive_events (retour exact à
+0004). Tests : tests/test_migration_0005_cognitive_support_traces.py (même
+variable ORYX_TEST_DATABASE_URL).
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 

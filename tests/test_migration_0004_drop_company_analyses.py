@@ -50,6 +50,9 @@ from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 T1C2 = "0004_drop_company_analyses"
 DROPPED = "company_analyses"
 REMAINING_TABLES = (HISTORICAL_TABLES - {DROPPED}) | {"analysis_sessions"}
+# Tables de T2-A (0005, testé à part) : déclarées dans les modèles, absentes
+# du schéma 0004.
+T2A_TABLES = {"cognitive_events", "support_traces"}
 # sha256 de alembic/versions/0003_analysis_session_links.py tel que mergé
 # sur main (2f1845e, T1-C1) et déployé en production.
 T1B1_SHA256 = "42303c53253fcf3264f7a4122651bba4f768e1719a1fc89dafc849bacad71e46"
@@ -70,20 +73,22 @@ def _statements(sql: str) -> list:
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_0002_0003_0004():
+def test_revision_chain_is_0001_0002_0003_0004():
+    # La tête de chaîne évolue avec les migrations suivantes (T2-A : voir
+    # tests/test_migration_0005_cognitive_support_traces.py) ; on vérifie ici
+    # les maillons 0001 -> 0002 -> 0003 -> 0004.
     script = _script_directory()
-    assert script.get_heads() == [T1C2]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2}
+    assert {BASELINE, T1A, T1B1, T1C2} <= set(revisions)
     assert revisions[T1C2].down_revision == T1B1
     assert revisions[T1B1].down_revision == T1A
     assert revisions[T1A].down_revision == BASELINE
     assert revisions[BASELINE].down_revision is None
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2)]
+    assert files[:4] == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2)]
 
 
 def test_0001_0002_0003_files_are_unchanged():
@@ -131,7 +136,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == REMAINING_TABLES
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
         assert all(fk.column.table.name != DROPPED for fk in table.foreign_keys), table.name
@@ -182,6 +187,10 @@ def test_no_company_analysis_usage_in_application_code():
         source = path.read_text(encoding="utf-8", errors="replace")
         if path.suffix == ".py":
             source = _code_tokens(source)
+        if rel.startswith("alembic/versions/"):
+            # L'identifiant de révision de 0004 (down_revision des migrations
+            # suivantes) n'est pas un usage de la table.
+            source = source.replace(T1C2, "")
         checked += 1
         assert "CompanyAnalysis" not in source, rel
         if rel not in allowed_table_mentions:
@@ -259,18 +268,26 @@ def _compare_metadata(engine) -> list:
         return compare_metadata(ctx, Base.metadata)
 
 
+def _assert_metadata_matches_0004(engine) -> None:
+    """Au schéma 0004, Base.metadata ne diffère que par les deux tables de
+    T2-A, créées seulement en 0005 ; tout le reste correspond exactement."""
+    diff = _compare_metadata(engine)
+    assert sorted((d[0], d[1].name) for d in diff) == [("add_table", t) for t in sorted(T2A_TABLES)]
+
+
 def _failed_upgrade(pg_url) -> subprocess.CalledProcessError:
     with pytest.raises(subprocess.CalledProcessError) as exc:
         _run_alembic(pg_url, "upgrade", T1C2)
     return exc.value
 
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
+def test_pg_upgrade_from_empty_database_to_0004(pg_url, pg_engine):
+    # La tête est 0005 depuis T2-A (testée à part) ; on vérifie ici 0004.
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T1C2)
     assert _version(pg_engine) == T1C2
     assert _tables(pg_engine) == REMAINING_TABLES | {"alembic_version"}
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0004(pg_engine)
 
 
 def test_pg_upgrade_0003_to_0004_drops_only_company_analyses_then_downgrade(pg_url, pg_engine):
@@ -311,7 +328,7 @@ def test_pg_upgrade_0003_to_0004_drops_only_company_analyses_then_downgrade(pg_u
     # Toutes les autres tables : schéma et données strictement inchangés.
     assert _snapshot(pg_engine, REMAINING_TABLES) == schema_0003
     assert _data(pg_engine, REMAINING_TABLES) == data_0003
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0004(pg_engine)
 
     # --- downgrade 0004 -> 0003 ------------------------------------------
     _run_alembic(pg_url, "downgrade", T1B1)
@@ -332,7 +349,7 @@ def test_pg_upgrade_0003_to_0004_drops_only_company_analyses_then_downgrade(pg_u
     assert _tables(pg_engine) == REMAINING_TABLES | {"alembic_version"}
     assert _snapshot(pg_engine, REMAINING_TABLES) == schema_0003
     assert _data(pg_engine, REMAINING_TABLES) == data_0003
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0004(pg_engine)
 
 
 def test_pg_upgrade_aborts_before_drop_when_company_analyses_is_not_empty(pg_url, pg_engine):

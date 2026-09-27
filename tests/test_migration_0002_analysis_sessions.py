@@ -202,7 +202,10 @@ def test_model_constraints():
 def test_model_does_not_touch_historical_tables():
     # T1-C2 (0004, testé à part) supprime le modèle et la table
     # company_analyses ; les autres tables historiques restent déclarées.
-    assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {"analysis_sessions"}
+    # T2-A (0005, testé à part) ajoute cognitive_events et support_traces.
+    assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
+        "analysis_sessions", "cognitive_events", "support_traces",
+    }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables
     # historiques ne doivent jamais le recevoir.
