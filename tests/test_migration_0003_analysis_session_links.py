@@ -57,12 +57,14 @@ def _fk_name(table: str) -> str:
 # --------------------------------------------------------------------------
 
 def test_revision_chain_is_0001_0002_0003():
+    # La tête de chaîne évolue avec les migrations suivantes (T1-C2 : voir
+    # tests/test_migration_0004_drop_company_analyses.py) ; on vérifie ici
+    # seulement les maillons 0001 -> 0002 -> 0003.
     script = _script_directory()
-    assert script.get_heads() == [T1B1]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1}
+    assert {BASELINE, T1A, T1B1} <= set(revisions)
     assert revisions[T1B1].down_revision == T1A
     assert revisions[T1A].down_revision == BASELINE
     assert revisions[BASELINE].down_revision is None
@@ -136,7 +138,8 @@ def test_models_declare_nullable_uuid_fk_to_analysis_sessions():
 
 
 def test_only_the_three_linked_models_changed():
-    for name in UNLINKED_TABLES | {"analysis_sessions"}:
+    # company_analyses n'a plus de modèle depuis T1-C2 (0004).
+    for name in (UNLINKED_TABLES - {"company_analyses"}) | {"analysis_sessions"}:
         assert "analysis_session_id" not in Base.metadata.tables[name].c, name
     expected_columns = {
         "analysis_facts": ["id", "user_id", "ticker", "fact_date", "fact_type", "fact_value"],
@@ -199,9 +202,9 @@ def _all_rows(engine) -> dict:
     }
 
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
+def test_pg_upgrade_from_empty_database_to_0003(pg_url, pg_engine):
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T1B1)
     assert _version(pg_engine) == T1B1
     assert _tables(pg_engine) == HISTORICAL_TABLES | {"analysis_sessions", "alembic_version"}
 
@@ -272,13 +275,15 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
             assert total > 0 and linked == 0, t
         assert conn.execute(sa.text("SELECT count(*) FROM analysis_sessions")).scalar_one() == 1
 
-    # Les modèles SQLAlchemy correspondent exactement au schéma migré.
+    # Les modèles SQLAlchemy correspondent exactement au schéma migré, à
+    # l'exception de company_analyses, encore présente en 0003 mais dont le
+    # modèle est supprimé depuis T1-C2 (la table disparaît en 0004).
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with pg_engine.connect() as conn:
         ctx = MigrationContext.configure(conn, opts={"compare_type": True})
         diff = compare_metadata(ctx, Base.metadata)
-    assert diff == []
+    assert [(d[0], d[1].name) for d in diff] == [("remove_table", "company_analyses")]
 
     # --- compatibilité avec le code legacy (transaction annulée) ---------
     with Session(pg_engine) as session:
@@ -333,7 +338,7 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
     assert _all_rows(pg_engine) == data_0002
 
     # --- ré-upgrade -------------------------------------------------------
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T1B1)
     assert _version(pg_engine) == T1B1
     assert _snapshot(pg_engine, HISTORICAL_TABLES | {"analysis_sessions"}) == schema_0003
     assert _all_rows(pg_engine) == data_0002
