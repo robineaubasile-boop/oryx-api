@@ -24,7 +24,7 @@ from core.portfolio_analysis_engine import build_system_prompt as build_portfoli
 from core.checklist_engine import build_system_prompt as build_checklist_prompt, build_user_message as build_checklist_user_message
 from core.market_lookup import search_market, get_eur_usd_rate
 from core.db import get_db
-from core.models import User, PortfolioPosition, CompanyAnalysis, InvestmentThesis
+from core.models import User, PortfolioPosition, InvestmentThesis, AnalysisSession
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
@@ -436,76 +436,37 @@ def _find_active_analysis_session(session, user_id, ticker):
 
 
 def _get_analysis_progress(user_id, ticker):
-	"""Retourne l'état d'une analyse construction_these EN COURS (pas
-	encore de thèse terminée) pour ce user+ticker, ou None si aucune
-	analyse en cours, ou si elle est déjà terminée (swot_final —
-	_get_latest_thesis prend le relai dans ce cas).
+	"""Retourne l'état d'une analyse construction_these EN COURS pour ce
+	user+ticker, ou None s'il n'y a aucune AnalysisSession in_progress
+	(_get_latest_thesis prend alors le relai).
 
-	Nouveau chemin (T1-B2) : si une AnalysisSession in_progress existe,
-	on ne lit QUE les AnalysisFact/UserStatement rattachés à son id, et
-	current_step vient de la session. Aucun filtre temporel.
-
-	Chemin legacy : tentative commencée avant T1-B2 (CompanyAnalysis
-	sans AnalysisSession). Filtre les AnalysisFact/UserStatement sur
-	analysis.created_at : décision explicite (2026-09) pour exclure les
-	lignes orphelines d'une tentative précédemment supprimée sur le même
-	ticker (le DELETE ne nettoie que InvestmentThesis + CompanyAnalysis,
-	pas ces deux tables). created_at est NULL pour les analyses créées
-	avant cette migration — dans ce cas on ne filtre pas. Filtre aussi
-	analysis_session_id IS NULL : le fallback legacy n'absorbe jamais
-	de données du nouveau système.
+	Source unique (T1-C1) : l'AnalysisSession in_progress retenue par
+	_find_active_analysis_session. current_step vient de la session ; on
+	ne lit QUE les AnalysisFact/UserStatement rattachés à son id. Aucun
+	filtre temporel.
 
 	Ne doit jamais faire planter la réponse principale : toute erreur
 	est journalisée et avalée silencieusement."""
 	from core.db import SessionLocal
-	from core.models import CompanyAnalysis, AnalysisFact, UserStatement
+	from core.models import AnalysisFact, UserStatement
 	if not SessionLocal or not user_id:
 		return None
 	try:
 		session = SessionLocal()
 		try:
 			active = _find_active_analysis_session(session, user_id, ticker)
-			if active:
-				statements = session.query(UserStatement).filter(
-					UserStatement.analysis_session_id == active.id
-				).order_by(UserStatement.statement_date.asc(), UserStatement.id.asc()).all()
-				facts = session.query(AnalysisFact).filter(
-					AnalysisFact.analysis_session_id == active.id
-				).order_by(AnalysisFact.fact_date.asc(), AnalysisFact.id.asc()).all()
-				return {
-					"current_step": active.current_step,
-					"statements": [{"step": s.step, "text": s.statement_text} for s in statements if s.step],
-					"facts": {f.fact_type: f.fact_value for f in facts},
-				}
-
-			analysis = session.query(CompanyAnalysis).filter(
-				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
-			).first()
-			if not analysis or not analysis.current_step or analysis.current_step == "swot_final":
+			if not active:
 				return None
-
-			since = analysis.created_at
-
-			statements_q = session.query(UserStatement).filter(
-				UserStatement.user_id == user_id, UserStatement.ticker == ticker,
-				UserStatement.analysis_session_id.is_(None),
-			)
-			facts_q = session.query(AnalysisFact).filter(
-				AnalysisFact.user_id == user_id, AnalysisFact.ticker == ticker,
-				AnalysisFact.analysis_session_id.is_(None),
-			)
-			if since:
-				statements_q = statements_q.filter(UserStatement.statement_date >= since)
-				facts_q = facts_q.filter(AnalysisFact.fact_date >= since)
-
-			statements = statements_q.order_by(UserStatement.statement_date.asc()).all()
-			facts = facts_q.order_by(AnalysisFact.fact_date.asc()).all()
-			facts_by_type = {f.fact_type: f.fact_value for f in facts}
-
+			statements = session.query(UserStatement).filter(
+				UserStatement.analysis_session_id == active.id
+			).order_by(UserStatement.statement_date.asc(), UserStatement.id.asc()).all()
+			facts = session.query(AnalysisFact).filter(
+				AnalysisFact.analysis_session_id == active.id
+			).order_by(AnalysisFact.fact_date.asc(), AnalysisFact.id.asc()).all()
 			return {
-				"current_step": analysis.current_step,
+				"current_step": active.current_step,
 				"statements": [{"step": s.step, "text": s.statement_text} for s in statements if s.step],
-				"facts": facts_by_type,
+				"facts": {f.fact_type: f.fact_value for f in facts},
 			}
 		finally:
 			session.close()
@@ -525,44 +486,33 @@ def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, 
 	faire planter la réponse principale : toute erreur est journalisée
 	et avalée silencieusement.
 
-	T1-B2 : AnalysisSession est l'identité de toute NOUVELLE tentative.
+	AnalysisSession est l'unique identité d'une tentative (T1-C1) :
 	- session in_progress existante pour user+ticker → réutilisée ;
-	- sinon, CompanyAnalysis en cours (current_step != swot_final) sans
-	  session → tentative legacy commencée avant T1-B2 : elle termine
-	  entièrement sur l'ancien chemin, sans session artificielle ;
-	- sinon → nouvelle tentative : création d'une AnalysisSession. Seule
-	  exception : un marqueur swot_final alors que la dernière tentative
-	  est déjà terminée (CompanyAnalysis à swot_final) est la conversation
-	  libre qui suit le bilan, pas une nouvelle tentative — ignoré.
-	CompanyAnalysis reste maintenu comme miroir de compatibilité (rollback
-	applicatif possible sur le schéma 0003) jusqu'à T1-C."""
+	- sinon, step != swot_final → nouvelle tentative : nouvelle session ;
+	- sinon (swot_final sans session active) → conversation libre après
+	  une analyse terminée : ignoré, aucune session artificielle.
+	Une session completed/abandoned n'est jamais reprise."""
 	from core.db import SessionLocal
-	from core.models import CompanyAnalysis
 	if not SessionLocal or not user_id:
 		return
 	try:
 		session = SessionLocal()
 		try:
 			active = _find_active_analysis_session(session, user_id, ticker)
-			analysis = session.query(CompanyAnalysis).filter(
-				CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker
-			).first()
-			if active is None and analysis is not None and analysis.current_step != "swot_final":
-				_track_legacy_progress(session, analysis, user_id, ticker, step, thesis_text)
-			elif active is None and analysis is not None and step == "swot_final":
+			if active is None and step == "swot_final":
 				print(f"[DB-TRACKING] Ignoré : user={user_id}, ticker={ticker}, swot_final hors tentative en cours (conversation libre après le bilan)")
-			else:
-				_track_session_progress(session, active, analysis, user_id, ticker, step, thesis_text, data)
+				return
+			_track_session_progress(session, active, user_id, ticker, step, thesis_text, data)
 		finally:
 			session.close()
 	except Exception as e:
 		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
 
 
-def _track_session_progress(session, active, analysis, user_id, ticker, step, thesis_text, data):
-	"""Nouveau chemin (T1-B2) : tout ce qui est écrit pour la tentative
-	porte analysis_session_id = active.id."""
-	from core.models import AnalysisSession, CompanyAnalysis, InvestmentThesis, AnalysisFact, UserStatement
+def _track_session_progress(session, active, user_id, ticker, step, thesis_text, data):
+	"""Tout ce qui est écrit pour la tentative porte
+	analysis_session_id = active.id."""
+	from core.models import AnalysisSession, InvestmentThesis, AnalysisFact, UserStatement
 	now = datetime.utcnow()
 	now_aware = datetime.now(timezone.utc)
 
@@ -583,20 +533,12 @@ def _track_session_progress(session, active, analysis, user_id, ticker, step, th
 		active.status = "completed"
 		active.completed_at = now_aware
 
-	# Miroir CompanyAnalysis : même tentative que la session. Au démarrage
-	# d'une nouvelle session, created_at est recalé sur son début pour que
-	# l'ancien code (filtre created_at) ne lise que cette tentative en cas
-	# de rollback applicatif.
-	if analysis is None:
-		session.add(CompanyAnalysis(user_id=user_id, ticker=ticker, current_step=step, created_at=now))
-	else:
-		analysis.current_step = step
-		if is_new_session:
-			analysis.created_at = now
-
-	# Le texte reçu à ce tour répond à l'étape PRÉCÉDENTE (voir
-	# _track_legacy_progress). Au premier tour d'une session, c'est le
-	# message déclencheur : on ne l'enregistre pas.
+	# Le texte reçu à ce tour (thesis_text=question) répond à l'étape
+	# PRÉCÉDENTE (previous_step), pas à l'étape que ce marqueur (step)
+	# annonce : le marqueur reflète l'étape que la réponse de
+	# l'assistant vient de traiter/entamer, toujours un tour d'avance
+	# sur ce que l'utilisateur vient de dire. Au premier tour d'une
+	# session, c'est le message déclencheur : on ne l'enregistre pas.
 	if thesis_text and previous_step:
 		session.add(UserStatement(
 			user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text,
@@ -621,30 +563,6 @@ def _track_session_progress(session, active, analysis, user_id, ticker, step, th
 
 	session.commit()
 	print(f"[DB-TRACKING] Écrit : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
-
-
-def _track_legacy_progress(session, analysis, user_id, ticker, step, thesis_text):
-	"""Chemin legacy : tentative CompanyAnalysis commencée avant T1-B2,
-	continuée sans AnalysisSession jusqu'à sa fin (analysis_session_id
-	reste NULL, aucun backfill)."""
-	from core.models import InvestmentThesis, UserStatement
-	previous_step = analysis.current_step
-	is_new_swot = step == "swot_final"
-	analysis.current_step = step
-
-	# Le texte reçu à ce tour (thesis_text=question) répond à l'étape
-	# PRÉCÉDENTE (previous_step), pas à l'étape que ce marqueur (step)
-	# annonce : le marqueur reflète l'étape que la réponse de
-	# l'assistant vient de traiter/entamer, toujours un tour d'avance
-	# sur ce que l'utilisateur vient de dire.
-	if thesis_text and previous_step:
-		session.add(UserStatement(user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text))
-
-	if is_new_swot and thesis_text:
-		session.add(InvestmentThesis(user_id=user_id, ticker=ticker, thesis_text=thesis_text))
-
-	session.commit()
-	print(f"[DB-TRACKING] Écrit (legacy) : user={user_id}, ticker={ticker}, étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}")
 
 
 @app.post("/decryptage")
@@ -1202,27 +1120,66 @@ def update_portfolio_position(user_id: str, position_id: int, request: Portfolio
 	}
 
 
+def _as_utc(dt):
+	"""Timestamps naïfs historiques (datetime.utcnow) → UTC aware."""
+	return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 @app.get("/api/user/{user_id}/theses")
 def get_theses(user_id: str, db: Session = Depends(get_db)):
-	analyses = db.query(CompanyAnalysis).filter(CompanyAnalysis.user_id == user_id).all()
-	result = []
-	for a in analyses:
-		theses = db.query(InvestmentThesis).filter(
-			InvestmentThesis.user_id == user_id, InvestmentThesis.ticker == a.ticker
-		).order_by(InvestmentThesis.created_at.desc()).all()
-		result.append({
-			"ticker": a.ticker,
-			"current_step": a.current_step,
-			"updated_at": a.updated_at.isoformat() if a.updated_at else None,
-			"theses": [{"text": t.thesis_text, "created_at": t.created_at.isoformat()} for t in theses],
-		})
-	return result
+	"""Une entrée par ticker (T1-C1 : AnalysisSession + InvestmentThesis) :
+	- session in_progress → current_step de la session, theses=[] (le
+	  frontend affiche « En cours », même si une ancienne thèse existe) ;
+	- sinon, thèse(s) → current_step="swot_final", thèses de la plus
+	  récente à la plus ancienne ;
+	- sinon (ex. uniquement des sessions abandoned) → absent."""
+	all_theses = db.query(InvestmentThesis).filter(
+		InvestmentThesis.user_id == user_id
+	).order_by(InvestmentThesis.created_at.desc(), InvestmentThesis.id.desc()).all()
+	theses_by_ticker = {}
+	for t in all_theses:
+		theses_by_ticker.setdefault(t.ticker, []).append(t)
+
+	active_tickers = {row.ticker for row in db.query(AnalysisSession.ticker).filter(
+		AnalysisSession.user_id == user_id, AnalysisSession.status == "in_progress"
+	).distinct()}
+
+	entries = []
+	for ticker in sorted(active_tickers | set(theses_by_ticker)):
+		active = _find_active_analysis_session(db, user_id, ticker) if ticker in active_tickers else None
+		if active:
+			entries.append((_as_utc(active.updated_at), {
+				"ticker": ticker,
+				"current_step": active.current_step,
+				"updated_at": _as_utc(active.updated_at).isoformat(),
+				"theses": [],
+			}))
+		else:
+			theses = theses_by_ticker[ticker]
+			latest = _as_utc(theses[0].created_at)
+			entries.append((latest, {
+				"ticker": ticker,
+				"current_step": "swot_final",
+				"updated_at": latest.isoformat(),
+				"theses": [{"text": t.thesis_text, "created_at": t.created_at.isoformat()} for t in theses],
+			}))
+	entries.sort(key=lambda e: e[0], reverse=True)
+	return [entry for _, entry in entries]
 
 
 @app.delete("/api/user/{user_id}/theses/{ticker}")
 def delete_thesis(user_id: str, ticker: str, db: Session = Depends(get_db)):
+	"""Supprime les thèses du user+ticker et passe ses sessions in_progress
+	à abandoned (T1-C1). AnalysisSession, AnalysisFact et UserStatement
+	sont conservés : une analyse ultérieure crée une nouvelle session."""
 	db.query(InvestmentThesis).filter(InvestmentThesis.user_id == user_id, InvestmentThesis.ticker == ticker).delete()
-	db.query(CompanyAnalysis).filter(CompanyAnalysis.user_id == user_id, CompanyAnalysis.ticker == ticker).delete()
+	now_aware = datetime.now(timezone.utc)
+	for active in db.query(AnalysisSession).filter(
+		AnalysisSession.user_id == user_id, AnalysisSession.ticker == ticker,
+		AnalysisSession.status == "in_progress",
+	).all():
+		active.status = "abandoned"
+		active.updated_at = now_aware
 	db.commit()
 	return {"success": True}
 
