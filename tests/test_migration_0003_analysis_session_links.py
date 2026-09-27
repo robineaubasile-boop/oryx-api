@@ -277,13 +277,18 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
 
     # Les modèles SQLAlchemy correspondent exactement au schéma migré, à
     # l'exception de company_analyses, encore présente en 0003 mais dont le
-    # modèle est supprimé depuis T1-C2 (la table disparaît en 0004).
+    # modèle est supprimé depuis T1-C2 (la table disparaît en 0004), et des
+    # tables de T2-A, déclarées dans les modèles mais créées seulement en 0005.
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with pg_engine.connect() as conn:
         ctx = MigrationContext.configure(conn, opts={"compare_type": True})
         diff = compare_metadata(ctx, Base.metadata)
-    assert [(d[0], d[1].name) for d in diff] == [("remove_table", "company_analyses")]
+    assert sorted((d[0], d[1].name) for d in diff) == [
+        ("add_table", "cognitive_events"),
+        ("add_table", "support_traces"),
+        ("remove_table", "company_analyses"),
+    ]
 
     # --- compatibilité avec le code legacy (transaction annulée) ---------
     with Session(pg_engine) as session:
