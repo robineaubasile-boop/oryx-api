@@ -2,12 +2,14 @@
 
 T1-B2 avait basculé les nouvelles tentatives sur AnalysisSession en gardant
 CompanyAnalysis (fallback legacy + miroir). T1-C1 retire tout usage
-applicatif de CompanyAnalysis ; la table reste en base jusqu'à T1-C2.
+applicatif de CompanyAnalysis ; T1-C2 supprime ensuite le modèle et la
+table (migration 0004_drop_company_analyses).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
-`alembic upgrade head` (= 0003_analysis_session_links).
+`alembic upgrade head` (= 0004_drop_company_analyses depuis T1-C2), ce qui
+vérifie que les parcours T1-C1 fonctionnent sans company_analyses.
 
-1. Tests sans base (toujours exécutés) : aucune migration ajoutée, aucune
+1. Tests sans base (toujours exécutés) : tête Alembic attendue, aucune
    référence à CompanyAnalysis dans api.py.
 
 2. Tests contre un vrai PostgreSQL (mêmes conditions que T1-A/B1/B2) :
@@ -37,7 +39,6 @@ from core.db import Base
 from core.models import (
     AnalysisFact,
     AnalysisSession,
-    CompanyAnalysis,
     InvestmentThesis,
     User,
     UserStatement,
@@ -54,6 +55,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 
 T1B1 = "0003_analysis_session_links"
+T1C2 = "0004_drop_company_analyses"
 USER = "user-t1c1"
 TICKER = "MC.PA"
 DATA = {
@@ -67,17 +69,18 @@ SNAPSHOT = {"operating_margin": 0.26, "roe": 0.24, "net_cash": -1.0e9}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_head_is_still_0003():
-    """(1) Aucune migration : la tête Alembic reste 0003 et aucun nouveau
-    fichier de migration n'existe."""
+def test_no_migration_added_by_t1c1_head_is_0004():
+    """(1) T1-C1 n'a ajouté aucune migration ; la seule ajoutée depuis est
+    0004 (T1-C2), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T1B1]
-    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1}
+    assert script.get_heads() == [T1C2]
+    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [
         "0001_current_oryx_baseline.py",
         "0002_analysis_sessions.py",
         "0003_analysis_session_links.py",
+        "0004_drop_company_analyses.py",
     ]
 
 
@@ -101,10 +104,11 @@ def test_api_has_no_reference_to_company_analysis():
     assert not hasattr(api, "_track_legacy_progress")
 
 
-def test_company_analysis_model_is_kept_for_schema_0003():
-    """(5) Le modèle reste déclaré (table encore présente jusqu'à T1-C2)."""
-    assert "company_analyses" in Base.metadata.tables
-    assert "OBSOLÈTE" in CompanyAnalysis.__doc__ and "T1-C2" in CompanyAnalysis.__doc__
+def test_company_analysis_model_is_removed():
+    """(5) T1-C2 : le modèle CompanyAnalysis n'existe plus."""
+    import core.models
+    assert "company_analyses" not in Base.metadata.tables
+    assert not hasattr(core.models, "CompanyAnalysis")
 
 
 # --------------------------------------------------------------------------
@@ -213,9 +217,9 @@ def _rows(db, model, **filters):
         return s.query(model).filter_by(user_id=USER, **filters).order_by(model.id).all()
 
 
-def _company_analyses_count(db):
+def _company_analyses_exists(db):
     with db() as s:
-        return s.query(CompanyAnalysis).count()
+        return "company_analyses" in sa.inspect(s.connection()).get_table_names()
 
 
 def test_first_attempt_creates_exactly_one_session_and_reuses_it(db, client, claude):
@@ -241,8 +245,8 @@ def test_first_attempt_creates_exactly_one_session_and_reuses_it(db, client, cla
     assert same.status == "in_progress"
     assert same.current_step == "chiffres"
     assert same.updated_at > first.updated_at
-    # Plus aucun miroir CompanyAnalysis.
-    assert _company_analyses_count(db) == 0
+    # Plus aucun miroir CompanyAnalysis (la table n'existe plus en 0004).
+    assert not _company_analyses_exists(db)
 
 
 def test_facts_statements_and_thesis_share_the_session_uuid(db, client, claude):
@@ -269,7 +273,7 @@ def test_facts_statements_and_thesis_share_the_session_uuid(db, client, claude):
     assert session.current_step == "swot_final"
     assert session.completed_at is not None and session.completed_at.tzinfo is not None
     assert session.updated_at >= session.completed_at
-    assert _company_analyses_count(db) == 0
+    assert not _company_analyses_exists(db)
 
 
 def test_second_attempt_gets_new_uuid_and_sessions_are_isolated(db, client, claude):
@@ -320,12 +324,10 @@ def test_swot_final_without_any_session_creates_nothing(db, client, claude):
 
 def test_progress_reads_only_the_active_session(db):
     """(8) _get_analysis_progress ne lit que l'AnalysisSession in_progress et
-    ses lignes : ni CompanyAnalysis, ni lignes sans session, ni lignes
-    d'autres sessions, et aucun filtre temporel."""
+    ses lignes : ni lignes sans session, ni lignes d'autres sessions, et
+    aucun filtre temporel."""
     long_ago = datetime.utcnow() - timedelta(days=30)
     with db() as s:
-        # Ancien état legacy : ignoré.
-        s.add(CompanyAnalysis(user_id=USER, ticker=TICKER, current_step="moat", created_at=long_ago))
         s.add(UserStatement(user_id=USER, ticker=TICKER, step="business", statement_text="sans session"))
         s.add(AnalysisFact(user_id=USER, ticker=TICKER, fact_type="roe", fact_value=0.11))
         s.commit()
@@ -520,10 +522,10 @@ def test_other_ticker_and_other_user_are_isolated(db, client, claude):
     assert api._get_analysis_progress("someone-else", TICKER) is None
 
 
-def test_schema_unchanged_and_company_analyses_untouched(db, client, claude, pg_engine):
+def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_engine):
     """(18) Après un parcours complet (analyse, GET, DELETE, nouvelle
-    analyse) : schéma = 0003, Base.metadata identique au schéma migré,
-    company_analyses toujours présente et jamais écrite."""
+    analyse) : schéma = 0004, Base.metadata identique au schéma migré,
+    company_analyses absente (supprimée par T1-C2)."""
     _full_attempt(client, claude, "A")
     client.theses()
     _turn(client, claude, "business")
@@ -531,9 +533,8 @@ def test_schema_unchanged_and_company_analyses_untouched(db, client, claude, pg_
     _turn(client, claude, "business")
 
     with pg_engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T1B1
-        assert "company_analyses" in sa.inspect(conn).get_table_names()
-        assert conn.execute(sa.text("SELECT count(*) FROM company_analyses")).scalar_one() == 0
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T1C2
+        assert "company_analyses" not in sa.inspect(conn).get_table_names()
 
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext

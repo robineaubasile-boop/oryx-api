@@ -26,26 +26,6 @@ class PortfolioPosition(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class CompanyAnalysis(Base):
-    """OBSOLÈTE — non utilisé par l'application depuis T1-C1.
-
-    Ancien état courant (une ligne par user_id+ticker) d'une tentative
-    construction_these, remplacé par AnalysisSession. Plus aucun code
-    applicatif ne lit ni n'écrit ce modèle.
-
-    Conservé uniquement parce que la table company_analyses existe encore
-    physiquement dans le schéma Alembic 0003 : Base.metadata doit y rester
-    fidèle. À supprimer avec la table en T1-C2 (DROP TABLE)."""
-    __tablename__ = "company_analyses"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    ticker = Column(String, nullable=False)
-    current_step = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
 class InvestmentThesis(Base):
     __tablename__ = "investment_theses"
 
@@ -101,6 +81,8 @@ class AnalysisSession(Base):
     (voir _track_construction_these_progress dans api.py).
     T1-C1 : unique identité d'une tentative ; CompanyAnalysis n'est plus
     utilisé par l'application.
+    T1-C2 : modèle CompanyAnalysis et table company_analyses supprimés
+    (migration 0004_drop_company_analyses).
 
     Conventions des nouvelles tables : id UUID généré par l'application
     (aucun server_default), timestamps TIMESTAMPTZ. Seul status est
