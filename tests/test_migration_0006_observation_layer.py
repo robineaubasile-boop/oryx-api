@@ -510,7 +510,10 @@ def test_t3a_tables_are_not_wired_to_the_application():
     allowed = {"core/models.py", f"alembic/versions/{T3A}.py", "core/observation_service.py",
                # T4-A : FK vers pedagogical_observations et FK ajoutée à
                # observation_evaluation_runs (aucun branchement applicatif).
-               "alembic/versions/0007_pedagogical_taxonomy.py"}
+               "alembic/versions/0007_pedagogical_taxonomy.py",
+               # T4-B : service de taxonomie (mapping des observations),
+               # lui-même non branché (tests/test_taxonomy_service.py).
+               "core/taxonomy_service.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0

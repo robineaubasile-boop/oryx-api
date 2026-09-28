@@ -9,8 +9,9 @@ réutilise les helpers) :
 1. Tests sans base (toujours exécutés) : chaîne Alembic, intégrité de 0001
    à 0006, vocabulaire des 45 capacités, SQL PostgreSQL généré en mode
    offline, métadonnées des modèles (colonnes, types, PK, FK, CHECK,
-   UNIQUE, index, défauts), anti-dérive (aucun service T4-B, seed, route,
-   LLM, état utilisateur par capacité, lignée).
+   UNIQUE, index, défauts), anti-dérive (aucun seed, route, LLM, état
+   utilisateur par capacité, lignée ; depuis T4-B, aucun service hors
+   core/taxonomy_service.py).
 
 2. Tests contre un vrai PostgreSQL, uniquement si ORYX_TEST_DATABASE_URL
    pointe vers une base DÉDIÉE dont le nom contient "test" (schéma public
@@ -529,9 +530,12 @@ def test_no_user_state_score_or_progression_in_t4a_tables():
 
 def test_no_t4b_t4c_service_seed_or_lineage_files():
     """T4-A ne crée ni service de taxonomie / mapping, ni seed / bootstrap
-    des 45 capacités, ni release V1."""
+    des 45 capacités, ni release V1. Depuis T4-B, le seul service est
+    core/taxonomy_service.py (voir tests/test_taxonomy_service.py) : aucun
+    autre module de service, aucun seed."""
+    assert (REPO_ROOT / "core" / "taxonomy_service.py").exists()
     forbidden = {
-        "taxonomy_service.py", "capability_service.py", "capability_mapping.py",
+        "capability_service.py", "capability_mapping.py",
         "seed_taxonomy.py", "bootstrap_taxonomy.py", "taxonomy_v1.json", "capabilities_v1.py",
     }
     found = [p for p in REPO_ROOT.rglob("*")
@@ -552,24 +556,32 @@ def _application_sources():
 
 
 def test_no_t4b_operation_anywhere():
-    """Aucune opération de cycle de vie / mapping T4-B n'existe (hors
-    docstrings et commentaires)."""
-    operations = ("create_candidate_release", "activate_release", "retire_release",
-                  "map_observation_capability", "reuse_capability_definition", "validate_taxonomy",
-                  "calculate_spec_fingerprint")
+    """Les opérations de cycle de vie / mapping n'existent que dans le
+    service T4-B core/taxonomy_service.py ; aucune opération hors périmètre
+    (retrait direct, validation de contenu, fingerprint calculé) n'existe
+    nulle part (hors docstrings et commentaires)."""
+    t4b_operations = ("create_candidate_release", "activate_release", "map_observation_capability")
+    never = ("retire_release", "reuse_capability_definition", "validate_taxonomy",
+             "calculate_spec_fingerprint")
     checked = 0
     for rel, source in _application_sources():
         checked += 1
-        for name in operations:
+        for name in never:
             assert name not in source, (rel, name)
+        if rel != "core/taxonomy_service.py":
+            for name in t4b_operations:
+                assert name not in source, (rel, name)
     assert checked > 0
 
 
 def test_t4a_tables_are_not_wired_to_the_application():
     """Aucun branchement : hors core/models.py et la migration 0007, aucun
     code applicatif (api.py, core/ dont le service T3-B, scripts/,
-    frontend) ne mentionne ces modèles ou ces tables. Aucune route T4."""
-    allowed = {"core/models.py", f"alembic/versions/{T4A}.py"}
+    frontend) ne mentionne ces modèles ou ces tables. Aucune route T4.
+    Depuis T4-B, seul le service core/taxonomy_service.py (lui-même non
+    branché ; core/observation_service.py n'appelle que son contrôle
+    interne, sans nommer ces modèles) les manipule."""
+    allowed = {"core/models.py", f"alembic/versions/{T4A}.py", "core/taxonomy_service.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0
