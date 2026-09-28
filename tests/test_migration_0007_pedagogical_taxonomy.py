@@ -559,8 +559,16 @@ def test_no_t4b_operation_anywhere():
     """Les opérations de cycle de vie / mapping n'existent que dans le
     service T4-B core/taxonomy_service.py ; aucune opération hors périmètre
     (retrait direct, validation de contenu, fingerprint calculé) n'existe
-    nulle part (hors docstrings et commentaires)."""
+    nulle part (hors docstrings et commentaires).
+
+    Depuis T4-C, l'orchestration core/pedagogy/taxonomy_bootstrap.py APPELLE
+    create_candidate_release et activate_release (jamais
+    map_observation_capability) : elle les consomme, elle ne les réimplémente
+    pas (voir tests/test_taxonomy_bootstrap.py). La validation de contenu et
+    le fingerprint de T4-C vivent dans core/pedagogy/taxonomy_v1.py
+    (validate_spec, compute_spec_fingerprint)."""
     t4b_operations = ("create_candidate_release", "activate_release", "map_observation_capability")
+    t4c_callers = {"core/pedagogy/taxonomy_bootstrap.py": ("create_candidate_release", "activate_release")}
     never = ("retire_release", "reuse_capability_definition", "validate_taxonomy",
              "calculate_spec_fingerprint")
     checked = 0
@@ -570,7 +578,8 @@ def test_no_t4b_operation_anywhere():
             assert name not in source, (rel, name)
         if rel != "core/taxonomy_service.py":
             for name in t4b_operations:
-                assert name not in source, (rel, name)
+                if name not in t4c_callers.get(rel, ()):
+                    assert name not in source, (rel, name)
     assert checked > 0
 
 
@@ -580,8 +589,12 @@ def test_t4a_tables_are_not_wired_to_the_application():
     frontend) ne mentionne ces modèles ou ces tables. Aucune route T4.
     Depuis T4-B, seul le service core/taxonomy_service.py (lui-même non
     branché ; core/observation_service.py n'appelle que son contrôle
-    interne, sans nommer ces modèles) les manipule."""
-    allowed = {"core/models.py", f"alembic/versions/{T4A}.py", "core/taxonomy_service.py"}
+    interne, sans nommer ces modèles) les manipule. Depuis T4-C,
+    l'orchestration interne core/pedagogy/taxonomy_bootstrap.py (sans route,
+    voir tests/test_taxonomy_bootstrap.py) LIT releases et définitions ; ses
+    écritures passent par le service T4-B."""
+    allowed = {"core/models.py", f"alembic/versions/{T4A}.py", "core/taxonomy_service.py",
+               "core/pedagogy/taxonomy_bootstrap.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0

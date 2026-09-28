@@ -266,7 +266,10 @@ def test_service_contains_no_inference_score_or_lineage_vocabulary():
 
 def test_service_is_not_wired_to_the_application():
     """Aucune route ni module applicatif n'utilise le service, hormis le
-    contrôle interne appelé par complete_evaluation_run (T3-B)."""
+    contrôle interne appelé par complete_evaluation_run (T3-B) et, depuis
+    T4-C, l'orchestration interne core/pedagogy/taxonomy_bootstrap.py
+    (bootstrap / vérification / activation de V1, sans route ; voir
+    tests/test_taxonomy_bootstrap.py)."""
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -277,7 +280,9 @@ def test_service_is_not_wired_to_the_application():
         if path.suffix == ".py":
             source = _code_tokens(source)
         checked += 1
-        if rel not in ("core/taxonomy_service.py", "core/observation_service.py"):
+        if rel == "core/pedagogy/taxonomy_bootstrap.py":
+            assert "_validate_run_capability_mappings" not in source, rel
+        elif rel not in ("core/taxonomy_service.py", "core/observation_service.py"):
             assert "taxonomy_service" not in source, rel
             assert "_validate_run_capability_mappings" not in source, rel
     assert checked > 0
@@ -291,15 +296,21 @@ def test_service_is_not_wired_to_the_application():
 
 def test_no_seed_bootstrap_or_real_taxonomy_content():
     """Aucune donnée pédagogique : le service ne contient ni libellé, ni
-    définition, ni release nommée, ni boucle de création sur les codes."""
+    définition, ni release nommée, ni boucle de création sur les codes.
+    Depuis T4-C, le contenu V1 vit dans UN seul module,
+    core/pedagogy/taxonomy_v1.py (voir tests/test_taxonomy_v1.py) : aucun
+    autre fichier de seed / bootstrap de taxonomie."""
     tokens = _code_tokens(SERVICE_PATH.read_text(encoding="utf-8")).lower()
     for word in ("oryx-v1", "oryx_v1", "production-v1", "seed", "bootstrap", "fixture"):
         assert word not in tokens, word
+    found = []
     for path in REPO_ROOT.rglob("*"):
-        if ".git" in path.parts or "node_modules" in path.parts or not path.is_file():
+        if (".git" in path.parts or "node_modules" in path.parts or "__pycache__" in path.parts
+                or not path.is_file()):
             continue
-        assert not path.name.lower().startswith(("seed_taxonomy", "bootstrap_taxonomy", "taxonomy_v1",
-                                                  "capabilities_v1")), path
+        if path.name.lower().startswith(("seed_taxonomy", "bootstrap_taxonomy", "taxonomy_v1", "capabilities_v1")):
+            found.append(path.relative_to(REPO_ROOT).as_posix())
+    assert found == ["core/pedagogy/taxonomy_v1.py"]
 
 
 def test_capability_vocabulary_is_exactly_the_45_t4a_codes_in_natural_order():
