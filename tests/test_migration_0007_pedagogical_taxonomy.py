@@ -601,7 +601,12 @@ def test_t4a_tables_are_not_wired_to_the_application():
                "core/pedagogy/taxonomy_bootstrap.py",
                # T5-A : FK des relations longitudinales vers les releases et
                # les memberships (aucun branchement applicatif).
-               "alembic/versions/0008_longitudinal_relations.py"}
+               "alembic/versions/0008_longitudinal_relations.py",
+               # T5-B : service longitudinal, qui LIT releases, memberships,
+               # définitions et localisations (compatibility gate, scopes ;
+               # jamais d'écriture T4 ; lui-même non branché :
+               # tests/test_longitudinal_service.py).
+               "core/longitudinal_service.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0
