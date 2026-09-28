@@ -392,10 +392,13 @@ def test_service_is_not_wired_to_the_application():
 
 
 def test_only_one_t5_service_module():
+    """Un seul service transactionnel T5 ; depuis T5-C, le seul autre module
+    T5 est le lecteur core/longitudinal_view.py (lecture seule, voir
+    tests/test_longitudinal_view.py)."""
     core = sorted(p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "core").rglob("*.py"))
     t5 = [m for m in core if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
                                                   "revalidation"))]
-    assert t5 == ["core/longitudinal_service.py"]
+    assert t5 == ["core/longitudinal_service.py", "core/longitudinal_view.py"]
 
 
 def test_vocabularies_match_the_0008_check_constraints():

@@ -752,8 +752,11 @@ def test_no_t5_service_or_inference_anywhere():
     modules = [p.relative_to(REPO_ROOT).as_posix()
                for p in [*(REPO_ROOT / "core").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"),
                          REPO_ROOT / "api.py"]]
+    # T5-C : core/longitudinal_view.py, lecteur read-only (non branché,
+    # voir tests/test_longitudinal_view.py), n'est pas un service.
     assert [m for m in modules if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
-                                                        "revalidation"))] == ["core/longitudinal_service.py"]
+                                                        "revalidation"))] == ["core/longitudinal_service.py",
+                                                                              "core/longitudinal_view.py"]
     checked = 0
     for rel, source in _application_sources():
         checked += 1
@@ -769,7 +772,10 @@ def test_t5a_tables_are_not_wired_to_the_application():
     tests/test_longitudinal_service.py), aucun code applicatif (api.py,
     core/ dont les services T2-B / T3-B / T4-B / T4-C, scripts/, frontend)
     ne mentionne ces modèles ou ces tables."""
-    allowed = {"core/models.py", f"alembic/versions/{T5A}.py", "core/longitudinal_service.py"}
+    allowed = {"core/models.py", f"alembic/versions/{T5A}.py", "core/longitudinal_service.py",
+               # T5-C : reconstruction READ-ONLY du dossier (SELECT
+               # uniquement, non branchée : tests/test_longitudinal_view.py).
+               "core/longitudinal_view.py"}
     needles = (*(m.__name__ for m in T5A_MODELS), *T5A_TABLES)
     checked = 0
     for rel, source in _application_sources():

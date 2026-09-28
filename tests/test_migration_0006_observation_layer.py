@@ -522,7 +522,10 @@ def test_t3a_tables_are_not_wired_to_the_application():
                # T5-B : service longitudinal, qui LIT les observations et
                # leurs runs pour construire le snapshot (jamais d'écriture ;
                # lui-même non branché : tests/test_longitudinal_service.py).
-               "core/longitudinal_service.py"}
+               "core/longitudinal_service.py",
+               # T5-C : reconstruction READ-ONLY du dossier (SELECT
+               # uniquement ; non branchée : tests/test_longitudinal_view.py).
+               "core/longitudinal_view.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
