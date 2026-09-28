@@ -59,6 +59,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T3A_TABLES,
     T4A_INDEXES,
     T4A_TABLES,
+    T5A_INDEXES,
+    T5A_TABLES,
     _catalog_columns,
     _code_tokens,
     _compare_metadata,
@@ -331,12 +333,12 @@ def test_offline_sql_of_0006_downgrade_drops_only_the_two_tables_and_the_index()
 
 def test_metadata_declares_the_two_new_tables():
     """Base.metadata = tables de 0005 + observation_evaluation_runs +
-    pedagogical_observations (+ les quatre tables T4-A, testées à part) ;
-    aucune autre table de taxonomie ou de capacités."""
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES
+    pedagogical_observations (+ les quatre tables T4-A et les huit tables
+    T5-A, testées à part) ; aucune autre table de taxonomie ou de capacités."""
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES | T5A_TABLES
     assert ObservationEvaluationRun.__table__ is Base.metadata.tables[RUNS]
     assert PedagogicalObservation.__table__ is Base.metadata.tables[OBS]
-    for name in set(Base.metadata.tables) - T4A_TABLES:
+    for name in set(Base.metadata.tables) - T4A_TABLES - T5A_TABLES:
         assert "taxonom" not in name and "capabilit" not in name, name
 
 
@@ -513,7 +515,10 @@ def test_t3a_tables_are_not_wired_to_the_application():
                "alembic/versions/0007_pedagogical_taxonomy.py",
                # T4-B : service de taxonomie (mapping des observations),
                # lui-même non branché (tests/test_taxonomy_service.py).
-               "core/taxonomy_service.py"}
+               "core/taxonomy_service.py",
+               # T5-A : FK des relations longitudinales vers
+               # pedagogical_observations (aucun branchement applicatif).
+               "alembic/versions/0008_longitudinal_relations.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
@@ -657,7 +662,7 @@ def _count(conn, table, where="TRUE", params=None) -> int:
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0007 depuis T4-A) + deux utilisateurs et une
+    """Schéma = head (0008 depuis T5-A) + deux utilisateurs et une
     analysis_session ; tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -679,19 +684,21 @@ T4A_RELEASE_FK = "observation_evaluation_runs_taxonomy_release_id_fkey"
 def _assert_metadata_matches_0006(engine) -> None:
     """Au schéma 0006, Base.metadata ne diffère que par T4-A (0007) : les
     quatre tables de taxonomie, leurs index, et l'index + la FK ajoutés à
-    observation_evaluation_runs.pedagogical_taxonomy_release_id ; tout le
-    reste correspond exactement."""
+    observation_evaluation_runs.pedagogical_taxonomy_release_id ; et par
+    T5-A (0008) : les huit tables de relations longitudinales et leurs
+    index ; tout le reste correspond exactement."""
     diff = _compare_metadata(engine)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
-        [("add_table", t) for t in T4A_TABLES] + [("add_index", i) for i in T4A_INDEXES]
+        [("add_table", t) for t in T4A_TABLES | T5A_TABLES]
+        + [("add_index", i) for i in T4A_INDEXES | T5A_INDEXES]
         + [("add_fk", T4A_RELEASE_FK)]
     )
 
 
 def test_pg_upgrade_from_empty_database_to_0006(pg_url, pg_engine):
-    """Base vide -> 0006 ; Base.metadata == schéma migré (hors T4-A) ;
-    aucun ENUM, trigger ni fonction. La tête est 0007 depuis T4-A (testée
-    à part)."""
+    """Base vide -> 0006 ; Base.metadata == schéma migré (hors T4-A et
+    T5-A) ; aucun ENUM, trigger ni fonction. La tête est 0008 depuis T5-A
+    (testée à part)."""
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", T3A)
     assert _version(pg_engine) == T3A

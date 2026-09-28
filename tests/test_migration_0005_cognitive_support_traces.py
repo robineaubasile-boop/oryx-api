@@ -52,6 +52,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T3A_TABLES,
     T4A_INDEXES,
     T4A_TABLES,
+    T5A_INDEXES,
+    T5A_TABLES,
     _assert_metadata_matches_0004,
     _catalog_columns,
     _code_tokens,
@@ -198,8 +200,8 @@ def test_offline_sql_of_0005_downgrade_drops_only_the_two_tables():
 
 def test_metadata_declares_the_two_new_tables():
     """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces
-    (+ les tables de T3-A et T4-A, testées à part)."""
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES
+    (+ les tables de T3-A, T4-A et T5-A, testées à part)."""
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
     assert CognitiveEvent.__table__ is Base.metadata.tables[EVENTS]
     assert SupportTrace.__table__ is Base.metadata.tables[TRACES]
 
@@ -364,15 +366,16 @@ def test_no_relationships_and_existing_models_untouched():
 def test_no_evaluation_concept_in_t2a_tables():
     """T2 est descriptif : aucune colonne ni table d'évaluation (score,
     compétence, niveau, confiance, observation, C1-C12...). Les tables
-    d'observation de T3-A (niveau 3) et de taxonomie de T4-A (testées à
-    part) sont les seules à porter ces notions."""
+    d'observation de T3-A (niveau 3), de taxonomie de T4-A et de relations
+    longitudinales de T5-A (testées à part) sont les seules à porter ces
+    notions."""
     forbidden = ("score", "level", "stage", "competenc", "capabilit", "mastery", "confidence",
                  "observation", "taxonomy", "evidence", "progress", "inference", "signal")
     for table in (CognitiveEvent.__table__, SupportTrace.__table__):
         for col in table.columns:
             assert not any(word in col.name for word in forbidden), (table.name, col.name)
             assert not (col.name[:1] in ("c", "C") and col.name[1:].isdigit()), col.name
-    for name in set(Base.metadata.tables) - T3A_TABLES - T4A_TABLES:
+    for name in set(Base.metadata.tables) - T3A_TABLES - T4A_TABLES - T5A_TABLES:
         assert not any(word in name for word in forbidden), name
 
 
@@ -383,10 +386,13 @@ def test_t2a_tables_are_not_wired_to_the_application():
     de T3-A (dont les FK et la down_revision référencent cognitive_events)
     et le service d'observations T3-B (core/observation_service.py, qui
     verrouille le CognitiveEvent évalué ; lui-même non branché : voir
-    tests/test_observation_service.py), aucun code applicatif (api.py,
-    core/, scripts/, frontend) ne mentionne ces modèles ou ces tables."""
+    tests/test_observation_service.py) et la migration 0008 de T5-A (FK
+    observation_dependencies.source_support_trace_id ; aucun branchement),
+    aucun code applicatif (api.py, core/, scripts/, frontend) ne mentionne
+    ces modèles ou ces tables."""
     allowed = {"core/models.py", f"alembic/versions/{T2A}.py", "core/cognitive_capture.py",
-               "alembic/versions/0006_observation_layer.py", "core/observation_service.py"}
+               "alembic/versions/0006_observation_layer.py", "core/observation_service.py",
+               "alembic/versions/0008_longitudinal_relations.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
@@ -458,7 +464,7 @@ def _upgrade_head_with_users(pg_url, pg_engine) -> None:
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0007 depuis T4-A) + deux utilisateurs et une analysis_session ;
+    """Schéma = head (0008 depuis T5-A) + deux utilisateurs et une analysis_session ;
     tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -514,19 +520,19 @@ def _refused(conn, match, statement, params=None):
 
 
 def _assert_metadata_matches_0005(engine) -> None:
-    """Au schéma 0005, Base.metadata ne diffère que par les tables de T3-A
-    et T4-A, créées seulement en 0006 et 0007 ; tout le reste correspond
-    exactement."""
+    """Au schéma 0005, Base.metadata ne diffère que par les tables de T3-A,
+    T4-A et T5-A, créées seulement en 0006, 0007 et 0008 ; tout le reste
+    correspond exactement."""
     diff = _compare_metadata(engine)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
-        [("add_table", t) for t in T3A_TABLES | T4A_TABLES]
-        + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES]
+        [("add_table", t) for t in T3A_TABLES | T4A_TABLES | T5A_TABLES]
+        + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES]
     )
 
 
 def test_pg_upgrade_from_empty_database_to_0005(pg_url, pg_engine):
     """(13)(30) Base vide -> 0005 ; Base.metadata == schéma (hors T3-A).
-    La tête est 0007 depuis T4-A (testée à part)."""
+    La tête est 0008 depuis T5-A (testée à part)."""
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", T2A)
     assert _version(pg_engine) == T2A
