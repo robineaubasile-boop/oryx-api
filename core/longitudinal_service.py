@@ -95,6 +95,8 @@ Invariants :
     cible (l'aide du même événement reste le contexte local T2/T3) ;
   * transfert : source et cible supportive, cible local_stage application
     (« au moins Application » : mastery n'est jamais un stade local) ;
+    deux observations localized sans définition compatible commune ne
+    forment aucun transfert, quel que soit scope_mode ;
   * revalidation (fait historique observé, pas un besoin T6) : source
     contradictory, cible supportive ; deux observations localized sans
     définition compatible commune ne revalident rien ;
@@ -105,7 +107,9 @@ Invariants :
   * *_basis : dict JSON strict NON VIDE (raison explicable), copié en
     profondeur ; le service ne juge pas sa justesse cognitive ;
   * doublon exact (même identité et même scope_fingerprint) refusé sous le
-    verrou du run.
+    verrou du run ; l'identité d'une dépendance (cible, source,
+    scope_fingerprint) n'inclut pas dependency_type : un autre type pour la
+    même dépendance est une classification contradictoire (refusée).
   Chronologie : le schéma ne porte pas d'horodatage atomique par
   observation ; started_at / closed_at / created_at sont des horodatages
   techniques (événements multi-tours, horloges applicatives) et ne sont
@@ -283,12 +287,14 @@ class RelationSourceNotFound(LongitudinalServiceError):
 
 class InvalidDependency(LongitudinalServiceError):
     """Dépendance incohérente : source XOR, auto-dépendance, même événement,
-    aide d'un autre user, conflit avec un transfert ou une revalidation."""
+    aide d'un autre user, conflit avec un transfert ou une revalidation,
+    classification contradictoire (même dépendance, autre type)."""
 
 
 class InvalidTransfer(LongitudinalServiceError):
     """Transfert incohérent : polarité, cible non application, même
-    événement, conflit avec une dépendance."""
+    événement, deux observations localized sans raisonnement commun, conflit
+    avec une dépendance."""
 
 
 class InvalidRevalidation(LongitudinalServiceError):
@@ -327,10 +333,13 @@ class _Scope(NamedTuple):
 
 class _Relation(NamedTuple):
     """Relation persistée, réduite à ce qu'exigent les contrôles de doublon
-    et de chevauchement."""
+    et de chevauchement. key = identité sémantique de la relation ;
+    qualifier = sa qualification (dependency_type pour une dépendance, qui
+    n'appartient PAS à l'identité : une même dépendance n'a qu'un type)."""
     target: uuid.UUID
     scope: _Scope
     key: tuple
+    qualifier: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -777,7 +786,12 @@ def _transfer_available(db, evidence, source_id, target_id) -> frozenset:
         raise InvalidTransfer(f"cible {target.polarity} ({SUPPORTIVE} requis)")
     if target.local_stage != APPLICATION:
         raise InvalidTransfer(f"cible local_stage {target.local_stage} ({APPLICATION} requis)")
-    return source.compatible & target.compatible
+    common = source.compatible & target.compatible
+    # Avant toute résolution de scope_mode : ni whole_observation ni
+    # competency_only ne contournent l'absence de raisonnement commun.
+    if source.localization == LOCALIZED and target.localization == LOCALIZED and not common:
+        raise InvalidTransfer("aucune définition de capacité compatible commune : aucun raisonnement commun")
+    return common
 
 
 def _revalidation_available(db, evidence, source_id, target_id) -> frozenset:
@@ -858,8 +872,9 @@ def _relations(db, run, evidence=None) -> tuple:
             scope = stored(row, links)
         dependency_relations.append(_Relation(
             row.target_observation_id, scope,
-            (row.target_observation_id, row.source_kind, row.source_observation_id, row.source_support_trace_id,
-             row.dependency_type, row.scope_fingerprint)))
+            _dependency_key(row.target_observation_id, row.source_kind, row.source_observation_id,
+                            row.source_support_trace_id, row.scope_fingerprint),
+            row.dependency_type))
 
     transfer_relations = []
     for row in transfers:
@@ -891,10 +906,33 @@ def _relations(db, run, evidence=None) -> tuple:
     return dependency_relations, transfer_relations, revalidation_relations
 
 
+def _dependency_key(target_id, source_kind, source_observation_id, source_support_trace_id,
+                    scope_fingerprint) -> tuple:
+    """Identité sémantique d'une dépendance, SANS dependency_type : même
+    cible, même source, même scope = UNE dépendance, qualifiée d'un seul
+    type (dependent ou partially_dependent)."""
+    return target_id, source_kind, source_observation_id, source_support_trace_id, scope_fingerprint
+
+
+def _check_dependency_identity(existing, key: tuple, dependency_type: str) -> None:
+    """Même identité et même type => doublon exact ; même identité et type
+    différent => classification contradictoire de la même dépendance."""
+    for relation in existing:
+        if relation.key == key:
+            if relation.qualifier == dependency_type:
+                raise DuplicateLongitudinalRelation("dépendance déjà présente (même identité, même type)")
+            raise InvalidDependency(
+                f"classification contradictoire de la même dépendance : déjà {relation.qualifier},"
+                f" {dependency_type} refusé")
+
+
 def _check_relation_set(dependencies, transfers, revalidations) -> None:
-    """Défense finale de complete : aucun doublon exact, aucune dépendance
+    """Défense finale de complete : aucune dépendance classée deux fois
+    (même ou autre type), aucun doublon exact, aucune dépendance
     chevauchant un transfert ou une revalidation de la même cible."""
-    for relations in (dependencies, transfers, revalidations):
+    for index, dependency in enumerate(dependencies):
+        _check_dependency_identity(dependencies[:index], dependency.key, dependency.qualifier)
+    for relations in (transfers, revalidations):
         keys = [r.key for r in relations]
         if len(set(keys)) != len(keys):
             raise DuplicateLongitudinalRelation("relation persistée en double")
@@ -1042,10 +1080,9 @@ def add_dependency(
     scope = _resolve_scope(run, scope_mode, _membership_links(db, membership_ids), target.compatible)
     fingerprint = _scope_fingerprint(run.competency_code, scope)
     dependencies, transfers, revalidations = _relations(db, run)
-    key = (target_observation_id, source_kind, source_observation_id, source_support_trace_id, dependency_type,
-           fingerprint)
-    if any(r.key == key for r in dependencies):
-        raise DuplicateLongitudinalRelation(f"dépendance déjà présente dans {run_id}")
+    _check_dependency_identity(dependencies, _dependency_key(target_observation_id, source_kind,
+                                                             source_observation_id, source_support_trace_id,
+                                                             fingerprint), dependency_type)
     if _conflicts(target_observation_id, scope, transfers):
         raise InvalidDependency("un transfert autonome vers cette cible chevauche ce scope")
     if _conflicts(target_observation_id, scope, revalidations):

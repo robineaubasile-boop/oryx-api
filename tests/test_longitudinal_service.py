@@ -714,6 +714,25 @@ def test_activation_lock_key_is_deterministic_per_user_and_competency():
     assert tax.ACTIVATION_LOCK_KEY not in keys
 
 
+def test_relation_set_refuses_contradictory_or_duplicate_dependency_classification():
+    """Défense finale (sans base) : l'identité d'une dépendance exclut
+    dependency_type."""
+    scope = svc._Scope("localized", frozenset({_uuid(1)}))
+    key = svc._dependency_key(_uuid(2), "observation", _uuid(3), None, "fp")
+    assert svc._dependency_key(_uuid(2), "observation", _uuid(3), None, "fp") == key
+    dependent = svc._Relation(_uuid(2), scope, key, "dependent")
+    partial = svc._Relation(_uuid(2), scope, key, "partially_dependent")
+    other_scope = svc._Relation(_uuid(2), scope, svc._dependency_key(_uuid(2), "observation", _uuid(3), None, "fp2"),
+                                "partially_dependent")
+    other_source = svc._Relation(_uuid(2), scope, svc._dependency_key(_uuid(2), "observation", _uuid(4), None, "fp"),
+                                 "partially_dependent")
+    svc._check_relation_set([dependent, other_scope, other_source], [], [])
+    with pytest.raises(InvalidDependency, match="classification contradictoire"):
+        svc._check_relation_set([dependent, other_scope, partial], [], [])
+    with pytest.raises(DuplicateLongitudinalRelation):
+        svc._check_relation_set([dependent, other_source, dependent], [], [])
+
+
 def test_overlap_is_conservative():
     a, b = _uuid(1), _uuid(2)
     loc = lambda *d: svc._Scope("localized", frozenset(d))  # noqa: E731
@@ -1280,6 +1299,8 @@ def world(Sessions):
         k_only=_t3(Sessions, tx.id, only(contra())).id,
         none=_t3(Sessions, tx.id, sup(A, stage="none")).id,
         app_only=_t3(Sessions, tx.id, only(app())).id,
+        s_only=_t3(Sessions, tx.id, only(sup())).id,
+        tB=_t3(Sessions, tx.id, app(B)).id,
         p_sup=same.ids[0], p_app=same.ids[1], p_contra=same.ids[2],
         same_event_trace=same_event_trace, other_event_trace=other_event_trace, foreign_trace=foreign_trace,
     )
@@ -1392,19 +1413,49 @@ def test_pg_dependency_scope_is_checked_against_the_target(engine, Sessions, db,
     assert _count(engine, "dependency_capabilities") == 2
 
 
-def test_pg_duplicate_dependency_is_refused_distinct_scopes_are_not(engine, Sessions, db, world):
+def test_pg_duplicate_dependency_is_refused_distinct_scopes_and_sources_are_not(engine, Sessions, db, world):
     w = world
     _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.A])
     with pytest.raises(DuplicateLongitudinalRelation):
         _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.A], basis={"why": "autre formulation"})
-    _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.B])
-    _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.A], kind="partially_dependent")
+    # Même source / cible, scope réellement distinct : autorisé.
+    _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.B], kind="partially_dependent")
     _dependency(db, w, w.t1, w.s1, mode="competency_only")
-    _dependency(db, w, w.t1, trace=w.other_event_trace, mode="localized", caps=[w.A])
+    # Même cible, autres sources : autorisé (quel que soit le type).
+    _dependency(db, w, w.t1, trace=w.other_event_trace, mode="localized", caps=[w.A], kind="partially_dependent")
+    _dependency(db, w, w.t1, w.s2, mode="localized", caps=[w.A])
     db.commit()
     assert _count(engine, "observation_dependencies") == 5
     with pytest.raises(DuplicateLongitudinalRelation):
         _dependency(db, w, w.t1, w.s1, mode="competency_only")
+
+
+@pytest.mark.parametrize("first, second", [("dependent", "partially_dependent"),
+                                           ("partially_dependent", "dependent")])
+def test_pg_same_dependency_cannot_be_classified_twice(engine, Sessions, db, world, first, second):
+    """dependency_type qualifie UNE dépendance : même cible, même source,
+    même scope_fingerprint => même dépendance ; un second type
+    contradictoire est refusé (InvalidDependency), le même type est un
+    doublon (DuplicateLongitudinalRelation)."""
+    w = world
+    same = (
+        lambda kind: _dependency(db, w, w.t1, w.s1, mode="localized", caps=[w.A], kind=kind),
+        lambda kind: _dependency(db, w, w.t1, w.s1, mode="competency_only", kind=kind),
+        lambda kind: _dependency(db, w, w.t2, w.s1, kind=kind),
+        lambda kind: _dependency(db, w, w.t1, trace=w.other_event_trace, mode="localized", caps=[w.B], kind=kind),
+    )
+    for add in same:
+        assert add(first).dependency_type == first
+        with pytest.raises(InvalidDependency, match="classification contradictoire de la même dépendance"):
+            add(second)
+        with pytest.raises(DuplicateLongitudinalRelation):
+            add(first)
+    db.commit()
+    assert _count(engine, "observation_dependencies") == len(same)
+    assert _count(engine, "observation_dependencies", "dependency_type = :t", t=second) == 0
+    svc.complete_longitudinal_assessment(db, run_id=w.run)
+    db.commit()
+    assert _state(engine, w.run) == ("completed", "active")
 
 
 # --- E. transferts -------------------------------------------------------------------------
@@ -1436,6 +1487,43 @@ def test_pg_transfer_semantics_are_enforced(engine, db, world, pair, match):
     w = world
     with pytest.raises(InvalidTransfer, match=match):
         _transfer(db, w, getattr(w, pair[0]), getattr(w, pair[1]))
+
+
+@pytest.mark.parametrize("mode, caps", [("localized", "A"), ("localized", "B"), ("whole_observation", None),
+                                         ("competency_only", None)])
+def test_pg_transfer_between_localized_observations_without_common_scope_is_refused(engine, db, world, mode,
+                                                                                    caps):
+    """localized C7_A -> localized C7_B Application : intersection vide =>
+    aucun raisonnement commun, refusé AVANT la résolution du scope_mode
+    (aucun contournement par whole_observation ou competency_only)."""
+    w = world
+    with pytest.raises(InvalidTransfer, match="aucun raisonnement commun"):
+        _transfer(db, w, w.s2, w.tB, mode=mode, caps=[getattr(w, caps)] if caps else [])
+    db.commit()
+    assert _count(engine, "observation_transfers") == 0
+
+
+def test_pg_transfer_valid_granularities(engine, Sessions, db, world):
+    """Restent valides : C7_A -> C7_A, C7_A/B -> C7_A, localized ->
+    competency_only et competency_only -> localized (granularité capability
+    inconnue : représentable au niveau compétence)."""
+    w = world
+    assert _transfer(db, w, w.s2, w.t2, mode="localized", caps=[w.A]).scope_fingerprint == _scope_fp(
+        "localized", w.dA)
+    assert _transfer(db, w, w.s1, w.t2, mode="localized", caps=[w.A]).scope_fingerprint == _scope_fp(
+        "localized", w.dA)
+    assert _transfer(db, w, w.s1, w.app_only, mode="competency_only").scope_fingerprint == _scope_fp(
+        "competency_only")
+    assert _transfer(db, w, w.s_only, w.t1).scope_fingerprint == _scope_fp("whole_observation")
+    assert _transfer(db, w, w.s_only, w.tB, mode="competency_only").scope_fingerprint == _scope_fp(
+        "competency_only")
+    with pytest.raises(InvalidRelationScope):
+        _transfer(db, w, w.s_only, w.t1, mode="localized", caps=[w.A])
+    db.commit()
+    svc.complete_longitudinal_assessment(db, run_id=w.run)
+    db.commit()
+    assert _state(engine, w.run) == ("completed", "active")
+    assert len(svc.get_transfers(db, run_id=w.run)) == 5
 
 
 def test_pg_transfer_scope_must_stay_within_the_intersection(engine, Sessions, db, world):
@@ -1726,6 +1814,21 @@ def _corrupt(db, w, case):
                   target_observation_id=w.t1, scope_mode="whole_observation", transfer_basis={"a": "x"},
                   scope_fingerprint=whole_t1)
         return InvalidTransfer
+    if case in ("dependency_contradictory_type", "dependency_duplicate_same_type"):
+        dependency_id = _raw_edge(db, "observation_dependencies", run_id=w.run, target_observation_id=w.t1,
+                                  source_kind="observation", source_observation_id=w.s1,
+                                  dependency_type="partially_dependent" if case == "dependency_contradictory_type"
+                                  else "dependent", scope_mode="localized", dependency_basis={"why": "copie"},
+                                  scope_fingerprint=_scope_fp("localized", w.dA))
+        _sql(db, "INSERT INTO dependency_capabilities (dependency_id, capability_membership_id) VALUES (:d, :m)",
+             d=dependency_id, m=w.A)
+        return InvalidDependency if case == "dependency_contradictory_type" else DuplicateLongitudinalRelation
+    if case.startswith("transfer_localized_disjoint_"):
+        mode = case.removeprefix("transfer_localized_disjoint_")
+        _raw_edge(db, "observation_transfers", run_id=w.run, source_observation_id=w.s2,
+                  target_observation_id=w.tB, scope_mode=mode, transfer_basis={"a": "x"},
+                  scope_fingerprint=_scope_fp(mode))
+        return InvalidTransfer
     if case == "duplicate_transfer":
         _raw_edge(db, "observation_transfers", run_id=w.run, source_observation_id=w.s2,
                   target_observation_id=w.t2, scope_mode="whole_observation", transfer_basis={"a": "copie"},
@@ -1752,6 +1855,8 @@ def _corrupt(db, w, case):
 CORRUPTIONS = ["input_row_deleted", "input_row_added", "input_fingerprint", "scope_fingerprint",
                "localized_without_capability", "capability_of_another_release", "empty_basis",
                "dependency_same_event", "dependency_foreign_trace", "dependency_independent_type",
+               "dependency_contradictory_type", "dependency_duplicate_same_type",
+               "transfer_localized_disjoint_whole_observation", "transfer_localized_disjoint_competency_only",
                "transfer_target_not_application", "transfer_overlapping_dependency", "duplicate_transfer",
                "revalidation_polarity", "revalidation_overlapping_dependency", "edge_outside_snapshot"]
 
