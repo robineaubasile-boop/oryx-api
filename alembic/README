@@ -274,6 +274,33 @@ valeurs), puis les quatre tables (retour exact à 0006). Tests :
 tests/test_migration_0007_pedagogical_taxonomy.py (même variable
 ORYX_TEST_DATABASE_URL).
 
+T4-C : contenu Oryx Taxonomy V1 (PAS une migration)
+----------------------------------------------------
+
+Aucune révision 0008 : 0007_pedagogical_taxonomy reste la tête. Alembic
+porte la STRUCTURE ; le CONTENU sémantique versionné (12 compétences, 8
+règles globales, 45 capacités r1 et leur mapping_guidance) vit dans
+core/pedagogy/taxonomy_v1.py, avec son fingerprint SHA-256 figé
+(EXPECTED_V1_FINGERPRINT). Seules les 45 capacités sont persistées ;
+compétences et règles n'ont pas de table mais sont couvertes par
+spec_fingerprint.
+
+Le pre-deploy reste `python -m alembic upgrade head` : le bootstrap n'y est
+jamais branché. Après deploy, action contrôlée :
+
+    python -m scripts.bootstrap_pedagogical_taxonomy_v1
+        # release candidate oryx-v1 + 45 définitions + 45 memberships,
+        # vérification stricte, commit ; NO-OP si déjà présente et conforme
+
+    python -m scripts.bootstrap_pedagogical_taxonomy_v1 --verify-only
+        # vérification seule, transaction READ ONLY
+
+La CLI n'active jamais V1. L'activation est une étape distincte et
+explicite (core.pedagogy.taxonomy_bootstrap.activate_taxonomy_v1 : 45/45 et
+conformité stricte exigées avant activate_release de T4-B). Une V1
+persistée divergente n'est jamais réparée : la commande échoue et
+rollback. Tests : tests/test_taxonomy_v1.py, tests/test_taxonomy_bootstrap.py.
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 
