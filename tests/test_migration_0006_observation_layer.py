@@ -17,7 +17,9 @@ réutilise les helpers) :
            python -m pytest tests/test_migration_0006_observation_layer.py
 
 T3-A = schéma + modèles seulement : aucune route ne lit ni n'écrit ces
-tables, aucun service (lifecycle en T3-B).
+tables. Le seul module applicatif autorisé à les écrire est le service T3-B
+core/observation_service.py (lui-même non branché, testé dans
+tests/test_observation_service.py).
 """
 import hashlib
 import threading
@@ -491,10 +493,11 @@ def test_no_score_progress_or_global_state_columns():
 
 
 def test_t3a_tables_are_not_wired_to_the_application():
-    """Aucun branchement : hors core/models.py et la migration 0006, aucun
-    code applicatif (api.py, core/, scripts/, frontend) ne mentionne ces
-    modèles ou ces tables."""
-    allowed = {"core/models.py", f"alembic/versions/{T3A}.py"}
+    """Aucun branchement : hors core/models.py, la migration 0006 et le
+    service T3-B core/observation_service.py (lui-même non branché : voir
+    tests/test_observation_service.py), aucun code applicatif (api.py,
+    core/, scripts/, frontend) ne mentionne ces modèles ou ces tables."""
+    allowed = {"core/models.py", f"alembic/versions/{T3A}.py", "core/observation_service.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
@@ -513,17 +516,21 @@ def test_t3a_tables_are_not_wired_to_the_application():
     assert checked > 0
 
 
-def test_no_t3b_service_and_no_t4_taxonomy():
-    """T3-A = persistance seulement : aucun module de service, aucune
-    fonction de lifecycle, aucune table de taxonomie / capacités."""
-    for name in ("observation_service.py", "observation_evaluation.py", "observation_capture.py"):
+def test_only_the_t3b_service_and_no_t4_taxonomy():
+    """Le lifecycle vit uniquement dans le service T3-B
+    core/observation_service.py : aucun autre module de service, aucune
+    fonction activate/supersede séparée, aucune table de taxonomie /
+    capacités (T4)."""
+    assert (REPO_ROOT / "core" / "observation_service.py").exists()
+    for name in ("observation_evaluation.py", "observation_capture.py"):
         assert not (REPO_ROOT / "core" / name).exists(), name
-    lifecycle = ("start_run", "complete_run", "fail_run", "activate_run", "supersede_run",
-                 "invalidate_observation")
+    lifecycle = ("start_run", "complete_run", "fail_run", "activate_run", "supersede_run")
     for path in list((REPO_ROOT / "core").glob("*.py")) + [REPO_ROOT / "api.py"]:
         tokens = _code_tokens(path.read_text(encoding="utf-8")).split("\n")
         for name in lifecycle:
             assert name not in tokens, (path.name, name)
+        if path.name != "observation_service.py":
+            assert "invalidate_observation" not in tokens, path.name
     for name in ("pedagogical_taxonomy_releases", "core_capability_definitions",
                  "capability_taxonomy_memberships", "observation_capabilities"):
         assert name not in Base.metadata.tables, name
