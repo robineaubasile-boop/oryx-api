@@ -4,8 +4,9 @@
 Aucune migration dans ce chantier : le schéma testé est celui produit par
 `alembic upgrade head` (= 0005_cognitive_support_traces, T2-A, puis
 0006_observation_layer depuis T3-A, 0007_pedagogical_taxonomy depuis
-T4-A et 0008_longitudinal_relations depuis T5-A, qui n'ajoutent que des
-tables non utilisées par ce service).
+T4-A, 0008_longitudinal_relations depuis T5-A et
+0009_competency_inference_state depuis T6-A, qui n'ajoutent que des tables
+non utilisées par ce service).
 
 1. Tests sans base (toujours exécutés) : aucune migration T2-B, API publique
    exacte (aucune fonction update/delete), aucun commit/rollback ni
@@ -64,6 +65,7 @@ from tests.test_migration_0005_cognitive_support_traces import T2A, USER, _upgra
 T3A = "0006_observation_layer"
 T4A = "0007_pedagogical_taxonomy"
 T5A = "0008_longitudinal_relations"
+T6A = "0009_competency_inference_state"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
 PUBLIC_API = {
@@ -143,14 +145,15 @@ def _open_kwargs(**overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t2b_head_is_0008():
+def test_no_migration_added_by_t2b_head_is_0009():
     """T2-B n'a ajouté aucune migration ; les seules ajoutées depuis sont
-    0006 (T3-A), 0007 (T4-A) et 0008 (T5-A), qui est la tête."""
+    0006 (T3-A), 0007 (T4-A), 0008 (T5-A) et 0009 (T6-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T5A]
-    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A}
+    assert script.get_heads() == [T6A]
+    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
+                                                                 T6A}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)]
 
 
 def test_public_api_is_exactly_the_capture_functions():
@@ -319,7 +322,7 @@ def test_utcnow_is_utc_aware():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0008) + deux utilisateurs et une analysis_session,
+    """Schéma = head (0009) + deux utilisateurs et une analysis_session,
     créé une fois pour le module ; chaque test nettoie ses événements."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)

@@ -5,8 +5,8 @@ complete_evaluation_run (core/observation_service.py).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
 `alembic upgrade head` (= 0007_pedagogical_taxonomy, T4-A, puis
-0008_longitudinal_relations depuis T5-A, tables vides non utilisées par ce
-service). Aucune donnée
+0008_longitudinal_relations depuis T5-A et 0009_competency_inference_state
+depuis T6-A, tables vides non utilisées par ce service). Aucune donnée
 pédagogique n'est seedée : chaque test crée ses propres releases,
 définitions et memberships (codes réels, libellés factices).
 
@@ -102,8 +102,10 @@ from tests.test_observation_service import (
 )
 from tests.test_observation_service import _event as _finalized_event
 
-# Migration de T5-A (relations longitudinales), tête depuis T5-A.
+# Migrations de T5-A (relations longitudinales) et de T6-A (inférence de
+# l'état C1-C12), tête depuis T6-A.
 T5A = "0008_longitudinal_relations"
+T6A = "0009_competency_inference_state"
 
 SERVICE_PATH = REPO_ROOT / "core" / "taxonomy_service.py"
 PUBLIC_API = {
@@ -154,12 +156,12 @@ def _def_kwargs(code="C7_A", revision=1, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t4b_head_is_0008():
-    """T4-B est service-only : aucune migration ajoutée par T4-B ; la seule
-    ajoutée depuis est 0008 (T5-A), qui est la tête."""
+def test_no_migration_added_by_t4b_head_is_0009():
+    """T4-B est service-only : aucune migration ajoutée par T4-B ; les seules
+    ajoutées depuis sont 0008 (T5-A) et 0009 (T6-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T5A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)
+    assert script.get_heads() == [T6A]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -538,7 +540,7 @@ ON_ADVISORY = "SELECT pg_advisory_xact_lock("
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0008) + deux utilisateurs ; chaque test nettoie ce
+    """Schéma = head (0009) + deux utilisateurs ; chaque test nettoie ce
     qu'il a créé."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)
@@ -718,13 +720,13 @@ def _pids(*sessions):
 # --- 0. aucune donnée seedée ------------------------------------------------
 
 def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, engine, db):  # noqa: F811
-    """Après upgrade head (0008 depuis T5-A) et import du service T4-B, les
+    """Après upgrade head (0009 depuis T6-A) et import du service T4-B, les
     quatre tables T4 sont vides : ni release V1, ni capacité, ni mapping."""
     _upgrade_head_with_users(pg_url, engine)
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T5A
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T6A
     assert tax.get_active_release(db) is None
 
 

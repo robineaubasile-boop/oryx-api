@@ -2,7 +2,9 @@
 des relations entre observations (core/longitudinal_service.py).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
-`alembic upgrade head` (= 0008_longitudinal_relations, T5-A). Aucune donnée
+`alembic upgrade head` (= 0008_longitudinal_relations, T5-A, puis
+0009_competency_inference_state depuis T6-A, tables vides non utilisées par
+ce service). Aucune donnée
 n'est seedée : chaque test crée ses releases, définitions, événements,
 runs T3 et observations via les services T2-B / T3-B / T4-B.
 
@@ -90,6 +92,7 @@ from tests.test_migration_0008_longitudinal_relations import (
     T5A,
     T5A_MODELS,
 )
+from tests.test_migration_0009_competency_inference_state import T6A
 from tests.test_observation_service import (
     INVALID_JSON_VALUES,
     _blocked,
@@ -208,15 +211,17 @@ RELATION_CALLS = {
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t5b_head_is_still_0008():
-    """T5-B est service-only : aucune migration 0009, tête = 0008."""
+def test_no_migration_added_by_t5b():
+    """T5-B est service-only : aucune migration ajoutée par T5-B ; la seule
+    ajoutée depuis est 0009 (T6-A, structure de l'inférence de l'état
+    C1-C12), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T5A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)
+    assert script.get_heads() == [T6A]
+    assert script.get_revision(T6A).down_revision == T5A
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
-    assert not any(name.startswith("0009") for name in files)
 
 
 def test_public_api_is_exactly_the_twelve_operations():
@@ -828,7 +833,7 @@ ON_ADVISORY = "SELECT pg_advisory_xact_lock("
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0008) + deux utilisateurs ; chaque test nettoie ce
+    """Schéma = head (0009) + deux utilisateurs ; chaque test nettoie ce
     qu'il a créé."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)

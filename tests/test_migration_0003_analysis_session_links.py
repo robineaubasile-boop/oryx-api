@@ -278,9 +278,9 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
     # Les modèles SQLAlchemy correspondent exactement au schéma migré, à
     # l'exception de company_analyses, encore présente en 0003 mais dont le
     # modèle est supprimé depuis T1-C2 (la table disparaît en 0004), et des
-    # tables de T2-A, T3-A, T4-A et T5-A (et des index de T3-A, T4-A et
-    # T5-A), déclarées dans les modèles mais créées seulement en 0005, 0006,
-    # 0007 et 0008.
+    # tables de T2-A, T3-A, T4-A, T5-A et T6-A (et des index de T3-A, T4-A,
+    # T5-A et T6-A), déclarées dans les modèles mais créées seulement en
+    # 0005, 0006, 0007, 0008 et 0009.
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with pg_engine.connect() as conn:
@@ -288,6 +288,18 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         diff = compare_metadata(ctx, Base.metadata)
     assert sorted((d[0], d[1].name) for d in diff) == [
         ("add_index", "ix_capability_taxonomy_memberships_capability_definition_id"),
+        ("add_index", "ix_competency_inference_basis_refs_inference_run_id"),
+        ("add_index", "ix_competency_inference_basis_refs_source_dependency_id"),
+        ("add_index", "ix_competency_inference_basis_refs_source_observation_id"),
+        ("add_index", "ix_competency_inference_basis_refs_source_revalidation_id"),
+        ("add_index", "ix_competency_inference_basis_refs_source_transfer_id"),
+        ("add_index", "ix_competency_inference_basis_refs_stage_claim_id"),
+        ("add_index", "ix_competency_inference_basis_refs_tension_id"),
+        ("add_index", "ix_competency_inference_runs_longitudinal_assessment_run_id"),
+        ("add_index", "ix_competency_inference_runs_predecessor_inference_run_id"),
+        ("add_index", "ix_competency_inference_runs_user_id"),
+        ("add_index", "ix_competency_inference_tension_caps_membership_id"),
+        ("add_index", "ix_competency_inference_tensions_inference_run_id"),
         ("add_index", "ix_dependency_capabilities_capability_membership_id"),
         ("add_index", "ix_longitudinal_assessment_inputs_observation_id"),
         ("add_index", "ix_longitudinal_assessment_runs_taxonomy_release_id"),
@@ -306,11 +318,17 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         ("add_index", "ix_observation_transfers_target_observation_id"),
         ("add_index", "ix_revalidation_capabilities_capability_membership_id"),
         ("add_index", "ix_transfer_capabilities_capability_membership_id"),
+        ("add_index", "uq_competency_inference_runs_one_active_user_competency"),
         ("add_index", "uq_longitudinal_assessment_runs_one_active_user_competency"),
         ("add_index", "uq_observation_evaluation_runs_one_active_event"),
         ("add_index", "uq_pedagogical_taxonomy_releases_one_active"),
         ("add_table", "capability_taxonomy_memberships"),
         ("add_table", "cognitive_events"),
+        ("add_table", "competency_inference_basis_refs"),
+        ("add_table", "competency_inference_runs"),
+        ("add_table", "competency_inference_tension_capabilities"),
+        ("add_table", "competency_inference_tensions"),
+        ("add_table", "competency_stage_claims"),
         ("add_table", "core_capability_definitions"),
         ("add_table", "dependency_capabilities"),
         ("add_table", "longitudinal_assessment_inputs"),
@@ -325,6 +343,7 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         ("add_table", "revalidation_capabilities"),
         ("add_table", "support_traces"),
         ("add_table", "transfer_capabilities"),
+        ("add_table", "user_competency_states"),
         ("remove_table", "company_analyses"),
     ]
 

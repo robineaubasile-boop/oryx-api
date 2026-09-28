@@ -74,6 +74,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T4A_TABLES,
     T5A_INDEXES,
     T5A_TABLES,
+    T6A_INDEXES,
+    T6A_TABLES,
     _catalog_columns,
     _code_tokens,
     _compare_metadata,
@@ -331,20 +333,21 @@ assert {name for table in INDEXES.values() for name in table} == T5A_INDEXES
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0008():
-    """0001 -> ... -> 0007 -> 0008, tête unique = 0008 ; 0008 est la seule
-    migration ajoutée par T5-A."""
+def test_revision_chain_is_0001_to_0008():
+    """0001 -> ... -> 0007 -> 0008 ; 0008 est la seule migration ajoutée
+    par T5-A. La tête de chaîne évolue avec les migrations suivantes (T6-A :
+    voir tests/test_migration_0009_competency_inference_state.py) ; on
+    vérifie ici les maillons jusqu'à 0008."""
     script = _script_directory()
-    assert script.get_heads() == [T5A]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A}
+    assert {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A} <= set(revisions)
     assert revisions[T5A].down_revision == T4A
     assert revisions[T4A].down_revision == T3A
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)]
+    assert files[:8] == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -501,7 +504,9 @@ def test_offline_sql_of_0008_downgrade_drops_only_t5a():
 
 
 def test_metadata_declares_exactly_the_eight_t5a_tables():
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    """Les huit tables T5-A (+ les six tables T6-A, testées à part)."""
+    assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+                                         | T6A_TABLES)
     for model, name in zip(T5A_MODELS, TABLES_IN_ORDER):
         assert model.__tablename__ == name
         assert model.__table__ is Base.metadata.tables[name]
@@ -710,11 +715,14 @@ def test_no_score_stage_confidence_or_profile_in_t5a():
     colonne de score, stade, confiance, maîtrise, progression, profil
     (coverage, variety, independence, consistency, freshness, durability),
     besoin de revalidation / confirmation, prédécesseur, LLM ni event_id
-    dupliqué ; aucune table de profil, d'historique actif ni de closure."""
+    dupliqué ; aucune table de profil, d'historique actif ni de closure.
+    Les stades, tensions, profils de confiance et le cache d'état
+    appartiennent au Niveau 6 (six tables T6-A, dérivées, testées dans
+    tests/test_migration_0009_competency_inference_state.py), jamais à T5."""
     for model in T5A_MODELS:
         for col in model.__table__.columns:
             assert not any(word in col.name for word in FORBIDDEN_COLUMN_FRAGMENTS), (model.__name__, col.name)
-    for table in Base.metadata.tables:
+    for table in set(Base.metadata.tables) - T6A_TABLES:
         for fragment in ("profile", "score", "active_history", "closure", "transitive", "stage", "confidence",
                          "mastery", "progress", "independen", "longitudinal_state", "user_competenc"):
             assert fragment not in table, table
@@ -775,7 +783,10 @@ def test_t5a_tables_are_not_wired_to_the_application():
     allowed = {"core/models.py", f"alembic/versions/{T5A}.py", "core/longitudinal_service.py",
                # T5-C : reconstruction READ-ONLY du dossier (SELECT
                # uniquement, non branchée : tests/test_longitudinal_view.py).
-               "core/longitudinal_view.py"}
+               "core/longitudinal_view.py",
+               # T6-A : FK de provenance des basis refs et du run
+               # d'inférence vers T5 (aucun branchement applicatif).
+               "alembic/versions/0009_competency_inference_state.py"}
     needles = (*(m.__name__ for m in T5A_MODELS), *T5A_TABLES)
     checked = 0
     for rel, source in _application_sources():
@@ -967,8 +978,8 @@ def _refused(conn, match, action, *, drop=()):
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0008) + deux utilisateurs et une analysis_session ;
-    tout ce que fait le test est annulé."""
+    """Schéma = head (0009 depuis T6-A) + deux utilisateurs et une
+    analysis_session ; tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
         trans = connection.begin()
@@ -990,16 +1001,27 @@ def run(conn, release) -> uuid.UUID:
 
 # --- upgrade et structure --------------------------------------------------------
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
-    """Base vide -> head = 0008 ; Base.metadata == schéma migré ; aucun
+def _assert_metadata_matches_0008(engine) -> None:
+    """Au schéma 0008, Base.metadata ne diffère que par les six tables de
+    T6-A et leurs index, créés seulement en 0009 ; tout le reste correspond
+    exactement."""
+    diff = _compare_metadata(engine)
+    assert sorted((d[0], d[1].name) for d in diff) == sorted(
+        [("add_table", t) for t in T6A_TABLES] + [("add_index", i) for i in T6A_INDEXES]
+    )
+
+
+def test_pg_upgrade_from_empty_database_to_0008(pg_url, pg_engine):
+    """Base vide -> 0008 ; Base.metadata == schéma migré (hors T6-A) ; aucun
     ENUM, trigger ni fonction ; les huit tables T5 sont VIDES (aucun seed)
-    et les tables T4 aussi (aucun bootstrap de taxonomie)."""
+    et les tables T4 aussi (aucun bootstrap de taxonomie). La tête est 0009
+    depuis T6-A (testée à part)."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T5A)
     assert _version(pg_engine) == T5A
     assert _tables(pg_engine) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                   | {"alembic_version"})
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0008(pg_engine)
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)
     # Aucune séquence T5 (UUID applicatifs) : seules celles des tables historiques.
@@ -1733,7 +1755,7 @@ def test_pg_upgrade_0007_to_0008_preserves_everything_then_downgrade(pg_url, pg_
     assert _data(pg_engine, T5A_TABLES) == {name: [] for name in sorted(T5A_TABLES)}
     assert _global_catalog(pg_engine) == global_0007
     assert (global_0007["enums"], global_0007["triggers"], global_0007["functions"]) == (0, 0, 0)
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0008(pg_engine)
     schema_t5 = _snapshot(pg_engine, T5A_TABLES)
     catalog_t5 = _catalog(pg_engine, T5A_TABLES)
 
@@ -1772,4 +1794,4 @@ def test_pg_upgrade_0007_to_0008_preserves_everything_then_downgrade(pg_url, pg_
     assert _catalog(pg_engine, T5A_TABLES) == catalog_t5
     assert _data(pg_engine, DATA_TABLES) == data_0007
     assert _data(pg_engine, T5A_TABLES) == {name: [] for name in sorted(T5A_TABLES)}
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0008(pg_engine)
