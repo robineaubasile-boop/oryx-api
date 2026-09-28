@@ -377,12 +377,14 @@ def test_no_evaluation_concept_in_t2a_tables():
 def test_t2a_tables_are_not_wired_to_the_application():
     """Aucun branchement : hors core/models.py, la migration 0005, le
     service de capture T2-B (core/cognitive_capture.py, lui-même non
-    branché : voir tests/test_cognitive_capture.py) et la migration 0006
-    de T3-A (dont les FK et la down_revision référencent cognitive_events),
-    aucun code applicatif (api.py, core/, scripts/, frontend) ne mentionne
-    ces modèles ou ces tables."""
+    branché : voir tests/test_cognitive_capture.py), la migration 0006
+    de T3-A (dont les FK et la down_revision référencent cognitive_events)
+    et le service d'observations T3-B (core/observation_service.py, qui
+    verrouille le CognitiveEvent évalué ; lui-même non branché : voir
+    tests/test_observation_service.py), aucun code applicatif (api.py,
+    core/, scripts/, frontend) ne mentionne ces modèles ou ces tables."""
     allowed = {"core/models.py", f"alembic/versions/{T2A}.py", "core/cognitive_capture.py",
-               "alembic/versions/0006_observation_layer.py"}
+               "alembic/versions/0006_observation_layer.py", "core/observation_service.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
