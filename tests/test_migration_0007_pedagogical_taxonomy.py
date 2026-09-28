@@ -606,7 +606,11 @@ def test_t4a_tables_are_not_wired_to_the_application():
                # définitions et localisations (compatibility gate, scopes ;
                # jamais d'écriture T4 ; lui-même non branché :
                # tests/test_longitudinal_service.py).
-               "core/longitudinal_service.py"}
+               "core/longitudinal_service.py",
+               # T5-C : reconstruction READ-ONLY du dossier (définitions,
+               # memberships, localisations ; SELECT uniquement ; non
+               # branchée : tests/test_longitudinal_view.py).
+               "core/longitudinal_view.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0
