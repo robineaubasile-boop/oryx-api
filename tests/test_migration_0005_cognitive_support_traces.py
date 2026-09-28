@@ -48,6 +48,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     SESSION_ID,
     T1B1_SHA256,
     T1C2,
+    T3A_INDEXES,
+    T3A_TABLES,
     _assert_metadata_matches_0004,
     _catalog_columns,
     _code_tokens,
@@ -107,14 +109,16 @@ TIMESTAMPTZ_COLUMNS = {
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0005():
-    """(1)(2) 0001 -> 0002 -> 0003 -> 0004 -> 0005, tête unique = 0005."""
+def test_revision_chain_is_0001_to_0005():
+    """(1)(2) 0001 -> 0002 -> 0003 -> 0004 -> 0005. La tête de chaîne évolue
+    avec les migrations suivantes (T3-A : voir
+    tests/test_migration_0006_observation_layer.py) ; on vérifie ici les
+    maillons jusqu'à 0005."""
     script = _script_directory()
-    assert script.get_heads() == [T2A]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A}
+    assert {BASELINE, T1A, T1B1, T1C2, T2A} <= set(revisions)
     assert revisions[T2A].down_revision == T1C2
     assert revisions[T1C2].down_revision == T1B1
     assert revisions[T1B1].down_revision == T1A
@@ -122,7 +126,7 @@ def test_revision_chain_is_exactly_0001_to_0005():
     assert revisions[BASELINE].down_revision is None
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A)]
+    assert files[:5] == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A)]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -191,8 +195,9 @@ def test_offline_sql_of_0005_downgrade_drops_only_the_two_tables():
 
 
 def test_metadata_declares_the_two_new_tables():
-    """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces."""
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES
+    """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces
+    (+ les tables de T3-A, testées à part)."""
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES
     assert CognitiveEvent.__table__ is Base.metadata.tables[EVENTS]
     assert SupportTrace.__table__ is Base.metadata.tables[TRACES]
 
@@ -356,24 +361,28 @@ def test_no_relationships_and_existing_models_untouched():
 
 def test_no_evaluation_concept_in_t2a_tables():
     """T2 est descriptif : aucune colonne ni table d'évaluation (score,
-    compétence, niveau, confiance, observation, C1-C12...)."""
+    compétence, niveau, confiance, observation, C1-C12...). Les tables
+    d'observation de T3-A (niveau 3, testées à part) sont les seules à
+    porter ces notions."""
     forbidden = ("score", "level", "stage", "competenc", "capabilit", "mastery", "confidence",
                  "observation", "taxonomy", "evidence", "progress", "inference", "signal")
     for table in (CognitiveEvent.__table__, SupportTrace.__table__):
         for col in table.columns:
             assert not any(word in col.name for word in forbidden), (table.name, col.name)
             assert not (col.name[:1] in ("c", "C") and col.name[1:].isdigit()), col.name
-    for name in Base.metadata.tables:
+    for name in set(Base.metadata.tables) - T3A_TABLES:
         assert not any(word in name for word in forbidden), name
 
 
 def test_t2a_tables_are_not_wired_to_the_application():
-    """Aucun branchement : hors core/models.py, la migration 0005 et le
+    """Aucun branchement : hors core/models.py, la migration 0005, le
     service de capture T2-B (core/cognitive_capture.py, lui-même non
-    branché : voir tests/test_cognitive_capture.py), aucun code applicatif
-    (api.py, core/, scripts/, frontend) ne mentionne ces modèles ou ces
-    tables."""
-    allowed = {"core/models.py", f"alembic/versions/{T2A}.py", "core/cognitive_capture.py"}
+    branché : voir tests/test_cognitive_capture.py) et la migration 0006
+    de T3-A (dont les FK et la down_revision référencent cognitive_events),
+    aucun code applicatif (api.py, core/, scripts/, frontend) ne mentionne
+    ces modèles ou ces tables."""
+    allowed = {"core/models.py", f"alembic/versions/{T2A}.py", "core/cognitive_capture.py",
+               "alembic/versions/0006_observation_layer.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
@@ -445,7 +454,7 @@ def _upgrade_head_with_users(pg_url, pg_engine) -> None:
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0005) + deux utilisateurs et une analysis_session ;
+    """Schéma = head (0006 depuis T3-A) + deux utilisateurs et une analysis_session ;
     tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -500,13 +509,23 @@ def _refused(conn, match, statement, params=None):
             conn.execute(statement, params or {})
 
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
-    """(13)(30) Base vide -> head = 0005 ; Base.metadata == schéma."""
+def _assert_metadata_matches_0005(engine) -> None:
+    """Au schéma 0005, Base.metadata ne diffère que par les tables de T3-A,
+    créées seulement en 0006 ; tout le reste correspond exactement."""
+    diff = _compare_metadata(engine)
+    assert sorted((d[0], d[1].name) for d in diff) == sorted(
+        [("add_table", t) for t in T3A_TABLES] + [("add_index", i) for i in T3A_INDEXES]
+    )
+
+
+def test_pg_upgrade_from_empty_database_to_0005(pg_url, pg_engine):
+    """(13)(30) Base vide -> 0005 ; Base.metadata == schéma (hors T3-A).
+    La tête est 0006 depuis T3-A (testée à part)."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T2A)
     assert _version(pg_engine) == T2A
     assert _tables(pg_engine) == REMAINING_TABLES | T2A_TABLES | {"alembic_version"}
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0005(pg_engine)
     assert _global_catalog(pg_engine)["enums"] == 0
     assert _global_catalog(pg_engine)["triggers"] == 0
 
@@ -775,7 +794,7 @@ def test_pg_upgrade_0004_to_0005_preserves_everything_then_downgrade(pg_url, pg_
     assert _global_catalog(pg_engine) == global_0004
     schema_0005 = _snapshot(pg_engine, T2A_TABLES)
     catalog_0005 = _catalog(pg_engine, T2A_TABLES)
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0005(pg_engine)
 
     # --- downgrade 0005 -> 0004 ------------------------------------------
     _run_alembic(pg_url, "downgrade", T1C2)
@@ -799,4 +818,4 @@ def test_pg_upgrade_0004_to_0005_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, T2A_TABLES) == schema_0005
     assert _catalog(pg_engine, T2A_TABLES) == catalog_0005
     assert _data(pg_engine, REMAINING_TABLES) == data_0004
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0005(pg_engine)
