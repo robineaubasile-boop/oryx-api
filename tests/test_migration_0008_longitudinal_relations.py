@@ -754,9 +754,9 @@ def test_no_t5_service_or_inference_anywhere():
                          REPO_ROOT / "api.py"]]
     # T5-C : core/longitudinal_view.py, lecteur read-only (non branché,
     # voir tests/test_longitudinal_view.py), n'est pas un service.
-    assert [m for m in modules if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
-                                                        "revalidation"))] == ["core/longitudinal_service.py",
-                                                                              "core/longitudinal_view.py"]
+    assert sorted(m for m in modules if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
+                                                              "revalidation"))) == ["core/longitudinal_service.py",
+                                                                                    "core/longitudinal_view.py"]
     checked = 0
     for rel, source in _application_sources():
         checked += 1
