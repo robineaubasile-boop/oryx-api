@@ -46,7 +46,12 @@ Invariants :
     courant relu sous ce verrou parent.
   * start_evaluation_run : CognitiveEvent seul ; le run réévalué est lu
     sans verrou explicite (event_id et existence sont immuables).
-  * invalidate_observation : verrou de la seule observation.
+  * invalidate_observation : verrou de la seule observation, en FOR NO
+    KEY UPDATE depuis T4-B : l'INSERT d'un mapping T4
+    (taxonomy_service.map_observation_capability, qui détient le verrou du
+    run) prend un FOR KEY SHARE (FK) sur l'observation ; avec FOR UPDATE,
+    une invalidation suivie d'un add / complete sur le même run dans une
+    même transaction formerait un cycle avec un mapping concurrent.
   Les runs sont verrouillés en SELECT ... FOR NO KEY UPDATE et non FOR
   UPDATE : l'INSERT d'un run qui réévalue un autre run (ou d'une
   observation) prend automatiquement un FOR KEY SHARE sur la ligne
@@ -58,6 +63,14 @@ Invariants :
   (aucune ne modifie une colonne clé). Chaque verrou utilise
   populate_existing : un objet déjà présent dans la Session est rechargé
   après l'attente, l'état n'est jamais lu avant le verrou.
+
+- Taxonomie (T4-B) : avant running / candidate -> completed / active, un
+  run évalué sous une release (pedagogical_taxonomy_release_id non NULL)
+  doit avoir des mappings cohérents (localized => au moins un,
+  competency_only => aucun, même release, même compétence), vérifiés sous
+  le verrou du run par core/taxonomy_service (import unidirectionnel : ce
+  module-là n'importe jamais celui-ci). Un run sans release garde
+  exactement le comportement T3-B.
 
 - Payloads JSON : validés strictement (types JSON exacts, flottants finis,
   clés str, pas de cycle, pas de NUL) puis copiés en profondeur ; rien
@@ -78,6 +91,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from core.models import CognitiveEvent, ObservationEvaluationRun, PedagogicalObservation
+from core.taxonomy_service import _validate_run_capability_mappings
 
 # CognitiveEvent.status évaluable (vocabulaire T2).
 FINALIZED = "finalized"
@@ -517,7 +531,11 @@ def complete_evaluation_run(
     observation est un succès.
 
     Ordre des verrous :
-    1. le run candidat (FOR NO KEY UPDATE), état vérifié ;
+    1. le run candidat (FOR NO KEY UPDATE), état vérifié ; s'il est évalué
+       sous une release T4, ses mappings sont validés sous ce verrou (qui
+       sérialise add_observation et map_observation_capability), sans
+       verrou supplémentaire ; une incohérence lève
+       taxonomy_service.InvalidCapabilityMapping avant toute mutation ;
     2. le CognitiveEvent parent (FOR UPDATE) : sérialise toutes les
        activations de l'événement. Le candidat n'a pas à être revalidé :
        son verrou est détenu depuis l'étape 1 et seule une transaction qui
@@ -536,6 +554,7 @@ def complete_evaluation_run(
     _require_text(output_fingerprint, "output_fingerprint")
 
     run = _lock_open_run(db, run_id)
+    _validate_run_capability_mappings(db, run)
     _lock_event(db, run.event_id)
     previous = db.execute(
         select(ObservationEvaluationRun)
@@ -589,7 +608,8 @@ def invalidate_observation(
     reason: str,
 ) -> PedagogicalObservation:
     """valid -> invalidated, définitif. L'observation est verrouillée (FOR
-    UPDATE) avant de lire integrity_status ; une seconde invalidation lève
+    NO KEY UPDATE, voir la docstring du module) avant de lire
+    integrity_status ; une seconde invalidation lève
     ObservationAlreadyInvalidated. Indépendant du lifecycle du run (une
     observation d'un run superseded ou obsolete peut être invalidée)."""
     _require_uuid(observation_id, "observation_id")
@@ -598,7 +618,7 @@ def invalidate_observation(
     observation = db.execute(
         select(PedagogicalObservation)
         .where(PedagogicalObservation.id == observation_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if observation is None:

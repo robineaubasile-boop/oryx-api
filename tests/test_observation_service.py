@@ -300,7 +300,11 @@ def test_service_owns_no_transaction_and_has_no_framework_or_llm_dependency():
             imported |= {alias.name for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
-    assert imported == {"math", "uuid", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models"}
+    # core.taxonomy_service (T4-B) : seul le contrôle interne des mappings
+    # avant complétion (import unidirectionnel, voir
+    # test_service_delegates_the_t4_check_to_the_taxonomy_service).
+    assert imported == {"math", "uuid", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
+                        "core.taxonomy_service"}
 
 
 def test_service_contains_no_inference_or_evaluator_vocabulary():
@@ -333,13 +337,34 @@ def test_service_is_not_wired_to_the_application():
 
 
 def test_service_does_not_touch_the_t4_taxonomy():
-    """Les tables T4-A existent (0007) mais le lifecycle T3-B n'est pas
-    modifié par T4-A : le service ne lit ni n'écrit aucune table de
-    taxonomie ; il ne fait que transmettre pedagogical_taxonomy_release_id
-    (la cohérence localized / competency_only relève de T4-B)."""
+    """Le service T3-B ne lit ni n'écrit lui-même aucune table de
+    taxonomie : il transmet pedagogical_taxonomy_release_id et, depuis
+    T4-B, délègue la cohérence localized / competency_only au contrôle
+    interne de core/taxonomy_service."""
     tokens = set(_code_tokens(SERVICE_PATH.read_text(encoding="utf-8")).split("\n"))
     for name in (*T4A_TABLES, *(model.__name__ for model in T4A_MODELS)):
         assert name not in tokens, name
+
+
+def test_service_delegates_the_t4_check_to_the_taxonomy_service():
+    """T4-B : un seul point de contact, le contrôle interne importé de
+    core.taxonomy_service, appelé une seule fois (complete_evaluation_run),
+    entre le verrou du run et celui de l'événement. Pas de cycle d'import :
+    taxonomy_service n'importe pas ce module."""
+    tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
+    imports = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "core.taxonomy_service"]
+    assert [[a.name for a in n.names] for n in imports] == [["_validate_run_capability_mappings"]]
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_validate_run_capability_mappings"]
+    assert len(calls) == 1
+    complete = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "complete_evaluation_run")
+    called = [n.func.id for n in ast.walk(complete) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert (called.index("_lock_open_run") < called.index("_validate_run_capability_mappings")
+            < called.index("_lock_event"))
+    taxonomy = ast.parse((REPO_ROOT / "core" / "taxonomy_service.py").read_text(encoding="utf-8"))
+    modules = {n.module for n in ast.walk(taxonomy) if isinstance(n, ast.ImportFrom)}
+    modules |= {a.name for n in ast.walk(taxonomy) if isinstance(n, ast.Import) for a in n.names}
+    assert not any("observation_service" in (m or "") for m in modules)
 
 
 def test_vocabularies_match_the_0006_check_constraints():
@@ -586,7 +611,9 @@ class _RecordingDB:
     ("add_observation", EvaluationRunNotFound, "observation_evaluation_runs", "FOR NO KEY UPDATE"),
     ("complete_evaluation_run", EvaluationRunNotFound, "observation_evaluation_runs", "FOR NO KEY UPDATE"),
     ("fail_evaluation_run", EvaluationRunNotFound, "observation_evaluation_runs", "FOR NO KEY UPDATE"),
-    ("invalidate_observation", ObservationNotFound, "pedagogical_observations", "FOR UPDATE"),
+    # FOR NO KEY UPDATE depuis T4-B (compatible avec le FOR KEY SHARE de la
+    # FK observation_capabilities -> pedagogical_observations).
+    ("invalidate_observation", ObservationNotFound, "pedagogical_observations", "FOR NO KEY UPDATE"),
 ])
 def test_first_query_of_each_mutation_is_a_row_lock(name, exc, table, mode):
     calls = {**UUID_CALLS, "start_evaluation_run": lambda db, v: svc.start_evaluation_run(
