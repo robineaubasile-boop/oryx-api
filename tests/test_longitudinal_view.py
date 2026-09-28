@@ -933,6 +933,7 @@ def test_pg_structural_recurrence_candidates(Sessions, db):
     assert candidate.occurrence_groups == (tuple(same_event.ids), (other.id,))
     assert candidate.contradiction_scopes == ("application", "comprehension")
     assert candidate.error_types == ("conceptual", "execution", "procedural")
+    assert candidate.dependency_linked_observation_ids == ()
     # Dépendance directe sur ce périmètre : une seule lignée, aucun candidat.
     linked = _build(db, _dossier_run(Sessions, tx.id, dep(other.id, same_event.ids[0], mode="localized",
                                                           caps=[A])))
@@ -941,10 +942,120 @@ def test_pg_structural_recurrence_candidates(Sessions, db):
     third = _t3(Sessions, tx.id, contra(B))
     unrelated = _build(db, _dossier_run(Sessions, tx.id, dep(other.id, third.id, mode="localized", caps=[B])))
     by_scope = {_cap(c.common_scope): c for c in unrelated.consistency_profile.structural_recurrence_candidates}
-    assert set(by_scope) == {"C7_A"}  # C7_B : other et third liés par la dépendance
+    assert set(by_scope) == {"C7_A"}  # C7_B : other dépend de third sur C7_B
+    assert by_scope["C7_A"].dependency_linked_observation_ids == ()
     assert view.SEMANTIC_CONTRADICTION_MOTIF_NOT_PERSISTED in {lim.code for lim in unrelated.limitations}
     _, values = _walk(unrelated.to_payload())
     assert "confirmed_cognitive_motif" not in values
+
+
+def _candidates(dossier) -> dict:
+    return {_cap(c.common_scope): c for c in dossier.consistency_profile.structural_recurrence_candidates}
+
+
+def test_pg_contradictions_dependent_on_the_same_support_trace_are_not_a_recurrence(Sessions, db):
+    """A. Deux contradictions C7_A d'événements distincts, toutes deux
+    dependent de la MÊME aide antérieure : aucune occurrence autonome."""
+    tx = _taxonomy(Sessions)
+    A = tx.m["C7_A"]
+    _, trace = _event_with_trace(Sessions)
+    first = _t3(Sessions, tx.id, contra(A))
+    second = _t3(Sessions, tx.id, contra(A))
+    unlinked = _build(db, _dossier_run(Sessions, tx.id))
+    assert set(_candidates(unlinked)) == {"C7_A"}  # sans dépendance connue : candidat
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(first.id, trace=trace), dep(second.id, trace=trace)))
+    assert _candidates(dossier) == {}
+
+
+@pytest.mark.parametrize("kind", ["dependent", "partially_dependent"])
+def test_pg_one_autonomous_and_one_trace_dependent_contradiction_are_not_a_recurrence(Sessions, db, kind):
+    """B / C. Une contradiction sans dépendance + une contradiction
+    dependent / partially_dependent d'une aide : une seule occasion
+    autonome, aucun candidat (partially_dependent ne suffit jamais)."""
+    tx = _taxonomy(Sessions)
+    A = tx.m["C7_A"]
+    _, trace = _event_with_trace(Sessions)
+    _t3(Sessions, tx.id, contra(A))
+    dependent = _t3(Sessions, tx.id, contra(A))
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(dependent.id, trace=trace, kind=kind)))
+    assert _candidates(dossier) == {}
+
+
+def test_pg_contradictions_dependent_on_the_same_supportive_source_are_not_a_recurrence(Sessions, db):
+    """D. Source supportive hors du groupe des contradictions : la lignée
+    compte quand même."""
+    tx = _taxonomy(Sessions)
+    A = tx.m["C7_A"]
+    source = _t3(Sessions, tx.id, sup(A))
+    first = _t3(Sessions, tx.id, contra(A))
+    second = _t3(Sessions, tx.id, contra(A))
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(first.id, source.id),
+                                      dep(second.id, source.id, kind="partially_dependent")))
+    assert _candidates(dossier) == {}
+    # Une troisième contradiction autonome ne suffit pas seule non plus.
+    third = _t3(Sessions, tx.id, contra(A))
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(first.id, source.id), dep(second.id, source.id)))
+    assert third.id not in {d.target_observation_id for d in dossier.dependency_profile.dependencies}
+    assert _candidates(dossier) == {}
+
+
+def test_pg_localized_dependency_neutralizes_only_its_scope(Sessions, db):
+    """E. Dépendance localized C7_A sur une contradiction C7_A+C7_B : plus
+    de candidat C7_A ; C7_B, non couverte, reste candidate."""
+    tx = _taxonomy(Sessions)
+    A, B = tx.m["C7_A"], tx.m["C7_B"]
+    _, trace = _event_with_trace(Sessions)
+    linked = _t3(Sessions, tx.id, contra(A, B))
+    other = _t3(Sessions, tx.id, contra(A, B))
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(linked.id, trace=trace, mode="localized", caps=[A])))
+    candidates = _candidates(dossier)
+    assert set(candidates) == {"C7_B"}
+    assert set(candidates["C7_B"].observation_ids) == {linked.id, other.id}
+    assert candidates["C7_B"].dependency_linked_observation_ids == ()
+    assert candidates["C7_B"].kind == "structural_recurrence_candidate"
+
+
+@pytest.mark.parametrize("mode", ["whole_observation", "competency_only"])
+def test_pg_non_localized_dependency_neutralizes_every_scope_of_its_target(Sessions, db, mode):
+    """F. whole_observation / competency_only : chevauchement conservateur,
+    tous les périmètres de la cible sont neutralisés."""
+    tx = _taxonomy(Sessions)
+    A, B = tx.m["C7_A"], tx.m["C7_B"]
+    source = _t3(Sessions, tx.id, sup(A, B))
+    linked = _t3(Sessions, tx.id, contra(A, B))
+    _t3(Sessions, tx.id, contra(A, B))
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(linked.id, source.id, mode=mode)))
+    assert _candidates(dossier) == {}
+
+
+def test_pg_dependency_linked_contradictions_stay_visible_in_a_candidate(Sessions, db):
+    """Trois contradictions C7_A : deux autonomes (candidat), une dépendante
+    listée à part, jamais comptée comme occasion."""
+    tx = _taxonomy(Sessions)
+    A = tx.m["C7_A"]
+    _, trace = _event_with_trace(Sessions)
+    first = _t3(Sessions, tx.id, contra(A))
+    second = _t3(Sessions, tx.id, contra(A))
+    dependent = _t3(Sessions, tx.id, contra(A))
+    (candidate,) = _build(db, _dossier_run(Sessions, tx.id, dep(dependent.id, trace=trace))
+                          ).consistency_profile.structural_recurrence_candidates
+    assert candidate.observation_ids == (first.id, second.id)
+    assert candidate.event_ids == (first.event, second.event)
+    assert candidate.occurrence_groups == ((first.id,), (second.id,))
+    assert candidate.dependency_linked_observation_ids == (dependent.id,)
+
+
+@pytest.mark.parametrize("mode", ["whole_observation", "competency_only"])
+def test_pg_competency_only_dependent_contradiction_is_not_an_autonomous_occurrence(Sessions, db, mode):
+    """G. Niveau compétence : une contradiction competency_only ciblée par
+    une dépendance ne crée pas d'occasion autonome."""
+    tx = _taxonomy(Sessions)
+    _, trace = _event_with_trace(Sessions)
+    linked = _t3(Sessions, tx.id, only(contra()))
+    _t3(Sessions, tx.id, only(contra()))
+    assert set(_candidates(_build(db, _dossier_run(Sessions, tx.id)))) == {None}
+    dossier = _build(db, _dossier_run(Sessions, tx.id, dep(linked.id, trace=trace, mode=mode)))
+    assert _candidates(dossier) == {}
 
 
 def test_pg_competency_only_recurrence_is_separate(Sessions, db):

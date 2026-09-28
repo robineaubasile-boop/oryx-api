@@ -499,11 +499,14 @@ class TensionReading(_View):
 
 @dataclass(frozen=True)
 class RecurrenceCandidate(_View):
-    """Contradictions d'événements distincts sur un même périmètre, non
-    réunies par une dépendance : candidat STRUCTUREL, jamais un motif
-    cognitif confirmé. occurrence_groups réunit ce qui ne compte que pour
-    une occurrence (même événement, ou dépendance directe sur ce
-    périmètre)."""
+    """Au moins deux occasions autonomes (événements distincts) de
+    contradiction sur un même périmètre, sans dépendance connue sur ce
+    périmètre : candidat STRUCTUREL, jamais une récurrence indépendante
+    confirmée ni un motif cognitif confirmé. observation_ids / event_ids /
+    occurrence_groups (une occasion par événement) ne portent que les
+    occurrences autonomes ; dependency_linked_observation_ids liste les
+    contradictions du périmètre rattachées à une lignée de dépendance
+    (visibles, jamais comptées)."""
     kind: str
     common_scope: ScopeUnit
     observation_ids: tuple
@@ -511,6 +514,7 @@ class RecurrenceCandidate(_View):
     contradiction_scopes: tuple
     error_types: tuple
     occurrence_groups: tuple
+    dependency_linked_observation_ids: tuple
 
 
 @dataclass(frozen=True)
@@ -1230,47 +1234,38 @@ def _transfer_profile(transfers) -> TransferProfile:
 
 
 def _recurrence_candidates(contradictions, dependencies) -> tuple:
-    """Par périmètre : contradictions d'événements distincts ; même
-    événement ou dépendance directe entre elles sur ce périmètre => une
-    seule occurrence (jamais une répétition indépendante)."""
+    """Par périmètre. Une contradiction ciblée par une dépendance (dependent
+    OU partially_dependent, quelle que soit la source : observation du
+    groupe ou non, supportive, aide) qui chevauche ce périmètre (règle
+    conservatrice de _limits) est une occurrence DÉPENDANTE : rattachée à sa
+    lignée, elle ne compte jamais comme occurrence autonome. Les
+    contradictions restantes d'un même événement forment une seule
+    occasion. Candidat seulement si au moins deux occasions autonomes
+    distinctes : aucune dépendance CONNUE n'invalide la lecture, ce qui ne
+    prouve jamais leur indépendance."""
     by_unit = {}
     for observation in contradictions:
         for unit in _units(observation):
             by_unit.setdefault(_unit_key(unit), (unit, []))[1].append(observation)
     candidates = []
     for key, (unit, items) in sorted(by_unit.items(), key=lambda entry: _unit_order(entry[1][0])):
-        ids = [o.observation_id for o in items]
-        parent = {i: i for i in ids}
-
-        def root(i):
-            while parent[i] != i:
-                i = parent[i]
-            return i
-
-        def join(a, b):
-            parent[root(b)] = root(a)
-
-        for first in items:
-            for second in items:
-                if first.event_id == second.event_id:
-                    join(first.observation_id, second.observation_id)
-        for dependency in dependencies:
-            if dependency.source is not None and dependency.source.observation_id in parent \
-                    and dependency.target.observation_id in parent and _limits(dependency, key):
-                join(dependency.source.observation_id, dependency.target.observation_id)
-        groups = {}
-        for i in ids:
-            groups.setdefault(root(i), []).append(i)
-        if len(groups) < 2:
+        linked = {o.observation_id for o in items
+                  if any(d.target.observation_id == o.observation_id and _limits(d, key) for d in dependencies)}
+        autonomous = [o for o in items if o.observation_id not in linked]
+        occasions = {}
+        for observation in autonomous:
+            occasions.setdefault(observation.event_id, []).append(observation.observation_id)
+        if len(occasions) < 2:
             continue
         candidates.append(RecurrenceCandidate(
             kind=STRUCTURAL_RECURRENCE_CANDIDATE,
             common_scope=unit,
-            observation_ids=tuple(ids),
-            event_ids=_unique(o.event_id for o in items),
-            contradiction_scopes=tuple(sorted({o.contradiction_scope for o in items})),
-            error_types=tuple(sorted({o.error_type for o in items if o.error_type is not None})),
-            occurrence_groups=tuple(tuple(group) for group in groups.values()),
+            observation_ids=tuple(o.observation_id for o in autonomous),
+            event_ids=tuple(occasions),
+            contradiction_scopes=tuple(sorted({o.contradiction_scope for o in autonomous})),
+            error_types=tuple(sorted({o.error_type for o in autonomous if o.error_type is not None})),
+            occurrence_groups=tuple(tuple(group) for group in occasions.values()),
+            dependency_linked_observation_ids=tuple(o.observation_id for o in items if o.observation_id in linked),
         ))
     return tuple(candidates)
 
