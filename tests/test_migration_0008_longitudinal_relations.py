@@ -9,8 +9,9 @@ réutilise les helpers) :
 1. Tests sans base (toujours exécutés) : chaîne Alembic, intégrité de 0001
    à 0007, SQL PostgreSQL généré en mode offline, métadonnées des modèles
    (colonnes, types, PK, FK, CHECK, UNIQUE, index, défauts), anti-dérive
-   (aucun seed, service T5, route, LLM, score, stade, confiance, profil,
-   « independent »).
+   (aucun seed, route, LLM, score, stade, confiance, profil,
+   « independent » ; depuis T5-B, aucun service T5 hors
+   core/longitudinal_service.py, testé dans tests/test_longitudinal_service.py).
 
 2. Tests contre un vrai PostgreSQL, uniquement si ORYX_TEST_DATABASE_URL
    pointe vers une base DÉDIÉE dont le nom contient "test" (schéma public
@@ -742,14 +743,17 @@ def _application_sources():
 
 
 def test_no_t5_service_or_inference_anywhere():
-    """T5-A = persistence only : aucun module de service longitudinal, aucune
-    opération T5-B (historique, dépendance, transfert, revalidation,
-    activation), hors docstrings et commentaires."""
+    """T5-A = persistence only. Depuis T5-B, UN seul module de service
+    longitudinal, core/longitudinal_service.py (non branché, voir
+    tests/test_longitudinal_service.py) ; aucun autre, ni route, ni script.
+    Aucune opération d'inférence / détection (historique, dépendance,
+    transfert, revalidation, activation hors service) nulle part, hors
+    docstrings et commentaires."""
     modules = [p.relative_to(REPO_ROOT).as_posix()
                for p in [*(REPO_ROOT / "core").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"),
                          REPO_ROOT / "api.py"]]
-    assert not [m for m in modules if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
-                                                            "revalidation"))], modules
+    assert [m for m in modules if any(w in m for w in ("longitudinal", "relation", "dependenc", "transfer",
+                                                        "revalidation"))] == ["core/longitudinal_service.py"]
     checked = 0
     for rel, source in _application_sources():
         checked += 1
@@ -759,10 +763,13 @@ def test_no_t5_service_or_inference_anywhere():
 
 
 def test_t5a_tables_are_not_wired_to_the_application():
-    """Aucun branchement : hors core/models.py et la migration 0008, aucun
-    code applicatif (api.py, core/ dont les services T2-B / T3-B / T4-B /
-    T4-C, scripts/, frontend) ne mentionne ces modèles ou ces tables."""
-    allowed = {"core/models.py", f"alembic/versions/{T5A}.py"}
+    """Aucun branchement : hors core/models.py, la migration 0008 et, depuis
+    T5-B, le service core/longitudinal_service.py (seul point d'écriture
+    applicatif, lui-même non branché : voir
+    tests/test_longitudinal_service.py), aucun code applicatif (api.py,
+    core/ dont les services T2-B / T3-B / T4-B / T4-C, scripts/, frontend)
+    ne mentionne ces modèles ou ces tables."""
+    allowed = {"core/models.py", f"alembic/versions/{T5A}.py", "core/longitudinal_service.py"}
     needles = (*(m.__name__ for m in T5A_MODELS), *T5A_TABLES)
     checked = 0
     for rel, source in _application_sources():

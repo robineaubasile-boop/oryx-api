@@ -386,13 +386,16 @@ def test_t2a_tables_are_not_wired_to_the_application():
     de T3-A (dont les FK et la down_revision référencent cognitive_events)
     et le service d'observations T3-B (core/observation_service.py, qui
     verrouille le CognitiveEvent évalué ; lui-même non branché : voir
-    tests/test_observation_service.py) et la migration 0008 de T5-A (FK
-    observation_dependencies.source_support_trace_id ; aucun branchement),
-    aucun code applicatif (api.py, core/, scripts/, frontend) ne mentionne
-    ces modèles ou ces tables."""
+    tests/test_observation_service.py), la migration 0008 de T5-A (FK
+    observation_dependencies.source_support_trace_id ; aucun branchement)
+    et le service longitudinal T5-B (core/longitudinal_service.py, qui LIT
+    le user d'un CognitiveEvent et d'un SupportTrace source de dépendance ;
+    lui-même non branché : voir tests/test_longitudinal_service.py), aucun
+    code applicatif (api.py, core/, scripts/, frontend) ne mentionne ces
+    modèles ou ces tables."""
     allowed = {"core/models.py", f"alembic/versions/{T2A}.py", "core/cognitive_capture.py",
                "alembic/versions/0006_observation_layer.py", "core/observation_service.py",
-               "alembic/versions/0008_longitudinal_relations.py"}
+               "alembic/versions/0008_longitudinal_relations.py", "core/longitudinal_service.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):

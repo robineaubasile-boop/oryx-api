@@ -518,7 +518,11 @@ def test_t3a_tables_are_not_wired_to_the_application():
                "core/taxonomy_service.py",
                # T5-A : FK des relations longitudinales vers
                # pedagogical_observations (aucun branchement applicatif).
-               "alembic/versions/0008_longitudinal_relations.py"}
+               "alembic/versions/0008_longitudinal_relations.py",
+               # T5-B : service longitudinal, qui LIT les observations et
+               # leurs runs pour construire le snapshot (jamais d'écriture ;
+               # lui-même non branché : tests/test_longitudinal_service.py).
+               "core/longitudinal_service.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
