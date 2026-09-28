@@ -2,7 +2,10 @@
 pédagogiques (core/observation_service.py).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
-`alembic upgrade head` (= 0006_observation_layer, T3-A).
+`alembic upgrade head` (= 0006_observation_layer, T3-A, puis
+0007_pedagogical_taxonomy depuis T4-A, qui ajoute les tables de taxonomie
+— non utilisées par ce service — et la FK
+observation_evaluation_runs.pedagogical_taxonomy_release_id).
 
 1. Tests sans base (toujours exécutés) : aucune migration T3-B, API publique
    exacte, petite hiérarchie d'exceptions, aucun commit/rollback ni
@@ -69,6 +72,7 @@ from tests.test_migration_0003_analysis_session_links import T1B1
 from tests.test_migration_0004_drop_company_analyses import T1C2, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, T2A, USER, _upgrade_head_with_users
 from tests.test_migration_0006_observation_layer import ACTIVE_INDEX, OBS_VOCABULARIES, RUN_VOCABULARIES, T3A
+from tests.test_migration_0007_pedagogical_taxonomy import RELEASE_FK, T4A, T4A_MODELS, T4A_TABLES
 
 SERVICE_PATH = REPO_ROOT / "core" / "observation_service.py"
 DEDUP_INDEX = "uq_observation_evaluation_runs_dedup_key"
@@ -221,10 +225,12 @@ def _add(db, run_id, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t3b_head_is_still_0006():
+def test_no_migration_added_by_t3b_head_is_0007():
+    """T3-B n'a ajouté aucune migration ; la seule ajoutée depuis est 0007
+    (T4-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T3A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A)
+    assert script.get_heads() == [T4A]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -326,11 +332,14 @@ def test_service_is_not_wired_to_the_application():
     assert checked > 0
 
 
-def test_no_t4_taxonomy_tables():
-    from core.db import Base
-    for name in ("pedagogical_taxonomy_releases", "core_capability_definitions",
-                 "capability_taxonomy_memberships", "observation_capabilities"):
-        assert name not in Base.metadata.tables, name
+def test_service_does_not_touch_the_t4_taxonomy():
+    """Les tables T4-A existent (0007) mais le lifecycle T3-B n'est pas
+    modifié par T4-A : le service ne lit ni n'écrit aucune table de
+    taxonomie ; il ne fait que transmettre pedagogical_taxonomy_release_id
+    (la cohérence localized / competency_only relève de T4-B)."""
+    tokens = set(_code_tokens(SERVICE_PATH.read_text(encoding="utf-8")).split("\n"))
+    for name in (*T4A_TABLES, *(model.__name__ for model in T4A_MODELS)):
+        assert name not in tokens, name
 
 
 def test_vocabularies_match_the_0006_check_constraints():
@@ -610,7 +619,7 @@ def test_dedup_violation_detection_is_targeted():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0006) + deux utilisateurs, créé une fois pour le
+    """Schéma = head (0007) + deux utilisateurs, créé une fois pour le
     module ; chaque test nettoie ce qu'il a créé."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)
@@ -625,6 +634,7 @@ def Sessions(engine):
     with engine.begin() as conn:
         conn.execute(sa.text("DELETE FROM pedagogical_observations"))
         conn.execute(sa.text("DELETE FROM observation_evaluation_runs"))
+        conn.execute(sa.text("DELETE FROM pedagogical_taxonomy_releases"))
         conn.execute(sa.text("DELETE FROM support_traces"))
         conn.execute(sa.text("DELETE FROM cognitive_events"))
         conn.execute(sa.text("DELETE FROM users WHERE id NOT IN ('u', 'u2')"))
@@ -790,9 +800,21 @@ def test_pg_start_on_finalized_event_creates_running_candidate(engine, Sessions,
     assert svc.get_evaluation_run(db, run_id=run.id) is run
 
 
+def _release(engine) -> uuid.UUID:
+    """Release de taxonomie T4 minimale, créée par le test (aucune n'est
+    seedée par la migration)."""
+    release_id = uuid.uuid4()
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO pedagogical_taxonomy_releases (id, version_key, status, spec_fingerprint, created_at) "
+            "VALUES (:id, :k, 'candidate', :f, now())"
+        ), {"id": release_id, "k": f"test-{release_id}", "f": f"sha256:{release_id}"})
+    return release_id
+
+
 def test_pg_start_real_clock_and_optional_provenance(engine, Sessions, db):
     event_id = _event(Sessions)
-    release = uuid.uuid4()
+    release = _release(engine)
     run = svc.start_evaluation_run(db, **_start_kwargs(
         event_id, trigger="manual_replay", pedagogical_taxonomy_release_id=release,
         model_id="model-2026-09", prompt_spec_version="prompt-3"))
@@ -803,6 +825,21 @@ def test_pg_start_real_clock_and_optional_provenance(engine, Sessions, db):
     assert stored["started_at"] == stored["created_at"]
     assert (stored["trigger"], stored["pedagogical_taxonomy_release_id"], stored["model_id"],
             stored["prompt_spec_version"]) == ("manual_replay", release, "model-2026-09", "prompt-3")
+
+
+def test_pg_start_with_unknown_taxonomy_release_is_refused_by_the_t4_fk(engine, Sessions, db):
+    """Depuis T4-A, pedagogical_taxonomy_release_id est une vraie FK : une
+    release inexistante est refusée par PostgreSQL. Le service (inchangé)
+    propage l'IntegrityError telle quelle (ce n'est pas un conflit de
+    dédup) après retour au savepoint : la transaction de l'appelant reste
+    utilisable."""
+    event_id = _event(Sessions)
+    with pytest.raises(sa.exc.IntegrityError, match=RELEASE_FK):
+        svc.start_evaluation_run(db, **_start_kwargs(event_id, pedagogical_taxonomy_release_id=uuid.uuid4()))
+    run = svc.start_evaluation_run(db, **_start_kwargs(event_id))
+    db.commit()
+    assert _count(engine, "observation_evaluation_runs") == 1
+    assert _run_row(engine, run.id)["pedagogical_taxonomy_release_id"] is None
 
 
 def test_pg_start_keeps_strings_exactly_as_provided(engine, Sessions, db):

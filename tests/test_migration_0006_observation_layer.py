@@ -7,7 +7,9 @@ réutilise les helpers) :
 1. Tests sans base (toujours exécutés) : chaîne Alembic, intégrité de 0001
    à 0005, SQL PostgreSQL généré en mode offline, métadonnées des modèles
    (colonnes, types, FK, CHECK, UNIQUE, index partiel, défauts), absence de
-   tout branchement applicatif, de service T3-B et de taxonomie T4.
+   tout branchement applicatif et de service autre que T3-B. La taxonomie
+   T4 (0007, FK pedagogical_taxonomy_release_id comprise) est testée dans
+   tests/test_migration_0007_pedagogical_taxonomy.py.
 
 2. Tests contre un vrai PostgreSQL, uniquement si ORYX_TEST_DATABASE_URL
    pointe vers une base DÉDIÉE dont le nom contient "test" (schéma public
@@ -55,6 +57,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T1C2,
     T3A_INDEXES,
     T3A_TABLES,
+    T4A_INDEXES,
+    T4A_TABLES,
     _catalog_columns,
     _code_tokens,
     _compare_metadata,
@@ -220,19 +224,21 @@ def _expected_checks(table) -> dict:
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0006():
-    """0001 -> ... -> 0005 -> 0006, tête unique = 0006."""
+def test_revision_chain_is_0001_to_0006():
+    """0001 -> ... -> 0005 -> 0006. La tête de chaîne évolue avec les
+    migrations suivantes (T4-A : voir
+    tests/test_migration_0007_pedagogical_taxonomy.py) ; on vérifie ici les
+    maillons jusqu'à 0006."""
     script = _script_directory()
-    assert script.get_heads() == [T3A]
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A}
+    assert {BASELINE, T1A, T1B1, T1C2, T2A, T3A} <= set(revisions)
     assert revisions[T3A].down_revision == T2A
     assert revisions[T2A].down_revision == T1C2
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A)]
+    assert files[:6] == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A)]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -325,11 +331,12 @@ def test_offline_sql_of_0006_downgrade_drops_only_the_two_tables_and_the_index()
 
 def test_metadata_declares_the_two_new_tables():
     """Base.metadata = tables de 0005 + observation_evaluation_runs +
-    pedagogical_observations ; aucune table T4 (taxonomie, capacités)."""
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | {RUNS, OBS}
+    pedagogical_observations (+ les quatre tables T4-A, testées à part) ;
+    aucune autre table de taxonomie ou de capacités."""
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES
     assert ObservationEvaluationRun.__table__ is Base.metadata.tables[RUNS]
     assert PedagogicalObservation.__table__ is Base.metadata.tables[OBS]
-    for name in Base.metadata.tables:
+    for name in set(Base.metadata.tables) - T4A_TABLES:
         assert "taxonom" not in name and "capabilit" not in name, name
 
 
@@ -359,14 +366,15 @@ def test_observation_evaluation_run_columns_types_nullability_and_fks():
     table = ObservationEvaluationRun.__table__
     _assert_columns(table, RUN_COLUMNS, RUN_NULLABLE)
     fks = sorted((fk.parent.name, fk.target_fullname) for fk in table.foreign_keys)
+    # La FK de pedagogical_taxonomy_release_id est ajoutée par T4-A (0007,
+    # testée à part) ; la colonne reste nullable.
     assert fks == [
         ("event_id", "cognitive_events.id"),
+        ("pedagogical_taxonomy_release_id", "pedagogical_taxonomy_releases.id"),
         ("re_evaluates_run_id", "observation_evaluation_runs.id"),
     ]
     for fk in table.foreign_keys:
         assert type(fk.column.type) is type(fk.parent.type), fk.parent.name
-    # Référence logique T4 : UUID nullable, volontairement SANS FK.
-    assert not table.c.pedagogical_taxonomy_release_id.foreign_keys
     assert table.c.pedagogical_taxonomy_release_id.nullable is True
 
 
@@ -414,9 +422,11 @@ def test_unique_constraints_and_partial_index():
         "uq_pedagogical_observations_run_ordinal": ["evaluation_run_id", "ordinal"],
     }
     assert not obs.indexes
-    assert len(runs.indexes) == 1
-    (index,) = runs.indexes
-    assert index.name == ACTIVE_INDEX
+    # Seul autre index de runs : celui de la FK T4-A (0007, testé à part).
+    assert {i.name for i in runs.indexes} == {
+        ACTIVE_INDEX, "ix_observation_evaluation_runs_pedagogical_taxonomy_release_id",
+    }
+    (index,) = [i for i in runs.indexes if i.name == ACTIVE_INDEX]
     assert index.unique is True
     assert [c.name for c in index.columns] == ["event_id"]
     assert str(index.dialect_options["postgresql"]["where"]) == "interpretation_status = 'active'"
@@ -497,7 +507,10 @@ def test_t3a_tables_are_not_wired_to_the_application():
     service T3-B core/observation_service.py (lui-même non branché : voir
     tests/test_observation_service.py), aucun code applicatif (api.py,
     core/, scripts/, frontend) ne mentionne ces modèles ou ces tables."""
-    allowed = {"core/models.py", f"alembic/versions/{T3A}.py", "core/observation_service.py"}
+    allowed = {"core/models.py", f"alembic/versions/{T3A}.py", "core/observation_service.py",
+               # T4-A : FK vers pedagogical_observations et FK ajoutée à
+               # observation_evaluation_runs (aucun branchement applicatif).
+               "alembic/versions/0007_pedagogical_taxonomy.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
@@ -516,11 +529,12 @@ def test_t3a_tables_are_not_wired_to_the_application():
     assert checked > 0
 
 
-def test_only_the_t3b_service_and_no_t4_taxonomy():
+def test_only_the_t3b_service():
     """Le lifecycle vit uniquement dans le service T3-B
     core/observation_service.py : aucun autre module de service, aucune
-    fonction activate/supersede séparée, aucune table de taxonomie /
-    capacités (T4)."""
+    fonction activate/supersede séparée. (Les tables de taxonomie existent
+    depuis T4-A, sans service : voir
+    tests/test_migration_0007_pedagogical_taxonomy.py.)"""
     assert (REPO_ROOT / "core" / "observation_service.py").exists()
     for name in ("observation_evaluation.py", "observation_capture.py"):
         assert not (REPO_ROOT / "core" / name).exists(), name
@@ -531,9 +545,6 @@ def test_only_the_t3b_service_and_no_t4_taxonomy():
             assert name not in tokens, (path.name, name)
         if path.name != "observation_service.py":
             assert "invalidate_observation" not in tokens, path.name
-    for name in ("pedagogical_taxonomy_releases", "core_capability_definitions",
-                 "capability_taxonomy_memberships", "observation_capabilities"):
-        assert name not in Base.metadata.tables, name
 
 
 # --------------------------------------------------------------------------
@@ -643,8 +654,8 @@ def _count(conn, table, where="TRUE", params=None) -> int:
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0006) + deux utilisateurs et une analysis_session ;
-    tout ce que fait le test est annulé."""
+    """Schéma = head (0007 depuis T4-A) + deux utilisateurs et une
+    analysis_session ; tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
         trans = connection.begin()
@@ -659,14 +670,30 @@ def _pg_in_check(column, values) -> str:
     return f"CHECK ((({column})::text = ANY ((ARRAY[{array}])::text[])))"
 
 
-def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):
-    """Base vide -> head = 0006 ; Base.metadata == schéma migré ; aucun
-    ENUM, trigger ni fonction."""
+T4A_RELEASE_FK = "observation_evaluation_runs_taxonomy_release_id_fkey"
+
+
+def _assert_metadata_matches_0006(engine) -> None:
+    """Au schéma 0006, Base.metadata ne diffère que par T4-A (0007) : les
+    quatre tables de taxonomie, leurs index, et l'index + la FK ajoutés à
+    observation_evaluation_runs.pedagogical_taxonomy_release_id ; tout le
+    reste correspond exactement."""
+    diff = _compare_metadata(engine)
+    assert sorted((d[0], d[1].name) for d in diff) == sorted(
+        [("add_table", t) for t in T4A_TABLES] + [("add_index", i) for i in T4A_INDEXES]
+        + [("add_fk", T4A_RELEASE_FK)]
+    )
+
+
+def test_pg_upgrade_from_empty_database_to_0006(pg_url, pg_engine):
+    """Base vide -> 0006 ; Base.metadata == schéma migré (hors T4-A) ;
+    aucun ENUM, trigger ni fonction. La tête est 0007 depuis T4-A (testée
+    à part)."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", T3A)
     assert _version(pg_engine) == T3A
     assert _tables(pg_engine) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | {"alembic_version"}
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0006(pg_engine)
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)
 
@@ -777,13 +804,20 @@ def test_pg_run_states_and_zero_observation_completed_run(conn):
 def test_pg_extensible_and_optional_run_columns(conn):
     """trigger est extensible ; model_id, prompt_spec_version,
     output_fingerprint, re_evaluates_run_id et
-    pedagogical_taxonomy_release_id sont facultatifs ; ce dernier accepte
-    n'importe quel UUID (aucune FK avant T4)."""
+    pedagogical_taxonomy_release_id sont facultatifs. Depuis T4-A (0007),
+    ce dernier doit désigner une release existante (FK testée dans
+    tests/test_migration_0007_pedagogical_taxonomy.py)."""
     event_id = _event(conn)
+    release_id = uuid.uuid4()
+    conn.execute(sa.text(
+        "INSERT INTO pedagogical_taxonomy_releases (id, version_key, status, spec_fingerprint, created_at) "
+        "VALUES (:id, 'v-test', 'candidate', 'sha256:spec', now())"
+    ), {"id": release_id})
     _run(conn, event_id, trigger="un_declencheur_futur_quelconque", model_id="claude-x",
          prompt_spec_version="prompt-3", output_fingerprint="sha256:out",
-         pedagogical_taxonomy_release_id=uuid.uuid4())
-    assert _count(conn, RUNS) == 1
+         pedagogical_taxonomy_release_id=release_id)
+    _run(conn, event_id)
+    assert _count(conn, RUNS) == 2
 
 
 @pytest.mark.parametrize("column", [c for c in RUN_COLUMNS if c not in RUN_NULLABLE and c != "id"])
@@ -1196,7 +1230,7 @@ def test_pg_upgrade_0005_to_0006_preserves_everything_then_downgrade(pg_url, pg_
     assert _global_catalog(pg_engine) == global_0005
     schema_0006 = _snapshot(pg_engine, T3A_TABLES)
     catalog_0006 = _catalog(pg_engine, T3A_TABLES)
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0006(pg_engine)
 
     # --- downgrade 0006 -> 0005 ------------------------------------------
     _run_alembic(pg_url, "downgrade", T2A)
@@ -1217,4 +1251,4 @@ def test_pg_upgrade_0005_to_0006_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, T3A_TABLES) == schema_0006
     assert _catalog(pg_engine, T3A_TABLES) == catalog_0006
     assert _data(pg_engine, data_tables) == data_0005
-    assert _compare_metadata(pg_engine) == []
+    _assert_metadata_matches_0006(pg_engine)

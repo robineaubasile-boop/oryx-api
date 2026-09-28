@@ -225,6 +225,55 @@ observation_evaluation_runs (retour exact à 0005). Tests :
 tests/test_migration_0006_observation_layer.py (même variable
 ORYX_TEST_DATABASE_URL).
 
+T4-A : 0007_pedagogical_taxonomy (EXPAND)
+-----------------------------------------
+
+down_revision = 0006_observation_layer. Crée la STRUCTURE de la taxonomie
+pédagogique versionnée et des capacités noyau (observation = force de la
+preuve ; capacité = périmètre de la preuve ; une capacité n'a ni niveau,
+ni score, ni confiance, ni progression). Aucune donnée pédagogique : ni
+compétence, ni capacité, ni release seedée ; les quatre tables sont vides
+après l'upgrade. L'application ne lit ni n'écrit ces tables (T4-B).
+
+  - pedagogical_taxonomy_releases : version de tout le référentiel.
+    version_key et spec_fingerprint UNIQUE ; status candidate / active /
+    retired (CHECK) ; au plus une active : index UNIQUE PARTIEL
+    uq_pedagogical_taxonomy_releases_one_active (status WHERE status =
+    'active').
+  - core_capability_definitions : une signification d'une capacité (même
+    id = même sens ; nouveau sens = nouvelle ligne, semantic_revision + 1).
+    capability_code limité aux 45 codes figés, competency_code à C1..C12,
+    cohérence split_part(capability_code, '_', 1) = competency_code,
+    semantic_revision >= 1, UNIQUE(capability_code, semantic_revision) ;
+    mapping_guidance JSONB NOT NULL sans schéma interne.
+  - capability_taxonomy_memberships : « cette définition appartient à cette
+    release » ; UNIQUE(taxonomy_release_id, capability_definition_id).
+  - observation_capabilities : localisation d'une pedagogical_observation
+    existante (PK composite, jamais une nouvelle preuve).
+  - observation_evaluation_runs.pedagogical_taxonomy_release_id (colonne de
+    0006) reçoit sa FK observation_evaluation_runs_taxonomy_release_id_fkey
+    et un index ; elle reste nullable. Garde-fou : une valeur préexistante
+    sans release fait échouer l'upgrade (jamais effacée ni réécrite).
+
+Index de FK côté enfant : memberships.capability_definition_id,
+observation_capabilities.capability_membership_id,
+observation_evaluation_runs.pedagogical_taxonomy_release_id (les autres FK
+sont la première colonne d'un UNIQUE ou de la PK composite).
+
+Reportés à T4-B (transactionnel, ni trigger ni dénormalisation) : une seule
+révision d'un code par release, observation Cn localisée uniquement sur
+Cn_*, localized => >= 1 localisation / competency_only => aucune,
+immutabilité des définitions, transitions de release.
+
+Mêmes conventions que 0006 (UUID applicatif, TIMESTAMPTZ, aucun
+server_default, pas d'ENUM, FK sans cascade, aucun trigger). Identifiant de
+révision de 25 caractères.
+
+Le downgrade retire la FK et l'index des runs (colonne conservée avec ses
+valeurs), puis les quatre tables (retour exact à 0006). Tests :
+tests/test_migration_0007_pedagogical_taxonomy.py (même variable
+ORYX_TEST_DATABASE_URL).
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 
