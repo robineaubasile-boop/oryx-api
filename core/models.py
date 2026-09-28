@@ -210,10 +210,12 @@ class ObservationEvaluationRun(Base):
     candidate, superseded et obsolete peuvent être multiples.
     re_evaluates_run_id est NULL pour un premier run.
 
-    pedagogical_taxonomy_release_id : référence LOGIQUE réservée à T4,
-    volontairement nullable et SANS clé étrangère tant que la table
-    pedagogical_taxonomy_releases n'existe pas ; la migration T4 ajoutera
-    la relation réelle.
+    pedagogical_taxonomy_release_id : release de taxonomie T4 sous laquelle
+    le run a été évalué. Colonne créée nullable et sans FK par 0006 ; T4-A
+    (migration 0007_pedagogical_taxonomy) ajoute la FK vers
+    pedagogical_taxonomy_releases.id (NO ACTION) et son index, sans la
+    rendre NOT NULL : des runs peuvent exister sans release (historique,
+    T7 non branché), jamais backfillés.
 
     T3-A : table créée par la migration 0006_observation_layer ; ni lue ni
     écrite par l'application (lifecycle et écriture en T3-B). trigger est
@@ -238,6 +240,10 @@ class ObservationEvaluationRun(Base):
             unique=True,
             postgresql_where=text("interpretation_status = 'active'"),
         ),
+        Index(
+            "ix_observation_evaluation_runs_pedagogical_taxonomy_release_id",
+            "pedagogical_taxonomy_release_id",
+        ),
     )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -249,9 +255,14 @@ class ObservationEvaluationRun(Base):
     evaluation_dedup_key = Column(String, nullable=False)
     normalization_version = Column(String, nullable=False)
     local_stage_version = Column(String, nullable=False)
-    # Référence logique T4 : pas de ForeignKey tant que la table cible
-    # n'existe pas (voir docstring).
-    pedagogical_taxonomy_release_id = Column(Uuid, nullable=True)
+    # FK ajoutée par T4-A (0007) ; nom explicite : le nom automatique
+    # PostgreSQL dépasserait 63 caractères. Reste nullable (voir docstring).
+    pedagogical_taxonomy_release_id = Column(
+        Uuid,
+        ForeignKey("pedagogical_taxonomy_releases.id",
+                   name="observation_evaluation_runs_taxonomy_release_id_fkey"),
+        nullable=True,
+    )
     capability_mapping_version = Column(String, nullable=False)
     evaluation_schema_version = Column(String, nullable=False)
     evaluator_version = Column(String, nullable=False)
@@ -391,4 +402,177 @@ class PedagogicalObservation(Base):
     integrity_status = Column(String, nullable=False)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class PedagogicalTaxonomyRelease(Base):
+    """Version de la taxonomie pédagogique Oryx ENTIÈRE (T4-A) : définitions
+    C1-C12, capacités noyau, frontières et mapping guidance. version_key
+    est l'identité stable de la release ; spec_fingerprint identifie son
+    contenu canonique (calculé plus tard, T4-B/T4-C, jamais ici).
+
+    status : candidate / active / retired. Au plus une release active,
+    garanti par PostgreSQL (index unique partiel
+    uq_pedagogical_taxonomy_releases_one_active) ; les transitions
+    relèvent de T4-B. Aucune release n'est créée par la migration.
+
+    T4-A : table créée par la migration 0007_pedagogical_taxonomy ; ni lue
+    ni écrite par l'application."""
+    __tablename__ = "pedagogical_taxonomy_releases"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('candidate', 'active', 'retired')",
+            name="ck_pedagogical_taxonomy_releases_status",
+        ),
+        UniqueConstraint(
+            "version_key",
+            name="uq_pedagogical_taxonomy_releases_version_key",
+        ),
+        UniqueConstraint(
+            "spec_fingerprint",
+            name="uq_pedagogical_taxonomy_releases_spec_fingerprint",
+        ),
+        Index(
+            "uq_pedagogical_taxonomy_releases_one_active",
+            "status",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    version_key = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    spec_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class CoreCapabilityDefinition(Base):
+    """UNE signification d'une capacité noyau (T4-A) : dimension interne
+    d'une compétence C1-C12 qui localise le PÉRIMÈTRE d'une preuve T3.
+    Observation = force et profondeur de la preuve ; capacité = périmètre.
+    Une capacité n'est ni une preuve, ni une sous-compétence utilisateur :
+    ni niveau, ni score, ni confiance, ni statut acquis, ni progression.
+
+    Même id = même sens. Un changement de sens crée une nouvelle ligne
+    (même capability_code, semantic_revision suivante, nouvel UUID) ; une
+    définition n'est jamais réécrite (immutabilité applicative en T4-B,
+    aucun trigger). UNIQUE(capability_code, semantic_revision),
+    semantic_revision >= 1.
+
+    capability_code : exactement les 45 codes figés ; competency_code :
+    C1..C12 ; cohérence code / compétence garantie en base
+    (ck_core_capability_definitions_code_competency : C7_A => C7).
+    mapping_guidance : JSONB sans schéma interne imposé en base (validation
+    métier en T4-B/T4-C) ; JSONB(none_as_null=True), sans défaut.
+
+    T4-A : table créée par la migration 0007_pedagogical_taxonomy ; aucune
+    capacité seedée ; ni lue ni écrite par l'application."""
+    __tablename__ = "core_capability_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "capability_code IN ("
+            "'C1_A', 'C1_B', 'C1_C', "
+            "'C2_A', 'C2_B', 'C2_C', "
+            "'C3_A', 'C3_B', 'C3_C', "
+            "'C4_A', 'C4_B', 'C4_C', 'C4_D', "
+            "'C5_A', 'C5_B', 'C5_C', 'C5_D', "
+            "'C6_A', 'C6_B', 'C6_C', 'C6_D', "
+            "'C7_A', 'C7_B', 'C7_C', 'C7_D', "
+            "'C8_A', 'C8_B', 'C8_C', 'C8_D', "
+            "'C9_A', 'C9_B', 'C9_C', 'C9_D', "
+            "'C10_A', 'C10_B', 'C10_C', 'C10_D', "
+            "'C11_A', 'C11_B', 'C11_C', 'C11_D', "
+            "'C12_A', 'C12_B', 'C12_C', 'C12_D')",
+            name="ck_core_capability_definitions_capability_code",
+        ),
+        CheckConstraint(
+            "competency_code IN ('C1', 'C2', 'C3', 'C4', 'C5', 'C6', "
+            "'C7', 'C8', 'C9', 'C10', 'C11', 'C12')",
+            name="ck_core_capability_definitions_competency_code",
+        ),
+        CheckConstraint(
+            "split_part(capability_code, '_', 1) = competency_code",
+            name="ck_core_capability_definitions_code_competency",
+        ),
+        CheckConstraint(
+            "semantic_revision >= 1",
+            name="ck_core_capability_definitions_semantic_revision",
+        ),
+        UniqueConstraint(
+            "capability_code", "semantic_revision",
+            name="uq_core_capability_definitions_code_revision",
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    capability_code = Column(String, nullable=False)
+    semantic_revision = Column(Integer, nullable=False)
+    competency_code = Column(String, nullable=False)
+    label = Column(String, nullable=False)
+    definition = Column(Text, nullable=False)
+    mapping_guidance = Column(JSONB(none_as_null=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class CapabilityTaxonomyMembership(Base):
+    """« Cette définition sémantique précise appartient à cette release »
+    (T4-A), et rien d'autre : ni validation utilisateur, ni progression,
+    ni poids, ni ordre, ni priorité. Une définition inchangée est réutilisée
+    par plusieurs releases (même capability_definition_id).
+    UNIQUE(taxonomy_release_id, capability_definition_id).
+
+    Limite volontaire : « jamais deux révisions du même capability_code
+    dans une release » traverse deux tables ; il n'est garanti ni par
+    trigger ni par dénormalisation, mais par T4-B (transactionnel).
+
+    T4-A : table créée par la migration 0007_pedagogical_taxonomy ; ni lue
+    ni écrite par l'application."""
+    __tablename__ = "capability_taxonomy_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "taxonomy_release_id", "capability_definition_id",
+            name="uq_capability_taxonomy_memberships_release_definition",
+        ),
+        Index(
+            "ix_capability_taxonomy_memberships_capability_definition_id",
+            "capability_definition_id",
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    taxonomy_release_id = Column(Uuid, ForeignKey("pedagogical_taxonomy_releases.id"), nullable=False)
+    capability_definition_id = Column(Uuid, ForeignKey("core_capability_definitions.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class ObservationCapability(Base):
+    """Localisation sémantique d'une PedagogicalObservation existante sur
+    une capacité d'une release (T4-A). Une ligne ne crée JAMAIS une
+    nouvelle preuve : plusieurs lignes pour une observation (C7_A et C7_B)
+    restent UNE observation. Aucun stade, score, poids, confiance, force
+    de preuve, polarité ni statut : tout cela appartient à l'observation
+    ou n'existe pas. PK composite (observation_id,
+    capability_membership_id), sans id artificiel.
+
+    Limites volontaires (garanties par T4-B, ni trigger ni
+    dénormalisation) : une observation Cn n'est localisée que sur des
+    capacités Cn_* ; localized => au moins une ligne, competency_only =>
+    aucune.
+
+    T4-A : table créée par la migration 0007_pedagogical_taxonomy ; ni lue
+    ni écrite par l'application."""
+    __tablename__ = "observation_capabilities"
+    __table_args__ = (
+        Index(
+            "ix_observation_capabilities_capability_membership_id",
+            "capability_membership_id",
+        ),
+    )
+
+    observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), primary_key=True)
+    capability_membership_id = Column(
+        Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
