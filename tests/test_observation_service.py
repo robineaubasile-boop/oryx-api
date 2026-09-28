@@ -5,7 +5,9 @@ Aucune migration dans ce chantier : le schéma testé est celui produit par
 `alembic upgrade head` (= 0006_observation_layer, T3-A, puis
 0007_pedagogical_taxonomy depuis T4-A, qui ajoute les tables de taxonomie
 — non utilisées par ce service — et la FK
-observation_evaluation_runs.pedagogical_taxonomy_release_id).
+observation_evaluation_runs.pedagogical_taxonomy_release_id, puis
+0008_longitudinal_relations depuis T5-A, tables vides non utilisées par ce
+service).
 
 1. Tests sans base (toujours exécutés) : aucune migration T3-B, API publique
    exacte, petite hiérarchie d'exceptions, aucun commit/rollback ni
@@ -73,6 +75,8 @@ from tests.test_migration_0004_drop_company_analyses import T1C2, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, T2A, USER, _upgrade_head_with_users
 from tests.test_migration_0006_observation_layer import ACTIVE_INDEX, OBS_VOCABULARIES, RUN_VOCABULARIES, T3A
 from tests.test_migration_0007_pedagogical_taxonomy import RELEASE_FK, T4A, T4A_MODELS, T4A_TABLES
+
+T5A = "0008_longitudinal_relations"
 
 SERVICE_PATH = REPO_ROOT / "core" / "observation_service.py"
 DEDUP_INDEX = "uq_observation_evaluation_runs_dedup_key"
@@ -225,12 +229,12 @@ def _add(db, run_id, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t3b_head_is_0007():
-    """T3-B n'a ajouté aucune migration ; la seule ajoutée depuis est 0007
-    (T4-A), qui est la tête."""
+def test_no_migration_added_by_t3b_head_is_0008():
+    """T3-B n'a ajouté aucune migration ; les seules ajoutées depuis sont
+    0007 (T4-A) et 0008 (T5-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T4A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A)
+    assert script.get_heads() == [T5A]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -646,7 +650,7 @@ def test_dedup_violation_detection_is_targeted():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0007) + deux utilisateurs, créé une fois pour le
+    """Schéma = head (0008) + deux utilisateurs, créé une fois pour le
     module ; chaque test nettoie ce qu'il a créé."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)

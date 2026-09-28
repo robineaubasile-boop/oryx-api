@@ -277,7 +277,7 @@ ORYX_TEST_DATABASE_URL).
 T4-C : contenu Oryx Taxonomy V1 (PAS une migration)
 ----------------------------------------------------
 
-Aucune révision 0008 : 0007_pedagogical_taxonomy reste la tête. Alembic
+T4-C n'ajoute aucune révision (0008 appartient à T5-A, ci-dessous). Alembic
 porte la STRUCTURE ; le CONTENU sémantique versionné (12 compétences, 8
 règles globales, 45 capacités r1 et leur mapping_guidance) vit dans
 core/pedagogy/taxonomy_v1.py, avec son fingerprint SHA-256 figé
@@ -300,6 +300,59 @@ explicite (core.pedagogy.taxonomy_bootstrap.activate_taxonomy_v1 : 45/45 et
 conformité stricte exigées avant activate_release de T4-B). Une V1
 persistée divergente n'est jamais réparée : la commande échoue et
 rollback. Tests : tests/test_taxonomy_v1.py, tests/test_taxonomy_bootstrap.py.
+
+T5-A : 0008_longitudinal_relations (EXPAND)
+-------------------------------------------
+
+down_revision = 0007_pedagogical_taxonomy. Crée la STRUCTURE des relations
+longitudinales du Niveau 5 (observation = unité de preuve ; capacité =
+périmètre ; relation T5 = structure historique entre preuves, jamais une
+preuve supplémentaire, jamais un poids). Huit tables vides après l'upgrade ;
+aucune table T0-T4 modifiée, aucun backfill, aucun seed, aucune taxonomie
+touchée. L'application ne lit ni n'écrit ces tables (service en T5-B).
+
+  - longitudinal_assessment_runs : version précise du dossier d'une
+    compétence (C1..C12) d'un utilisateur, sous une release de taxonomie
+    (FK NOT NULL) et des versions dependency / transfer / revalidation /
+    relation_schema. execution_status et interpretation_status en CHECK,
+    trigger ouvert, assessment_dedup_key UNIQUE ; au plus un run active par
+    (user_id, competency_code) : index UNIQUE PARTIEL
+    uq_longitudinal_assessment_runs_one_active_user_competency.
+  - longitudinal_assessment_inputs : snapshot explicite des observations
+    examinées (PK composite ; un run peut n'en avoir aucune).
+  - observation_dependencies : dépendance inter-épisodes envers une
+    observation OU une support_trace (CHECK XOR sur source_kind, pas
+    d'auto-dépendance) ; dependency_type dependent / partially_dependent,
+    jamais « independent » (absence d'arête != indépendance).
+  - observation_transfers / observation_revalidations : relations
+    directionnelles, non transitives, source <> cible.
+  - dependency_capabilities / transfer_capabilities /
+    revalidation_capabilities : périmètre des arêtes (PK composite, rien
+    d'autre).
+  - scope_mode (whole_observation / localized / competency_only) en CHECK
+    sur les trois arêtes ; *_basis JSONB NOT NULL sans schéma interne ;
+    scope_fingerprint et input_fingerprint stockés seulement.
+
+Aucun score, stade, confiance, progression ni profil (coverage, variety,
+independence, consistency, freshness, durability : reconstruits plus tard).
+Index sur chaque FK enfant non couverte par la première colonne d'une PK
+composite. Noms explicites pour les FK dont le nom automatique atteindrait
+63 caractères (longitudinal_assessment_runs_taxonomy_release_id_fkey,
+observation_revalidations_source_contradiction_fkey,
+observation_revalidations_target_supportive_fkey).
+
+Reportés à T5-B (cross-table, ni trigger ni dénormalisation) : cohérence du
+snapshot avec le user / la compétence / la release du run, validité des
+observations, polarités et inter-événements des arêtes, sémantique du
+transfert et de la revalidation, localized / competency_only, scopes ⊆
+observations, memberships de la release du run, fingerprints, lifecycle.
+
+Mêmes conventions que 0007 (UUID applicatif, TIMESTAMPTZ, aucun
+server_default, pas d'ENUM, FK sans cascade, aucun trigger ni fonction).
+Identifiant de révision de 27 caractères. Le downgrade supprime les huit
+tables dans l'ordre inverse des dépendances (retour exact à 0007). Tests :
+tests/test_migration_0008_longitudinal_relations.py (même variable
+ORYX_TEST_DATABASE_URL).
 
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------

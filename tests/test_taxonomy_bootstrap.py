@@ -78,6 +78,9 @@ from tests.test_taxonomy_service import (
 )
 from tests.test_taxonomy_v1 import GOLDEN_V1_FINGERPRINT
 
+# Migration de T5-A (relations longitudinales), tête depuis T5-A.
+T5A = "0008_longitudinal_relations"
+
 MODULE_PATH = REPO_ROOT / "core" / "pedagogy" / "taxonomy_bootstrap.py"
 CLI_PATH = REPO_ROOT / "scripts" / "bootstrap_pedagogical_taxonomy_v1.py"
 PUBLIC_API = {"bootstrap_taxonomy_v1", "verify_taxonomy_v1", "activate_taxonomy_v1"}
@@ -92,13 +95,16 @@ SPEC_BY_CODE = {c["capability_code"]: c for c in SPEC["capabilities"]}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_head_is_still_0007():
-    """T4-C est du CONTENU : ni 0008, ni fichier de migration ajouté."""
+def test_no_migration_added_by_t4c_head_is_0008():
+    """T4-C est du CONTENU : aucune migration ajoutée par T4-C. La seule
+    ajoutée depuis est 0008 (T5-A, structure des relations longitudinales,
+    qui ne contient aucune donnée de taxonomie : voir
+    tests/test_migration_0008_longitudinal_relations.py)."""
     script = _script_directory()
-    assert script.get_heads() == [T4A]
+    assert script.get_heads() == [T5A]
+    assert script.get_revision(T5A).down_revision == T4A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-1] == f"{T4A}.py" and len(files) == 7
-    assert not any(name.startswith("0008") for name in files)
+    assert files[-2:] == [f"{T4A}.py", f"{T5A}.py"] and len(files) == 8
 
 
 def test_public_api_is_exactly_bootstrap_verify_activate():

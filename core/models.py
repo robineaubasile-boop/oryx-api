@@ -576,3 +576,370 @@ class ObservationCapability(Base):
         Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
     )
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class LongitudinalAssessmentRun(Base):
+    """Version précise du dossier d'UNE compétence (competency_code) d'UN
+    utilisateur (user_id) (T5-A, niveau 5 : relations longitudinales) : ce
+    run dit quelle version du dossier Cx a été examinée, sous quelle
+    release de taxonomie (pedagogical_taxonomy_release_id, NOT NULL) et
+    quelles versions de règles (dependency_version, transfer_version,
+    revalidation_version, relation_schema_version ; aucun modèle, prompt ni
+    évaluateur, aucun output_fingerprint, aucun run prédécesseur).
+
+    OBSERVATION = unité de preuve ; CAPABILITY = périmètre de la preuve ;
+    RELATION T5 = structure historique entre preuves. Ce run ne crée
+    aucune preuve et ne porte ni stade, ni score, ni confiance, ni
+    progression, ni maîtrise, ni besoin de revalidation (T6). Les profils
+    coverage / variety / independence / consistency / freshness /
+    durability sont reconstruits, jamais stockés.
+
+    Les observations examinées sont listées explicitement par
+    LongitudinalAssessmentInput. Aucun run = dossier jamais examiné ; un
+    run sans entrée = dossier vide examiné (représentable).
+
+    execution_status : running / completed / failed ;
+    interpretation_status : candidate / active / superseded / obsolete. Au
+    plus un run active par (user_id, competency_code), garanti par
+    PostgreSQL (index unique partiel
+    uq_longitudinal_assessment_runs_one_active_user_competency) ; les
+    autres statuts restent multiples. Les transitions, la cohérence
+    status <-> completed_at et la re-vérification de input_fingerprint à
+    l'activation relèvent de T5-B (aucun trigger, aucun CHECK croisé).
+    input_fingerprint est stocké seulement (algorithme défini en T5-B).
+    trigger est un vocabulaire ouvert, volontairement sans CHECK.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application (aucun service, aucune route)."""
+    __tablename__ = "longitudinal_assessment_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "competency_code IN ('C1', 'C2', 'C3', 'C4', 'C5', 'C6', "
+            "'C7', 'C8', 'C9', 'C10', 'C11', 'C12')",
+            name="ck_longitudinal_assessment_runs_competency_code",
+        ),
+        CheckConstraint(
+            "execution_status IN ('running', 'completed', 'failed')",
+            name="ck_longitudinal_assessment_runs_execution_status",
+        ),
+        CheckConstraint(
+            "interpretation_status IN ('candidate', 'active', 'superseded', 'obsolete')",
+            name="ck_longitudinal_assessment_runs_interpretation_status",
+        ),
+        UniqueConstraint(
+            "assessment_dedup_key",
+            name="uq_longitudinal_assessment_runs_dedup_key",
+        ),
+        Index(
+            "uq_longitudinal_assessment_runs_one_active_user_competency",
+            "user_id", "competency_code",
+            unique=True,
+            postgresql_where=text("interpretation_status = 'active'"),
+        ),
+        Index("ix_longitudinal_assessment_runs_user_id", "user_id"),
+        Index("ix_longitudinal_assessment_runs_taxonomy_release_id", "pedagogical_taxonomy_release_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    competency_code = Column(String, nullable=False)
+    execution_status = Column(String, nullable=False)
+    interpretation_status = Column(String, nullable=False)
+    trigger = Column(String, nullable=False)
+    # Nom explicite : le nom automatique PostgreSQL dépasserait 63 caractères.
+    pedagogical_taxonomy_release_id = Column(
+        Uuid,
+        ForeignKey("pedagogical_taxonomy_releases.id",
+                   name="longitudinal_assessment_runs_taxonomy_release_id_fkey"),
+        nullable=False,
+    )
+    dependency_version = Column(String, nullable=False)
+    transfer_version = Column(String, nullable=False)
+    revalidation_version = Column(String, nullable=False)
+    relation_schema_version = Column(String, nullable=False)
+    input_fingerprint = Column(String, nullable=False)
+    assessment_dedup_key = Column(String, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    failure_code = Column(String, nullable=True)
+
+
+class LongitudinalAssessmentInput(Base):
+    """Snapshot EXPLICITE des observations réellement examinées par UN
+    LongitudinalAssessmentRun (T5-A). Une ligne = « cette observation
+    faisait partie du dossier examiné par ce run », rien d'autre : ni
+    poids, ni score, ni horodatage, ni nouvelle entité pédagogique. PK
+    composite (run_id, observation_id), sans id artificiel ; une même
+    observation peut entrer dans plusieurs runs.
+
+    L'absence ultérieure de relation entre deux observations du snapshot
+    ne signifie jamais automatiquement leur indépendance. Aucun minimum
+    d'entrées n'est imposé (dossier vide représentable). Pas de table
+    active_history : l'historique actif est reconstruit (T2/T3/T4 + ce
+    snapshot), jamais dupliqué.
+
+    Limites volontaires (T5-B, ni trigger ni dénormalisation) : que
+    l'observation appartienne au user et à la compétence du run, provienne
+    d'un run T3 active completed, soit valid et compatible avec la release
+    du run.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "longitudinal_assessment_inputs"
+    __table_args__ = (
+        Index("ix_longitudinal_assessment_inputs_observation_id", "observation_id"),
+    )
+
+    run_id = Column(Uuid, ForeignKey("longitudinal_assessment_runs.id"), primary_key=True)
+    observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), primary_key=True)
+
+
+class ObservationDependency(Base):
+    """Dépendance cognitive INTER-épisodes identifiée par un run
+    longitudinal (T5-A) : l'observation cible (target_observation_id)
+    dépend d'une source antérieure, soit une autre observation
+    (source_kind = 'observation'), soit une aide réellement montrée
+    (source_kind = 'support_trace'). Exactement une source, cohérente avec
+    source_kind (ck_observation_dependencies_source_xor) ; une observation
+    ne dépend jamais d'elle-même
+    (ck_observation_dependencies_no_self_dependency).
+
+    Une dépendance n'est JAMAIS une preuve supplémentaire, ni un
+    coefficient : pas de score, de poids ni de score d'indépendance.
+    dependency_type : dependent / partially_dependent uniquement.
+    « independent » n'existe volontairement pas : l'absence d'arête dans un
+    dossier examiné signifie seulement qu'aucune dépendance n'a été
+    identifiée ; l'indépendance sera reconstruite (snapshot, événements,
+    aides, relations, contexte). dependency_basis (JSONB sans schéma en
+    base, validé en T5-B) dit POURQUOI la dépendance a été identifiée.
+    scope_mode (whole_observation / localized / competency_only) et
+    DependencyCapability décrivent le périmètre ; scope_fingerprint est
+    stocké seulement (calcul en T5-B). Aucune transitivité (A -> B et
+    B -> C ne génèrent jamais A -> C).
+
+    Le support immédiat du MÊME CognitiveEvent reste décrit par
+    SupportTrace, support_level et residual_cognitive_work (non doublé).
+    Limites volontaires (T5-B) : dépendance inter-événements, source et
+    cible dans le snapshot, support_trace du bon user / contexte causal,
+    périmètre ⊆ cible, memberships de la release du run, incompatibilité
+    avec un transfert autonome sur le même scope. event_id n'est pas
+    dupliqué ici (provenance : observation -> run T3 -> événement).
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "observation_dependencies"
+    __table_args__ = (
+        CheckConstraint(
+            "source_kind IN ('observation', 'support_trace')",
+            name="ck_observation_dependencies_source_kind",
+        ),
+        CheckConstraint(
+            "(source_kind = 'observation' AND source_observation_id IS NOT NULL "
+            "AND source_support_trace_id IS NULL) "
+            "OR (source_kind = 'support_trace' AND source_observation_id IS NULL "
+            "AND source_support_trace_id IS NOT NULL)",
+            name="ck_observation_dependencies_source_xor",
+        ),
+        CheckConstraint(
+            "source_observation_id IS NULL OR source_observation_id <> target_observation_id",
+            name="ck_observation_dependencies_no_self_dependency",
+        ),
+        CheckConstraint(
+            "dependency_type IN ('dependent', 'partially_dependent')",
+            name="ck_observation_dependencies_dependency_type",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('whole_observation', 'localized', 'competency_only')",
+            name="ck_observation_dependencies_scope_mode",
+        ),
+        Index("ix_observation_dependencies_run_id", "run_id"),
+        Index("ix_observation_dependencies_target_observation_id", "target_observation_id"),
+        Index("ix_observation_dependencies_source_observation_id", "source_observation_id"),
+        Index("ix_observation_dependencies_source_support_trace_id", "source_support_trace_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id = Column(Uuid, ForeignKey("longitudinal_assessment_runs.id"), nullable=False)
+    target_observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), nullable=False)
+    source_kind = Column(String, nullable=False)
+    source_observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), nullable=True)
+    source_support_trace_id = Column(Uuid, ForeignKey("support_traces.id"), nullable=True)
+    dependency_type = Column(String, nullable=False)
+    scope_mode = Column(String, nullable=False)
+    dependency_basis = Column(JSONB(none_as_null=True), nullable=False)
+    scope_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class DependencyCapability(Base):
+    """Périmètre sémantique d'une ObservationDependency (T5-A), et rien
+    d'autre : une ligne localise l'arête sur un membership de taxonomie ;
+    elle ne crée aucune preuve et ne porte ni score, ni poids, ni stade,
+    ni horodatage (la provenance temporelle appartient à l'arête parente).
+    PK composite (dependency_id, capability_membership_id).
+
+    Limites volontaires (T5-B) : membership de la release du run, périmètre
+    ⊆ celui de l'observation cible, localized => au moins une ligne,
+    competency_only => aucune.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "dependency_capabilities"
+    __table_args__ = (
+        Index("ix_dependency_capabilities_capability_membership_id", "capability_membership_id"),
+    )
+
+    dependency_id = Column(Uuid, ForeignKey("observation_dependencies.id"), primary_key=True)
+    capability_membership_id = Column(
+        Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
+    )
+
+
+class ObservationTransfer(Base):
+    """Transfert effectivement démontré, identifié par un run longitudinal
+    (T5-A) : DIRECTIONNEL (source_observation_id -> target_observation_id),
+    local et NON TRANSITIF (A -> B et B -> C ne génèrent jamais A -> C ;
+    aucune closure). source <> cible
+    (ck_observation_transfers_distinct_observations). Un transfert n'est
+    jamais une preuve supplémentaire ni un poids.
+
+    Sémantique (validée en T5-B, jamais par trigger) : événements
+    cognitifs distincts ; source = démonstration supportive ; cible
+    supportive, au moins Application sur le scope concerné ; contexte
+    cognitivement différent ; adaptation attribuable à l'utilisateur.
+    Changer uniquement le ticker, la date, la surface ou le nom de société
+    ne suffit jamais. Une dépendance directe forte et un transfert
+    autonome sont incompatibles sur un même scope (T5-B).
+
+    transfer_basis (JSONB sans schéma en base) dit pourquoi ; scope_mode,
+    TransferCapability et scope_fingerprint décrivent le périmètre (⊆
+    intersection source-cible, memberships de la release du run : T5-B).
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "observation_transfers"
+    __table_args__ = (
+        CheckConstraint(
+            "source_observation_id <> target_observation_id",
+            name="ck_observation_transfers_distinct_observations",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('whole_observation', 'localized', 'competency_only')",
+            name="ck_observation_transfers_scope_mode",
+        ),
+        Index("ix_observation_transfers_run_id", "run_id"),
+        Index("ix_observation_transfers_source_observation_id", "source_observation_id"),
+        Index("ix_observation_transfers_target_observation_id", "target_observation_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id = Column(Uuid, ForeignKey("longitudinal_assessment_runs.id"), nullable=False)
+    source_observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), nullable=False)
+    target_observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), nullable=False)
+    scope_mode = Column(String, nullable=False)
+    transfer_basis = Column(JSONB(none_as_null=True), nullable=False)
+    scope_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class TransferCapability(Base):
+    """Périmètre sémantique d'un ObservationTransfer (T5-A), et rien
+    d'autre : ni preuve, ni score, ni poids, ni stade, ni horodatage. PK
+    composite (transfer_id, capability_membership_id).
+
+    Limites volontaires (T5-B) : périmètre ⊆ intersection(source, cible),
+    membership de la release du run, localized => au moins une ligne,
+    competency_only => aucune.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "transfer_capabilities"
+    __table_args__ = (
+        Index("ix_transfer_capabilities_capability_membership_id", "capability_membership_id"),
+    )
+
+    transfer_id = Column(Uuid, ForeignKey("observation_transfers.id"), primary_key=True)
+    capability_membership_id = Column(
+        Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
+    )
+
+
+class ObservationRevalidation(Base):
+    """Fait HISTORIQUE identifié par un run longitudinal (T5-A) : une
+    nouvelle démonstration supportive (target_supportive_observation_id)
+    réexamine réellement un mécanisme auparavant fragilisé par une
+    observation contradictory (source_contradiction_observation_id).
+    Directionnelle, non transitive ; source <> cible
+    (ck_observation_revalidations_distinct_observations).
+
+    Ce n'est PAS « il faudra revalider dans le futur » : ce besoin est une
+    décision T6. La contradiction historique reste conservée ; la
+    revalidation ne crée aucune preuve supplémentaire.
+
+    Sémantique (validée en T5-B, jamais par trigger) : source polarity =
+    contradictory, cible polarity = supportive, événements distincts,
+    nouvelle démonstration réellement diagnostique du même mécanisme ; une
+    répétition immédiate après correction Oryx n'est PAS une revalidation.
+    revalidation_basis (JSONB sans schéma en base) dit pourquoi ;
+    scope_mode, RevalidationCapability et scope_fingerprint décrivent le
+    périmètre (⊆ intersection source-cible : T5-B).
+
+    Noms explicites des deux FK d'observation : les noms automatiques
+    PostgreSQL atteindraient ou dépasseraient 63 caractères.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "observation_revalidations"
+    __table_args__ = (
+        CheckConstraint(
+            "source_contradiction_observation_id <> target_supportive_observation_id",
+            name="ck_observation_revalidations_distinct_observations",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('whole_observation', 'localized', 'competency_only')",
+            name="ck_observation_revalidations_scope_mode",
+        ),
+        Index("ix_observation_revalidations_run_id", "run_id"),
+        Index("ix_observation_revalidations_source_contradiction", "source_contradiction_observation_id"),
+        Index("ix_observation_revalidations_target_supportive", "target_supportive_observation_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id = Column(Uuid, ForeignKey("longitudinal_assessment_runs.id"), nullable=False)
+    source_contradiction_observation_id = Column(
+        Uuid,
+        ForeignKey("pedagogical_observations.id", name="observation_revalidations_source_contradiction_fkey"),
+        nullable=False,
+    )
+    target_supportive_observation_id = Column(
+        Uuid,
+        ForeignKey("pedagogical_observations.id", name="observation_revalidations_target_supportive_fkey"),
+        nullable=False,
+    )
+    scope_mode = Column(String, nullable=False)
+    revalidation_basis = Column(JSONB(none_as_null=True), nullable=False)
+    scope_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class RevalidationCapability(Base):
+    """Périmètre sémantique d'une ObservationRevalidation (T5-A), et rien
+    d'autre : ni preuve, ni score, ni poids, ni stade, ni horodatage. PK
+    composite (revalidation_id, capability_membership_id).
+
+    Limites volontaires (T5-B) : périmètre ⊆ intersection(source
+    contradiction, cible supportive), membership de la release du run,
+    localized => au moins une ligne, competency_only => aucune.
+
+    T5-A : table créée par la migration 0008_longitudinal_relations ; ni
+    lue ni écrite par l'application."""
+    __tablename__ = "revalidation_capabilities"
+    __table_args__ = (
+        Index("ix_revalidation_capabilities_capability_membership_id", "capability_membership_id"),
+    )
+
+    revalidation_id = Column(Uuid, ForeignKey("observation_revalidations.id"), primary_key=True)
+    capability_membership_id = Column(
+        Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
+    )

@@ -205,12 +205,17 @@ def test_model_does_not_touch_historical_tables():
     # T2-A (0005, testé à part) ajoute cognitive_events et support_traces ;
     # T3-A (0006, testé à part) observation_evaluation_runs et
     # pedagogical_observations ; T4-A (0007, testé à part) les quatre tables
-    # de taxonomie.
+    # de taxonomie ; T5-A (0008, testé à part) les huit tables de relations
+    # longitudinales.
     assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
         "analysis_sessions", "cognitive_events", "support_traces",
         "observation_evaluation_runs", "pedagogical_observations",
         "pedagogical_taxonomy_releases", "core_capability_definitions",
         "capability_taxonomy_memberships", "observation_capabilities",
+        "longitudinal_assessment_runs", "longitudinal_assessment_inputs",
+        "observation_dependencies", "dependency_capabilities",
+        "observation_transfers", "transfer_capabilities",
+        "observation_revalidations", "revalidation_capabilities",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables
