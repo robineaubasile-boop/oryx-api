@@ -2,7 +2,9 @@
 (core/longitudinal_view.py).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
-`alembic upgrade head` (= 0008_longitudinal_relations). Les données sont
+`alembic upgrade head` (= 0008_longitudinal_relations, puis
+0009_competency_inference_state depuis T6-A, tables vides non lues par ce
+module). Les données sont
 créées via les services T2-B / T3-B / T4-B / T5-B ; seules les corruptions
 sont écrites en SQL direct, dans la transaction du test (annulée).
 
@@ -69,6 +71,7 @@ from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 —
 from tests.test_migration_0004_drop_company_analyses import _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
+from tests.test_migration_0009_competency_inference_state import T6A
 from tests.test_observation_service import _NoDB, _reaches_db
 
 VIEW_PATH = REPO_ROOT / "core" / "longitudinal_view.py"
@@ -96,10 +99,13 @@ def _has_word(text: str, word: str) -> bool:
 # --------------------------------------------------------------------------
 
 def test_no_migration_added_by_t5c():
+    """Aucune migration ajoutée par T5-C ; la seule ajoutée depuis est 0009
+    (T6-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T5A]
+    assert script.get_heads() == [T6A]
+    assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-1] == f"{T5A}.py" and not any(name.startswith("0009") for name in files)
+    assert files[-2:] == [f"{T5A}.py", f"{T6A}.py"] and not any(name.startswith("0010") for name in files)
 
 
 def test_no_profile_table_or_model_exists():

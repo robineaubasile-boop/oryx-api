@@ -50,8 +50,9 @@ from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 T1C2 = "0004_drop_company_analyses"
 DROPPED = "company_analyses"
 REMAINING_TABLES = (HISTORICAL_TABLES - {DROPPED}) | {"analysis_sessions"}
-# Tables de T2-A (0005), T3-A (0006), T4-A (0007) et T5-A (0008), testées
-# à part : déclarées dans les modèles, absentes du schéma 0004.
+# Tables de T2-A (0005), T3-A (0006), T4-A (0007), T5-A (0008) et T6-A
+# (0009), testées à part : déclarées dans les modèles, absentes du schéma
+# 0004.
 T2A_TABLES = {"cognitive_events", "support_traces"}
 T3A_TABLES = {"observation_evaluation_runs", "pedagogical_observations"}
 T4A_TABLES = {"pedagogical_taxonomy_releases", "core_capability_definitions",
@@ -92,6 +93,27 @@ T5A_INDEXES = {
     "ix_observation_revalidations_source_contradiction",
     "ix_observation_revalidations_target_supportive",
     "ix_revalidation_capabilities_capability_membership_id",
+}
+# Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
+T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
+              "competency_inference_tensions", "competency_inference_tension_capabilities",
+              "competency_inference_basis_refs", "user_competency_states"}
+# Index de T6-A (0009) : unique partiel « un seul run d'inférence active par
+# (user_id, competency_code) » et index des FK côté enfant.
+T6A_INDEXES = {
+    "uq_competency_inference_runs_one_active_user_competency",
+    "ix_competency_inference_runs_user_id",
+    "ix_competency_inference_runs_longitudinal_assessment_run_id",
+    "ix_competency_inference_runs_predecessor_inference_run_id",
+    "ix_competency_inference_tensions_inference_run_id",
+    "ix_competency_inference_tension_caps_membership_id",
+    "ix_competency_inference_basis_refs_inference_run_id",
+    "ix_competency_inference_basis_refs_stage_claim_id",
+    "ix_competency_inference_basis_refs_tension_id",
+    "ix_competency_inference_basis_refs_source_observation_id",
+    "ix_competency_inference_basis_refs_source_dependency_id",
+    "ix_competency_inference_basis_refs_source_transfer_id",
+    "ix_competency_inference_basis_refs_source_revalidation_id",
 }
 # sha256 de alembic/versions/0003_analysis_session_links.py tel que mergé
 # sur main (2f1845e, T1-C1) et déployé en production.
@@ -176,7 +198,8 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+                                        | T6A_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
         assert all(fk.column.table.name != DROPPED for fk in table.foreign_keys), table.name
@@ -310,12 +333,12 @@ def _compare_metadata(engine) -> list:
 
 def _assert_metadata_matches_0004(engine) -> None:
     """Au schéma 0004, Base.metadata ne diffère que par les tables de T2-A,
-    T3-A, T4-A et T5-A, créées seulement en 0005, 0006, 0007 et 0008 ; tout
-    le reste correspond exactement."""
+    T3-A, T4-A, T5-A et T6-A, créées seulement en 0005, 0006, 0007, 0008 et
+    0009 ; tout le reste correspond exactement."""
     diff = _compare_metadata(engine)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
-        [("add_table", t) for t in T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES]
-        + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES]
+        [("add_table", t) for t in T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES | T6A_TABLES]
+        + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES | T6A_INDEXES]
     )
 
 

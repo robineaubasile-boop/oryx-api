@@ -206,7 +206,8 @@ def test_model_does_not_touch_historical_tables():
     # T3-A (0006, testé à part) observation_evaluation_runs et
     # pedagogical_observations ; T4-A (0007, testé à part) les quatre tables
     # de taxonomie ; T5-A (0008, testé à part) les huit tables de relations
-    # longitudinales.
+    # longitudinales ; T6-A (0009, testé à part) les six tables d'inférence
+    # de l'état C1-C12.
     assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
         "analysis_sessions", "cognitive_events", "support_traces",
         "observation_evaluation_runs", "pedagogical_observations",
@@ -216,6 +217,9 @@ def test_model_does_not_touch_historical_tables():
         "observation_dependencies", "dependency_capabilities",
         "observation_transfers", "transfer_capabilities",
         "observation_revalidations", "revalidation_capabilities",
+        "competency_inference_runs", "competency_stage_claims",
+        "competency_inference_tensions", "competency_inference_tension_capabilities",
+        "competency_inference_basis_refs", "user_competency_states",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables

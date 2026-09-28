@@ -354,6 +354,67 @@ tables dans l'ordre inverse des dépendances (retour exact à 0007). Tests :
 tests/test_migration_0008_longitudinal_relations.py (même variable
 ORYX_TEST_DATABASE_URL).
 
+T6-A : 0009_competency_inference_state (EXPAND)
+-----------------------------------------------
+
+down_revision = 0008_longitudinal_relations. Crée la STRUCTURE de
+l'inférence de l'état C1-C12 du Niveau 6 : une INTERPRÉTATION VERSIONNÉE et
+DÉRIVÉE du dossier longitudinal T5, jamais une preuve (observation ->
+périmètre T4 -> dossier T5 -> inférence T6). Six tables vides après
+l'upgrade ; aucune table T0-T5 modifiée (users.level compris), aucun
+backfill, aucun seed, aucun état généré pour les utilisateurs existants.
+L'application ne lit ni n'écrit ces tables (service en T6-B, règles en
+T6-C).
+
+  - competency_inference_runs : interprétation d'une compétence (C1..C12)
+    d'un utilisateur, adossée à exactement UN longitudinal_assessment_run
+    (FK NOT NULL ; la release de taxonomie est la sienne, non dupliquée) ;
+    predecessor_inference_run_id self-FK nullable, jamais soi-même.
+    execution_status, interpretation_status, previous / current_stage
+    (non_etabli / discovery / comprehension / application / mastery),
+    transition, transition_cause, tension_state en CHECK ; trigger ouvert ;
+    sorties NULLABLE (un run running n'a pas de sortie : non_etabli n'est
+    jamais un placeholder) ; inference_dedup_key UNIQUE ; au plus un run
+    active par (user_id, competency_code) : index UNIQUE PARTIEL
+    uq_competency_inference_runs_one_active_user_competency.
+  - competency_stage_claims : prétention positive par stade (non_etabli
+    n'en est pas une), UNIQUE(run, stage) ; not_established => basis_mode
+    none, established => direct / implied_by_higher_claim.
+    confidence_profile / mastery_assessment : JSONB nullable, sans schéma.
+  - competency_inference_tensions (+ competency_inference_tension_capabilities,
+    PK composite) : prétention positive fragilisée sur un périmètre ;
+    tension != stade != pénalité.
+  - competency_inference_basis_refs : provenance (jamais une preuve
+    supplémentaire), quatre FK explicites (observation, dépendance,
+    transfert, revalidation), CHECK XOR sur source_kind ; rattachement par
+    ref_role en CHECK (positive_basis = claim + observation uniquement ;
+    confidence = claim + dimension ; mastery = claim ; tension = tension ;
+    transition / validation = run-level).
+  - user_competency_states : read-model / cache du run active (PK
+    (user_id, competency_code), active_inference_run_id UNIQUE,
+    state_generation BIGINT technique). Absence de ligne = aucune inférence ;
+    seul T6-B l'écrira, à l'activation atomique d'un run.
+
+Aucun score, aucune confiance numérique, aucun stade numérique, aucun
+niveau global, aucun active_validation_plan, aucune colonne de fraîcheur.
+Index sur chaque FK enfant non couverte par la première colonne d'une PK
+ou d'un UNIQUE. Nom explicite pour la FK dont le nom automatique
+dépasserait 63 caractères (competency_inference_tension_caps_membership_id_fkey).
+
+Reportés à T6-B / T6-C (cross-table, ni trigger ni dénormalisation) : run
+T5 parent (statut, user, compétence), predecessor cohérent, complétion et
+quatre claims avant activation, règles de transition, profils, refs
+appartenant au dossier T5 consommé et au même run, périmètres localized /
+competency_only / whole_competency, memberships de la release, écriture du
+cache et state_generation.
+
+Mêmes conventions que 0008 (UUID applicatif, TIMESTAMPTZ, aucun
+server_default, pas d'ENUM, FK sans cascade, aucun trigger ni fonction).
+Identifiant de révision de 31 caractères. Le downgrade supprime les six
+tables dans l'ordre inverse des dépendances (retour exact à 0008). Tests :
+tests/test_migration_0009_competency_inference_state.py (même variable
+ORYX_TEST_DATABASE_URL).
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 

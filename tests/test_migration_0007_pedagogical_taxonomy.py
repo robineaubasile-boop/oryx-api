@@ -71,6 +71,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T4A_TABLES,
     T5A_INDEXES,
     T5A_TABLES,
+    T6A_INDEXES,
+    T6A_TABLES,
     _catalog_columns,
     _code_tokens,
     _compare_metadata,
@@ -368,8 +370,10 @@ def test_offline_sql_of_0007_downgrade_drops_only_t4a():
 
 
 def test_metadata_declares_exactly_the_four_t4a_tables():
-    """Les quatre tables T4-A (+ les huit tables T5-A, testées à part)."""
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    """Les quatre tables T4-A (+ les huit tables T5-A et les six tables T6-A,
+    testées à part)."""
+    assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+                                         | T6A_TABLES)
     for model, name in zip(T4A_MODELS, (RELEASES, DEFS, MEMBERSHIPS, OBS_CAPS)):
         assert model.__tablename__ == name
         assert model.__table__ is Base.metadata.tables[name]
@@ -519,7 +523,9 @@ def test_no_user_state_score_or_progression_in_t4a_tables():
     """Une capacité ne sait jamais où en est l'utilisateur : aucune colonne
     d'état utilisateur, de niveau, de score, de confiance, de progression,
     de poids, d'ordre ni de lignée. Seule la release porte un status (son
-    cycle de vie, pas celui d'un utilisateur)."""
+    cycle de vie, pas celui d'un utilisateur). Aucun état par capacité,
+    nulle part ; l'état COMPÉTENCE-spécifique (C1..C12) n'existe que dans
+    les six tables dérivées du Niveau 6 (T6-A, testées à part)."""
     for model in T4A_MODELS:
         for col in model.__table__.columns:
             assert not any(word in col.name for word in FORBIDDEN_COLUMN_FRAGMENTS), (model.__name__, col.name)
@@ -528,8 +534,10 @@ def test_no_user_state_score_or_progression_in_t4a_tables():
     for table in Base.metadata.tables:
         for fragment in ("user_capabilit", "capability_state", "capability_stage", "capability_score",
                          "capability_master", "capability_progress", "capability_confidence",
-                         "lineage", "competenc"):
+                         "lineage"):
             assert fragment not in table, table
+        if table not in T6A_TABLES:
+            assert "competenc" not in table, table
 
 
 def test_no_t4b_t4c_service_seed_or_lineage_files():
@@ -610,7 +618,10 @@ def test_t4a_tables_are_not_wired_to_the_application():
                # T5-C : reconstruction READ-ONLY du dossier (définitions,
                # memberships, localisations ; SELECT uniquement ; non
                # branchée : tests/test_longitudinal_view.py).
-               "core/longitudinal_view.py"}
+               "core/longitudinal_view.py",
+               # T6-A : FK du périmètre des tensions vers les memberships
+               # (aucun branchement applicatif).
+               "alembic/versions/0009_competency_inference_state.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0
@@ -732,7 +743,7 @@ def _refused(conn, match, action, *, isolate=()):
 
 @pytest.fixture
 def conn(pg_url, pg_engine):
-    """Schéma = head (0008 depuis T5-A) + deux utilisateurs et une analysis_session ;
+    """Schéma = head (0009 depuis T6-A) + deux utilisateurs et une analysis_session ;
     tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -747,19 +758,20 @@ def conn(pg_url, pg_engine):
 
 def _assert_metadata_matches_0007(engine) -> None:
     """Au schéma 0007, Base.metadata ne diffère que par les huit tables de
-    T5-A et leurs index, créés seulement en 0008 ; tout le reste correspond
-    exactement."""
+    T5-A et les six tables de T6-A et leurs index, créés seulement en 0008
+    et 0009 ; tout le reste correspond exactement."""
     diff = _compare_metadata(engine)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
-        [("add_table", t) for t in T5A_TABLES] + [("add_index", i) for i in T5A_INDEXES]
+        [("add_table", t) for t in T5A_TABLES | T6A_TABLES]
+        + [("add_index", i) for i in T5A_INDEXES | T6A_INDEXES]
     )
 
 
 def test_pg_upgrade_from_empty_database_to_0007(pg_url, pg_engine):
-    """Base vide -> 0007 ; Base.metadata == schéma migré (hors T5-A) ; aucun
-    ENUM, trigger ni fonction ; les quatre tables T4 sont VIDES (aucun
-    seed, aucune release, aucune capacité). La tête est 0008 depuis T5-A
-    (testée à part)."""
+    """Base vide -> 0007 ; Base.metadata == schéma migré (hors T5-A et
+    T6-A) ; aucun ENUM, trigger ni fonction ; les quatre tables T4 sont
+    VIDES (aucun seed, aucune release, aucune capacité). La tête est 0009
+    depuis T6-A (testée à part)."""
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", T4A)
     assert _version(pg_engine) == T4A

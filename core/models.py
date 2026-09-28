@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Float, Integer, SmallInteger, Text, DateTime, ForeignKey, Uuid,
+    Column, String, Float, Integer, SmallInteger, BigInteger, Text, DateTime, ForeignKey, Uuid,
     CheckConstraint, UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -943,3 +943,436 @@ class RevalidationCapability(Base):
     capability_membership_id = Column(
         Uuid, ForeignKey("capability_taxonomy_memberships.id"), primary_key=True,
     )
+
+
+# --- Niveau 6 : inférence de l'état C1-C12 (T6-A) -----------------------------
+
+_COMPETENCY_CODES_SQL = ("('C1', 'C2', 'C3', 'C4', 'C5', 'C6', "
+                         "'C7', 'C8', 'C9', 'C10', 'C11', 'C12')")
+# non_etabli = conclusion pédagogique réelle (« dossier interprété sans
+# prétention positive établie »), jamais un placeholder ni une stage claim.
+_CURRENT_STAGES_SQL = "('non_etabli', 'discovery', 'comprehension', 'application', 'mastery')"
+_CLAIM_STAGES_SQL = "('discovery', 'comprehension', 'application', 'mastery')"
+
+
+class CompetencyInferenceRun(Base):
+    """Interprétation VERSIONNÉE du dossier longitudinal d'UNE compétence
+    (competency_code) d'UN utilisateur (user_id) (T6-A, niveau 6 :
+    inférence de l'état C1-C12). État DÉRIVÉ, jamais preuve : ni le run, ni
+    ses stage claims, tensions ou basis refs, ni le cache
+    UserCompetencyState ne deviennent une nouvelle preuve utilisateur ; une
+    inférence ancienne reste auditable mais ne remonte jamais dans la
+    chaîne comme preuve.
+
+    Chaîne : PedagogicalObservation -> périmètre T4 -> dossier / relations
+    T5 -> inférence T6. Le run référence exactement UN
+    longitudinal_assessment_run_id (le snapshot T5 réellement interprété) ;
+    la release de taxonomie est celle de ce run T5 (non dupliquée ici).
+    predecessor_inference_run_id : run T6 précédent (NULL pour une première
+    inférence), jamais le run lui-même
+    (ck_competency_inference_runs_no_self_predecessor).
+
+    Sorties (previous_stage, current_stage, transition, transition_cause,
+    tension_state, unresolved_revision_context, validation_needs,
+    state_decision_summary, output_fingerprint) : NULLABLE, car un run
+    running représente une inférence en cours ; non_etabli n'est JAMAIS un
+    placeholder de calcul. Stage et tension sont orthogonaux (pas de faux
+    stade « application_uncertain »). Aucun ordre numérique de stade, aucun
+    score, aucune confiance numérique, aucun niveau global utilisateur, aucun
+    active_validation_plan (validation_needs = besoin latent dérivé).
+
+    Au plus un run active par (user_id, competency_code), garanti par
+    PostgreSQL (index unique partiel
+    uq_competency_inference_runs_one_active_user_competency). Invariants de
+    complétion, transitions, cohérence du predecessor (même user, même
+    compétence, bon run précédent) et du run T5 parent : T6-B (aucun
+    trigger, aucun CHECK croisé de lifecycle). trigger est un vocabulaire
+    ouvert, volontairement sans CHECK.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application (aucun service, aucune route)."""
+    __tablename__ = "competency_inference_runs"
+    __table_args__ = (
+        CheckConstraint(
+            f"competency_code IN {_COMPETENCY_CODES_SQL}",
+            name="ck_competency_inference_runs_competency_code",
+        ),
+        CheckConstraint(
+            "execution_status IN ('running', 'completed', 'failed')",
+            name="ck_competency_inference_runs_execution_status",
+        ),
+        CheckConstraint(
+            "interpretation_status IN ('candidate', 'active', 'superseded', 'obsolete')",
+            name="ck_competency_inference_runs_interpretation_status",
+        ),
+        CheckConstraint(
+            f"previous_stage IN {_CURRENT_STAGES_SQL}",
+            name="ck_competency_inference_runs_previous_stage",
+        ),
+        CheckConstraint(
+            f"current_stage IN {_CURRENT_STAGES_SQL}",
+            name="ck_competency_inference_runs_current_stage",
+        ),
+        CheckConstraint(
+            "transition IN ('maintained', 'upgraded', 'revised_down')",
+            name="ck_competency_inference_runs_transition",
+        ),
+        CheckConstraint(
+            "transition_cause IN ('new_user_evidence', 'evidence_integrity_change', "
+            "'pedagogical_reinterpretation')",
+            name="ck_competency_inference_runs_transition_cause",
+        ),
+        CheckConstraint(
+            "tension_state IN ('none', 'open')",
+            name="ck_competency_inference_runs_tension_state",
+        ),
+        CheckConstraint(
+            "predecessor_inference_run_id IS NULL OR predecessor_inference_run_id <> id",
+            name="ck_competency_inference_runs_no_self_predecessor",
+        ),
+        UniqueConstraint(
+            "inference_dedup_key",
+            name="uq_competency_inference_runs_dedup_key",
+        ),
+        Index(
+            "uq_competency_inference_runs_one_active_user_competency",
+            "user_id", "competency_code",
+            unique=True,
+            postgresql_where=text("interpretation_status = 'active'"),
+        ),
+        Index("ix_competency_inference_runs_user_id", "user_id"),
+        Index("ix_competency_inference_runs_longitudinal_assessment_run_id", "longitudinal_assessment_run_id"),
+        Index("ix_competency_inference_runs_predecessor_inference_run_id", "predecessor_inference_run_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    competency_code = Column(String, nullable=False)
+    longitudinal_assessment_run_id = Column(Uuid, ForeignKey("longitudinal_assessment_runs.id"), nullable=False)
+    predecessor_inference_run_id = Column(Uuid, ForeignKey("competency_inference_runs.id"), nullable=True)
+    execution_status = Column(String, nullable=False)
+    interpretation_status = Column(String, nullable=False)
+    trigger = Column(String, nullable=False)
+    previous_stage = Column(String, nullable=True)
+    current_stage = Column(String, nullable=True)
+    transition = Column(String, nullable=True)
+    transition_cause = Column(String, nullable=True)
+    tension_state = Column(String, nullable=True)
+    unresolved_revision_context = Column(JSONB(none_as_null=True), nullable=True)
+    validation_needs = Column(JSONB(none_as_null=True), nullable=True)
+    state_decision_summary = Column(Text, nullable=True)
+    positive_basis_version = Column(String, nullable=False)
+    confidence_profile_version = Column(String, nullable=False)
+    state_decision_version = Column(String, nullable=False)
+    validation_version = Column(String, nullable=False)
+    inference_schema_version = Column(String, nullable=False)
+    evaluator_version = Column(String, nullable=False)
+    model_id = Column(String, nullable=True)
+    prompt_spec_version = Column(String, nullable=True)
+    input_fingerprint = Column(String, nullable=False)
+    output_fingerprint = Column(String, nullable=True)
+    inference_dedup_key = Column(String, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    failure_code = Column(String, nullable=True)
+
+
+class CompetencyStageClaim(Base):
+    """Prétention POSITIVE sur UN stade (discovery / comprehension /
+    application / mastery) au sein d'un CompetencyInferenceRun (T6-A). Une
+    stage claim est distincte du current_stage du run : le current_stage est
+    une décision d'état ; la claim dit seulement si une base positive est
+    établie pour ce stade. non_etabli n'est PAS une stage claim (absence de
+    prétention positive établie). UNIQUE(inference_run_id, stage).
+
+    positive_basis_status (established / not_established) et basis_mode
+    (direct / implied_by_higher_claim / none) restent structurellement
+    cohérents (ck_competency_stage_claims_basis_status_mode) :
+    not_established => none ; established => direct ou
+    implied_by_higher_claim (Application directe peut impliquer
+    Compréhension et Discovery sans recopier les preuves). La base ne
+    décide jamais quand un mode s'applique.
+
+    Un run complet contiendra exactement quatre claims ; cette complétude,
+    le plus haut stade positivement établi (DÉRIVÉ, jamais persisté) et
+    l'absence de profil pour une claim not_established relèvent de
+    T6-B/T6-C (aucun trigger). confidence_profile et mastery_assessment :
+    JSONB nullable sans schéma interne en base (T6-C) ; jamais un score, un
+    niveau low / medium / high, un pourcentage, un x/5 ni un booléen global.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application."""
+    __tablename__ = "competency_stage_claims"
+    __table_args__ = (
+        CheckConstraint(
+            f"stage IN {_CLAIM_STAGES_SQL}",
+            name="ck_competency_stage_claims_stage",
+        ),
+        CheckConstraint(
+            "positive_basis_status IN ('established', 'not_established')",
+            name="ck_competency_stage_claims_positive_basis_status",
+        ),
+        CheckConstraint(
+            "basis_mode IN ('direct', 'implied_by_higher_claim', 'none')",
+            name="ck_competency_stage_claims_basis_mode",
+        ),
+        CheckConstraint(
+            "(positive_basis_status = 'not_established' AND basis_mode = 'none') "
+            "OR (positive_basis_status = 'established' "
+            "AND basis_mode IN ('direct', 'implied_by_higher_claim'))",
+            name="ck_competency_stage_claims_basis_status_mode",
+        ),
+        UniqueConstraint(
+            "inference_run_id", "stage",
+            name="uq_competency_stage_claims_run_stage",
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    inference_run_id = Column(Uuid, ForeignKey("competency_inference_runs.id"), nullable=False)
+    stage = Column(String, nullable=False)
+    positive_basis_status = Column(String, nullable=False)
+    basis_mode = Column(String, nullable=False)
+    basis_summary = Column(Text, nullable=True)
+    scope_summary = Column(Text, nullable=True)
+    confidence_profile = Column(JSONB(none_as_null=True), nullable=True)
+    mastery_assessment = Column(JSONB(none_as_null=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class CompetencyInferenceTension(Base):
+    """Tension d'un CompetencyInferenceRun (T6-A) : une prétention positive
+    défendable (fragilized_stage) est fragilisée sur un périmètre donné.
+    Une tension n'est ni un stade, ni une pénalité, ni un score : stage et
+    tension sont orthogonaux. Une contradiction seule, sans claim positive
+    préexistante, ne crée pas nécessairement de tension (le current_stage
+    peut rester non_etabli, jamais un pseudo-stade négatif).
+
+    scope_mode : whole_competency / localized / competency_only ; périmètre
+    localisé par CompetencyInferenceTensionCapability. revision_status :
+    unresolved / revalidation_needed. La base stocke une tension déjà
+    décidée (T6-C) ; cohérence avec les claims et le périmètre : T6-B.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application."""
+    __tablename__ = "competency_inference_tensions"
+    __table_args__ = (
+        CheckConstraint(
+            f"fragilized_stage IN {_CLAIM_STAGES_SQL}",
+            name="ck_competency_inference_tensions_fragilized_stage",
+        ),
+        CheckConstraint(
+            "scope_mode IN ('whole_competency', 'localized', 'competency_only')",
+            name="ck_competency_inference_tensions_scope_mode",
+        ),
+        CheckConstraint(
+            "revision_status IN ('unresolved', 'revalidation_needed')",
+            name="ck_competency_inference_tensions_revision_status",
+        ),
+        Index("ix_competency_inference_tensions_inference_run_id", "inference_run_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    inference_run_id = Column(Uuid, ForeignKey("competency_inference_runs.id"), nullable=False)
+    fragilized_stage = Column(String, nullable=False)
+    scope_mode = Column(String, nullable=False)
+    summary = Column(Text, nullable=False)
+    revision_status = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class CompetencyInferenceTensionCapability(Base):
+    """Périmètre sémantique d'une CompetencyInferenceTension (T6-A), et
+    rien d'autre : ni preuve, ni score, ni poids, ni stade, ni horodatage.
+    PK composite (tension_id, capability_membership_id).
+
+    Limites volontaires (T6-B, ni trigger ni dénormalisation) : localized
+    => au moins une ligne ; whole_competency et competency_only => aucune ;
+    membership de la release du run T5 parent, de la compétence du run et
+    du périmètre réellement fragilisé.
+
+    Nom explicite de la FK membership : le nom automatique PostgreSQL
+    dépasserait 63 caractères.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application."""
+    __tablename__ = "competency_inference_tension_capabilities"
+    __table_args__ = (
+        Index("ix_competency_inference_tension_caps_membership_id", "capability_membership_id"),
+    )
+
+    tension_id = Column(Uuid, ForeignKey("competency_inference_tensions.id"), primary_key=True)
+    capability_membership_id = Column(
+        Uuid,
+        ForeignKey("capability_taxonomy_memberships.id",
+                   name="competency_inference_tension_caps_membership_id_fkey"),
+        primary_key=True,
+    )
+
+
+class CompetencyInferenceBasisRef(Base):
+    """Provenance explicite d'une décision T6 (T6-A) : QUELLE source du
+    dossier (observation, dépendance, transfert ou revalidation T5)
+    documente une claim, une dimension de confiance, une tension, une
+    transition, un besoin de validation ou une évaluation de maîtrise.
+    Provenance seulement : une ref n'est JAMAIS une preuve supplémentaire
+    (ni +1, ni poids, ni coefficient).
+
+    Quatre FK explicites (pas de FK polymorphique opaque) ; exactement une
+    source, cohérente avec source_kind
+    (ck_competency_inference_basis_refs_source_xor). Rattachement structurel
+    par ref_role :
+    - positive_basis : stage_claim_id requis, tension_id et
+      confidence_dimension absents, source_kind = observation (seules les
+      PedagogicalObservation soutiennent directement une positive claim ;
+      les relations T5 n'y valent jamais « preuve +1 ») ;
+    - confidence : stage_claim_id et confidence_dimension requis
+      (diagnosticity / coverage / independence / consistency /
+      temporal_validation), tension_id absent ;
+    - mastery : stage_claim_id requis, tension_id et confidence_dimension
+      absents ;
+    - tension : tension_id requis, stage_claim_id et confidence_dimension
+      absents ;
+    - transition / validation : run-level, stage_claim_id, tension_id et
+      confidence_dimension absents.
+
+    Limites volontaires (T6-B, ni trigger ni dénormalisation) : la source
+    appartient au snapshot / au run T5 consommé par le run T6 ; la claim ou
+    la tension appartient au même run ; une ref mastery vise la claim
+    mastery.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application."""
+    __tablename__ = "competency_inference_basis_refs"
+    __table_args__ = (
+        CheckConstraint(
+            "ref_role IN ('positive_basis', 'confidence', 'tension', 'transition', 'validation', 'mastery')",
+            name="ck_competency_inference_basis_refs_ref_role",
+        ),
+        CheckConstraint(
+            "confidence_dimension IN ('diagnosticity', 'coverage', 'independence', 'consistency', "
+            "'temporal_validation')",
+            name="ck_competency_inference_basis_refs_confidence_dimension",
+        ),
+        CheckConstraint(
+            "source_kind IN ('observation', 'dependency', 'transfer', 'revalidation')",
+            name="ck_competency_inference_basis_refs_source_kind",
+        ),
+        CheckConstraint(
+            "(source_kind = 'observation' AND source_observation_id IS NOT NULL "
+            "AND source_dependency_id IS NULL AND source_transfer_id IS NULL "
+            "AND source_revalidation_id IS NULL) "
+            "OR (source_kind = 'dependency' AND source_observation_id IS NULL "
+            "AND source_dependency_id IS NOT NULL AND source_transfer_id IS NULL "
+            "AND source_revalidation_id IS NULL) "
+            "OR (source_kind = 'transfer' AND source_observation_id IS NULL "
+            "AND source_dependency_id IS NULL AND source_transfer_id IS NOT NULL "
+            "AND source_revalidation_id IS NULL) "
+            "OR (source_kind = 'revalidation' AND source_observation_id IS NULL "
+            "AND source_dependency_id IS NULL AND source_transfer_id IS NULL "
+            "AND source_revalidation_id IS NOT NULL)",
+            name="ck_competency_inference_basis_refs_source_xor",
+        ),
+        CheckConstraint(
+            "ref_role <> 'positive_basis' OR (stage_claim_id IS NOT NULL AND tension_id IS NULL "
+            "AND confidence_dimension IS NULL AND source_kind = 'observation')",
+            name="ck_competency_inference_basis_refs_positive_basis_ref",
+        ),
+        CheckConstraint(
+            "ref_role <> 'confidence' OR (stage_claim_id IS NOT NULL AND tension_id IS NULL "
+            "AND confidence_dimension IS NOT NULL)",
+            name="ck_competency_inference_basis_refs_confidence_ref",
+        ),
+        CheckConstraint(
+            "ref_role <> 'mastery' OR (stage_claim_id IS NOT NULL AND tension_id IS NULL "
+            "AND confidence_dimension IS NULL)",
+            name="ck_competency_inference_basis_refs_mastery_ref",
+        ),
+        CheckConstraint(
+            "ref_role <> 'tension' OR (stage_claim_id IS NULL AND tension_id IS NOT NULL "
+            "AND confidence_dimension IS NULL)",
+            name="ck_competency_inference_basis_refs_tension_ref",
+        ),
+        CheckConstraint(
+            "ref_role <> 'transition' OR (stage_claim_id IS NULL AND tension_id IS NULL "
+            "AND confidence_dimension IS NULL)",
+            name="ck_competency_inference_basis_refs_transition_ref",
+        ),
+        CheckConstraint(
+            "ref_role <> 'validation' OR (stage_claim_id IS NULL AND tension_id IS NULL "
+            "AND confidence_dimension IS NULL)",
+            name="ck_competency_inference_basis_refs_validation_ref",
+        ),
+        Index("ix_competency_inference_basis_refs_inference_run_id", "inference_run_id"),
+        Index("ix_competency_inference_basis_refs_stage_claim_id", "stage_claim_id"),
+        Index("ix_competency_inference_basis_refs_tension_id", "tension_id"),
+        Index("ix_competency_inference_basis_refs_source_observation_id", "source_observation_id"),
+        Index("ix_competency_inference_basis_refs_source_dependency_id", "source_dependency_id"),
+        Index("ix_competency_inference_basis_refs_source_transfer_id", "source_transfer_id"),
+        Index("ix_competency_inference_basis_refs_source_revalidation_id", "source_revalidation_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    inference_run_id = Column(Uuid, ForeignKey("competency_inference_runs.id"), nullable=False)
+    stage_claim_id = Column(Uuid, ForeignKey("competency_stage_claims.id"), nullable=True)
+    tension_id = Column(Uuid, ForeignKey("competency_inference_tensions.id"), nullable=True)
+    ref_role = Column(String, nullable=False)
+    confidence_dimension = Column(String, nullable=True)
+    source_kind = Column(String, nullable=False)
+    source_observation_id = Column(Uuid, ForeignKey("pedagogical_observations.id"), nullable=True)
+    source_dependency_id = Column(Uuid, ForeignKey("observation_dependencies.id"), nullable=True)
+    source_transfer_id = Column(Uuid, ForeignKey("observation_transfers.id"), nullable=True)
+    source_revalidation_id = Column(Uuid, ForeignKey("observation_revalidations.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class UserCompetencyState(Base):
+    """Read-model / cache de l'état courant d'UNE compétence d'UN
+    utilisateur (T6-A), PAS la source de vérité pédagogique : la source de
+    vérité est le CompetencyInferenceRun active (active_inference_run_id,
+    UNIQUE) et sa chaîne parentale (run T5, observations). PK composite
+    (user_id, competency_code).
+
+    Absence de ligne = aucune inférence encore produite ; ligne
+    current_stage = non_etabli = dossier réellement interprété sans
+    prétention positive suffisante pour Discovery. Les deux restent
+    distincts : la migration ne crée aucune ligne (aucun backfill) et aucun
+    trigger ne l'alimente. Seul T6-B, lors de l'activation atomique d'un
+    run, écrira cette table.
+
+    state_generation : compteur TECHNIQUE de génération du cache (mutation
+    définie en T6-B) ; jamais XP, progression, score de stade, confiance ni
+    nombre de preuves. Aucun niveau global : l'état reste
+    compétence-spécifique (C1..C12) ; users.level reste distinct du moteur
+    pédagogique.
+
+    T6-A : table créée par la migration 0009_competency_inference_state ;
+    ni lue ni écrite par l'application."""
+    __tablename__ = "user_competency_states"
+    __table_args__ = (
+        CheckConstraint(
+            f"competency_code IN {_COMPETENCY_CODES_SQL}",
+            name="ck_user_competency_states_competency_code",
+        ),
+        CheckConstraint(
+            f"current_stage IN {_CURRENT_STAGES_SQL}",
+            name="ck_user_competency_states_current_stage",
+        ),
+        CheckConstraint(
+            "tension_state IN ('none', 'open')",
+            name="ck_user_competency_states_tension_state",
+        ),
+        UniqueConstraint(
+            "active_inference_run_id",
+            name="uq_user_competency_states_active_inference_run_id",
+        ),
+    )
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    competency_code = Column(String, primary_key=True)
+    active_inference_run_id = Column(Uuid, ForeignKey("competency_inference_runs.id"), nullable=False)
+    current_stage = Column(String, nullable=False)
+    tension_state = Column(String, nullable=False)
+    state_generation = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
