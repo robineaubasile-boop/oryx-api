@@ -50,9 +50,13 @@ from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 T1C2 = "0004_drop_company_analyses"
 DROPPED = "company_analyses"
 REMAINING_TABLES = (HISTORICAL_TABLES - {DROPPED}) | {"analysis_sessions"}
-# Tables de T2-A (0005, testé à part) : déclarées dans les modèles, absentes
-# du schéma 0004.
+# Tables de T2-A (0005) et T3-A (0006), testées à part : déclarées dans les
+# modèles, absentes du schéma 0004.
 T2A_TABLES = {"cognitive_events", "support_traces"}
+T3A_TABLES = {"observation_evaluation_runs", "pedagogical_observations"}
+# Index hors table (unique partiel) de T3-A : autogenerate le signale à part
+# (add_index) tant que la table n'existe pas.
+T3A_INDEXES = {"uq_observation_evaluation_runs_one_active_event"}
 # sha256 de alembic/versions/0003_analysis_session_links.py tel que mergé
 # sur main (2f1845e, T1-C1) et déployé en production.
 T1B1_SHA256 = "42303c53253fcf3264f7a4122651bba4f768e1719a1fc89dafc849bacad71e46"
@@ -136,7 +140,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES
+    assert set(Base.metadata.tables) == REMAINING_TABLES | T2A_TABLES | T3A_TABLES
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
         assert all(fk.column.table.name != DROPPED for fk in table.foreign_keys), table.name
@@ -269,10 +273,13 @@ def _compare_metadata(engine) -> list:
 
 
 def _assert_metadata_matches_0004(engine) -> None:
-    """Au schéma 0004, Base.metadata ne diffère que par les deux tables de
-    T2-A, créées seulement en 0005 ; tout le reste correspond exactement."""
+    """Au schéma 0004, Base.metadata ne diffère que par les tables de T2-A
+    et T3-A, créées seulement en 0005 et 0006 ; tout le reste correspond
+    exactement."""
     diff = _compare_metadata(engine)
-    assert sorted((d[0], d[1].name) for d in diff) == [("add_table", t) for t in sorted(T2A_TABLES)]
+    assert sorted((d[0], d[1].name) for d in diff) == sorted(
+        [("add_table", t) for t in T2A_TABLES | T3A_TABLES] + [("add_index", i) for i in T3A_INDEXES]
+    )
 
 
 def _failed_upgrade(pg_url) -> subprocess.CalledProcessError:

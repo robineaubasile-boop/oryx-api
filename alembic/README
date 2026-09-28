@@ -186,6 +186,45 @@ Le downgrade supprime support_traces puis cognitive_events (retour exact à
 0004). Tests : tests/test_migration_0005_cognitive_support_traces.py (même
 variable ORYX_TEST_DATABASE_URL).
 
+T3-A : 0006_observation_layer (EXPAND)
+--------------------------------------
+
+down_revision = 0005_cognitive_support_traces. Strictement additive : crée
+observation_evaluation_runs, pedagogical_observations et un index unique
+partiel (couche de persistance de niveau 3). cognitive_events et
+support_traces inchangées ; aucun backfill, aucun seed ; l'application ne
+lit ni n'écrit encore ces tables (lifecycle transactionnel en T3-B).
+
+  - observation_evaluation_runs : interprétation versionnée complète d'un
+    cognitive_event (FK event_id). execution_status (running / completed /
+    failed) et interpretation_status (candidate / active / superseded /
+    obsolete) contraints par CHECK nommés. Un run completed sans
+    observation = évaluation réussie n'ayant rien observé. re_evaluates_run_id
+    : FK auto-référente nullable. evaluation_dedup_key : UNIQUE
+    (uq_observation_evaluation_runs_dedup_key). Un seul run active par
+    événement : index UNIQUE PARTIEL uq_observation_evaluation_runs_one_active_event
+    (event_id WHERE interpretation_status = 'active').
+    pedagogical_taxonomy_release_id : UUID nullable SANS FK, référence
+    logique réservée à T4 (la migration T4 ajoutera la FK).
+  - pedagogical_observations : unité probante locale et atomique (une
+    competency_code C1..C12), FK evaluation_run_id. Vocabulaires fermés en
+    CHECK nommés ck_pedagogical_observations_<colonne> ; local_stage sans
+    mastery. CHECK croisés : polarity_stage_scope (supportive => local_stage
+    renseigné et contradiction_scope NULL ; contradictory => l'inverse) et
+    integrity_invalidation (valid => invalidated_at / invalidation_reason
+    NULL ; invalidated => les deux renseignés).
+    UNIQUE(evaluation_run_id, ordinal) (uq_pedagogical_observations_run_ordinal),
+    aucune unicité sur competency_code.
+
+Mêmes conventions que 0005 (UUID applicatif, TIMESTAMPTZ, aucun
+server_default, pas d'ENUM, FK sans cascade, aucun trigger). Identifiant de
+révision de 22 caractères (alembic_version.version_num = VARCHAR(32)).
+
+Le downgrade supprime pedagogical_observations, l'index partiel puis
+observation_evaluation_runs (retour exact à 0005). Tests :
+tests/test_migration_0006_observation_layer.py (même variable
+ORYX_TEST_DATABASE_URL).
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 

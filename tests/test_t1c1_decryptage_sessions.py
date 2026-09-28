@@ -6,9 +6,9 @@ applicatif de CompanyAnalysis ; T1-C2 supprime ensuite le modèle et la
 table (migration 0004_drop_company_analyses).
 
 Aucune migration dans ce chantier : le schéma testé est celui produit par
-`alembic upgrade head` (= 0005_cognitive_support_traces depuis T2-A, qui
-n'ajoute que des tables non utilisées par Décrypte), ce qui vérifie que les
-parcours T1-C1 fonctionnent sans company_analyses.
+`alembic upgrade head` (= 0006_observation_layer depuis T3-A ; 0005 (T2-A)
+et 0006 n'ajoutent que des tables non utilisées par Décrypte), ce qui
+vérifie que les parcours T1-C1 fonctionnent sans company_analyses.
 
 1. Tests sans base (toujours exécutés) : tête Alembic attendue, aucune
    référence à CompanyAnalysis dans api.py.
@@ -58,6 +58,7 @@ from tests.test_migration_0002_analysis_sessions import (
 T1B1 = "0003_analysis_session_links"
 T1C2 = "0004_drop_company_analyses"
 T2A = "0005_cognitive_support_traces"
+T3A = "0006_observation_layer"
 USER = "user-t1c1"
 TICKER = "MC.PA"
 DATA = {
@@ -71,12 +72,12 @@ SNAPSHOT = {"operating_margin": 0.26, "roe": 0.24, "net_cash": -1.0e9}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t1c1_head_is_0005():
+def test_no_migration_added_by_t1c1_head_is_0006():
     """(1) T1-C1 n'a ajouté aucune migration ; les seules ajoutées depuis
-    sont 0004 (T1-C2) et 0005 (T2-A), qui est la tête."""
+    sont 0004 (T1-C2), 0005 (T2-A) et 0006 (T3-A), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T2A]
-    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A}
+    assert script.get_heads() == [T3A]
+    assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [
         "0001_current_oryx_baseline.py",
@@ -84,6 +85,7 @@ def test_no_migration_added_by_t1c1_head_is_0005():
         "0003_analysis_session_links.py",
         "0004_drop_company_analyses.py",
         "0005_cognitive_support_traces.py",
+        "0006_observation_layer.py",
     ]
 
 
@@ -527,7 +529,7 @@ def test_other_ticker_and_other_user_are_isolated(db, client, claude):
 
 def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_engine):
     """(18) Après un parcours complet (analyse, GET, DELETE, nouvelle
-    analyse) : schéma = head (0005), Base.metadata identique au schéma migré,
+    analyse) : schéma = head (0006), Base.metadata identique au schéma migré,
     company_analyses absente (supprimée par T1-C2)."""
     _full_attempt(client, claude, "A")
     client.theses()
@@ -536,7 +538,7 @@ def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_eng
     _turn(client, claude, "business")
 
     with pg_engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T2A
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T3A
         assert "company_analyses" not in sa.inspect(conn).get_table_names()
 
     from alembic.autogenerate import compare_metadata
