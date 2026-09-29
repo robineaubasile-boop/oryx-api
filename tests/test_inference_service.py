@@ -89,6 +89,7 @@ from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
 from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _reaches_db, _recording
+from tests.test_observation_service import _event as _finalized_event
 from tests.test_observation_service import _start_kwargs as t3_kwargs
 from tests.test_taxonomy_service import _advisory_locks, _pids, _rows
 
@@ -1662,9 +1663,14 @@ def test_pg_revised_down_requires_a_positive_basis_for_the_arrival_stage(engine,
 def test_pg_revision_to_non_etabli(engine, Sessions, db, world, cause, claim_set, with_transition_ref, ok):
     """revised_down -> non_etabli : jamais par new_user_evidence, jamais
     avec une claim established ; ref transition facultative (exception
-    structurelle) par intégrité ou réinterprétation."""
+    structurelle) par intégrité ou réinterprétation. Dossier corrigé
+    (observation du predecessor invalidée) + nouvel événement, autre
+    spécification : chaque cause a son support structurel."""
     w = world
-    _, context, (new,) = _second(Sessions, w, new=[contra(w.A)], state_decision_version="state-2")
+    _activate_first(Sessions, w)
+    _invalidate(Sessions, w.k)
+    l2, (new,) = _new_t5(Sessions, w, contra(w.A))
+    context = _start(Sessions, l2, state_decision_version="state-2")
     refs = [ref("transition", "observation", new)] if with_transition_ref else []
     if claim_set != claims():
         refs.append(pos("discovery", w.disc))
@@ -1719,7 +1725,7 @@ def test_pg_same_dossier_is_neither_new_user_evidence_nor_integrity_change(engin
     w = world
     _, context, _ = _second(Sessions, w)  # même dossier, autre spécification
     for cause, match in (("new_user_evidence", "new_user_evidence sans aucun CognitiveEvent"),
-                         ("evidence_integrity_change", "sans changement du dossier longitudinal")):
+                         ("evidence_integrity_change", "sans aucune observation du dossier du predecessor invalidée")):
         with pytest.raises(InvalidInferenceDecision, match=match):
             svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(w, cause=cause))
         db.rollback()
@@ -1727,11 +1733,10 @@ def test_pg_same_dossier_is_neither_new_user_evidence_nor_integrity_change(engin
                                       decision=_app_decision(w, cause="pedagogical_reinterpretation"))
 
 
-def test_pg_revision_to_non_etabli_on_an_identical_dossier_is_not_an_integrity_change(engine, Sessions, db,
-                                                                                         world):
+def test_pg_revision_to_non_etabli_without_invalidation_is_not_an_integrity_change(engine, Sessions, db, world):
     w = world
     _, context, _ = _second(Sessions, w)  # même dossier, autre spécification
-    with pytest.raises(InvalidInferenceDecision, match="sans changement du dossier longitudinal"):
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor"):
         svc.complete_competency_inference(db, run_id=context.run_id, decision=decision(
             "non_etabli", claims(), cause="evidence_integrity_change"))
 
@@ -1739,7 +1744,9 @@ def test_pg_revision_to_non_etabli_on_an_identical_dossier_is_not_an_integrity_c
 def test_pg_t3_reevaluation_is_never_new_user_evidence(engine, Sessions, db, world):
     """Predecessor : E1 / run T3 R1 / O1. Réévaluation du MÊME E1 : R2
     active, O2 remplace O1. Nouveau T5 avec O2 : O2 != O1 mais même
-    événement => aucune nouvelle démonstration utilisateur."""
+    événement => aucune nouvelle démonstration utilisateur ; sans
+    invalidation, ce n'est pas une correction d'intégrité : c'est une
+    réinterprétation (dossier logique changé, aucun nouvel événement)."""
     w = world
     first = _activate_first(Sessions, w)
     o1, e1 = w.app, w.app_t3.event
@@ -1758,26 +1765,98 @@ def test_pg_t3_reevaluation_is_never_new_user_evidence(engine, Sessions, db, wor
     with pytest.raises(InvalidInferenceDecision, match="new_user_evidence sans aucun CognitiveEvent"):
         svc.complete_competency_inference(db, run_id=context.run_id, decision=reeval)
     db.rollback()
-    # Mêmes spécifications : ce n'est pas non plus une réinterprétation.
-    with pytest.raises(InvalidInferenceDecision, match="aucune spécification différente"):
+    # Aucune observation du predecessor invalidée : pas une correction d'intégrité.
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor"):
         svc.complete_competency_inference(db, run_id=context.run_id, decision=dataclasses.replace(
-            reeval, transition_cause="pedagogical_reinterpretation"))
+            reeval, transition_cause="evidence_integrity_change"))
     db.rollback()
-    # Le dossier a réellement changé : cause d'intégrité structurellement recevable.
+    # Mêmes spécifications T6 mais dossier réinterprété sans nouvelle démonstration.
     svc.complete_competency_inference(db, run_id=context.run_id, decision=dataclasses.replace(
-        reeval, transition_cause="evidence_integrity_change"))
+        reeval, transition_cause="pedagogical_reinterpretation"))
     db.commit()
-    assert _run(engine, context.run_id)["transition_cause"] == "evidence_integrity_change"
+    assert _run(engine, context.run_id)["transition_cause"] == "pedagogical_reinterpretation"
+
+
+def _closed_at(engine, event_id):
+    return _rows(engine, "SELECT closed_at FROM cognitive_events WHERE id = :e", e=event_id)[0]["closed_at"]
+
+
+def _started_at(engine, t5_run):
+    return _rows(engine, "SELECT started_at FROM longitudinal_assessment_runs WHERE id = :r",
+                 r=t5_run)[0]["started_at"]
+
+
+def test_pg_an_old_event_newly_interpreted_in_the_competency_is_not_new_user_evidence(engine, Sessions, db):
+    """E_old finalisé AVANT le snapshot T5 du predecessor, mais sa première
+    évaluation T3 n'a produit aucune observation C7 : absent du dossier C7
+    du predecessor. Réévalué ensuite (observation C7), il entre dans le
+    nouveau dossier : ce n'est PAS une nouvelle démonstration (closed_at <=
+    started_at du T5 predecessor). Contrôle : E_new finalisé APRÈS."""
+    tx = _taxonomy(Sessions, ("C7_A", "C8_A"))
+    A = tx.m["C7_A"]
+    old_event = _finalized_event(Sessions)
+    first_eval = _t3(Sessions, tx.id, sup(tx.m["C8_A"], competency_code="C8"), event_id=old_event)
+    base = _t3(Sessions, tx.id, sup(A))
+    l1 = _start_t5(Sessions, tx.id)
+    _complete_t5(Sessions, l1)
+    assert old_event not in _event_ids(engine, l1) and first_eval.event == old_event
+    r1 = _start(Sessions, l1)
+    _complete(Sessions, r1.run_id, decision("comprehension", refs=[pos("comprehension", base.id)]))
+    reinterpreted = _t3(Sessions, tx.id, app(A), event_id=old_event)  # nouveau run T3 du même événement
+    l2 = _start_t5(Sessions, tx.id)
+    _complete_t5(Sessions, l2)
+    assert old_event in _event_ids(engine, l2)
+    assert _closed_at(engine, old_event) <= _started_at(engine, l1)
+    r2 = _start(Sessions, l2)
+    upgrade = decision("application", refs=[pos("application", reinterpreted.id),
+                                             ref("transition", "observation", reinterpreted.id)],
+                       cause="new_user_evidence")
+    with pytest.raises(InvalidInferenceDecision, match="new_user_evidence sans aucun CognitiveEvent finalisé"):
+        svc.complete_competency_inference(db, run_id=r2.run_id, decision=upgrade)
+    db.rollback()
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor"):
+        svc.complete_competency_inference(db, run_id=r2.run_id, decision=dataclasses.replace(
+            upgrade, transition_cause="evidence_integrity_change"))
+    db.rollback()
+    # Réinterprétation d'un événement déjà capturé : structurellement recevable.
+    svc.complete_competency_inference(db, run_id=r2.run_id, decision=dataclasses.replace(
+        upgrade, transition_cause="pedagogical_reinterpretation"))
+    db.rollback()
+    # Contrôle : E_new finalisé après la capture du snapshot précédent.
+    fresh = _t3(Sessions, tx.id, app(A))
+    l3 = _start_t5(Sessions, tx.id)
+    _complete_t5(Sessions, l3)
+    assert _closed_at(engine, fresh.event) > _started_at(engine, l1)
+    svc.fail_competency_inference(db, run_id=r2.run_id, failure_code="stale_input")
+    db.commit()
+    r3 = _start(Sessions, l3)
+    svc.complete_competency_inference(db, run_id=r3.run_id, decision=decision(
+        "application", refs=[pos("application", fresh.id), ref("transition", "observation", fresh.id)],
+        cause="new_user_evidence"))
+    db.commit()
+    assert (_run(engine, r3.run_id)["transition"], _run(engine, r3.run_id)["transition_cause"]) == (
+        "upgraded", "new_user_evidence")
+
+
+def test_pg_finalized_event_without_closed_at_is_never_guessed(engine, Sessions, db, world):
+    w = world
+    _, context, _ = _second(Sessions, w)
+    _exec(engine, "UPDATE cognitive_events SET closed_at = NULL WHERE id = :e", e=w.app_t3.event)
+    with pytest.raises(InvalidInferenceState, match="sans closed_at"):
+        svc.complete_competency_inference(db, run_id=context.run_id,
+                                          decision=_app_decision(w, cause="pedagogical_reinterpretation"))
 
 
 def test_pg_a_new_cognitive_event_is_new_user_evidence(engine, Sessions, db, world):
-    """Contrôle : predecessor E1..En ; nouveau T5 = mêmes événements + E2."""
+    """Contrôle : predecessor E1..En ; nouveau T5 = mêmes événements + E2,
+    finalisé après la capture du snapshot précédent."""
     w = world
     _activate_first(Sessions, w)
     fresh = _t3(Sessions, w.tx.id, sup(w.A))
     l2 = _start_t5(Sessions, w.tx.id)
     _complete_t5(Sessions, l2)
     assert _event_ids(engine, l2) - _event_ids(engine, w.t5) == {fresh.event}
+    assert _closed_at(engine, fresh.event) > _started_at(engine, w.t5)
     context = _start(Sessions, l2)
     svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(w, cause="new_user_evidence"))
     db.commit()
@@ -1859,10 +1938,13 @@ def test_pg_other_downward_revisions_still_require_a_transition_ref(engine, Sess
         db.rollback()
 
 
-def test_pg_pedagogical_reinterpretation_requires_a_specification_change(engine, Sessions, db, world):
+def test_pg_pedagogical_reinterpretation_is_not_a_cover_for_new_evidence(engine, Sessions, db, world):
+    """Mêmes spécifications T6, dossier changé PAR un nouvel événement :
+    la cause plausible est new_user_evidence, pas une réinterprétation ;
+    et un dossier identique sous mêmes spécifications est un reroll."""
     w = world
     _, context, _ = _second(Sessions, w, new=[sup(w.A)])  # nouveau dossier, mêmes spécifications
-    with pytest.raises(InvalidInferenceDecision, match="aucune spécification différente"):
+    with pytest.raises(InvalidInferenceDecision, match="sans spécification T6 différente"):
         svc.complete_competency_inference(db, run_id=context.run_id,
                                           decision=_app_decision(w, cause="pedagogical_reinterpretation"))
     db.rollback()
