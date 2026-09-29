@@ -786,7 +786,11 @@ def test_t5a_tables_are_not_wired_to_the_application():
                "core/longitudinal_view.py",
                # T6-A : FK de provenance des basis refs et du run
                # d'inférence vers T5 (aucun branchement applicatif).
-               "alembic/versions/0009_competency_inference_state.py"}
+               "alembic/versions/0009_competency_inference_state.py",
+               # T6-B : service d'inférence, qui LIT le dossier T5 parent
+               # (FOR SHARE), ses inputs et ses relations (jamais d'écriture
+               # T5 ; non branché : tests/test_inference_service.py).
+               "core/inference_service.py"}
     needles = (*(m.__name__ for m in T5A_MODELS), *T5A_TABLES)
     checked = 0
     for rel, source in _application_sources():

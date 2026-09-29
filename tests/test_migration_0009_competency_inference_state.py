@@ -898,33 +898,46 @@ def _application_sources():
         yield rel, source
 
 
+# T6-B : le service transactionnel core/inference_service.py (non branché,
+# voir tests/test_inference_service.py) est le SEUL module T6 ; il ne porte
+# que ces deux opérations de la liste ci-dessus (aucun moteur T6-C).
+T6B_SERVICE = "core/inference_service.py"
+T6B_SERVICE_OPERATIONS = ("start_competency_inference", "complete_competency_inference")
+
+
 def test_no_t6_service_engine_or_inference_anywhere():
     """T6-A = persistance seulement : aucun module d'inférence / d'état
-    (core/inference_service.py, core/inference_engine.py...), aucune
-    opération T6-B (démarrer, compléter, activer, ajouter claim / tension,
-    écrire le cache, inférer un stade) nulle part, hors docstrings et
-    commentaires."""
+    autre que le service transactionnel T6-B core/inference_service.py
+    (aucun core/inference_engine.py, aucun moteur T6-C), aucune opération
+    T6-B (démarrer, compléter, activer, ajouter claim / tension, écrire le
+    cache, inférer un stade) ailleurs que dans ce service, et, dans ce
+    service, seulement start / complete (jamais infer_stage, add_claim,
+    activate...), hors docstrings et commentaires."""
     modules = [p.relative_to(REPO_ROOT).as_posix()
                for p in [*(REPO_ROOT / "core").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"),
                          REPO_ROOT / "api.py"]]
-    assert not [m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
-                                                            "tension", "user_state"))]
-    assert not (REPO_ROOT / "core" / "inference_service.py").exists()
+    assert [m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
+                                                        "tension", "user_state"))] == [T6B_SERVICE]
     assert not (REPO_ROOT / "core" / "inference_engine.py").exists()
     checked = 0
     for rel, source in _application_sources():
         checked += 1
+        allowed = T6B_SERVICE_OPERATIONS if rel == T6B_SERVICE else ()
         for name in T6B_OPERATIONS:
-            assert name not in source, (rel, name)
+            if name not in allowed:
+                assert name not in source, (rel, name)
     assert checked > 0
 
 
 def test_t6a_tables_are_not_wired_to_the_application():
-    """Aucun branchement : hors core/models.py et la migration 0009, aucun
-    code applicatif (api.py, core/ dont les services T2-B à T5-C, scripts/,
-    frontend) ne mentionne ces modèles ou ces tables, et aucun code
-    n'écrit user_competency_states."""
-    allowed = {"core/models.py", f"alembic/versions/{T6A}.py"}
+    """Aucun branchement : hors core/models.py, la migration 0009 et, depuis
+    T6-B, le service core/inference_service.py (seul point d'écriture
+    applicatif des six tables, lui-même non branché : voir
+    tests/test_inference_service.py),
+    aucun code applicatif (api.py, core/ dont les services T2-B à T5-C,
+    scripts/, frontend) ne mentionne ces modèles ou ces tables, et aucun
+    autre code n'écrit user_competency_states."""
+    allowed = {"core/models.py", f"alembic/versions/{T6A}.py", T6B_SERVICE}
     needles = (*(m.__name__ for m in T6A_MODELS), *T6A_TABLES)
     checked = 0
     for rel, source in _application_sources():

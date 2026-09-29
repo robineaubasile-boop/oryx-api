@@ -401,7 +401,11 @@ def test_t2a_tables_are_not_wired_to_the_application():
                "alembic/versions/0008_longitudinal_relations.py", "core/longitudinal_service.py",
                # T5-C : lecteur read-only du dossier (provenance des
                # événements et des aides ; tests/test_longitudinal_view.py).
-               "core/longitudinal_view.py"}
+               "core/longitudinal_view.py",
+               # T6-B : service d'inférence, qui LIT et verrouille en FOR
+               # SHARE les événements de la chaîne amont (jamais d'écriture
+               # T2 ; non branché : tests/test_inference_service.py).
+               "core/inference_service.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
