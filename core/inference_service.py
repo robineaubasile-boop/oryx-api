@@ -170,6 +170,32 @@ Invariants :
   inference_schema_version), jamais par un reroll implicite : le garde de
   reroll est inchangé.
 
+- Taxonomie courante (T6-C0) : current_taxonomy_context
+  (CurrentTaxonomyContext) développe pedagogical_taxonomy_release_id du
+  parent T5, déjà engagé par input_fingerprint : pour la SEULE compétence
+  du run, chaque capacité de la release comme (membership_id,
+  definition_id, capability_code, semantic_revision, label). Il permet au
+  futur T6-C, qui raisonne par capability_definition_id (vue T5-C),
+  d'écrire le capability_membership_id exact qu'exige une TensionDecision
+  localized, sans accès à la base. Même definition_id = même sens (réutilisé
+  entre releases sous des memberships différents) ; même capability_code
+  seul n'est jamais une identité sémantique : aucune correspondance par
+  code, aucun repli, aucune continuité entre révisions (le futur T6-C
+  décidera explicitement de leur compatibilité). Identité seulement : ni
+  definition, ni mapping_guidance (logique T3 / T4), ni statut ni
+  horodatage de release (relus au présent), ni poids, ordre pédagogique
+  utilisateur, score ou progression. Filtre sur la compétence PERSISTÉE de
+  la définition (jamais sur le préfixe du code), ordre naturel de T4-B
+  (get_release_capabilities, SELECT groupé : C2 avant C10), aucune
+  cardinalité imposée (capabilities peut être vide). Release introuvable,
+  membership / définition incohérents ou doublon (membership, définition
+  ou capability_code) => InvalidInferenceState, jamais un choix arbitraire.
+  Construit par start (avant l'INSERT) et get_inference_context avec le
+  même helper, en lecture seule ; présent pour V1 legacy comme V2 (aucune
+  causalité nouvelle) ; hors de toute empreinte (input, dédup, output) ;
+  complete ne le construit pas (il valide lui-même les memberships des
+  tensions).
+
 - complete : reçoit uniquement run_id et une InferenceDecision (sans
   previous_stage, transition, tension_state ni empreinte : dérivés). Tout
   est vérifié AVANT la première mutation ; l'ancien active est superseded
@@ -269,8 +295,9 @@ Invariants :
   run antérieur, claims, tensions + périmètres + définitions, refs ;
   causalité : observations des deux snapshots + runs T3 + événements en une
   jointure, localisations T4, runs T3 des événements concernés, relations
-  du T5 précédent) ; aucune requête par ref, par tension, par observation
-  ni par événement.
+  du T5 précédent ; taxonomie courante : release, puis memberships +
+  définitions en une jointure) ; aucune requête par ref, par tension, par
+  observation, par événement ni par capacité.
 """
 import hashlib
 import json
@@ -319,6 +346,7 @@ from core.models import (
     User,
     UserCompetencyState,
 )
+from core.taxonomy_service import TaxonomyServiceError, get_release_capabilities
 
 # Statuts de run (vocabulaires T3 / T5 / T6 identiques).
 RUNNING = "running"
@@ -754,15 +782,46 @@ class TransitionCausalityContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CurrentTaxonomyCapability:
+    """Une capacité de la release COURANTE (T6-C0) : identité taxonomique
+    seulement. membership_id = appartenance à CETTE release (ce qu'exige une
+    TensionDecision localized) ; definition_id = sens, comparable entre
+    releases (même id = même sens). capability_code et semantic_revision
+    servent à l'audit et à la compatibilité de policy, jamais à une
+    correspondance (même code, autre révision = autre sens) ; label est
+    descriptif, jamais un critère de décision. semantic_revision n'est ni un
+    niveau, ni un score, ni un ordre pédagogique."""
+    membership_id: uuid.UUID
+    definition_id: uuid.UUID
+    capability_code: str
+    semantic_revision: int
+    label: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class CurrentTaxonomyContext:
+    """Résolution taxonomique de la release du parent T5 courant (T6-C0),
+    limitée à la compétence du run, dans l'ordre naturel T4-B (C1_A ...
+    C12_D). Dérivée de pedagogical_taxonomy_release_id (déjà engagé par
+    input_fingerprint) : aucune empreinte propre, aucune propriété relue au
+    présent. capabilities peut être vide : aucune cardinalité imposée."""
+    release_id: uuid.UUID
+    competency_code: str
+    capabilities: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
 class InferenceContext:
     """Unique entrée autorisée du futur T6-C : le dossier T5 courant (vue
     T5-C), le predecessor (identité minimale + contenu décisionnel
     historique, tous deux None pour une première inférence), les faits
     causaux entre les deux snapshots (transition_causality, None sans
     predecessor ET pour un candidat legacy V1 : jamais une causalité
-    reconstruite après coup que son empreinte n'engage pas) et l'identité
-    figée du candidat. Le futur moteur T6-C V1 exigera input_schema_version
-    == 2 ; un contexte V1 reste lisible pour compatibilité technique."""
+    reconstruite après coup que son empreinte n'engage pas), la résolution
+    taxonomique courante (current_taxonomy_context, toujours présente, V1
+    comme V2) et l'identité figée du candidat. Le futur moteur T6-C V1
+    exigera input_schema_version == 2 ; un contexte V1 reste lisible pour
+    compatibilité technique."""
     run_id: uuid.UUID
     user_id: str
     competency_code: str
@@ -773,6 +832,7 @@ class InferenceContext:
     predecessor: PredecessorSnapshot | None
     predecessor_decision_context: PredecessorDecisionContext | None
     transition_causality: TransitionCausalityContext | None
+    current_taxonomy_context: CurrentTaxonomyContext
     input_schema_version: int
     input_fingerprint: str
     inference_dedup_key: str
@@ -1724,7 +1784,8 @@ def _verified_inputs(db, run, *, lock: bool) -> _Inputs:
                    identity.transition_causality, identity.input_fingerprint)
 
 
-def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext | None) -> InferenceContext:
+def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext | None,
+             taxonomy_context: CurrentTaxonomyContext) -> InferenceContext:
     snapshot = inputs.snapshot
     if (snapshot is None) != (decision_context is None) or snapshot is not None and (
             (snapshot.inference_run_id, snapshot.longitudinal_assessment_run_id)
@@ -1734,6 +1795,12 @@ def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext 
             snapshot is not None and inputs.input_schema_version == INPUT_SCHEMA_VERSION):
         raise InvalidInferenceState(f"{run.id} : transition_causality incohérente avec le predecessor et"
                                     f" input_schema_version {inputs.input_schema_version}")
+    # Ancrage : la taxonomie exposée est celle du parent T5 ET du dossier T5-C.
+    if len({taxonomy_context.release_id, inputs.parent.pedagogical_taxonomy_release_id,
+            inputs.dossier.pedagogical_taxonomy_release_id}) != 1 or len(
+            {taxonomy_context.competency_code, run.competency_code, inputs.dossier.competency_code}) != 1:
+        raise InvalidInferenceState(f"{run.id} : current_taxonomy_context divergent de la release ou de la"
+                                    " compétence du dossier T5")
     return InferenceContext(
         run_id=run.id,
         user_id=run.user_id,
@@ -1745,11 +1812,58 @@ def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext 
         predecessor=snapshot,
         predecessor_decision_context=decision_context,
         transition_causality=inputs.transition_causality,
+        current_taxonomy_context=taxonomy_context,
         input_schema_version=inputs.input_schema_version,
         input_fingerprint=run.input_fingerprint,
         inference_dedup_key=run.inference_dedup_key,
         **{name: getattr(run, name) for name in SPECIFICATION_FIELDS},
     )
+
+
+# --------------------------------------------------------------------------
+# Résolution taxonomique courante (T6-C0)
+# --------------------------------------------------------------------------
+
+def _build_current_taxonomy_context(db, *, release_id: uuid.UUID, competency_code: str) -> CurrentTaxonomyContext:
+    """Capacités de `competency_code` dans la release `release_id` (celle du
+    parent T5), via la lecture T4-B get_release_capabilities (SELECT groupé,
+    ordre naturel, aucun verrou, aucune écriture), converties en valeurs
+    immuables : aucun objet ORM ne sort d'ici.
+
+    Filtre sur definition.competency_code PERSISTÉ (jamais sur le préfixe
+    du code). Aucune correspondance par capability_code : chaque entrée est
+    le couple (membership, définition) tel que persisté. Aucune cardinalité
+    imposée : zéro capacité => capabilities vide. Release introuvable,
+    membership hors de la release ou vers une autre définition, doublon de
+    membership, de définition ou de capability_code (deux révisions d'un
+    même code : T4-B l'interdit, la base ne peut pas l'imposer) =>
+    InvalidInferenceState, jamais une ligne choisie arbitrairement."""
+    try:
+        rows = get_release_capabilities(db, release_id=release_id)
+    except TaxonomyServiceError as exc:
+        raise InvalidInferenceState(f"release {release_id} du dossier T5 illisible : {exc!r}") from exc
+    capabilities, seen = [], set()
+    for membership, definition in rows:
+        if membership.taxonomy_release_id != release_id or membership.capability_definition_id != definition.id:
+            raise InvalidInferenceState(f"membership {membership.id} incohérent avec la release {release_id}"
+                                        f" ou la définition {definition.id}")
+        if definition.competency_code != competency_code:
+            continue
+        for identity in (("membership", membership.id), ("definition", definition.id),
+                         ("capability_code", definition.capability_code)):
+            if identity in seen:
+                raise InvalidInferenceState(f"release {release_id}, {competency_code} : {identity[0]}"
+                                            f" {identity[1]} en double")
+            seen.add(identity)
+        capabilities.append(CurrentTaxonomyCapability(
+            membership_id=membership.id,
+            definition_id=definition.id,
+            capability_code=definition.capability_code,
+            semantic_revision=definition.semantic_revision,
+            label=definition.label,
+        ))
+    return CurrentTaxonomyContext(release_id=release_id, competency_code=competency_code,
+                                  capabilities=tuple(capabilities))
 
 
 # --------------------------------------------------------------------------
@@ -2670,6 +2784,10 @@ def start_competency_inference(
         raise LongitudinalParentNotUsable("; ".join(problems + identity + status))
     dossier = _dossier(db, parent.id, LongitudinalParentNotUsable)
     relations = _relations(db, parent.id)
+    # Résolution taxonomique (T6-C0), construite AVANT l'INSERT : release
+    # incohérente => InvalidInferenceState, aucun candidat.
+    taxonomy_context = _build_current_taxonomy_context(
+        db, release_id=parent.pedagogical_taxonomy_release_id, competency_code=parent.competency_code)
 
     active, cache = _active_and_cache(db, parent.user_id, parent.competency_code)
     if active is not None:
@@ -2737,7 +2855,7 @@ def start_competency_inference(
             raise DuplicateInference(dedup_key) from exc
         raise
     return _context(run, _Inputs(parent, dossier, relations, active, snapshot, INPUT_SCHEMA_VERSION, causality,
-                                 fingerprint), decision_context)
+                                 fingerprint), decision_context, taxonomy_context)
 
 
 def get_inference_context(db, *, run_id: uuid.UUID) -> InferenceContext:
@@ -2763,7 +2881,10 @@ def get_inference_context(db, *, run_id: uuid.UUID) -> InferenceContext:
         _check_cache(active, cache, run.user_id, run.competency_code)
         decision_context = None if inputs.predecessor is None else _build_predecessor_decision_context(
             db, inputs.predecessor)
-        return _context(run, inputs, decision_context)
+        taxonomy_context = _build_current_taxonomy_context(
+            db, release_id=inputs.parent.pedagogical_taxonomy_release_id,
+            competency_code=inputs.parent.competency_code)
+        return _context(run, inputs, decision_context, taxonomy_context)
 
 
 def complete_competency_inference(db, *, run_id: uuid.UUID, decision: InferenceDecision) -> CompetencyInferenceRun:
