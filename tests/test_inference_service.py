@@ -71,6 +71,8 @@ from core.inference_service import (
     PredecessorSnapshot,
     PredecessorStageClaimContext,
     PredecessorTensionContext,
+    CurrentTaxonomyCapability,
+    CurrentTaxonomyContext,
     ReevaluationContext,
     RelationDeltaContext,
     RelationFamilyDeltaContext,
@@ -145,6 +147,7 @@ PREDECESSOR_CONTEXT_CLASSES = (PredecessorDecisionContext, PredecessorStageClaim
                                PredecessorHistoricalObservation)
 CAUSALITY_CLASSES = (TransitionCausalityContext, IntegrityChangeContext, ReevaluationContext, ObservationDeltaContext,
                      RelationDeltaContext, RelationFamilyDeltaContext, VersionChangeContext)
+TAXONOMY_CONTEXT_CLASSES = (CurrentTaxonomyContext, CurrentTaxonomyCapability)
 # Propriétés de la vue T5-C relues au présent : jamais dans l'entrée T6-C.
 LIVE_OBSERVATION_FIELDS = ("current_integrity_status", "current_evaluation_run_interpretation_status")
 INVALID_UUIDS = [None, "", str(uuid.UUID(int=7)), 1, uuid.UUID(int=7).bytes]
@@ -292,7 +295,8 @@ def test_exceptions_are_a_small_business_hierarchy():
 
 def test_structures_are_frozen_keyword_only_dataclasses():
     for cls in (InferenceContext, PredecessorSnapshot, InferenceDecision, StageClaimDecision, TensionDecision,
-                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES, *CAUSALITY_CLASSES):
+                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES, *CAUSALITY_CLASSES,
+                *TAXONOMY_CONTEXT_CLASSES):
         assert cls.__dataclass_params__.frozen, cls
         assert all(f.kw_only for f in dataclasses.fields(cls)), cls
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -413,6 +417,11 @@ T6B2_ADDITIONS = {
 CHANGED_BY_T6B2 = {"INPUT_SCHEMA_VERSION", "InferenceContext", "_Inputs", "_verified_inputs", "_context",
                    "_build_predecessor_decision_context", "_check_decision", "start_competency_inference",
                    "get_inference_context"}
+T6B2_MERGE = "6ca71a7a14cb0211edf6f96fa20201f6bf18f716"
+T6C0_ADDITIONS = {"CurrentTaxonomyCapability", "CurrentTaxonomyContext", "_build_current_taxonomy_context"}
+# Seules définitions T6-B.2 modifiées par T6-C0 : le champ du contexte, son
+# assemblage et ses deux constructeurs (start / get).
+CHANGED_BY_T6C0 = {"InferenceContext", "_context", "start_competency_inference", "get_inference_context"}
 
 
 def _top_level(source):
@@ -446,8 +455,9 @@ def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
     before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
     for name in UNCHANGED_BY_T6B1:
         assert name in before and after.get(name) == before[name], name
-    # Seuls ajouts : les structures historiques (T6-B.1) et causales (T6-B.2).
-    assert set(after) - set(before) == T6B1_ADDITIONS | T6B2_ADDITIONS
+    # Seuls ajouts : les structures historiques (T6-B.1), causales (T6-B.2)
+    # et la résolution taxonomique courante (T6-C0).
+    assert set(after) - set(before) == T6B1_ADDITIONS | T6B2_ADDITIONS | T6C0_ADDITIONS
     assert set(before) - set(after) == {"_input_fingerprint"}  # renommé _input_fingerprint_v1 (T6-B.2)
 
 
@@ -474,7 +484,7 @@ def test_t6b2_changes_only_the_input_identity_and_the_causal_checks():
         pytest.skip("historique git indisponible")
     current = SERVICE_PATH.read_text(encoding="utf-8")
     before, after = _top_level(base.stdout), _top_level(current)
-    assert set(after) - set(before) == T6B2_ADDITIONS
+    assert set(after) - set(before) == T6B2_ADDITIONS | T6C0_ADDITIONS
     assert set(before) - set(after) == {"_input_fingerprint"}
     for name in set(before) - CHANGED_BY_T6B2 - {"_input_fingerprint"}:
         assert after[name] == before[name], name
@@ -514,10 +524,11 @@ def test_service_owns_no_transaction_and_has_no_framework_or_llm_dependency():
         assert forbidden not in tokens, forbidden
     assert tokens.count("begin_nested") == 1
     assert tokens.count("pg_advisory_xact_lock") == 1
-    # Seule dépendance applicative : les modèles et la vue T5-C (lecture).
+    # Seules dépendances applicatives : les modèles, la vue T5-C et la
+    # lecture T4-B get_release_capabilities (T6-C0), toutes en lecture.
     assert _imports(SERVICE_PATH) == {"hashlib", "json", "math", "uuid", "collections.abc", "dataclasses",
                                       "datetime", "types", "typing", "sqlalchemy", "sqlalchemy.exc",
-                                      "core.longitudinal_view", "core.models"}
+                                      "core.longitudinal_view", "core.models", "core.taxonomy_service"}
 
 
 def test_no_llm_route_or_decision_engine():
@@ -3990,3 +4001,360 @@ def test_pg_causal_reconstruction_query_count_is_constant(engine, Sessions, db, 
         assert all(sql.startswith("SELECT") and " FOR " not in sql for sql, _ in statements)
     assert len(facts.reevaluations) == 2 and len(facts.integrity_changes) == 2 and len(facts.new_user_event_ids) == 2
     assert counts[small] == counts[large] == 3
+
+
+# --------------------------------------------------------------------------
+# T6-C0 : résolution taxonomique courante (current_taxonomy_context)
+# --------------------------------------------------------------------------
+
+def test_t6c0_changes_only_the_inference_context_surface():
+    """Diff AST contre le merge de T6-B.2 : trois ajouts (deux structures,
+    un helper) ; seuls InferenceContext, _context, start et get changent.
+    Empreintes V1 / V2, payload causal, payload predecessor, dédup, output,
+    _Inputs, _verified_inputs, validation, verrous, complete, fail, cache et
+    lecture validée strictement identiques."""
+    base = subprocess.run(["git", "show", f"{T6B2_MERGE}:core/inference_service.py"], cwd=REPO_ROOT,
+                          capture_output=True, text=True)
+    if base.returncode != 0:
+        pytest.skip("historique git indisponible")
+    before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
+    assert set(after) - set(before) == T6C0_ADDITIONS
+    assert set(before) - set(after) == set()
+    for name in set(before) - CHANGED_BY_T6C0:
+        assert after[name] == before[name], name
+    for name in CHANGED_BY_T6C0:
+        assert after[name] != before[name], name
+    for name in ("_input_fingerprint_v1", "_input_fingerprint_v2", "_causality_fingerprint_payload",
+                 "_predecessor_payload", "_dossier_payload", "_detect_input_identity", "_inference_dedup_key",
+                 "_output_fingerprint", "_Inputs", "_verified_inputs", "_membership_definitions",
+                 "_check_decision", "_build_transition_causality", "_build_predecessor_decision_context",
+                 "complete_competency_inference", "TensionDecision", "SPECIFICATION_FIELDS"):
+        assert name not in CHANGED_BY_T6C0 and after[name] == before[name], name
+
+
+def test_t6c0_leaves_every_schema_version_unchanged():
+    assert (svc.INPUT_SCHEMA_VERSION, svc.LEGACY_INPUT_SCHEMA_VERSION, svc.TRANSITION_CAUSALITY_SCHEMA_VERSION,
+            svc.DEDUP_SCHEMA_VERSION, svc.OUTPUT_SCHEMA_VERSION) == (2, 1, 1, 1, 1)
+
+
+def test_current_taxonomy_structures_expose_identity_only():
+    names = lambda cls: [f.name for f in dataclasses.fields(cls)]  # noqa: E731
+    assert names(CurrentTaxonomyCapability) == ["membership_id", "definition_id", "capability_code",
+                                                "semantic_revision", "label"]
+    assert names(CurrentTaxonomyContext) == ["release_id", "competency_code", "capabilities"]
+    context_fields = names(InferenceContext)
+    assert context_fields.index("current_taxonomy_context") == context_fields.index("transition_causality") + 1
+    assert dataclasses.fields(InferenceContext)[context_fields.index("current_taxonomy_context")].type in (
+        "CurrentTaxonomyContext", CurrentTaxonomyContext)
+    # Ni texte de définition, ni mapping_guidance (T3 / T4), ni propriété de
+    # release relue au présent, ni valeur pédagogique.
+    for cls in TAXONOMY_CONTEXT_CLASSES:
+        for field in ("definition", "mapping_guidance", "created_at", "activated_at", "status", "release_status",
+                      "weight", "priority", "rank", "order", "score", "level", "progression", "acquisition_status",
+                      "stage", "confidence"):
+            assert field not in names(cls), (cls, field)
+    # TensionDecision inchangée : memberships, jamais de definition_ids.
+    assert names(TensionDecision)[-1] == "capability_membership_ids"
+    assert "capability_definition_ids" not in names(TensionDecision)
+
+
+def test_current_taxonomy_context_uses_only_the_t4_read_api():
+    """Aucune mutation T4 ni transaction : seule la lecture
+    get_release_capabilities (et son exception de base) est importée."""
+    tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
+    imported = [alias.name for node in tree.body if isinstance(node, ast.ImportFrom)
+                and node.module == "core.taxonomy_service" for alias in node.names]
+    assert sorted(imported) == ["TaxonomyServiceError", "get_release_capabilities"]
+    tokens = _code_tokens(SERVICE_PATH.read_text(encoding="utf-8")).split("\n")
+    for forbidden in ("create_candidate_release", "create_capability_definition", "attach_capability_to_release",
+                      "activate_release", "map_observation_capability", "mapping_guidance"):
+        assert forbidden not in tokens, forbidden
+    helper = _function(SERVICE_PATH.read_text(encoding="utf-8"), "_build_current_taxonomy_context")
+    on_db = {node.func.attr for node in ast.walk(helper) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == "db"}
+    assert on_db == set()  # la session n'est passée qu'à get_release_capabilities
+    calls = {node.func.attr for node in ast.walk(helper)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert not calls & {"add_all", "flush", "delete", "commit", "rollback", "begin_nested", "merge",
+                        "with_for_update"}
+    # complete ne construit pas le contexte taxonomique (lectures inutiles).
+    complete = _function(SERVICE_PATH.read_text(encoding="utf-8"), "complete_competency_inference")
+    assert "_build_current_taxonomy_context" not in ast.unparse(complete)
+    for name in ("start_competency_inference", "get_inference_context"):
+        assert ast.unparse(_function(SERVICE_PATH.read_text(encoding="utf-8"), name)).count(
+            "_build_current_taxonomy_context(") == 1, name
+
+
+def _fake_rows(*specs, release=X):
+    """(membership, définition) factices, dans l'ordre fourni ; spec = (membership,
+    définition, code, compétence[, release du membership[, définition du
+    membership]])."""
+    rows = []
+    for membership_id, definition_id, code, competency, *rest in specs:
+        mapped_release = rest[0] if rest else release
+        mapped_definition = rest[1] if len(rest) > 1 else definition_id
+        rows.append((SimpleNamespace(id=membership_id, taxonomy_release_id=mapped_release,
+                                     capability_definition_id=mapped_definition),
+                     SimpleNamespace(id=definition_id, capability_code=code, competency_code=competency,
+                                     semantic_revision=1, label=f"label {code}")))
+    return rows
+
+
+TM1, TM2, TM3, TD1, TD2, TD3 = (uuid.UUID(int=0x200 + i) for i in range(6))
+
+
+@pytest.mark.parametrize("rows, match", [
+    (_fake_rows((TM1, TD1, "C8_A", "C8"), (TM2, TD2, "C8_C", "C8", Y)), "incohérent avec la release"),
+    (_fake_rows((TM1, TD1, "C8_A", "C8"), (TM2, TD2, "C8_C", "C8", X, TD3)), "incohérent avec la release"),
+    (_fake_rows((TM1, TD1, "C8_A", "C8"), (TM1, TD2, "C8_C", "C8")), "membership .* en double"),
+    (_fake_rows((TM1, TD1, "C8_A", "C8"), (TM2, TD1, "C8_A", "C8")), "definition .* en double"),
+    (_fake_rows((TM1, TD1, "C8_C", "C8"), (TM2, TD2, "C8_C", "C8")), "capability_code C8_C en double"),
+])
+def test_current_taxonomy_context_refuses_incoherent_rows(monkeypatch, rows, match):
+    """Jamais une ligne choisie arbitrairement : membership hors release ou
+    vers une autre définition, doublons => InvalidInferenceState."""
+    monkeypatch.setattr(svc, "get_release_capabilities", lambda db, *, release_id: rows)
+    with pytest.raises(InvalidInferenceState, match=match):
+        svc._build_current_taxonomy_context(_NoDB(), release_id=X, competency_code="C8")
+
+
+def test_current_taxonomy_context_filters_on_the_persisted_competency_and_keeps_t4_order(monkeypatch):
+    """Filtre sur definition.competency_code (la définition persistée est la
+    source, jamais le préfixe du code) ; ordre T4-B conservé ; doublons
+    d'autres compétences hors du contexte."""
+    rows = _fake_rows((TM1, TD1, "C8_B", "C8"), (TM2, TD2, "C8_A", "C7"), (TM3, TD3, "C7_A", "C8"),
+                      (uuid.uuid4(), uuid.uuid4(), "C9_A", "C9"), (uuid.uuid4(), uuid.uuid4(), "C9_A", "C9"))
+    monkeypatch.setattr(svc, "get_release_capabilities", lambda db, *, release_id: rows)
+    context = svc._build_current_taxonomy_context(_NoDB(), release_id=X, competency_code="C8")
+    assert context == CurrentTaxonomyContext(release_id=X, competency_code="C8", capabilities=(
+        CurrentTaxonomyCapability(membership_id=TM1, definition_id=TD1, capability_code="C8_B", semantic_revision=1,
+                                  label="label C8_B"),
+        CurrentTaxonomyCapability(membership_id=TM3, definition_id=TD3, capability_code="C7_A", semantic_revision=1,
+                                  label="label C7_A")))
+
+
+def test_current_taxonomy_context_translates_a_missing_release(monkeypatch):
+    def missing(db, *, release_id):
+        raise tax.TaxonomyReleaseNotFound(str(release_id))
+
+    monkeypatch.setattr(svc, "get_release_capabilities", missing)
+    with pytest.raises(InvalidInferenceState, match="illisible"):
+        svc._build_current_taxonomy_context(_NoDB(), release_id=X, competency_code="C8")
+
+
+def _capability_rows(engine, release_id):
+    return {row["capability_code"]: row for row in _rows(
+        engine, "SELECT m.id AS membership_id, d.id AS definition_id, d.capability_code, d.semantic_revision,"
+                " d.label, d.competency_code FROM capability_taxonomy_memberships m JOIN core_capability_definitions d"
+                " ON d.id = m.capability_definition_id WHERE m.taxonomy_release_id = :r", r=release_id)}
+
+
+def _expected_capability(row):
+    return CurrentTaxonomyCapability(membership_id=row["membership_id"], definition_id=row["definition_id"],
+                                     capability_code=row["capability_code"],
+                                     semantic_revision=row["semantic_revision"], label=row["label"])
+
+
+def _assert_deeply_immutable_without_orm(value, path="context"):
+    from core import models as orm
+    mapped = tuple(o for o in vars(orm).values() if isinstance(o, type) and hasattr(o, "__table__"))
+    assert not isinstance(value, mapped), path
+    if dataclasses.is_dataclass(value):
+        assert type(value).__dataclass_params__.frozen, path
+        for f in dataclasses.fields(value):
+            _assert_deeply_immutable_without_orm(getattr(value, f.name), f"{path}.{f.name}")
+    elif isinstance(value, tuple):
+        for i, item in enumerate(value):
+            _assert_deeply_immutable_without_orm(item, f"{path}[{i}]")
+    else:
+        assert type(value) in (uuid.UUID, str, int), (path, type(value))
+
+
+def test_pg_first_inference_exposes_the_current_taxonomy_of_its_competency(engine, Sessions, db, world):
+    """Release C7_A/B/C + C8_A, run C7 : exactement les trois memberships C7
+    tels que persistés (membership -> définition), ordre naturel ; start ==
+    get ; aucun objet ORM, immuable en profondeur."""
+    w = world
+    context = _start(Sessions, w.t5)
+    taxonomy = context.current_taxonomy_context
+    rows = _capability_rows(engine, w.tx.id)
+    assert taxonomy == CurrentTaxonomyContext(
+        release_id=w.tx.id, competency_code="C7",
+        capabilities=tuple(_expected_capability(rows[code]) for code in ("C7_A", "C7_B", "C7_C")))
+    assert taxonomy.release_id == context.pedagogical_taxonomy_release_id == \
+        context.longitudinal_dossier.pedagogical_taxonomy_release_id
+    assert taxonomy.competency_code == context.competency_code == context.longitudinal_dossier.competency_code
+    assert [(c.membership_id, c.definition_id) for c in taxonomy.capabilities] == [
+        (w.tx.m[code], w.tx.d[code]) for code in ("C7_A", "C7_B", "C7_C")]
+    assert w.tx.m["C8_A"] not in {c.membership_id for c in taxonomy.capabilities}
+    resumed = svc.get_inference_context(db, run_id=context.run_id)
+    assert resumed.current_taxonomy_context == taxonomy and resumed == context
+    _assert_deeply_immutable_without_orm(taxonomy)
+    assert isinstance(taxonomy.capabilities, tuple)
+    for target, field in ((taxonomy, "release_id"), (taxonomy, "competency_code"), (taxonomy, "capabilities"),
+                          (taxonomy.capabilities[0], "membership_id"), (taxonomy.capabilities[0], "definition_id"),
+                          (taxonomy.capabilities[0], "semantic_revision")):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(target, field, None)
+    with pytest.raises(TypeError):
+        taxonomy.capabilities[0] = None
+
+
+def test_pg_current_taxonomy_filters_the_competency_in_natural_order(engine, Sessions, db):
+    """Release multi-compétences : seules les capacités de la compétence
+    demandée, ordre naturel T4-B (C2 avant C10, jamais l'ordre lexical) ;
+    compétence absente => capabilities vide (aucune cardinalité imposée) ;
+    release inconnue => InvalidInferenceState, jamais un contexte vide."""
+    codes = ("C10_D", "C1_A", "C2_A", "C8_B", "C10_A", "C8_D", "C9_A", "C10_C", "C8_A", "C1_B", "C10_B", "C8_C",
+             "C12_A")
+    release = _taxonomy(Sessions, codes, activate=False)
+    rows = _capability_rows(engine, release.id)
+    for competency, expected in (("C8", ("C8_A", "C8_B", "C8_C", "C8_D")),
+                                 ("C10", ("C10_A", "C10_B", "C10_C", "C10_D")), ("C1", ("C1_A", "C1_B"))):
+        context = svc._build_current_taxonomy_context(db, release_id=release.id, competency_code=competency)
+        assert context == CurrentTaxonomyContext(release_id=release.id, competency_code=competency,
+                                                 capabilities=tuple(_expected_capability(rows[c]) for c in expected))
+    everything = [c.capability_code for i in range(1, 13) for c in svc._build_current_taxonomy_context(
+        db, release_id=release.id, competency_code=f"C{i}").capabilities]
+    assert everything == [d.capability_code for _, d in tax.get_release_capabilities(db, release_id=release.id)]
+    assert everything.index("C2_A") < everything.index("C10_A") and sorted(everything) != everything
+    assert svc._build_current_taxonomy_context(db, release_id=release.id, competency_code="C3") == \
+        CurrentTaxonomyContext(release_id=release.id, competency_code="C3", capabilities=())
+    with pytest.raises(InvalidInferenceState, match="illisible"):
+        svc._build_current_taxonomy_context(db, release_id=uuid.uuid4(), competency_code="C8")
+
+
+def test_pg_current_taxonomy_context_is_select_only_with_a_constant_query_count(engine, Sessions):
+    """Anti-N+1 : release puis memberships + définitions en une jointure,
+    quel que soit le nombre de capacités ; aucune écriture ni verrou."""
+    small = _taxonomy(Sessions, ("C10_A",), activate=False)
+    large = _taxonomy(Sessions, ("C10_A", "C10_B", "C10_C", "C10_D", "C8_A", "C8_B"), activate=False)
+    counts = {}
+    for release, size in ((small, 1), (large, 4)):
+        with Sessions() as session:
+            statements, record = _recording(engine)
+            sa.event.listen(engine, "before_cursor_execute", record)
+            try:
+                context = svc._build_current_taxonomy_context(session, release_id=release.id, competency_code="C10")
+            finally:
+                sa.event.remove(engine, "before_cursor_execute", record)
+            assert len(context.capabilities) == size
+            assert all(sql.startswith("SELECT") and " FOR " not in sql for sql, _ in statements)
+            assert not session.new and not session.dirty and not session.deleted
+            counts[size] = len(statements)
+    assert counts[1] == counts[4] == 2
+
+
+def test_pg_v2_successor_exposes_the_current_taxonomy_next_to_its_history(engine, Sessions, db, world):
+    """Inférence V2 avec predecessor : predecessor, contexte historique et
+    causalité présents et inchangés par T6-C0 ; taxonomie courante =
+    release du nouveau parent T5 ; start == get."""
+    w = world
+    first = _start(Sessions, w.t5)
+    _complete(Sessions, first.run_id, _app_decision(w))
+    l2, _ = _new_t5(Sessions, w, sup(w.A))
+    second = _start(Sessions, l2)
+    assert second.input_schema_version == 2 and second.transition_causality is not None
+    assert second.predecessor.inference_run_id == first.run_id
+    assert second.predecessor_decision_context.inference_run_id == first.run_id
+    assert second.current_taxonomy_context == first.current_taxonomy_context
+    assert second.current_taxonomy_context.release_id == second.pedagogical_taxonomy_release_id == w.tx.id
+    resumed = svc.get_inference_context(db, run_id=second.run_id)
+    assert resumed == second and resumed.current_taxonomy_context == second.current_taxonomy_context
+
+
+def test_pg_legacy_v1_candidate_also_exposes_the_derived_taxonomy(engine, Sessions, db, world):
+    """Candidat V1 legacy : input_schema_version 1, transition_causality
+    None, empreinte V1 reproduite à l'identique ET current_taxonomy_context
+    présent (pur développement de la release déjà engagée)."""
+    w = world
+    first = _start(Sessions, w.t5)
+    v1 = _as_legacy_v1(engine, db, first.run_id)
+    legacy = svc.get_inference_context(db, run_id=first.run_id)
+    assert (legacy.input_schema_version, legacy.transition_causality, legacy.input_fingerprint) == (1, None, v1)
+    assert legacy.current_taxonomy_context == first.current_taxonomy_context
+    assert len(legacy.current_taxonomy_context.capabilities) == 3
+    parent = svc._parent_row(db, w.t5, lock=False)
+    assert svc._input_fingerprint_v1(svc._dossier_payload(parent, svc._relations(db, w.t5)), None) == v1 == _run(
+        engine, first.run_id)["input_fingerprint"]
+
+
+def test_pg_cross_release_resolution_goes_through_definition_ids_never_codes(engine, Sessions, db, world):
+    """R1 : C7_A = (TM1, TD1), C7_B = (M1b, D1b). R2 réutilise D1 sous M2 et
+    crée une NOUVELLE révision de C7_B (TD2). Le contexte R2 expose (TM2, TD1)
+    et (M2b, TD2) : aucun membership de R1, aucune correspondance D1b -> M2b
+    par capability_code. Une tension localized résolue par definition_id
+    via ce contexte est acceptée par T6-B ; le membership historique M1 est
+    refusé (validation T6-B inchangée)."""
+    w = world
+    r2 = _taxonomy(Sessions, {"C7_A": w.dA, "C7_B": None, "C7_C": w.tx.d["C7_C"]})
+    assert _rows(engine, "SELECT status FROM pedagogical_taxonomy_releases WHERE id = :i",
+                 i=w.tx.id)[0]["status"] == "retired"
+    positive = _t3(Sessions, r2.id, app(r2.m["C7_A"])).id
+    contradiction = _t3(Sessions, r2.id, contra(r2.m["C7_A"])).id
+    l2 = _t5_now(Sessions, w, release_id=r2.id)
+    context = _start(Sessions, l2)
+    taxonomy = context.current_taxonomy_context
+    assert taxonomy.release_id == r2.id == context.pedagogical_taxonomy_release_id
+    by_code = {c.capability_code: c for c in taxonomy.capabilities}
+    assert list(by_code) == ["C7_A", "C7_B", "C7_C"]
+    # Même définition réutilisée : même sens, membership propre à R2.
+    assert (by_code["C7_A"].definition_id, by_code["C7_A"].membership_id) == (w.dA, r2.m["C7_A"])
+    assert r2.m["C7_A"] != w.A
+    # Nouvelle révision : autre définition, jamais assimilée à l'ancienne.
+    old_b, new_b = _capability_rows(engine, w.tx.id)["C7_B"], _capability_rows(engine, r2.id)["C7_B"]
+    assert (by_code["C7_B"].definition_id, by_code["C7_B"].membership_id) == (r2.d["C7_B"], r2.m["C7_B"])
+    assert by_code["C7_B"].definition_id != w.dB
+    assert by_code["C7_B"].semantic_revision == new_b["semantic_revision"] != old_b["semantic_revision"]
+    assert [c for c in taxonomy.capabilities if c.definition_id == w.dB] == []
+    assert not {c.membership_id for c in taxonomy.capabilities} & set(w.tx.m.values())
+
+    # Résolution definition_id -> membership courant, sans base (futur T6-C).
+    (current,) = [c for c in taxonomy.capabilities if c.definition_id == w.dA]
+    refs = [pos("application", positive), ref("tension", "observation", contradiction, tension_key="t1")]
+    historical = decision("application", refs=refs, tensions=[tension("t1", mode="localized", memberships=(w.A,))])
+    with pytest.raises(InvalidInferenceTension, match="autre release"):
+        svc.complete_competency_inference(db, run_id=context.run_id, decision=historical)
+    db.rollback()
+    resolved = decision("application", refs=refs, tensions=[tension(
+        "t1", mode="localized", memberships=(current.membership_id,))])
+    svc.complete_competency_inference(db, run_id=context.run_id, decision=resolved)
+    db.commit()
+    assert _state(engine, context.run_id) == ("completed", "active")
+    ((_, memberships),) = svc.get_inference_tensions(db, run_id=context.run_id)
+    assert tuple(memberships) == (r2.m["C7_A"],)
+
+
+def test_pg_retiring_the_release_after_start_keeps_the_existing_stale_rule(engine, Sessions, db, world):
+    """Aucun maintien artificiel : release retirée après start =>
+    StaleInferenceInput (règle T6-B inchangée), avant toute résolution
+    taxonomique."""
+    w = world
+    context = _start(Sessions, w.t5)
+    _taxonomy(Sessions, ("C7_A",))
+    with pytest.raises(StaleInferenceInput, match="retired"):
+        svc.get_inference_context(db, run_id=context.run_id)
+
+
+def test_pg_duplicate_capability_code_in_the_release_is_invalid_state(engine, Sessions, db, world):
+    """Corruption SQL (la base ne peut pas l'imposer, T4-B l'interdit) : la
+    release active contient deux révisions de C7_A. start => aucun
+    candidat ; get d'un candidat existant => InvalidInferenceState ; jamais
+    une ligne choisie arbitrairement."""
+    w = world
+    existing = _start(Sessions, w.t5)
+    other_revision = _taxonomy(Sessions, ("C7_A",), activate=False).d["C7_A"]
+    _exec(engine, "INSERT INTO capability_taxonomy_memberships (id, taxonomy_release_id, capability_definition_id,"
+                  " created_at) VALUES (:i, :r, :d, now())", i=uuid.uuid4(), r=w.tx.id, d=other_revision)
+    with pytest.raises(InvalidInferenceState, match="capability_code C7_A en double"):
+        svc._build_current_taxonomy_context(db, release_id=w.tx.id, competency_code="C7")
+    with pytest.raises(InvalidInferenceState, match="capability_code C7_A en double"):
+        svc.get_inference_context(db, run_id=existing.run_id)
+    db.rollback()
+    with pytest.raises(InvalidInferenceState, match="capability_code C7_A en double"):
+        svc.start_competency_inference(db, **_start_kwargs(w.t5, state_decision_version="state-2"))
+    db.rollback()
+    assert _count(engine, "competency_inference_runs") == 1
+    # Une autre compétence de la même release n'est pas concernée.
+    assert [c.capability_code for c in svc._build_current_taxonomy_context(
+        db, release_id=w.tx.id, competency_code="C8").capabilities] == ["C8_A"]
