@@ -47,6 +47,7 @@ from core import inference_service as svc
 from core import longitudinal_service as t5
 from core import longitudinal_view as view
 from core import observation_service as obs
+from core import taxonomy_service as tax
 from core.inference_service import (
     BasisRefDecision,
     DuplicateInference,
@@ -60,7 +61,9 @@ from core.inference_service import (
     InvalidInferenceState,
     InvalidInferenceTension,
     InvalidStageClaim,
+    IntegrityChangeContext,
     LongitudinalParentNotUsable,
+    ObservationDeltaContext,
     PredecessorBasisRefContext,
     PredecessorDecisionContext,
     PredecessorHistoricalObservation,
@@ -68,13 +71,18 @@ from core.inference_service import (
     PredecessorSnapshot,
     PredecessorStageClaimContext,
     PredecessorTensionContext,
+    ReevaluationContext,
+    RelationDeltaContext,
+    RelationFamilyDeltaContext,
     StageClaimDecision,
     StaleInferenceChain,
     StaleInferenceInput,
     StaleInferencePredecessor,
     TensionDecision,
+    TransitionCausalityContext,
     UserNotFound,
     ValidatedCompetencyState,
+    VersionChangeContext,
 )
 from tests.test_longitudinal_service import (  # noqa: F401 — fixture engine
     CLEANUP as T5_CLEANUP,
@@ -94,7 +102,7 @@ from tests.test_migration_0004_drop_company_analyses import T6A_TABLES, _code_to
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
-from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _reaches_db, _recording
+from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _obs_kwargs, _reaches_db, _recording
 from tests.test_observation_service import _event as _finalized_event
 from tests.test_observation_service import _start_kwargs as t3_kwargs
 from tests.test_taxonomy_service import _advisory_locks, _pids, _rows
@@ -135,6 +143,8 @@ PROFILE = {"diagnosticity": {"note": "décrit par T6-C"}, "coverage": {"note": "
 PREDECESSOR_CONTEXT_CLASSES = (PredecessorDecisionContext, PredecessorStageClaimContext, PredecessorTensionContext,
                                PredecessorBasisRefContext, PredecessorLongitudinalContext,
                                PredecessorHistoricalObservation)
+CAUSALITY_CLASSES = (TransitionCausalityContext, IntegrityChangeContext, ReevaluationContext, ObservationDeltaContext,
+                     RelationDeltaContext, RelationFamilyDeltaContext, VersionChangeContext)
 # Propriétés de la vue T5-C relues au présent : jamais dans l'entrée T6-C.
 LIVE_OBSERVATION_FIELDS = ("current_integrity_status", "current_evaluation_run_interpretation_status")
 INVALID_UUIDS = [None, "", str(uuid.UUID(int=7)), 1, uuid.UUID(int=7).bytes]
@@ -282,7 +292,7 @@ def test_exceptions_are_a_small_business_hierarchy():
 
 def test_structures_are_frozen_keyword_only_dataclasses():
     for cls in (InferenceContext, PredecessorSnapshot, InferenceDecision, StageClaimDecision, TensionDecision,
-                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES):
+                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES, *CAUSALITY_CLASSES):
         assert cls.__dataclass_params__.frozen, cls
         assert all(f.kw_only for f in dataclasses.fields(cls)), cls
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -368,18 +378,41 @@ def test_predecessor_context_structures():
 T6B_MERGE = "0435aa4dd00cc5cf5cab38f686805b6d94075cb0"
 # Formats canoniques, identité logique, verrous, lifecycle, activation et
 # cache : strictement ceux de T6-B (PR #188).
+# (T6-B.2 change volontairement INPUT_SCHEMA_VERSION, renomme
+# _input_fingerprint en _input_fingerprint_v1 et étend _verified_inputs,
+# _check_decision et _Inputs : voir le test T6-B.2 ci-dessous.)
 UNCHANGED_BY_T6B1 = (
-    "INPUT_SCHEMA_VERSION", "DEDUP_SCHEMA_VERSION", "OUTPUT_SCHEMA_VERSION", "ACTIVATION_LOCK_NAMESPACE",
+    "DEDUP_SCHEMA_VERSION", "OUTPUT_SCHEMA_VERSION", "ACTIVATION_LOCK_NAMESPACE",
     "SPECIFICATION_FIELDS", "VERSION_FIELDS", "REF_ATTACHMENTS", "_canonical_json", "_canonical_sha256",
-    "_specification", "_dossier_payload", "_predecessor_payload", "_input_fingerprint", "_inference_dedup_key",
+    "_specification", "_dossier_payload", "_predecessor_payload", "_inference_dedup_key",
     "_activation_lock_key", "_ref_source_identity", "_ref_payload", "_output_fingerprint", "_relations",
-    "_snapshot", "_verified_inputs", "_check_decision", "_membership_definitions", "_validated_decision",
+    "_snapshot", "_membership_definitions", "_validated_decision",
     "_validated_claims", "_validated_tensions", "_validated_refs", "_parent_problems", "_share_chain",
     "_require_completed_active", "_active_and_cache", "_check_cache", "_children", "_require_pristine_candidate",
-    "_lock_couple", "_lock_run", "_lock_active", "_lock_cache", "_persist_children", "_Decision", "_Inputs",
+    "_lock_couple", "_lock_run", "_lock_active", "_lock_cache", "_persist_children", "_Decision",
     "PredecessorSnapshot", "InferenceDecision", "complete_competency_inference", "fail_competency_inference",
     "get_validated_user_competency_state", "get_competency_inference", "get_active_competency_inference",
     "get_stage_claims", "get_inference_tensions", "get_inference_basis_refs", "get_user_competency_state")
+T6B1_ADDITIONS = {
+    "PredecessorDecisionContext", "PredecessorStageClaimContext", "PredecessorTensionContext",
+    "PredecessorBasisRefContext", "PredecessorLongitudinalContext", "PredecessorHistoricalObservation",
+    "LIVE_LIMITATION_CODES", "_build_predecessor_decision_context", "_historical_longitudinal_context",
+    "_historical_ref_order", "_historical_ref_contexts"}
+T6B1_MERGE = "4635545be818a40aae9ec38288d588723b5b5045"
+T6B2_ADDITIONS = {
+    "INVALIDATED", "T3_SPECIFICATION_FIELDS", "T5_VERSION_FIELDS", "LEGACY_INPUT_SCHEMA_VERSION",
+    "TRANSITION_CAUSALITY_SCHEMA_VERSION", "IntegrityChangeContext", "ReevaluationContext", "ObservationDeltaContext",
+    "RelationFamilyDeltaContext", "RelationDeltaContext", "VersionChangeContext", "TransitionCausalityContext",
+    "_InputIdentity", "_CausalFacts", "_input_fingerprint_v1", "_input_fingerprint_v2",
+    "_causality_fingerprint_payload", "_detect_input_identity", "_predecessor_parent", "_sorted_ids",
+    "_effective_run", "_check_reevaluation_chain", "_causal_facts", "_id_delta", "_relation_family_delta",
+    "_version_changes", "_build_transition_causality", "_check_legacy_causes", "_cited_events",
+    "_check_transition_causes"}
+# Seules définitions T6-B.1 modifiées par T6-B.2 : identité d'entrée (version,
+# détection V1 / V2, causalité), contexte, validation des causes, docstrings.
+CHANGED_BY_T6B2 = {"INPUT_SCHEMA_VERSION", "InferenceContext", "_Inputs", "_verified_inputs", "_context",
+                   "_build_predecessor_decision_context", "_check_decision", "start_competency_inference",
+                   "get_inference_context"}
 
 
 def _top_level(source):
@@ -397,7 +430,7 @@ def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
     formats V1 (input, dédup, output), _predecessor_payload, les verrous,
     complete / fail, l'activation, le cache et la lecture validée sont
     identiques (AST) à ceux du merge de T6-B."""
-    assert (svc.INPUT_SCHEMA_VERSION, svc.DEDUP_SCHEMA_VERSION, svc.OUTPUT_SCHEMA_VERSION) == (1, 1, 1)
+    assert (svc.LEGACY_INPUT_SCHEMA_VERSION, svc.DEDUP_SCHEMA_VERSION, svc.OUTPUT_SCHEMA_VERSION) == (1, 1, 1)
     assert list(inspect.signature(svc._predecessor_payload).parameters) == ["snapshot", "raw_context"]
     snapshot = PredecessorSnapshot(
         inference_run_id=X, longitudinal_assessment_run_id=Y, current_stage="application", previous_stage=None,
@@ -413,13 +446,54 @@ def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
     before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
     for name in UNCHANGED_BY_T6B1:
         assert name in before and after.get(name) == before[name], name
-    # Seuls ajouts : les quatre structures historiques et deux helpers internes.
-    assert set(after) - set(before) == {
-        "PredecessorDecisionContext", "PredecessorStageClaimContext", "PredecessorTensionContext",
-        "PredecessorBasisRefContext", "PredecessorLongitudinalContext", "PredecessorHistoricalObservation",
-        "LIVE_LIMITATION_CODES", "_build_predecessor_decision_context", "_historical_longitudinal_context",
-        "_historical_ref_order", "_historical_ref_contexts"}
-    assert set(before) - set(after) == set()
+    # Seuls ajouts : les structures historiques (T6-B.1) et causales (T6-B.2).
+    assert set(after) - set(before) == T6B1_ADDITIONS | T6B2_ADDITIONS
+    assert set(before) - set(after) == {"_input_fingerprint"}  # renommé _input_fingerprint_v1 (T6-B.2)
+
+
+def _without_docstring(node):
+    if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+        node.body = node.body[1:]
+    return node
+
+
+def _function(source, name):
+    return next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_t6b2_changes_only_the_input_identity_and_the_causal_checks():
+    """Diff AST contre le merge de T6-B.1 : T6-B.1 (structures et projection
+    historique), dédup, output, verrous, complete, fail, cache et lecture
+    validée strictement inchangés ; seules l'identité d'entrée, le contexte
+    et la validation des causes évoluent. _input_fingerprint_v1 est
+    l'ancien _input_fingerprint, et _check_legacy_causes l'ancien bloc
+    causal de _check_decision, à l'identique."""
+    base = subprocess.run(["git", "show", f"{T6B1_MERGE}:core/inference_service.py"], cwd=REPO_ROOT,
+                          capture_output=True, text=True)
+    if base.returncode != 0:
+        pytest.skip("historique git indisponible")
+    current = SERVICE_PATH.read_text(encoding="utf-8")
+    before, after = _top_level(base.stdout), _top_level(current)
+    assert set(after) - set(before) == T6B2_ADDITIONS
+    assert set(before) - set(after) == {"_input_fingerprint"}
+    for name in set(before) - CHANGED_BY_T6B2 - {"_input_fingerprint"}:
+        assert after[name] == before[name], name
+    for name in CHANGED_BY_T6B2:
+        assert after[name] != before[name], name
+    # V1 : même corps, seul le nom de la constante de version change.
+    old = _function(base.stdout, "_input_fingerprint")
+    old.name = "_input_fingerprint_v1"
+    for node in ast.walk(old):
+        if isinstance(node, ast.Name) and node.id == "INPUT_SCHEMA_VERSION":
+            node.id = "LEGACY_INPUT_SCHEMA_VERSION"
+    assert ast.dump(old) == ast.dump(_without_docstring(_function(current, "_input_fingerprint_v1")))
+    # Chemin legacy : l'ancien bloc « if predecessor is not None » à l'identique.
+    old_block = next(n for n in _function(base.stdout, "_check_decision").body
+                     if isinstance(n, ast.If) and ast.unparse(n.test) == "predecessor is not None"
+                     and "_new_user_events" in ast.unparse(n))
+    legacy = _without_docstring(_function(current, "_check_legacy_causes")).body
+    assert ast.unparse(legacy[0]) == "error = InvalidInferenceDecision"
+    assert [ast.dump(n) for n in legacy[1:]] == [ast.dump(n) for n in old_block.body]
 
 
 def _imports(path):
@@ -467,9 +541,15 @@ def test_no_score_rank_or_numeric_pedagogy():
         assert word not in tokens.split("\n") and f"{word}_" not in tokens and f"_{word}" not in tokens, word
     assert svc.STAGE_SEQUENCE == ("non_etabli", "discovery", "comprehension", "application", "mastery")
     # Aucun champ d'état numérique dans les structures du service.
-    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES):
+    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES,
+                *CAUSALITY_CLASSES):
         for f in dataclasses.fields(cls):
             assert f.type not in (float, "float"), (cls, f.name)
+    # Deltas causaux : des ensembles, jamais un décompte, un solde ni un score.
+    for cls in CAUSALITY_CLASSES:
+        for f in dataclasses.fields(cls):
+            assert not any(word in f.name for word in ("count", "net_", "score", "progress", "weight", "age",
+                                                       "fresh", "decay", "duration", "_at")), (cls, f.name)
 
 
 def test_vocabularies_match_the_0009_check_constraints():
@@ -580,21 +660,187 @@ def test_input_fingerprint_v1_exact_canonical_format():
                 "relation_schema_version": "s1", "dependencies": [dependency], "transfers": [],
                 "revalidations": [], "predecessor": predecessor}
     canonical = json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    assert svc._input_fingerprint(payload, predecessor) == hashlib.sha256(canonical.encode()).hexdigest()
-    assert svc._input_fingerprint(payload, None) != svc._input_fingerprint(payload, predecessor)
+    assert svc._input_fingerprint_v1(payload, predecessor) == hashlib.sha256(canonical.encode()).hexdigest()
+    assert svc._input_fingerprint_v1(payload, None) != svc._input_fingerprint_v1(payload, predecessor)
 
 
 def test_input_fingerprint_tracks_every_component():
     base = svc._dossier_payload(_parent(), _relations())
-    reference = svc._input_fingerprint(base, None)
+    reference = svc._input_fingerprint_v2(base, None, None)
     variants = [svc._dossier_payload(_parent(**{k: v}), _relations()) for k, v in (
         ("user_id", "autre"), ("competency_code", "C8"), ("pedagogical_taxonomy_release_id", uuid.UUID(int=10)),
         ("input_fingerprint", "t5fp2"), ("dependency_version", "d2"), ("transfer_version", "t2"),
         ("revalidation_version", "r2"), ("relation_schema_version", "s2"))]
     variants += [svc._dossier_payload(_parent(), _relations(**{k: [{"x": 1}]}))
                  for k in ("dependencies", "transfers", "revalidations")]
-    prints = {svc._input_fingerprint(v, None) for v in variants}
+    prints = {svc._input_fingerprint_v2(v, None, None) for v in variants}
     assert reference not in prints and len(prints) == len(variants)
+    assert len({svc._input_fingerprint_v1(v, None) for v in variants}) == len(variants)
+
+
+def _golden_payloads():
+    dependency = {"target_observation_id": str(X), "source_kind": "observation", "source_observation_id": str(Y),
+                  "source_support_trace_id": None, "scope_fingerprint": "sf", "dependency_type": "dependent",
+                  "scope_mode": "localized", "dependency_basis": {"why": "é"}}
+    transfer = {"source_observation_id": str(Y), "target_observation_id": str(Z), "scope_fingerprint": "sf2",
+                "scope_mode": "whole_observation", "transfer_basis": {"adaptation": ["a", 1, 2.5, True, None]}}
+    revalidation = {"source_contradiction_observation_id": str(Z), "target_supportive_observation_id": str(X),
+                    "scope_fingerprint": "sf3", "scope_mode": "competency_only",
+                    "revalidation_basis": {"mechanism": "démontré"}}
+    predecessor = {"inference_run_id": str(Z), "current_stage": "application", "tension_state": "none",
+                   "unresolved_revision_context": None, "output_fingerprint": "out"}
+    open_tension = {"inference_run_id": str(X), "current_stage": "comprehension", "tension_state": "open",
+                    "unresolved_revision_context": {"motif": "levier contredit", "détail": ["C7_A", 2]},
+                    "output_fingerprint": "0" * 64}
+    return {
+        "empty_first": (svc._dossier_payload(_parent(), _relations()), None),
+        "dependency_predecessor": (svc._dossier_payload(_parent(), _relations(dependencies=[dependency])),
+                                   predecessor),
+        "dependency_first": (svc._dossier_payload(_parent(), _relations(dependencies=[dependency])), None),
+        "all_relations_open_tension": (svc._dossier_payload(
+            _parent(competency_code="C12", user_id="u2"),
+            _relations(dependencies=[dependency], transfers=[transfer], revalidations=[revalidation])), open_tension),
+    }
+
+
+# Empreintes calculées par core/inference_service.py AVANT T6-B.2 (main
+# 4635545, _input_fingerprint) sur les payloads ci-dessus : V1 doit les
+# reproduire octet pour octet, pour toujours.
+GOLDEN_V1 = {
+    "empty_first": "d380b82e7e2ac8c8636f47e432c1fb69ba99dc21de7213e4a7b79ed9cce61bd1",
+    "dependency_predecessor": "583a9f62887f30efb6cb16ebe7ec88441d4b26b0e940d3868b2ac1f2fc2c7238",
+    "dependency_first": "c2651fd607091c98ee6e8ae92230ae9cd1d39af48d9a1dbf08696a0ab2291576",
+    "all_relations_open_tension": "3b0dac449a5b1eb27f99fec99202be5e0baf76fafccc0eb1f9922dd9feb5fbc6",
+}
+
+
+def test_input_fingerprint_v1_reproduces_pre_t6b2_golden_hashes():
+    payloads = _golden_payloads()
+    assert set(payloads) == set(GOLDEN_V1)
+    for name, (dossier, predecessor) in payloads.items():
+        assert svc._input_fingerprint_v1(dossier, predecessor) == GOLDEN_V1[name], name
+        # V2 est un autre format, même sans predecessor ni causalité.
+        assert svc._input_fingerprint_v2(dossier, predecessor, None) != GOLDEN_V1[name], name
+
+
+def test_input_schema_versions():
+    assert (svc.INPUT_SCHEMA_VERSION, svc.LEGACY_INPUT_SCHEMA_VERSION, svc.TRANSITION_CAUSALITY_SCHEMA_VERSION) == (
+        2, 1, 1)
+    assert (svc.DEDUP_SCHEMA_VERSION, svc.OUTPUT_SCHEMA_VERSION) == (1, 1)
+    assert svc.T3_SPECIFICATION_FIELDS == (
+        "normalization_version", "local_stage_version", "pedagogical_taxonomy_release_id",
+        "capability_mapping_version", "evaluation_schema_version", "evaluator_version", "model_id",
+        "prompt_spec_version")
+    assert svc.T5_VERSION_FIELDS == ("dependency_version", "transfer_version", "revalidation_version",
+                                     "relation_schema_version")
+    # Aucune colonne de version d'entrée : elle se détecte par recalcul.
+    from core import models as orm
+    assert "input_schema_version" not in orm.CompetencyInferenceRun.__table__.c
+
+
+E1, E2, O1, O2, R1, R2, D1 = (uuid.UUID(int=0x100 + i) for i in range(7))
+
+
+def _facts(new=(), integrity=(), reevaluations=()):
+    return SimpleNamespace(new_user_event_ids=tuple(new), integrity_changes=tuple(integrity),
+                           reevaluations=tuple(reevaluations))
+
+
+def _integrity(observation=O1, event=E1, run=R1, definitions=(D1,)):
+    return IntegrityChangeContext(observation_id=observation, event_id=event, evaluation_run_id=run,
+                                  capability_definition_ids=tuple(definitions))
+
+
+def _reevaluation(**overrides):
+    kwargs = {"event_id": E1, "previous_evaluation_run_id": R1, "replacement_evaluation_run_id": R2,
+              "replacement_re_evaluates_run_id": R1, "previous_observation_ids": (O1,),
+              "current_observation_ids": (), "previous_capability_definition_ids": (D1,),
+              "current_capability_definition_ids": (), "changed_evaluation_specification_fields": ("evaluator_version",)}
+    kwargs.update(overrides)
+    return ReevaluationContext(**kwargs)
+
+
+def test_input_fingerprint_v2_exact_canonical_format():
+    dossier, predecessor = _golden_payloads()["dependency_predecessor"]
+    causality = svc._causality_fingerprint_payload(_facts([E2], [_integrity()], [_reevaluation()]))
+    assert causality == {
+        "causality_schema_version": 1,
+        "new_user_event_ids": [str(E2)],
+        "integrity_changes": [{"observation_id": str(O1), "event_id": str(E1), "evaluation_run_id": str(R1),
+                               "capability_definition_ids": [str(D1)]}],
+        "reevaluations": [{"event_id": str(E1), "previous_evaluation_run_id": str(R1),
+                           "replacement_evaluation_run_id": str(R2), "replacement_re_evaluates_run_id": str(R1),
+                           "previous_observation_ids": [str(O1)], "current_observation_ids": [],
+                           "previous_capability_definition_ids": [str(D1)], "current_capability_definition_ids": [],
+                           "changed_evaluation_specification_fields": ["evaluator_version"]}],
+    }
+    expected = {"input_schema_version": 2, **dossier, "predecessor": predecessor, "transition_causality": causality}
+    canonical = json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert svc._input_fingerprint_v2(dossier, predecessor, causality) == hashlib.sha256(
+        canonical.encode()).hexdigest()
+    # Première inférence : transition_causality null.
+    first = json.dumps({"input_schema_version": 2, **dossier, "predecessor": None, "transition_causality": None},
+                       sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert svc._causality_fingerprint_payload(None) is None
+    assert svc._input_fingerprint_v2(dossier, None, None) == hashlib.sha256(first.encode()).hexdigest()
+    # Aucun horodatage, aucun décompte dans le payload causal.
+    assert not any(key.endswith("_at") or "count" in key for key in canonical.replace('"', " ").split())
+
+
+def test_causal_payload_distinguishes_integrity_from_reevaluation():
+    """Test architectural : même dossier courant, même predecessor ; A =
+    observation invalidée, B = même événement réévalué (observation ->
+    zéro). V1 les confond ; V2 les distingue."""
+    dossier, predecessor = _golden_payloads()["dependency_predecessor"]
+    history_a = svc._causality_fingerprint_payload(_facts(integrity=[_integrity()]))
+    history_b = svc._causality_fingerprint_payload(_facts(reevaluations=[_reevaluation()]))
+    assert history_a != history_b
+    assert svc._input_fingerprint_v2(dossier, predecessor, history_a) != svc._input_fingerprint_v2(
+        dossier, predecessor, history_b)
+    assert svc._input_fingerprint_v1(dossier, predecessor) == svc._input_fingerprint_v1(dossier, predecessor)
+    # Chaque fait causal est engagé.
+    variants = [_facts(), _facts(new=[E1]), _facts(new=[E2]), _facts(integrity=[_integrity(definitions=())]),
+                _facts(reevaluations=[_reevaluation(previous_evaluation_run_id=None)]),
+                _facts(reevaluations=[_reevaluation(replacement_re_evaluates_run_id=None)]),
+                _facts(reevaluations=[_reevaluation(current_observation_ids=(O2,))]),
+                _facts(reevaluations=[_reevaluation(changed_evaluation_specification_fields=())]),
+                _facts(reevaluations=[_reevaluation(current_capability_definition_ids=(D1,))])]
+    prints = {svc._input_fingerprint_v2(dossier, predecessor, svc._causality_fingerprint_payload(v))
+              for v in variants + [_facts(integrity=[_integrity()]), _facts(reevaluations=[_reevaluation()])]}
+    assert len(prints) == len(variants) + 2
+
+
+def test_causal_payload_is_canonical_whatever_the_order():
+    integrity = [_integrity(O1, E1, R1, (D1, X)), _integrity(O2, E2, R2, (Y,))]
+    reevaluations = [_reevaluation(), _reevaluation(event_id=E2, previous_observation_ids=(O2, O1),
+                                                    changed_evaluation_specification_fields=("model_id", "evaluator_version"))]
+    a = svc._causality_fingerprint_payload(_facts([E1, E2], integrity, reevaluations))
+    b = svc._causality_fingerprint_payload(_facts([E2, E1], reversed(integrity), reversed(reevaluations)))
+    b_shuffled = svc._causality_fingerprint_payload(_facts(
+        [E2, E1], [_integrity(O2, E2, R2, (Y,)), _integrity(O1, E1, R1, (X, D1))],
+        [dataclasses.replace(reevaluations[1], previous_observation_ids=(O1, O2),
+                             changed_evaluation_specification_fields=("evaluator_version", "model_id")),
+         reevaluations[0]]))
+    assert a == b == b_shuffled
+    assert svc._canonical_json(a) == svc._canonical_json(b_shuffled)
+
+
+def test_detect_input_identity_is_cryptographic_never_by_date():
+    dossier, predecessor = _golden_payloads()["dependency_predecessor"]
+    causality = _facts([E2])
+    calls = []
+
+    def build():
+        calls.append(1)
+        return causality
+
+    v1 = svc._input_fingerprint_v1(dossier, predecessor)
+    v2 = svc._input_fingerprint_v2(dossier, predecessor, svc._causality_fingerprint_payload(causality))
+    assert svc._detect_input_identity(v1, dossier, predecessor, build) == (1, None, v1)
+    assert calls == []  # un candidat V1 n'est jamais soumis à une causalité qu'il n'a pas signée
+    assert svc._detect_input_identity(v2, dossier, predecessor, build) == (2, causality, v2)
+    assert svc._detect_input_identity("0" * 64, dossier, predecessor, build) is None
+    assert "date" not in inspect.signature(svc._detect_input_identity).parameters
 
 
 def test_dedup_key_excludes_the_trigger_and_tracks_every_specification():
@@ -1981,7 +2227,16 @@ def test_pg_a_new_cognitive_event_is_new_user_evidence(engine, Sessions, db, wor
     assert _event_ids(engine, l2) - _event_ids(engine, w.t5) == {fresh.event}
     assert _closed_at(engine, fresh.event) > _started_at(engine, w.t5)
     context = _start(Sessions, l2)
-    svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(w, cause="new_user_evidence"))
+    assert context.transition_causality.new_user_event_ids == (fresh.event,)
+    # T6-B.2 : la nouvelle démonstration doit toucher une provenance de la
+    # décision ; « un nouvel événement existe quelque part » ne suffit pas.
+    with pytest.raises(InvalidInferenceDecision, match="aucune ref de la décision ne cite"):
+        svc.complete_competency_inference(db, run_id=context.run_id,
+                                          decision=_app_decision(w, cause="new_user_evidence"))
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(
+        w, cause="new_user_evidence", refs=[pos("application", w.app), ref(
+            "confidence", "observation", fresh.id, claim_stage="application", confidence_dimension="consistency")]))
     db.commit()
     assert _run(engine, context.run_id)["transition"] == "maintained"
 
@@ -2066,12 +2321,13 @@ def test_pg_pedagogical_reinterpretation_is_not_a_cover_for_new_evidence(engine,
     la cause plausible est new_user_evidence, pas une réinterprétation ;
     et un dossier identique sous mêmes spécifications est un reroll."""
     w = world
-    _, context, _ = _second(Sessions, w, new=[sup(w.A)])  # nouveau dossier, mêmes spécifications
+    _, context, (new,) = _second(Sessions, w, new=[sup(w.A)])  # nouveau dossier, mêmes spécifications
     with pytest.raises(InvalidInferenceDecision, match="sans spécification T6 différente"):
         svc.complete_competency_inference(db, run_id=context.run_id,
                                           decision=_app_decision(w, cause="pedagogical_reinterpretation"))
     db.rollback()
-    svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(w, cause="new_user_evidence"))
+    svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(
+        w, cause="new_user_evidence", refs=[pos("application", w.app), ref("transition", "observation", new)]))
 
 
 def test_pg_anti_oscillation(engine, Sessions, db, world):
@@ -3120,9 +3376,10 @@ def test_pg_rich_context_changes_neither_input_fingerprint_nor_dedup_key(engine,
     row = _run(engine, context.run_id)
     parent = svc._parent_row(db, context.longitudinal_assessment_run_id, lock=False)
     predecessor = svc._run_row(db, first)
-    expected = svc._input_fingerprint(svc._dossier_payload(parent, svc._relations(db, parent.id)),
-                                      svc._predecessor_payload(context.predecessor,
-                                                               predecessor.unresolved_revision_context))
+    expected = svc._input_fingerprint_v2(svc._dossier_payload(parent, svc._relations(db, parent.id)),
+                                         svc._predecessor_payload(context.predecessor,
+                                                                  predecessor.unresolved_revision_context),
+                                         svc._causality_fingerprint_payload(context.transition_causality))
     assert row["input_fingerprint"] == context.input_fingerprint == expected
     assert row["inference_dedup_key"] == svc._inference_dedup_key(expected, svc._specification(row))
     # Même entrée logique : toujours un doublon, jamais un nouveau run.
@@ -3210,3 +3467,526 @@ def test_pg_historical_upstream_mutation_after_start_never_changes_the_candidate
         "invalidated", "superseded")
     upstream = [lim for lim in live.limitations if lim.code == view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT]
     assert upstream and o1 in upstream[0].observation_ids
+
+
+# --------------------------------------------------------------------------
+# T6-B.2 : causalité de transition versionnée (input_fingerprint V2)
+# --------------------------------------------------------------------------
+
+def test_transition_causality_structures():
+    names = lambda cls: [f.name for f in dataclasses.fields(cls)]  # noqa: E731
+    assert names(TransitionCausalityContext) == [
+        "causality_schema_version", "new_user_event_ids", "integrity_changes", "reevaluations",
+        "observation_delta", "relation_delta", "taxonomy_release_changed", "previous_taxonomy_release_id",
+        "current_taxonomy_release_id", "t5_version_changes", "t6_specification_changes"]
+    assert names(IntegrityChangeContext) == ["observation_id", "event_id", "evaluation_run_id",
+                                             "capability_definition_ids"]
+    assert names(ReevaluationContext) == [
+        "event_id", "previous_evaluation_run_id", "replacement_evaluation_run_id", "replacement_re_evaluates_run_id",
+        "previous_observation_ids", "current_observation_ids", "previous_capability_definition_ids",
+        "current_capability_definition_ids", "changed_evaluation_specification_fields"]
+    assert names(ObservationDeltaContext) == ["added_observation_ids", "removed_observation_ids",
+                                              "retained_observation_ids", "added_event_ids", "removed_event_ids",
+                                              "retained_event_ids"]
+    assert names(RelationDeltaContext) == ["dependencies", "transfers", "revalidations"]
+    assert names(RelationFamilyDeltaContext) == ["added", "removed", "retained"]
+    assert names(VersionChangeContext) == ["field_name", "previous_value", "current_value"]
+    context_fields = names(InferenceContext)
+    assert context_fields.index("transition_causality") == context_fields.index("predecessor_decision_context") + 1
+    assert "input_schema_version" in context_fields
+    # Aucune cause choisie, aucun horodatage exposé.
+    for cls in CAUSALITY_CLASSES:
+        assert not any(n in ("transition_cause", "cause", "selected_cause") for n in names(cls)), cls
+    # Aucun engine T6-C.
+    for name in ("infer_competency", "StageBasisEngine", "ConfidenceProfileEngine", "TensionEngine",
+                 "ValidationNeedEngine"):
+        assert not hasattr(svc, name), name
+
+
+def test_version_and_relation_deltas_are_pure_derivations():
+    assert svc._version_changes({"b": "1", "a": "1", "c": None}, {"b": "2", "a": "1", "c": "x"}, ("b", "a", "c")) == (
+        VersionChangeContext(field_name="b", previous_value="1", current_value="2"),
+        VersionChangeContext(field_name="c", previous_value=None, current_value="x"))
+    kept, gone, new = {"id": "k", "basis": {"é": [1]}}, {"id": "g"}, {"id": "n"}
+    delta = svc._relation_family_delta([gone, kept], [dict(kept), new])
+    assert (delta.added, delta.removed, delta.retained) == ((new,), (gone,), (svc._freeze(kept),))
+    assert isinstance(delta.retained[0], MappingProxyType) and isinstance(delta.retained[0]["basis"]["é"], tuple)
+    assert svc._id_delta([Y, X], [Z, Y]) == ((Z,), (X,), (Y,))
+
+
+def _reevaluate(Sessions, release_id, prior, *specs, **overrides):
+    """Réévaluation T3 DÉCLARÉE (re_evaluates_run_id = prior.run) du même
+    CognitiveEvent, via les services T3-B / T4-B ; zéro spec = run completed
+    sans observation."""
+    with Sessions() as session:
+        run = obs.start_evaluation_run(session, **t3_kwargs(
+            prior.event, pedagogical_taxonomy_release_id=release_id, re_evaluates_run_id=prior.run, **overrides))
+        ids = []
+        for spec in specs:
+            spec = dict(spec)
+            caps = spec.pop("caps", ())
+            observation = obs.add_observation(session, run_id=run.id, **_obs_kwargs(**spec))
+            for membership_id in caps:
+                tax.map_observation_capability(session, observation_id=observation.id,
+                                               capability_membership_id=membership_id)
+            ids.append(observation.id)
+        obs.complete_evaluation_run(session, run_id=run.id, output_fingerprint="sha256:out")
+        session.commit()
+        return SimpleNamespace(run=run.id, ids=ids, id=ids[0] if ids else None, event=prior.event)
+
+
+def _t3_of(engine, observation_id):
+    row = _rows(engine, "SELECT o.evaluation_run_id, r.event_id FROM pedagogical_observations o JOIN"
+                        " observation_evaluation_runs r ON r.id = o.evaluation_run_id WHERE o.id = :o",
+                o=observation_id)[0]
+    return SimpleNamespace(run=row["evaluation_run_id"], event=row["event_id"])
+
+
+def _t5_now(Sessions, w, release_id=None, **overrides):
+    run = _start_t5(Sessions, release_id or w.tx.id, **overrides)
+    _complete_t5(Sessions, run)
+    return run
+
+
+def _ids(*values):
+    return tuple(sorted(values, key=str))
+
+
+def _as_legacy_v1(engine, db, run_id):
+    """Réécrit un candidat vierge EXACTEMENT comme T6-B / T6-B.1 l'auraient
+    créé (input_fingerprint V1 + inference_dedup_key correspondante) : aucun
+    nouveau run V1 ne peut plus être créé par le service."""
+    run = svc._run_row(db, run_id)
+    parent = svc._parent_row(db, run.longitudinal_assessment_run_id, lock=False)
+    predecessor = None if run.predecessor_inference_run_id is None else svc._run_row(
+        db, run.predecessor_inference_run_id)
+    v1 = svc._input_fingerprint_v1(
+        svc._dossier_payload(parent, svc._relations(db, parent.id)),
+        svc._predecessor_payload(None if predecessor is None else svc._snapshot(db, predecessor),
+                                 None if predecessor is None else predecessor.unresolved_revision_context))
+    db.rollback()
+    _exec(engine, "UPDATE competency_inference_runs SET input_fingerprint = :f, inference_dedup_key = :k"
+                  " WHERE id = :r", f=v1, k=svc._inference_dedup_key(v1, svc._specification(run)), r=run_id)
+    return v1
+
+
+def test_pg_first_inference_is_v2_without_causality(engine, Sessions, db, world):
+    w = world
+    context = _start(Sessions, w.t5)
+    assert (context.input_schema_version, context.transition_causality, context.predecessor,
+            context.predecessor_decision_context) == (2, None, None, None)
+    parent = svc._parent_row(db, w.t5, lock=False)
+    dossier = svc._dossier_payload(parent, svc._relations(db, w.t5))
+    assert context.input_fingerprint == svc._input_fingerprint_v2(dossier, None, None) == _run(
+        engine, context.run_id)["input_fingerprint"]
+    assert context.input_fingerprint != svc._input_fingerprint_v1(dossier, None)
+    assert context.inference_dedup_key == svc._inference_dedup_key(context.input_fingerprint,
+                                                                  svc._specification(_run(engine, context.run_id)))
+    assert svc.get_inference_context(db, run_id=context.run_id) == context
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=context.run_id, decision=_app_decision(w))
+    db.commit()
+    assert _state(engine, context.run_id) == ("completed", "active")
+
+
+def test_pg_legacy_v1_runs_stay_readable_and_never_get_retroactive_causality(engine, Sessions, db, world):
+    """Candidat V1 (tel que créé avant T6-B.2) : lisible, empreinte V1
+    reproduite, transition_causality None, chemin de validation legacy ;
+    predecessor V1 accepté par un nouveau candidat V2."""
+    w = world
+    first = _start(Sessions, w.t5)
+    v1 = _as_legacy_v1(engine, db, first.run_id)
+    legacy = svc.get_inference_context(db, run_id=first.run_id)
+    assert (legacy.input_schema_version, legacy.transition_causality, legacy.input_fingerprint) == (1, None, v1)
+    db.rollback()
+    _complete(Sessions, first.run_id, _app_decision(w))
+    assert _run(engine, first.run_id)["input_fingerprint"] == v1
+
+    # Predecessor V1 -> nouveau candidat : V2 uniquement.
+    l2, (fresh,) = _new_t5(Sessions, w, sup(w.A))
+    second = _start(Sessions, l2)
+    assert second.input_schema_version == 2 and second.predecessor.input_fingerprint == v1
+    assert second.predecessor_decision_context.inference_run_id == first.run_id
+    assert second.transition_causality.new_user_event_ids == (_event_of(engine, fresh),)
+    assert svc.get_inference_context(db, run_id=second.run_id) == second
+    db.rollback()
+
+    # Candidat legacy AVEC predecessor : aucune causalité non signée exposée,
+    # validation T6-B inchangée (un nouvel événement dans le dossier suffit).
+    _as_legacy_v1(engine, db, second.run_id)
+    legacy_second = svc.get_inference_context(db, run_id=second.run_id)
+    assert (legacy_second.input_schema_version, legacy_second.transition_causality) == (1, None)
+    assert legacy_second.predecessor_decision_context == second.predecessor_decision_context
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=second.run_id, decision=_app_decision(w, cause="new_user_evidence"))
+    db.commit()
+
+    # Predecessor V1 (lui-même successeur d'un V1) -> candidat V2.
+    third = _start(Sessions, l2, state_decision_version="state-2")
+    assert third.input_schema_version == 2 and third.predecessor.inference_run_id == second.run_id
+    assert third.transition_causality.t6_specification_changes == (VersionChangeContext(
+        field_name="state_decision_version", previous_value="state_decision-1", current_value="state-2"),)
+    assert svc.get_inference_context(db, run_id=third.run_id) == third
+
+
+def test_pg_true_new_event_integrity_change_and_observation_delta(engine, Sessions, db, world):
+    w = world
+    _activate_first(Sessions, w)
+    _invalidate(Sessions, w.k)
+    l2, (fresh,) = _new_t5(Sessions, w, sup(w.A))
+    context = _start(Sessions, l2)
+    c = context.transition_causality
+    fresh_event, k = _event_of(engine, fresh), _t3_of(engine, w.k)
+    assert _closed_at(engine, fresh_event) > _started_at(engine, w.t5)
+    assert c.causality_schema_version == 1
+    assert c.new_user_event_ids == (fresh_event,)
+    assert c.integrity_changes == (IntegrityChangeContext(observation_id=w.k, event_id=k.event,
+                                                          evaluation_run_id=k.run, capability_definition_ids=(w.dA,)),)
+    assert c.reevaluations == () and c.t5_version_changes == () and c.t6_specification_changes == ()
+    assert not c.taxonomy_release_changed and c.previous_taxonomy_release_id == c.current_taxonomy_release_id
+    retained = [w.disc, w.comp, w.app, w.app_b, w.kB, w.k_only]
+    assert c.observation_delta == ObservationDeltaContext(
+        added_observation_ids=(fresh,), removed_observation_ids=(w.k,), retained_observation_ids=_ids(*retained),
+        added_event_ids=(fresh_event,), removed_event_ids=(k.event,),
+        retained_event_ids=_ids(*(_event_of(engine, o) for o in retained)))
+    # Mêmes ensembles que les deux dossiers exposés à T6-C.
+    history = context.predecessor_decision_context.historical_longitudinal_context
+    delta = c.observation_delta
+    assert {o.observation_id for o in history.observations} == set(delta.removed_observation_ids) | set(
+        delta.retained_observation_ids)
+    assert {o.observation_id for o in context.longitudinal_dossier.active_history.observations} == set(
+        delta.added_observation_ids) | set(delta.retained_observation_ids)
+    # L2 n'a aucune relation : les trois relations de L1 sont sorties.
+    for family in ("dependencies", "transfers", "revalidations"):
+        assert (getattr(c.relation_delta, family).added, getattr(c.relation_delta, family).retained) == ((), ())
+        assert len(getattr(c.relation_delta, family).removed) == 1
+    _walk(context)
+
+
+def test_pg_old_event_reevaluated_is_never_new_user_evidence(engine, Sessions, db, world):
+    """E1 finalisé avant L1 ; R1 -> O1 ; réévaluation déclarée R2 -> O2
+    (autre évaluateur) ; L2 : réévaluation observation -> observation."""
+    w = world
+    _activate_first(Sessions, w)
+    o2 = _reevaluate(Sessions, w.tx.id, w.app_t3, app(w.A, w.B), evaluator_version="evaluator-2")
+    l2 = _t5_now(Sessions, w)
+    context = _start(Sessions, l2)
+    c = context.transition_causality
+    assert _closed_at(engine, w.app_t3.event) <= _started_at(engine, w.t5)
+    assert c.new_user_event_ids == () and c.integrity_changes == ()
+    assert c.reevaluations == (ReevaluationContext(
+        event_id=w.app_t3.event, previous_evaluation_run_id=w.app_t3.run, replacement_evaluation_run_id=o2.run,
+        replacement_re_evaluates_run_id=w.app_t3.run, previous_observation_ids=(w.app,),
+        current_observation_ids=(o2.id,), previous_capability_definition_ids=(w.dA,),
+        current_capability_definition_ids=_ids(w.dA, w.dB),
+        changed_evaluation_specification_fields=("evaluator_version",)),)
+    assert c.observation_delta.retained_event_ids.count(w.app_t3.event) == 1
+    reeval = decision("application", refs=[pos("application", o2.id)], cause="new_user_evidence")
+    with pytest.raises(InvalidInferenceDecision, match="new_user_evidence sans aucun CognitiveEvent"):
+        svc.complete_competency_inference(db, run_id=context.run_id, decision=reeval)
+    db.rollback()
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor invalidée"):
+        svc.complete_competency_inference(db, run_id=context.run_id, decision=dataclasses.replace(
+            reeval, transition_cause="evidence_integrity_change"))
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=context.run_id, decision=dataclasses.replace(
+        reeval, transition_cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+def test_pg_reevaluation_from_zero_to_an_observation(engine, Sessions, db):
+    """E_old finalisé avant L1, évalué (C8 seulement) : absent du dossier C7.
+    Réévalué ensuite (C7) : zéro -> observation, jamais une nouvelle
+    démonstration. E_late : finalisé avant L1 mais évalué pour la première
+    fois après : aucune interprétation -> une interprétation."""
+    tx = _taxonomy(Sessions, ("C7_A", "C8_A"))
+    A = tx.m["C7_A"]
+    old_event, late_event = _finalized_event(Sessions), _finalized_event(Sessions)
+    c8 = _t3(Sessions, tx.id, sup(tx.m["C8_A"], competency_code="C8"), event_id=old_event)
+    base = _t3(Sessions, tx.id, sup(A))
+    l1 = _start_t5(Sessions, tx.id)
+    _complete_t5(Sessions, l1)
+    r1 = _start(Sessions, l1)
+    _complete(Sessions, r1.run_id, decision("comprehension", refs=[pos("comprehension", base.id)]))
+    o2 = _reevaluate(Sessions, tx.id, c8, app(A))
+    late = _t3(Sessions, tx.id, sup(A), event_id=late_event)
+    l2 = _start_t5(Sessions, tx.id)
+    _complete_t5(Sessions, l2)
+    c = _start(Sessions, l2).transition_causality
+    assert c.new_user_event_ids == ()
+    expected = sorted([
+        ReevaluationContext(event_id=old_event, previous_evaluation_run_id=c8.run, replacement_evaluation_run_id=o2.run,
+                            replacement_re_evaluates_run_id=c8.run, previous_observation_ids=(),
+                            current_observation_ids=(o2.id,), previous_capability_definition_ids=(),
+                            current_capability_definition_ids=(tx.d["C7_A"],),
+                            changed_evaluation_specification_fields=()),
+        ReevaluationContext(event_id=late_event, previous_evaluation_run_id=None,
+                            replacement_evaluation_run_id=late.run, replacement_re_evaluates_run_id=None,
+                            previous_observation_ids=(), current_observation_ids=(late.id,),
+                            previous_capability_definition_ids=(), current_capability_definition_ids=(tx.d["C7_A"],),
+                            changed_evaluation_specification_fields=()),
+    ], key=lambda r: str(r.event_id))
+    assert c.reevaluations == tuple(expected)
+    assert c.observation_delta.added_event_ids == _ids(old_event, late_event)
+
+
+def test_pg_reevaluation_from_an_observation_to_zero(engine, Sessions, db, world):
+    """R1 -> O1 (C7) ; réévaluation R2 -> zéro observation : E1 sort de L2,
+    la réévaluation reste détectée (jamais déduite du seul dossier courant)."""
+    w = world
+    _activate_first(Sessions, w)
+    zero = _reevaluate(Sessions, w.tx.id, w.disc_t3)
+    l2 = _t5_now(Sessions, w)
+    context = _start(Sessions, l2)
+    c = context.transition_causality
+    assert w.disc_t3.event not in {o.event_id for o in context.longitudinal_dossier.active_history.observations}
+    assert c.reevaluations == (ReevaluationContext(
+        event_id=w.disc_t3.event, previous_evaluation_run_id=w.disc_t3.run, replacement_evaluation_run_id=zero.run,
+        replacement_re_evaluates_run_id=w.disc_t3.run, previous_observation_ids=(w.disc,),
+        current_observation_ids=(), previous_capability_definition_ids=_ids(w.dA, w.dB),
+        current_capability_definition_ids=(), changed_evaluation_specification_fields=()),)
+    assert c.integrity_changes == () and c.new_user_event_ids == ()
+    assert c.observation_delta.removed_observation_ids == (w.disc,)
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor invalidée"):
+        svc.complete_competency_inference(db, run_id=context.run_id,
+                                          decision=_app_decision(w, cause="evidence_integrity_change"))
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=context.run_id,
+                                      decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+def test_pg_post_snapshot_mutations_never_change_the_causality(engine, Sessions, db, world):
+    """start == get == complete malgré, APRÈS la capture de L2, une
+    invalidation et une réévaluation historiques hors de L2 (L2 reste
+    courant) ; l'intégrité de la fenêtre (kB) reste, celle d'après (O1)
+    n'entre jamais."""
+    w = world
+    _activate_first(Sessions, w)
+    o2 = _reevaluate(Sessions, w.tx.id, w.app_t3, app(w.A))
+    _invalidate(Sessions, w.kB)
+    l2 = _t5_now(Sessions, w)
+    started = _start(Sessions, l2)
+    c = started.transition_causality
+    assert [i.observation_id for i in c.integrity_changes] == [w.kB]
+    assert [r.event_id for r in c.reevaluations] == [w.app_t3.event]
+    _invalidate(Sessions, w.app)  # O1 : remplacée par O2, absente de L2
+    _reevaluate(Sessions, w.tx.id, _t3_of(engine, w.kB), contra(w.B))  # ancien événement absent de L2
+    resumed = svc.get_inference_context(db, run_id=started.run_id)
+    assert resumed == started
+    assert (resumed.input_schema_version, resumed.transition_causality, resumed.input_fingerprint,
+            resumed.inference_dedup_key) == (2, c, started.input_fingerprint, started.inference_dedup_key)
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=started.run_id, decision=_app_decision(
+        w, refs=[pos("application", o2.id)], cause="evidence_integrity_change"))
+    db.commit()
+    row = _run(engine, started.run_id)
+    assert (row["input_fingerprint"], row["execution_status"], row["interpretation_status"]) == (
+        started.input_fingerprint, "completed", "active")
+
+
+def test_pg_an_invalidation_after_the_current_snapshot_never_supports_an_integrity_cause(engine, Sessions, db,
+                                                                                          world):
+    w = world
+    _activate_first(Sessions, w)
+    o2 = _reevaluate(Sessions, w.tx.id, w.app_t3, app(w.A))
+    l2 = _t5_now(Sessions, w)
+    started = _start(Sessions, l2)
+    _invalidate(Sessions, w.app)
+    assert svc.get_inference_context(db, run_id=started.run_id).transition_causality.integrity_changes == ()
+    db.rollback()
+    d = _app_decision(w, refs=[pos("application", o2.id)], cause="evidence_integrity_change")
+    with pytest.raises(InvalidInferenceDecision, match="sans aucune observation du dossier du predecessor invalidée"):
+        svc.complete_competency_inference(db, run_id=started.run_id, decision=d)
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=started.run_id, decision=dataclasses.replace(
+        d, transition_cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+def test_pg_multiple_causal_families_coexist_and_no_cause_is_chosen(engine, Sessions, db, world):
+    """Même fenêtre : nouvel événement + observation invalidée + ancien
+    événement réévalué. Les trois familles coexistent ; chaque cause passe
+    ses gardes structurelles selon la décision ; T6-B n'en choisit aucune."""
+    w = world
+    _activate_first(Sessions, w)
+    _invalidate(Sessions, w.k)
+    o2 = _reevaluate(Sessions, w.tx.id, w.app_t3, app(w.A))
+    l2, (fresh,) = _new_t5(Sessions, w, sup(w.A))
+    context = _start(Sessions, l2)
+    c = context.transition_causality
+    assert c.new_user_event_ids == (_event_of(engine, fresh),)
+    assert [i.observation_id for i in c.integrity_changes] == [w.k]
+    assert [r.event_id for r in c.reevaluations] == [w.app_t3.event]
+    assert not hasattr(c, "transition_cause")
+    _walk(context)
+    refs = [pos("application", o2.id), ref("transition", "observation", fresh)]
+    for cause in ("new_user_evidence", "evidence_integrity_change", "pedagogical_reinterpretation"):
+        svc.complete_competency_inference(db, run_id=context.run_id, decision=decision(
+            "application", refs=refs, cause=cause))
+        assert _run(engine, context.run_id)["transition_cause"] is None  # rien de commité
+        db.rollback()
+
+
+def test_pg_relation_delta_is_semantic(engine, Sessions, db, world):
+    """L2 = mêmes observations ; même dépendance recréée (autre UUID) =>
+    conservée ; transfert au basis différent => sorti + entré ; revalidation
+    non recréée => sortie. Aucune comparaison d'UUID de ligne."""
+    w = world
+    _activate_first(Sessions, w)
+    l2 = _start_t5(Sessions, w.tx.id)
+    with Sessions() as s:
+        dep = t5.add_dependency(s, run_id=l2, target_observation_id=w.comp, source_kind="observation",
+                                source_observation_id=w.disc, dependency_type="partially_dependent",
+                                scope_mode="localized", dependency_basis={"why": "reprend la décomposition"},
+                                capability_membership_ids=[w.B]).id
+        t5.add_transfer(s, run_id=l2, source_observation_id=w.comp, target_observation_id=w.app,
+                        scope_mode="localized", transfer_basis={"adaptation": "autre justification"},
+                        capability_membership_ids=[w.A])
+        s.commit()
+    _complete_t5(Sessions, l2)
+    assert dep != w.dep
+    context = _start(Sessions, l2)
+    delta = context.transition_causality.relation_delta
+    before, after = svc._relations(db, w.t5).payload, svc._relations(db, l2).payload
+    freeze = svc._freeze
+    assert delta.dependencies == RelationFamilyDeltaContext(added=(), removed=(), retained=(
+        freeze(after["dependencies"][0]),))
+    assert after["dependencies"] == before["dependencies"]
+    assert delta.transfers == RelationFamilyDeltaContext(added=(freeze(after["transfers"][0]),),
+                                                         removed=(freeze(before["transfers"][0]),), retained=())
+    assert delta.revalidations == RelationFamilyDeltaContext(added=(), removed=(freeze(before["revalidations"][0]),),
+                                                             retained=())
+    c = context.transition_causality
+    assert c.observation_delta.added_observation_ids == () == c.observation_delta.removed_observation_ids
+    _walk(c)
+    # Un delta de relations n'est pas à lui seul une évolution contrôlée.
+    with pytest.raises(InvalidInferenceDecision, match="sans spécification T6 différente"):
+        svc.complete_competency_inference(db, run_id=context.run_id,
+                                          decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+
+
+@pytest.mark.parametrize("field, value", [("dependency_version", "dependency-2"), ("transfer_version", "transfer-2"),
+                                          ("revalidation_version", "revalidation-2"),
+                                          ("relation_schema_version", "relations-2")])
+def test_pg_t5_version_change_is_exposed_alone(engine, Sessions, db, world, field, value):
+    w = world
+    _activate_first(Sessions, w)
+    context = _start(Sessions, _t5_now(Sessions, w, **{field: value}))
+    c = context.transition_causality
+    default = {"dependency_version": "dependency-1", "transfer_version": "transfer-1",
+               "revalidation_version": "revalidation-1", "relation_schema_version": "relations-1"}
+    assert c.t5_version_changes == (VersionChangeContext(field_name=field, previous_value=default[field],
+                                                         current_value=value),)
+    assert (c.taxonomy_release_changed, c.t6_specification_changes, c.reevaluations, c.new_user_event_ids,
+            c.integrity_changes) == (False, (), (), (), ())
+    svc.complete_competency_inference(db, run_id=context.run_id,
+                                      decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+def test_pg_taxonomy_release_change_is_exposed_alone(engine, Sessions, db, world):
+    w = world
+    _activate_first(Sessions, w)
+    release = _taxonomy(Sessions, {code: w.tx.d[code] for code in ("C7_A", "C7_B", "C7_C", "C8_A")})
+    context = _start(Sessions, _t5_now(Sessions, w, release_id=release.id))
+    c = context.transition_causality
+    assert (c.taxonomy_release_changed, c.previous_taxonomy_release_id, c.current_taxonomy_release_id) == (
+        True, w.tx.id, release.id)
+    assert (c.t5_version_changes, c.t6_specification_changes, c.reevaluations, c.new_user_event_ids,
+            c.integrity_changes) == ((), (), (), (), ())
+    svc.complete_competency_inference(db, run_id=context.run_id,
+                                      decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+@pytest.mark.parametrize("field", [*VERSIONS, "model_id", "prompt_spec_version"])
+def test_pg_t6_specification_change_is_exposed_alone(engine, Sessions, db, world, field):
+    w = world
+    _activate_first(Sessions, w)
+    previous = svc._specification(_start_kwargs())[field] if field in VERSIONS else None
+    context = _start(Sessions, w.t5, **{field: "autre-2"})
+    c = context.transition_causality
+    assert c.t6_specification_changes == (VersionChangeContext(field_name=field, previous_value=previous,
+                                                               current_value="autre-2"),)
+    assert (c.t5_version_changes, c.taxonomy_release_changed, c.reevaluations, c.new_user_event_ids,
+            c.integrity_changes, c.observation_delta.added_observation_ids,
+            c.observation_delta.removed_observation_ids) == ((), False, (), (), (), (), ())
+    assert svc.get_inference_context(db, run_id=context.run_id).transition_causality == c
+
+
+def test_pg_v2_causes_are_read_from_the_frozen_causality_never_live(engine, Sessions, db, world, monkeypatch):
+    """complete d'un candidat V2 : aucune relecture live des causes (ni le
+    chemin legacy ni _new_user_events) ; anti-oscillation sur les
+    new_user_event_ids figés."""
+    w = world
+    _, revise, (k_new,) = _second(Sessions, w, new=[contra(w.A)])
+    _complete(Sessions, revise.run_id, decision(
+        "comprehension", refs=[pos("comprehension", w.comp), ref("transition", "observation", k_new),
+                               ref("tension", "observation", k_new, tension_key="levier")],
+        cause="new_user_evidence", context={"motif": "levier"}, tensions=[tension("levier", stage="application")]))
+    l3, (fresh,) = _new_t5(Sessions, w, app(w.A))
+    rebound = _start(Sessions, l3)
+    assert rebound.transition_causality.new_user_event_ids == (_event_of(engine, fresh),)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("relecture live des causes pour un candidat V2")
+
+    monkeypatch.setattr(svc, "_check_legacy_causes", forbidden)
+    monkeypatch.setattr(svc, "_new_user_events", forbidden)
+    # Ref vers le nouvel événement mais seulement en confidence : la
+    # nouvelle démonstration est citée (cause recevable), pas la remontée.
+    only_confidence = decision("application", refs=[
+        pos("application", w.app), ref("transition", "observation", w.app),
+        ref("confidence", "observation", fresh, claim_stage="application", confidence_dimension="consistency")],
+        cause="new_user_evidence")
+    with pytest.raises(InvalidInferenceDecision, match="remontée après une révision non résolue"):
+        svc.complete_competency_inference(db, run_id=rebound.run_id, decision=only_confidence)
+    db.rollback()
+    svc.complete_competency_inference(db, run_id=rebound.run_id, decision=dataclasses.replace(
+        only_confidence, basis_refs=(pos("application", w.app), ref("transition", "observation", fresh))))
+    db.commit()
+    assert _run(engine, rebound.run_id)["transition"] == "upgraded"
+
+
+def test_pg_an_impossible_reevaluation_chain_is_refused(engine, Sessions, db, world):
+    w = world
+    first = _activate_first(Sessions, w)
+    o2 = _reevaluate(Sessions, w.tx.id, w.app_t3, app(w.A))
+    l2 = _t5_now(Sessions, w)
+    _exec(engine, "UPDATE observation_evaluation_runs SET re_evaluates_run_id = :other WHERE id = :r",
+          other=w.disc_t3.run, r=o2.run)
+    with pytest.raises(InvalidInferenceState, match="hors de l'événement"):
+        svc.start_competency_inference(db, **_start_kwargs(l2))
+    db.rollback()
+    assert _count(engine, "competency_inference_runs") == 1 and _state(engine, first) == ("completed", "active")
+
+
+def test_pg_causal_reconstruction_query_count_is_constant(engine, Sessions, db, world):
+    """Anti-N+1 : trois SELECT pour les faits causaux, quel que soit le
+    nombre d'observations, d'événements, de réévaluations ou
+    d'invalidations."""
+    w = world
+    _activate_first(Sessions, w)
+    small = _t5_now(Sessions, w)
+    for observation in (w.k, w.kB):
+        _invalidate(Sessions, observation)
+    for prior in (w.app_t3, w.disc_t3):
+        _reevaluate(Sessions, w.tx.id, prior, app(w.A))
+    _t3(Sessions, w.tx.id, sup(w.A), sup(w.B))
+    _t3(Sessions, w.tx.id, contra(w.C))
+    large = _t5_now(Sessions, w)
+    counts = {}
+    previous = svc._parent_row(db, w.t5, lock=False)
+    for current in (small, large):
+        parent = svc._parent_row(db, current, lock=False)
+        statements, record = _recording(engine)
+        sa.event.listen(engine, "before_cursor_execute", record)
+        try:
+            facts = svc._causal_facts(db, previous, parent)
+        finally:
+            sa.event.remove(engine, "before_cursor_execute", record)
+        counts[current] = len(statements)
+        assert all(sql.startswith("SELECT") and " FOR " not in sql for sql, _ in statements)
+    assert len(facts.reevaluations) == 2 and len(facts.integrity_changes) == 2 and len(facts.new_user_event_ids) == 2
+    assert counts[small] == counts[large] == 3
