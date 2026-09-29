@@ -292,7 +292,8 @@ def test_structures_are_frozen_keyword_only_dataclasses():
     assert names(PositiveBasisAssessment) == ["policy_version", "competency_code", "claims",
                                               "highest_established_stage"]
     assert names(PositiveBasisClaim) == [
-        "stage", "status", "basis_mode", "basis_observation_ids", "represented_capability_definition_ids",
+        "stage", "status", "basis_mode", "implied_from_stage", "basis_observation_ids",
+        "represented_capability_definition_ids",
         "competency_only_observation_ids", "structural_basis_refs", "representative_pattern_names",
         "representativeness_reason", "limitations", "mastery_assessment"]
     assert names(MasteryAssessment) == [
@@ -598,6 +599,7 @@ def test_new_expert_first_representative_application_is_established_immediately(
     for stage in ("discovery", "comprehension"):
         implied = claim(result, stage)
         assert implied.basis_observation_ids == () and implied.representativeness_reason == "implied_by_higher_claim"
+        assert implied.implied_from_stage == "application"
 
 
 def test_comprehension_can_be_the_first_claim_without_discovery_evidence():
@@ -619,6 +621,64 @@ def test_distinct_direct_bases_stay_direct():
                                 "mastery": NONE}
     assert claim(result, "application").basis_observation_ids == (o42,)
     assert claim(result, "comprehension").basis_observation_ids == (o17,)
+
+
+def test_implied_claims_keep_the_represented_scope_of_application_without_basis():
+    """Application directe localisée : Comprehension / Discovery implied
+    reprennent son périmètre représenté, zéro basis_observation_ids."""
+    d = Dossier("C4")
+    o = d.observe("e1", "C4_B", "C4_D", name="o")
+    result = d.assess()
+    app = claim(result, "application")
+    assert app.basis_mode == "direct" and app.basis_observation_ids == (o,)
+    for stage in ("discovery", "comprehension"):
+        implied = claim(result, stage)
+        assert (implied.status, implied.basis_mode, implied.implied_from_stage) == (
+            EST, "implied_by_higher_claim", "application")
+        assert implied.basis_observation_ids == () and implied.structural_basis_refs == ()
+        assert implied.represented_capability_definition_ids == (definition_id("C4_B"), definition_id("C4_D"))
+        assert implied.representative_pattern_names == app.representative_pattern_names
+        assert implied.competency_only_observation_ids == () and implied.limitations == ()
+    assert _all_basis_ids(result) == [o]
+
+
+def test_claims_implied_by_mastery_keep_its_represented_scope():
+    d, a, b, t = _mastery_dossier()
+    result = d.assess()
+    mastery = claim(result, "mastery")
+    assert mastery.basis_mode == "direct"
+    for stage in ("discovery", "comprehension", "application"):
+        implied = claim(result, stage)
+        assert implied.basis_mode == "implied_by_higher_claim" and implied.implied_from_stage == "mastery"
+        assert implied.basis_observation_ids == ()
+        assert implied.represented_capability_definition_ids == mastery.represented_capability_definition_ids == (
+            definition_id("C2_A"), definition_id("C2_B"))
+    ids = _all_basis_ids(result)
+    assert sorted(ids, key=str) == sorted({a, b}, key=str) and len(ids) == len(set(ids))
+
+
+def test_implied_scope_comes_from_the_nearest_direct_higher_claim():
+    """Comprehension directe distincte sous Application : Discovery reprend
+    le périmètre de Comprehension (la claim directe la plus proche)."""
+    d = Dossier("C2")
+    d.observe("e17", "C2_A", "C2_C", stage="comprehension", name="O17")
+    d.observe("e42", "C2_A", "C2_B", name="O42")
+    discovery = claim(d.assess(), "discovery")
+    assert discovery.implied_from_stage == "comprehension"
+    assert discovery.represented_capability_definition_ids == (definition_id("C2_A"), definition_id("C2_C"))
+
+
+def test_competency_only_higher_claim_keeps_competency_only_nature_when_implied():
+    d = Dossier("C10")
+    o = d.observe("e1", name="o")
+    result = d.assess()
+    for stage in ("discovery", "comprehension"):
+        implied = claim(result, stage)
+        assert implied.basis_mode == "implied_by_higher_claim" and implied.implied_from_stage == "application"
+        assert implied.represented_capability_definition_ids == ()  # aucune capacité inventée
+        assert implied.competency_only_observation_ids == (o,)
+        assert implied.basis_observation_ids == ()
+    assert _all_basis_ids(result) == [o]
 
 
 def _all_basis_ids(result):
@@ -645,6 +705,12 @@ def test_invariants_of_every_claim():
                 assert c.basis_mode == "none" and c.basis_observation_ids == ()
             if c.basis_mode == "implied_by_higher_claim":
                 assert seen_established and c.stage != "mastery"
+                source = claim(result, c.implied_from_stage)
+                assert source.basis_mode == "direct" and STAGES.index(source.stage) > STAGES.index(c.stage)
+                assert c.represented_capability_definition_ids == source.represented_capability_definition_ids
+                assert c.basis_observation_ids == () and c.structural_basis_refs == ()
+            else:
+                assert c.implied_from_stage is None
             if c.basis_mode == "direct":
                 assert c.basis_observation_ids
             seen_established = seen_established or c.status == EST
@@ -677,76 +743,128 @@ def test_strong_never_lifts_a_claim_above_local_stage():
     assert claim(result, "application").representativeness_reason == "insufficient_positive_basis"
 
 
-def test_no_universal_strong_minimum():
-    """8 : une démonstration medium suffit à chaque stade direct."""
+def test_evidence_strength_is_never_an_eligibility_gate():
+    """8 + correction d'audit : evidence_strength reste descriptive. Une
+    démonstration représentative de profondeur suffisante établit la claim
+    quelle que soit sa force (ni « weak => incapable seule », ni
+    « medium / strong => capable seule ») ; la force reste projetée pour la
+    confiance future."""
     for stage in ("discovery", "comprehension", "application"):
-        d = Dossier("C3")
-        d.observe("e1", "C3_B", stage=stage, strength="medium")
-        assert claim(d.assess(), stage).basis_mode == "direct", stage
-
-
-def test_weak_complementary_independent_history_can_establish_a_claim():
-    """9 : weak / medium d'épisodes distincts, convergentes et
-    complémentaires (C2_A puis C2_C) : base collective, forces inchangées,
-    indépendance jamais présumée."""
-    d = Dossier("C2")
-    a = d.observe("e1", "C2_A", stage="comprehension", strength="weak", name="a")
-    c = d.observe("e2", "C2_C", stage="comprehension", strength="weak", name="c")
-    result = d.assess()
-    comprehension = claim(result, "comprehension")
-    assert statuses(result)["comprehension"] == DIRECT
-    assert comprehension.representativeness_reason == "complementary_representative_history"
-    assert set(comprehension.basis_observation_ids) == {a, c}
-    assert "independence_not_established" in [lim.code for lim in comprehension.limitations]
+        results = {}
+        for strength in ("weak", "medium", "strong"):
+            d = Dossier("C3")
+            o = d.observe("e1", "C3_B", stage=stage, strength=strength, name="o")
+            result = d.assess()
+            assert claim(result, stage).basis_mode == "direct", (stage, strength)
+            assert claim(result, stage).basis_observation_ids == (o,)
+            results[strength] = result
+        assert results["weak"] == results["medium"] == results["strong"], stage
+    d = Dossier("C10")
+    d.observe("e1", strength="weak")
+    assert claim(d.assess(), "application").representativeness_reason == "competency_only_representative_demonstration"
     evidence = project_positive_evidence(d.context(), resolve_positive_basis_policy(d.context()))
-    assert {x.evidence_strength for x in evidence.demonstrations} == {"weak"}
-    # Application : medium C2_A + weak C2_B, deux épisodes.
+    assert [x.evidence_strength for x in evidence.demonstrations] == ["weak"]
+    assert not hasattr(engine_module, "SELF_STANDING_STRENGTHS")
+
+
+def _independent_pair(stage, *, revalidated=True):
+    """C2_A puis C2_C démontrés dans deux épisodes distincts ; si
+    revalidated, chacun est la cible d'une revalidation T5 sur ce périmètre
+    (independence_evidence établie par T5)."""
     d = Dossier("C2")
-    d.observe("e1", "C2_A", strength="medium")
-    d.observe("e2", "C2_B", strength="weak")
-    assert claim(d.assess(), "application").representativeness_reason == "complementary_representative_history"
+    a = d.observe("e2", "C2_A", stage=stage, strength="weak", name="a")
+    c = d.observe("e4", "C2_C", stage=stage, strength="weak", name="c")
+    if revalidated:
+        d.revalidation(d.contra("e1", "C2_A", name="ka"), a)
+        d.revalidation(d.contra("e3", "C2_C", name="kc"), c)
+    return d, a, c
+
+
+@pytest.mark.parametrize("stage", ["comprehension", "application"])
+def test_complementary_history_with_established_independence_can_establish(stage):
+    """9 : épisodes distincts, convergents et complémentaires dont T5 établit
+    l'indépendance sur les périmètres apportés : base collective."""
+    d, a, c = _independent_pair(stage)
+    readings = {(r.observation_id, r.classification)
+                for r in d.context().longitudinal_dossier.dependency_profile.scope_readings}
+    assert {(a, "independence_evidence"), (c, "independence_evidence")} <= readings
+    result = d.assess()
+    target = claim(result, stage)
+    assert (target.status, target.basis_mode) == DIRECT
+    assert target.representativeness_reason == "complementary_representative_history"
+    assert set(target.basis_observation_ids) == {a, c}
+    assert target.representative_pattern_names == ("c2_risk_nature_related_to_horizon_or_capacity",)
+    assert "independence_not_established" not in [lim.code for lim in target.limitations]
+
+
+@pytest.mark.parametrize("stage", ["comprehension", "application"])
+def test_same_complementary_history_without_established_independence_does_not_establish(stage):
+    """Même histoire, lectures T5 not_established (aucune arête) : aucune
+    indépendance présumée ; claim non établie par cette voie, raison
+    explicable, aucune fraction."""
+    d, a, c = _independent_pair(stage, revalidated=False)
+    target = claim(d.assess(), stage)
+    assert target.status == NOT and target.basis_mode == "none"
+    assert target.representativeness_reason == "independence_not_established"
+    [limitation] = target.limitations
+    assert limitation.code == "independence_not_established"
+    assert set(limitation.observation_ids) == {a, c}
+    assert limitation.pattern_names == ("c2_risk_nature_related_to_horizon_or_capacity",)
+    # Une seule contribution indépendante ne suffit pas non plus.
+    d, a, c = _independent_pair(stage, revalidated=False)
+    d.revalidation(d.contra("e1", "C2_A", name="ka"), a)
+    target = claim(d.assess(), stage)
+    assert target.status == NOT and target.limitations[0].observation_ids == (c,)
+
+
+def test_single_representative_application_needs_no_independence_evidence():
+    """Une première démonstration unique représentative établit Application
+    sans répétition ni indépendance : l'indépendance n'est jamais une
+    barrière cachée de la voie A."""
+    d = Dossier("C2")
+    o = d.observe("e1", "C2_A", "C2_B", strength="weak")
+    readings = {r.classification for r in d.context().longitudinal_dossier.dependency_profile.scope_readings}
+    assert readings == {"not_established"}
+    app = claim(d.assess(), "application")
+    assert (app.status, app.basis_mode, app.basis_observation_ids) == (EST, "direct", (o,))
+    assert app.representativeness_reason == "single_representative_demonstration"
 
 
 def test_redundant_repetition_of_the_same_micro_knowledge_does_not_progress():
-    """10 : répétitions d'un même périmètre (weak) = rien ; plusieurs weak
-    ne fabriquent jamais Discovery."""
+    """10 : répéter un même micro-savoir n'étend jamais le périmètre : même
+    statut qu'une seule démonstration, jamais un stade de plus."""
+    def statuses_for(repetitions, competency, caps, stage):
+        d = Dossier(competency)
+        for i in range(repetitions):
+            d.observe(f"e{i}", *caps, stage=stage, strength="weak")
+        return statuses(d.assess())
+
+    for competency, caps, stage in (("C2", ["C2_A"], "comprehension"), ("C1", ["C1_B"], "application"),
+                                    ("C10", ["C10_B"], "application")):
+        once = statuses_for(1, competency, caps, stage)
+        assert statuses_for(6, competency, caps, stage) == once, competency
+        assert once[stage] == NONE, competency
     d = Dossier("C2")
     for i in range(6):
-        d.observe(f"e{i}", "C2_A", stage="comprehension", strength="weak")
-    result = d.assess()
-    assert result.highest_established_stage is None
-    d = Dossier("C1")
-    for i in range(6):
-        d.observe(f"e{i}", "C1_A", stage="application", strength="weak")
-    result = d.assess()
-    assert result.highest_established_stage is None
-    assert [lim.code for lim in claim(result, "application").limitations] == [
-        "representative_scope_without_diagnostic_basis"]
-    # Un épisode weak qui couvre toute la relation + une répétition d'une
-    # dimension : aucune complémentarité réelle.
-    d = Dossier("C2")
-    d.observe("e1", "C2_A", "C2_B", strength="weak")
-    d.observe("e2", "C2_A", strength="weak")
-    assert claim(d.assess(), "application").status == NOT
+        d.observe(f"e{i}", "C2_A", stage="comprehension", strength="strong")
+    assert claim(d.assess(), "comprehension").representativeness_reason == "localized_scope_not_representative"
 
 
 def test_sibling_observations_widen_coverage_but_never_independence():
-    """11 : observations sœurs d'un même CognitiveEvent."""
-    d = Dossier("C2")
-    a = d.observe("e1", "C2_A", strength="medium", name="a")
-    b = d.observe("e1", "C2_B", strength="medium", name="b")
-    result = d.assess()
-    app = claim(result, "application")
-    assert app.representativeness_reason == "single_representative_episode"
-    assert set(app.basis_observation_ids) == {a, b}
-    mastery = claim(result, "mastery").mastery_assessment
-    for prop in ("independent_repetition", "variety_transfer", "longitudinality"):
-        assert getattr(mastery, prop).status == "not_demonstrated", prop
-    # Sœurs weak : jamais une histoire complémentaire (même épisode).
-    d = Dossier("C2")
-    d.observe("e1", "C2_A", strength="weak")
-    d.observe("e1", "C2_B", strength="weak")
-    assert d.assess().highest_established_stage is None
+    """11 : observations sœurs d'un même CognitiveEvent (quelle que soit
+    leur force) : couverture élargie, jamais indépendance, transfert ni
+    durabilité."""
+    for strength in ("weak", "medium"):
+        d = Dossier("C2")
+        a = d.observe("e1", "C2_A", strength=strength, name="a")
+        b = d.observe("e1", "C2_B", strength=strength, name="b")
+        result = d.assess()
+        app = claim(result, "application")
+        assert app.representativeness_reason == "single_representative_episode"
+        assert set(app.basis_observation_ids) == {a, b}
+        mastery = claim(result, "mastery").mastery_assessment
+        for prop in ("independent_repetition", "variety_transfer", "longitudinality"):
+            assert getattr(mastery, prop).status == "not_demonstrated", prop
 
 
 def test_absence_of_dependency_edge_is_never_independence():
@@ -759,25 +877,31 @@ def test_absence_of_dependency_edge_is_never_independence():
     assert mastery.status == NOT
     assert mastery.mastery_assessment.independent_repetition.status == "not_demonstrated"
     assert mastery.mastery_assessment.independent_repetition.reason_codes == ("no_t5_independent_remobilization",)
-    # Histoire complémentaire sans arête : indépendance signalée non établie.
+    # Histoire complémentaire sans arête : jamais établie, indépendance
+    # signalée non établie.
     d = Dossier("C2")
-    d.observe("e1", "C2_A", strength="weak")
-    d.observe("e2", "C2_B", strength="weak")
-    assert [lim.code for lim in claim(d.assess(), "application").limitations] == ["independence_not_established"]
+    d.observe("e1", "C2_A")
+    d.observe("e2", "C2_B")
+    app = claim(d.assess(), "application")
+    assert app.status == NOT and app.representativeness_reason == "independence_not_established"
 
 
-def test_established_dependency_excludes_a_complementary_contribution():
-    """Une démonstration qu'une dépendance T5 limite n'est pas une
-    contribution autonome d'une histoire complémentaire."""
+@pytest.mark.parametrize("kind", ["dependent", "partially_dependent"])
+def test_established_dependency_never_counts_as_a_complementary_contribution(kind):
+    """dependent / partially_dependent ne suffisent jamais pour la voie B ;
+    sur une claim directe (voie A), la dépendance est seulement signalée."""
     d = Dossier("C2")
-    a = d.observe("e1", "C2_A", strength="weak", name="a")
-    b = d.observe("e2", "C2_B", strength="weak", name="b")
-    d.dependency(b, a)
-    assert claim(d.assess(), "application").status == NOT
+    a = d.observe("e1", "C2_A", name="a")
+    b = d.observe("e2", "C2_B", name="b")
+    d.revalidation(d.contra("e0", "C2_A", name="ka"), a)
+    d.dependency(b, a, kind=kind)
+    app = claim(d.assess(), "application")
+    assert app.status == NOT and app.representativeness_reason == "independence_not_established"
+    assert app.limitations[0].observation_ids == (b,)
     d = Dossier("C2")
     a = d.observe("e1", "C2_A", "C2_B", name="a")
     b = d.observe("e2", "C2_A", "C2_B", stage="comprehension", strength="medium", name="b")
-    d.dependency(b, a, kind="partially_dependent")
+    d.dependency(b, a, kind=kind)
     comprehension = claim(d.assess(), "comprehension")
     assert comprehension.basis_mode == "direct"  # jamais une barrière cachée à une claim directe
     assert [lim.code for lim in comprehension.limitations] == ["dependency_limited_demonstration"]
@@ -815,12 +939,19 @@ def test_competency_only_establishes_without_inventing_capabilities():
     assert [lim.code for lim in app.limitations] == ["competency_only_scope_not_localizable"]
 
 
-def test_weak_competency_only_observations_never_accumulate():
-    """16."""
-    d = Dossier("C10")
-    for i in range(7):
-        d.observe(f"e{i}", strength="weak")
-    assert d.assess().highest_established_stage is None
+def test_competency_only_observations_never_accumulate():
+    """16 : plusieurs competency_only (weak) ne s'additionnent jamais : même
+    statut qu'une seule, jamais un stade au-delà de leur profondeur."""
+    def build(repetitions, stage):
+        d = Dossier("C10")
+        for i in range(repetitions):
+            d.observe(f"e{i}", stage=stage, strength="weak")
+        return statuses(d.assess())
+
+    for stage in ("discovery", "comprehension"):
+        assert build(7, stage) == build(1, stage)
+    assert build(7, "discovery") == {"discovery": DIRECT, "comprehension": NONE, "application": NONE,
+                                     "mastery": NONE}
 
 
 def test_adding_only_contradictions_leaves_positive_basis_identical():
@@ -889,18 +1020,59 @@ def test_mastery_without_prior_contradiction_is_possible():
 
 
 def test_mastery_requires_every_property_and_no_partial_mastery():
-    """Une propriété manquante => not_established, sans stade intermédiaire."""
-    d, *_ = _mastery_dossier(support="guided")
-    mastery = claim(d.assess(), "mastery")
+    """Une propriété manquante => not_established, sans stade intermédiaire
+    (ici autonomy : la cible remobilisée est answer_given)."""
+    d, *_ = _mastery_dossier(support="answer_given")
+    result = d.assess()
+    mastery = claim(result, "mastery")
     assert mastery.status == NOT and mastery.basis_mode == "none"
     assert mastery.representativeness_reason == "insufficient_longitudinal_structure"
     assert mastery.mastery_assessment.autonomy.status == "not_demonstrated"
-    assert mastery.mastery_assessment.variety_transfer.status == "supported"
-    assert claim(d.assess(), "application").basis_mode == "direct"
+    assert mastery.mastery_assessment.autonomy.reason_codes == ("autonomy_not_demonstrated_on_representative_scope",)
+    for prop in ("independent_repetition", "variety_transfer", "longitudinality", "robustness_revision"):
+        assert getattr(mastery.mastery_assessment, prop).status == "supported", prop
+    assert claim(result, "application").basis_mode == "direct"
+
+
+@pytest.mark.parametrize("support", ["none", "hinted", "guided"])
+def test_guided_is_never_an_automatic_autonomy_ceiling(support):
+    """support_level n'est ni un coefficient ni un plafond : une cible guided
+    sur un périmètre remobilisé sans dépendance T5 peut porter l'autonomie."""
+    d, a, b, t = _mastery_dossier(support=support)
+    mastery = claim(d.assess(), "mastery")
+    assert mastery.mastery_assessment.autonomy.status == "supported"
+    assert mastery.mastery_assessment.autonomy.observation_ids == tuple(sorted((a, b), key=str))
+    assert mastery.status == EST
+
+
+def test_answer_given_alone_does_not_demonstrate_autonomy():
     d, *_ = _mastery_dossier(support="answer_given")
     assert claim(d.assess(), "mastery").mastery_assessment.autonomy.status == "not_demonstrated"
-    d, *_ = _mastery_dossier(support="hinted")
-    assert claim(d.assess(), "mastery").status == EST
+
+
+@pytest.mark.parametrize("kind", ["dependent", "partially_dependent"])
+def test_dependency_on_the_remobilized_scope_blocks_autonomy_on_that_scope(kind):
+    """Dépendance T5 d'une extrémité positive de la relation sur le
+    périmètre remobilisé : autonomie non démontrée sur ce périmètre (ici la
+    source du transfert dépend d'une démonstration antérieure)."""
+    d = Dossier("C2")
+    z = d.observe("e0", "C2_A", "C2_B", name="z")
+    a = d.observe("e1", "C2_A", "C2_B", name="a")
+    b = d.observe("e2", "C2_A", "C2_B", name="b")
+    d.dependency(a, z, kind=kind)
+    d.transfer(a, b)
+    mastery = claim(d.assess(), "mastery")
+    assert mastery.mastery_assessment.autonomy.status == "not_demonstrated"
+    assert mastery.status == NOT
+    # Dépendance limitée à C2_B : le périmètre autonome restant (C2_A) n'est
+    # plus représentatif de C2.
+    d = Dossier("C2")
+    z = d.observe("e0", "C2_A", "C2_B", name="z")
+    a = d.observe("e1", "C2_A", "C2_B", name="a")
+    b = d.observe("e2", "C2_A", "C2_B", name="b")
+    d.dependency(a, z, kind=kind, caps=["C2_B"])
+    d.transfer(a, b)
+    assert claim(d.assess(), "mastery").mastery_assessment.autonomy.status == "not_demonstrated"
 
 
 def test_mastery_scope_must_remain_representative():
