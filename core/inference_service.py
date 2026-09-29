@@ -58,9 +58,10 @@ Invariants :
   historique, jamais une preuve. Le cache doit correspondre exactement à
   l'active (ou être absent sans active), jamais réparé.
 
-- input_fingerprint V1 (calculé, jamais fourni) : SHA-256 (hex minuscule)
-  du JSON canonique (sort_keys, séparateurs compacts, ensure_ascii=False,
-  UTF-8) de {input_schema_version: 1, user_id, competency_code,
+- input_fingerprint (calculé, jamais fourni), SHA-256 (hex minuscule) du
+  JSON canonique (sort_keys, séparateurs compacts, ensure_ascii=False,
+  UTF-8). V1 (T6-B / T6-B.1, _input_fingerprint_v1, conservé octet pour
+  octet) : {input_schema_version: 1, user_id, competency_code,
   pedagogical_taxonomy_release_id, longitudinal_input_fingerprint (celui du
   run T5, qui identifie déjà les observations, runs T3, événements et
   périmètres compatibles), dependency_version, transfer_version,
@@ -68,9 +69,16 @@ Invariants :
   revalidations (identité SÉMANTIQUE complète de chaque relation T5 : ni
   UUID de relation, ni created_at ; chaque collection triée par son JSON
   canonique), predecessor: null | {inference_run_id, current_stage,
-  tension_state, unresolved_revision_context, output_fingerprint}}. Même
-  dossier logique + même predecessor => même empreinte, même si le run T5
-  a été recalculé sous un autre UUID.
+  tension_state, unresolved_revision_context, output_fingerprint}}. V2
+  (T6-B.2, INPUT_SCHEMA_VERSION courant, _input_fingerprint_v2) : même
+  contenu avec input_schema_version: 2 et transition_causality: null (sans
+  predecessor) | _causality_fingerprint_payload (voir T6-B.2). Tout nouveau
+  run est V2 ; aucune colonne ne stocke la version : pour un run persisté,
+  elle est DÉTECTÉE par reproduction (V1 puis V2), jamais par date ; aucun
+  format ne reproduit l'empreinte => StaleInferenceInput pour un candidat,
+  InvalidInferenceState pour un predecessor historique. Même dossier
+  logique + même predecessor (+ mêmes faits causaux en V2) => même
+  empreinte, même si le run T5 a été recalculé sous un autre UUID.
 
 - inference_dedup_key V1 : même canonicalisation de {dedup_schema_version:
   1, input_fingerprint, positive_basis_version, confidence_profile_version,
@@ -117,13 +125,50 @@ Invariants :
   mutation amont historique après start ne change donc jamais l'entrée
   d'un candidat. Seule la cohérence est vérifiée :
   structure, rattachements, existence et appartenance des sources au parent
-  historique, input_fingerprint et output_fingerprint recalculés avec les
-  formats V1 inchangés ; écart => InvalidInferenceState, jamais réparé.
+  historique, input_fingerprint (V1 ou V2, voir T6-B.2) et
+  output_fingerprint (V1 inchangé) recalculés ; écart => InvalidInferenceState, jamais réparé.
   Construit par start (avant l'INSERT) et get_inference_context, en
   lecture seule ; complete ne l'utilise pas. Ce contexte n'entre PAS dans
   input_fingerprint ni dans inference_dedup_key : il développe une décision
   déjà engagée par output_fingerprint du predecessor, présent dans le
   payload predecessor.
+
+- Causalité de transition (T6-B.2) : T6-B.1 = décision predecessor
+  historique stable ; T6-B.2 = FAITS CAUSAUX entre le snapshot T5 du
+  predecessor et le snapshot courant (TransitionCausalityContext, None sans
+  predecessor) ; futur T6-C = interprétation pédagogique de ces faits.
+  Causalité factuelle != décision pédagogique : T6-B.2 ne choisit jamais
+  entre new_user_evidence, evidence_integrity_change et
+  pedagogical_reinterpretation, et ne déduit aucun stade d'un fait.
+  Fenêtre : previous_T5.started_at < fait <= current_T5.started_at (un run
+  T5 fige ses inputs à son start ; rien de postérieur à la capture
+  courante). Horodatages = ordre TECHNIQUE de capture uniquement (« ce
+  fait existait-il lors de la capture ? »), jamais fraîcheur, âge, durée,
+  décroissance, durabilité, maîtrise, confiance ni validation temporelle ;
+  ils classent les faits mais ne sont ni exposés ni hachés. Faits engagés
+  par V2 : new_user_event_ids (CognitiveEvent du dossier courant finalisés
+  dans la fenêtre ; finalized sans closed_at => InvalidInferenceState),
+  integrity_changes (observations du snapshot du predecessor invalidated
+  dans la fenêtre : seul signal d'intégrité, jamais une supersession, une
+  absence ni un changement de version), reevaluations (interprétation T3
+  EFFECTIVE de chaque événement ancien des deux snapshots, à chaque
+  capture : le run du snapshot s'il y contribue, sinon le dernier run
+  completed à cette date ; différente => un ReevaluationContext, y compris
+  observation -> zéro et zéro -> observation ; chaîne re_evaluates_run_id
+  impossible => InvalidInferenceState). Faits dérivés, exposés mais non
+  répétés dans le hash (déjà engagés par le dossier, le predecessor ou
+  inference_dedup_key) : deltas d'observations / d'événements (ensembles,
+  jamais des décomptes), deltas de relations par identité sémantique,
+  release, versions T5, spécification T6. Figé au start, reconstruit à
+  l'identique par get_inference_context et complete : une mutation
+  postérieure à current_T5.started_at ne le modifie jamais. Candidat
+  legacy V1 : transition_causality None (jamais une causalité non signée
+  reconstruite après coup). Le futur moteur T6-C V1 exigera
+  input_schema_version == 2 ; un contexte V1 reste lisible (compatibilité
+  technique). Réinterpréter volontairement un état V1 sous le nouveau
+  moteur passera par une version T6 explicite (ex.
+  inference_schema_version), jamais par un reroll implicite : le garde de
+  reroll est inchangé.
 
 - complete : reçoit uniquement run_id et une InferenceDecision (sans
   previous_stage, transition, tension_state ni empreinte : dérivés). Tout
@@ -188,25 +233,24 @@ Invariants :
   règles normales). Un current_stage au-dessus de la plus haute claim
   established n'est acceptable que comme maintien du stade précédent sous
   tension ouverte avec unresolved_revision_context non vide. Causes : T6-B
-  ne choisit jamais la cause ; il vérifie qu'elle a un support STRUCTUREL.
-  Nouvel événement utilisateur = CognitiveEvent du dossier courant dont
-  closed_at > started_at du run T5 parent du predecessor (un run T5 fige
-  ses inputs au start : un événement déjà finalisé à ce moment n'est jamais
-  une nouvelle démonstration, même s'il n'apparaît dans la compétence
-  qu'après une réévaluation T3). closed_at n'est qu'une frontière TECHNIQUE
-  causale, jamais une fraîcheur, un âge, une durabilité ni une validation
-  temporelle ; finalized sans closed_at => InvalidInferenceState.
-  new_user_evidence exige au moins un nouvel événement ;
-  pedagogical_reinterpretation exige une spécification T6 différente, OU
-  un dossier T5 logique (_dossier_payload) différent sans aucun nouvel
-  événement ; evidence_integrity_change exige qu'au moins une observation
-  du snapshot T5 du predecessor soit désormais invalidated (une simple
-  réévaluation n'en est pas une). Anti-oscillation : remonter après une
-  révision non résolue par new_user_evidence exige qu'au moins une ref
-  positive_basis ou transition cite une observation d'un nouvel événement
-  (directement ou comme extrémité d'une relation T5) : les anciennes
-  démonstrations, même réévaluées, ne provoquent jamais une remontée ;
-  T6-C reste seul juge de la résolution du motif.
+  ne choisit jamais la cause ; il vérifie qu'elle a un support STRUCTUREL,
+  lu pour un candidat V2 dans sa seule transition_causality figée (aucune
+  relecture live) : new_user_evidence exige au moins un new_user_event_id
+  ET au moins une ref de la décision (tout ref_role) citant une observation
+  d'un de ces événements, directement ou comme extrémité d'une relation
+  T5 ; evidence_integrity_change exige au moins un integrity_change (même
+  si l'observation invalidée a quitté le dossier) ;
+  pedagogical_reinterpretation exige une réévaluation, une release, une
+  version T5 ou une spécification T6 différente. Plusieurs familles
+  coexistent : chacune rend sa cause possible, aucune n'est exclusive.
+  Anti-oscillation : remonter après une révision non résolue par
+  new_user_evidence exige qu'au moins une ref positive_basis ou transition
+  atteigne un new_user_event_id (les anciennes démonstrations, même
+  réévaluées, ne provoquent jamais une remontée) ; garde STRUCTURELLE,
+  T6-C reste seul juge de la résolution du motif. Candidat legacy V1
+  seulement : validation T6-B / T6-B.1 inchangée (_check_legacy_causes :
+  nouvel événement = closed_at > started_at du T5 du predecessor, relu au
+  présent), jamais utilisée pour un V2.
 
 - Lecture validée (get_validated_user_competency_state) : cache -> active
   T6 -> parent T5 active -> observations valid -> runs T3 completed /
@@ -222,8 +266,11 @@ Invariants :
 - Anti-N+1 : SELECT groupés (parent, chaîne observations + runs T3 +
   événements en une jointure, chaque famille de relations, memberships,
   predecessor / cache ; contexte historique : parent, vue T5-C, relations,
-  run antérieur, claims, tensions + périmètres + définitions, refs) ;
-  aucune requête par ref, par tension ni par observation.
+  run antérieur, claims, tensions + périmètres + définitions, refs ;
+  causalité : observations des deux snapshots + runs T3 + événements en une
+  jointure, localisations T4, runs T3 des événements concernés, relations
+  du T5 précédent) ; aucune requête par ref, par tension, par observation
+  ni par événement.
 """
 import hashlib
 import json
@@ -262,6 +309,7 @@ from core.models import (
     CoreCapabilityDefinition,
     LongitudinalAssessmentInput,
     LongitudinalAssessmentRun,
+    ObservationCapability,
     ObservationDependency,
     ObservationEvaluationRun,
     ObservationRevalidation,
@@ -284,6 +332,7 @@ OBSOLETE = "obsolete"
 # Chaîne amont (vocabulaires T2 / T3 / T4, lus seulement).
 FINALIZED = "finalized"
 VALID = "valid"
+INVALIDATED = "invalidated"
 SUPPORTIVE = "supportive"
 LOCALIZED = "localized"
 RELEASE_ACTIVE = "active"
@@ -356,8 +405,19 @@ VERSION_FIELDS = ("positive_basis_version", "confidence_profile_version", "state
                   "validation_version", "inference_schema_version", "evaluator_version")
 SPECIFICATION_FIELDS = (*VERSION_FIELDS, "model_id", "prompt_spec_version")
 
-# Versions des formats canoniques possédés par T6-B.
-INPUT_SCHEMA_VERSION = 1
+# Spécification sémantique d'un run T3 (jamais trigger, horodatages ni UUID
+# techniques) et versions de règles d'un run T5, comparées par T6-B.2.
+T3_SPECIFICATION_FIELDS = ("normalization_version", "local_stage_version", "pedagogical_taxonomy_release_id",
+                           "capability_mapping_version", "evaluation_schema_version", "evaluator_version",
+                           "model_id", "prompt_spec_version")
+T5_VERSION_FIELDS = ("dependency_version", "transfer_version", "revalidation_version", "relation_schema_version")
+
+# Versions des formats canoniques possédés par T6-B. Tout nouveau run porte
+# un input_fingerprint V2 (T6-B.2) ; V1 reste reproductible pour l'historique.
+# Aucune colonne ne stocke la version : elle est détectée par recalcul.
+INPUT_SCHEMA_VERSION = 2
+LEGACY_INPUT_SCHEMA_VERSION = 1
+TRANSITION_CAUSALITY_SCHEMA_VERSION = 1
 DEDUP_SCHEMA_VERSION = 1
 OUTPUT_SCHEMA_VERSION = 1
 # Espace de noms de la clé consultative d'activation (distinct de « oryx-t5 »).
@@ -589,11 +649,120 @@ class PredecessorDecisionContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class IntegrityChangeContext:
+    """Observation qui APPARTENAIT au snapshot T5 du predecessor et a été
+    invalidée (T3-B) dans la fenêtre causale. Elle peut précisément avoir
+    disparu du dossier courant. capability_definition_ids = périmètre
+    sémantique de sa localisation T4 (vide si competency_only)."""
+    observation_id: uuid.UUID
+    event_id: uuid.UUID
+    evaluation_run_id: uuid.UUID
+    capability_definition_ids: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReevaluationContext:
+    """Changement de l'interprétation T3 EFFECTIVE d'un CognitiveEvent déjà
+    finalisé lors de la capture du snapshot du predecessor : run effectif à
+    cette capture (None si l'événement n'était encore interprété par aucun
+    run completed) -> run effectif à la capture du snapshot courant. Un seul
+    contexte par événement, jamais les runs intermédiaires. Les observations
+    sont celles de l'événement dans chaque snapshot T5 (vides si le run
+    effectif n'y contribuait pas : observation -> zéro, zéro ->
+    observation). replacement_re_evaluates_run_id = réévaluation déclarée
+    par le run de remplacement (None si T3-B ne l'a pas reçue) : jamais
+    inventée. changed_evaluation_specification_fields : champs de
+    spécification T3 différents (ordre alphabétique ; vide sans run
+    précédent)."""
+    event_id: uuid.UUID
+    previous_evaluation_run_id: uuid.UUID | None
+    replacement_evaluation_run_id: uuid.UUID
+    replacement_re_evaluates_run_id: uuid.UUID | None
+    previous_observation_ids: tuple
+    current_observation_ids: tuple
+    previous_capability_definition_ids: tuple
+    current_capability_definition_ids: tuple
+    changed_evaluation_specification_fields: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservationDeltaContext:
+    """Entrées / sorties entre le snapshot T5 du predecessor et le snapshot
+    courant (observations et événements). Des ensembles, jamais un décompte
+    ni un solde : aucun nombre ne devient un signal pédagogique."""
+    added_observation_ids: tuple
+    removed_observation_ids: tuple
+    retained_observation_ids: tuple
+    added_event_ids: tuple
+    removed_event_ids: tuple
+    retained_event_ids: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class RelationFamilyDeltaContext:
+    """Une famille de relations T5 comparée par identité SÉMANTIQUE
+    canonique (payload de input_fingerprint : ni UUID de relation, ni
+    created_at) ; valeurs immuables, triées par JSON canonique."""
+    added: tuple
+    removed: tuple
+    retained: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class RelationDeltaContext:
+    dependencies: RelationFamilyDeltaContext
+    transfers: RelationFamilyDeltaContext
+    revalidations: RelationFamilyDeltaContext
+
+
+@dataclass(frozen=True, kw_only=True)
+class VersionChangeContext:
+    """Un champ de version / spécification réellement modifié."""
+    field_name: str
+    previous_value: str | None
+    current_value: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TransitionCausalityContext:
+    """Faits causaux entre le snapshot T5 du predecessor et le snapshot
+    courant (T6-B.2), fenêtre previous_T5.started_at < fait <=
+    current_T5.started_at (un run T5 fige ses inputs à son start).
+    Horodatages = ordre TECHNIQUE de capture seulement, jamais fraîcheur,
+    âge, durée, durabilité ni validation temporelle ; aucun n'est exposé.
+
+    Faits, jamais une cause : plusieurs familles coexistent librement
+    (nouvelles démonstrations, corrections d'intégrité, réévaluations,
+    changements de release / versions) ; T6-C choisit la transition_cause,
+    T6-B ne vérifie que son support structurel. new_user_event_ids,
+    integrity_changes et reevaluations sont engagés par input_fingerprint V2
+    (_causality_fingerprint_payload) ; les deltas et changements de versions
+    dérivent de données déjà engagées (dossiers T5, predecessor,
+    spécification du candidat). Une mutation amont postérieure à
+    current_T5.started_at ne modifie jamais ce contexte."""
+    causality_schema_version: int
+    new_user_event_ids: tuple
+    integrity_changes: tuple
+    reevaluations: tuple
+    observation_delta: ObservationDeltaContext
+    relation_delta: RelationDeltaContext
+    taxonomy_release_changed: bool
+    previous_taxonomy_release_id: uuid.UUID
+    current_taxonomy_release_id: uuid.UUID
+    t5_version_changes: tuple
+    t6_specification_changes: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
 class InferenceContext:
     """Unique entrée autorisée du futur T6-C : le dossier T5 courant (vue
     T5-C), le predecessor (identité minimale + contenu décisionnel
-    historique, tous deux None pour une première inférence) et l'identité
-    figée du candidat."""
+    historique, tous deux None pour une première inférence), les faits
+    causaux entre les deux snapshots (transition_causality, None sans
+    predecessor ET pour un candidat legacy V1 : jamais une causalité
+    reconstruite après coup que son empreinte n'engage pas) et l'identité
+    figée du candidat. Le futur moteur T6-C V1 exigera input_schema_version
+    == 2 ; un contexte V1 reste lisible pour compatibilité technique."""
     run_id: uuid.UUID
     user_id: str
     competency_code: str
@@ -603,6 +772,8 @@ class InferenceContext:
     longitudinal_dossier: LongitudinalDossier
     predecessor: PredecessorSnapshot | None
     predecessor_decision_context: PredecessorDecisionContext | None
+    transition_causality: TransitionCausalityContext | None
+    input_schema_version: int
     input_fingerprint: str
     inference_dedup_key: str
     positive_basis_version: str
@@ -734,7 +905,27 @@ class _Inputs(NamedTuple):
     relations: _Relations
     predecessor: object
     snapshot: PredecessorSnapshot | None
+    input_schema_version: int
+    transition_causality: TransitionCausalityContext | None
     input_fingerprint: str
+
+
+class _InputIdentity(NamedTuple):
+    """Identité d'entrée reproduite : version détectée par recalcul (jamais
+    par date), causalité engagée (None en V1 ou sans predecessor)."""
+    input_schema_version: int
+    transition_causality: object
+    input_fingerprint: str
+
+
+class _CausalFacts(NamedTuple):
+    """Faits causaux engagés par input_fingerprint V2, plus les snapshots
+    ({observation_id: event_id}) dont dérivent les deltas (internes)."""
+    new_user_event_ids: tuple
+    integrity_changes: tuple
+    reevaluations: tuple
+    previous_snapshot: dict
+    current_snapshot: dict
 
 
 def _utcnow() -> datetime:
@@ -1061,9 +1252,69 @@ def _predecessor_payload(snapshot: PredecessorSnapshot | None, raw_context) -> d
     }
 
 
-def _input_fingerprint(dossier_payload: dict, predecessor_payload: dict | None) -> str:
-    return _canonical_sha256({"input_schema_version": INPUT_SCHEMA_VERSION, **dossier_payload,
+def _input_fingerprint_v1(dossier_payload: dict, predecessor_payload: dict | None) -> str:
+    """Format V1 (T6-B / T6-B.1), conservé octet pour octet pour reproduire
+    l'historique ; plus jamais utilisé pour un nouveau run."""
+    return _canonical_sha256({"input_schema_version": LEGACY_INPUT_SCHEMA_VERSION, **dossier_payload,
                               "predecessor": predecessor_payload})
+
+
+def _input_fingerprint_v2(dossier_payload: dict, predecessor_payload: dict | None,
+                          causality_payload: dict | None) -> str:
+    """Format V2 (T6-B.2) : V1 + transition_causality (null sans
+    predecessor)."""
+    return _canonical_sha256({"input_schema_version": INPUT_SCHEMA_VERSION, **dossier_payload,
+                              "predecessor": predecessor_payload, "transition_causality": causality_payload})
+
+
+def _causality_fingerprint_payload(causality) -> dict | None:
+    """Faits causaux que V1 ne permettait pas de reconstruire : nouvelles
+    démonstrations, corrections d'intégrité, réévaluations effectives
+    (identifiants, périmètres par capability_definition_id, noms de champs
+    T3 modifiés ; aucun horodatage). Les deltas d'observations / relations
+    et les changements de release / versions T5 / T6 dérivent de données
+    déjà engagées (payload du dossier, predecessor, inference_dedup_key) :
+    jamais répétés ici. Collections triées canoniquement."""
+    if causality is None:
+        return None
+    return {
+        "causality_schema_version": TRANSITION_CAUSALITY_SCHEMA_VERSION,
+        "new_user_event_ids": sorted(str(e) for e in causality.new_user_event_ids),
+        "integrity_changes": _canonical_list({
+            "observation_id": str(c.observation_id),
+            "event_id": str(c.event_id),
+            "evaluation_run_id": str(c.evaluation_run_id),
+            "capability_definition_ids": sorted(str(d) for d in c.capability_definition_ids),
+        } for c in causality.integrity_changes),
+        "reevaluations": _canonical_list({
+            "event_id": str(r.event_id),
+            "previous_evaluation_run_id": _str(r.previous_evaluation_run_id),
+            "replacement_evaluation_run_id": str(r.replacement_evaluation_run_id),
+            "replacement_re_evaluates_run_id": _str(r.replacement_re_evaluates_run_id),
+            "previous_observation_ids": sorted(str(o) for o in r.previous_observation_ids),
+            "current_observation_ids": sorted(str(o) for o in r.current_observation_ids),
+            "previous_capability_definition_ids": sorted(str(d) for d in r.previous_capability_definition_ids),
+            "current_capability_definition_ids": sorted(str(d) for d in r.current_capability_definition_ids),
+            "changed_evaluation_specification_fields": sorted(r.changed_evaluation_specification_fields),
+        } for r in causality.reevaluations),
+    }
+
+
+def _detect_input_identity(stored: str, dossier_payload: dict, predecessor_payload: dict | None,
+                           build_causality) -> _InputIdentity | None:
+    """Version d'un input_fingerprint PERSISTÉ, par reproduction
+    cryptographique uniquement (jamais par date) : V1 d'abord (simple
+    recalcul : un candidat legacy n'est jamais soumis à une causalité qu'il
+    n'a pas signée), puis V2 avec la causalité reconstruite. None si aucun
+    format ne reproduit l'empreinte ; l'appelant choisit l'erreur."""
+    legacy = _input_fingerprint_v1(dossier_payload, predecessor_payload)
+    if stored == legacy:
+        return _InputIdentity(LEGACY_INPUT_SCHEMA_VERSION, None, legacy)
+    causality = build_causality()
+    current = _input_fingerprint_v2(dossier_payload, predecessor_payload, _causality_fingerprint_payload(causality))
+    if stored == current:
+        return _InputIdentity(INPUT_SCHEMA_VERSION, causality, current)
+    return None
 
 
 def _inference_dedup_key(input_fingerprint: str, specification: dict) -> str:
@@ -1426,8 +1677,10 @@ def _require_pristine_candidate(db, run) -> None:
 def _verified_inputs(db, run, *, lock: bool) -> _Inputs:
     """Entrée d'un candidat existant, revérifiée intégralement (sous verrous
     partagés si lock) : parent T5 courant, chaîne amont, dossier T5-C,
-    predecessor capturé, input_fingerprint et inference_dedup_key
-    recalculés. Jamais réécrits."""
+    predecessor capturé, input_fingerprint (V1 legacy, ou V2 avec la
+    causalité de transition reconstruite) et inference_dedup_key recalculés.
+    Aucun format ne reproduit l'empreinte => StaleInferenceInput. Jamais
+    réécrits."""
     parent = _parent_row(db, run.longitudinal_assessment_run_id, lock=lock)
     if parent is None:
         raise InvalidInferenceState(f"run T5 parent {run.longitudinal_assessment_run_id} introuvable")
@@ -1450,14 +1703,25 @@ def _verified_inputs(db, run, *, lock: bool) -> _Inputs:
                 run.user_id, run.competency_code) or predecessor.execution_status != COMPLETED:
             raise InvalidInferenceState(f"predecessor {run.predecessor_inference_run_id} du candidat incohérent")
         snapshot = _snapshot(db, predecessor)
-    fingerprint = _input_fingerprint(_dossier_payload(parent, relations),
-                                     _predecessor_payload(snapshot, None if predecessor is None
-                                                          else predecessor.unresolved_revision_context))
-    if fingerprint != run.input_fingerprint:
+
+    def causality():
+        if predecessor is None:
+            return None
+        return _build_transition_causality(
+            db, previous_parent=_predecessor_parent(db, predecessor), current_parent=parent,
+            current_relations=relations, previous_specification=_specification(predecessor),
+            current_specification=_specification(run))
+
+    identity = _detect_input_identity(
+        run.input_fingerprint, _dossier_payload(parent, relations),
+        _predecessor_payload(snapshot, None if predecessor is None else predecessor.unresolved_revision_context),
+        causality)
+    if identity is None:
         raise StaleInferenceInput(f"{run.id} : input_fingerprint différent de l'entrée courante")
-    if _inference_dedup_key(fingerprint, _specification(run)) != run.inference_dedup_key:
+    if _inference_dedup_key(identity.input_fingerprint, _specification(run)) != run.inference_dedup_key:
         raise InvalidInferenceState(f"{run.id} : inference_dedup_key incohérente avec l'entrée et les versions")
-    return _Inputs(parent, dossier, relations, predecessor, snapshot, fingerprint)
+    return _Inputs(parent, dossier, relations, predecessor, snapshot, identity.input_schema_version,
+                   identity.transition_causality, identity.input_fingerprint)
 
 
 def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext | None) -> InferenceContext:
@@ -1466,6 +1730,10 @@ def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext 
             (snapshot.inference_run_id, snapshot.longitudinal_assessment_run_id)
             != (decision_context.inference_run_id, decision_context.longitudinal_assessment_run_id)):
         raise InvalidInferenceState(f"{run.id} : predecessor et predecessor_decision_context divergents")
+    if (inputs.transition_causality is not None) != (
+            snapshot is not None and inputs.input_schema_version == INPUT_SCHEMA_VERSION):
+        raise InvalidInferenceState(f"{run.id} : transition_causality incohérente avec le predecessor et"
+                                    f" input_schema_version {inputs.input_schema_version}")
     return InferenceContext(
         run_id=run.id,
         user_id=run.user_id,
@@ -1476,6 +1744,8 @@ def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext 
         longitudinal_dossier=inputs.dossier,
         predecessor=snapshot,
         predecessor_decision_context=decision_context,
+        transition_causality=inputs.transition_causality,
+        input_schema_version=inputs.input_schema_version,
         input_fingerprint=run.input_fingerprint,
         inference_dedup_key=run.inference_dedup_key,
         **{name: getattr(run, name) for name in SPECIFICATION_FIELDS},
@@ -1531,9 +1801,12 @@ def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionC
     (sorties complètes, exactement quatre claims, rattachements, sources
     existantes et appartenant au parent historique, memberships de sa
     release et de sa compétence), puis par recalcul de input_fingerprint
-    depuis ce parent et de output_fingerprint (formats V1 inchangés) depuis
-    les lignes persistées. Tout écart => InvalidInferenceState (historique
-    corrompu, jamais StaleInferenceInput) ; jamais réparé ni réécrit."""
+    depuis ce parent (V1 legacy ou V2 : un predecessor V1 reste accepté ; en
+    V2, ses faits causaux sont reconstruits entre le snapshot de son propre
+    predecessor et son parent, jamais au-delà) et de output_fingerprint
+    (format V1 inchangé) depuis les lignes persistées. Tout écart =>
+    InvalidInferenceState (historique corrompu, jamais StaleInferenceInput) ;
+    jamais réparé ni réécrit."""
     def corrupt(message):
         return InvalidInferenceState(f"predecessor {predecessor.id} : historique corrompu ({message})")
 
@@ -1560,15 +1833,31 @@ def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionC
         except LongitudinalViewError as exc:
             raise corrupt(f"dossier T5 {parent.id} non reconstructible : {exc}") from exc
         relations = _relations(db, parent.id)
-        earlier = earlier_snapshot = None
+        earlier = earlier_snapshot = earlier_parent = None
         if predecessor.predecessor_inference_run_id is not None:
             earlier = _run_row(db, predecessor.predecessor_inference_run_id)
             if earlier is None:
                 raise corrupt(f"run T6 antérieur {predecessor.predecessor_inference_run_id} introuvable")
             earlier_snapshot = _snapshot(db, earlier)
-        if _input_fingerprint(_dossier_payload(parent, relations), _predecessor_payload(
-                earlier_snapshot, None if earlier is None else earlier.unresolved_revision_context)) \
-                != predecessor.input_fingerprint:
+            earlier_parent = _parent_row(db, earlier.longitudinal_assessment_run_id, lock=False)
+            if earlier_parent is None:
+                raise corrupt(f"run T5 {earlier.longitudinal_assessment_run_id} du run T6 antérieur introuvable")
+
+        def historical_causality():
+            # Predecessor V2 : ses faits causaux entre le snapshot de SON
+            # predecessor et SON parent T5 (rien de postérieur à ce parent),
+            # sans reconstruire le contexte riche du run antérieur.
+            if earlier_parent is None:
+                return None
+            try:
+                return _causal_facts(db, earlier_parent, parent)
+            except InvalidInferenceState as exc:
+                raise corrupt(f"causalité de transition non reconstructible : {exc}") from exc
+
+        if _detect_input_identity(predecessor.input_fingerprint, _dossier_payload(parent, relations),
+                                  _predecessor_payload(earlier_snapshot, None if earlier is None
+                                                       else earlier.unresolved_revision_context),
+                                  historical_causality) is None:
             raise corrupt(f"input_fingerprint non reproductible depuis le run T5 {parent.id}")
 
         claim_rows = db.execute(
@@ -1721,6 +2010,258 @@ def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionC
         run_basis_refs=_historical_ref_contexts(r for r in refs if r.claim_stage is None and r.tension_key is None),
         validation_needs=_freeze(predecessor.validation_needs),
         state_decision_summary=predecessor.state_decision_summary,
+    )
+
+
+# --------------------------------------------------------------------------
+# Causalité de transition (T6-B.2)
+# --------------------------------------------------------------------------
+
+def _predecessor_parent(db, predecessor):
+    parent = _parent_row(db, predecessor.longitudinal_assessment_run_id, lock=False)
+    if parent is None:
+        raise InvalidInferenceState(f"predecessor {predecessor.id} : run T5 parent introuvable")
+    return parent
+
+
+def _sorted_ids(ids) -> tuple:
+    return tuple(sorted(ids, key=str))
+
+
+def _effective_run(event_id, anchored: set, event_runs: list, boundary, runs: dict, label: str):
+    """Interprétation T3 EFFECTIVE d'un événement à la capture d'un snapshot
+    T5 (boundary = son started_at). Si l'événement contribue au snapshot, le
+    snapshot fait foi : son unique run T3, completed au plus tard à la
+    capture. Sinon : le run completed le plus récemment complété au plus tard
+    à la capture (compléter un run T3 supersede l'active de l'événement ;
+    jamais le interpretation_status ACTUEL), ou None. Incohérence =>
+    InvalidInferenceState."""
+    if len(anchored) > 1:
+        raise InvalidInferenceState(f"événement {event_id} : plusieurs runs T3 dans le snapshot {label}")
+    if anchored:
+        run = runs.get(next(iter(anchored)))
+        if run is None or run.execution_status != COMPLETED or run.completed_at is None \
+                or run.completed_at > boundary:
+            raise InvalidInferenceState(f"événement {event_id} : run T3 du snapshot {label} non completed avant"
+                                        " sa capture")
+        return run
+    completed = [r for r in event_runs
+                 if r.execution_status == COMPLETED and r.completed_at is not None and r.completed_at <= boundary]
+    if not completed:
+        return None
+    latest = max(r.completed_at for r in completed)
+    chosen = [r for r in completed if r.completed_at == latest]
+    if len(chosen) > 1:
+        raise InvalidInferenceState(f"événement {event_id} : interprétation T3 effective ambiguë au snapshot {label}")
+    return chosen[0]
+
+
+def _check_reevaluation_chain(run, runs: dict) -> None:
+    """Chaîne re_evaluates_run_id du run de remplacement : chaque cible est
+    un run du MÊME événement, existant avant le start du run qui la
+    réévalue, sans cycle. Chaîne impossible => InvalidInferenceState."""
+    seen = {run.id}
+    while run.re_evaluates_run_id is not None:
+        target = runs.get(run.re_evaluates_run_id)
+        if target is None or target.event_id != run.event_id:
+            raise InvalidInferenceState(f"run T3 {run.id} : re_evaluates_run_id {run.re_evaluates_run_id} hors de"
+                                        f" l'événement {run.event_id}")
+        if target.id in seen or target.created_at > run.started_at:
+            raise InvalidInferenceState(f"run T3 {run.id} : chaîne de réévaluation impossible"
+                                        f" ({run.re_evaluates_run_id})")
+        seen.add(target.id)
+        run = target
+
+
+def _causal_facts(db, previous_parent, current_parent) -> _CausalFacts:
+    """Faits causaux entre deux snapshots T5, fenêtre previous.started_at <
+    fait <= current.started_at, trois SELECT groupés (observations des deux
+    snapshots + runs T3 + événements en une jointure ; localisations T4 ;
+    runs T3 de ces événements), aucune requête par observation ni par
+    événement.
+
+    - Nouvel événement : CognitiveEvent contribuant au snapshot courant et
+      finalisé dans la fenêtre. Un événement déjà finalisé à la capture
+      précédente n'est jamais nouveau, même s'il n'entre dans la compétence
+      qu'après une réévaluation.
+    - Correction d'intégrité : observation du snapshot précédent
+      invalidated avec invalidated_at dans la fenêtre (seul signal : ni
+      supersession T3, ni absence, ni changement de release ou de version).
+    - Réévaluation : pour chaque événement ancien d'un des deux snapshots,
+      interprétation T3 effective à chaque capture (_effective_run) ;
+      différente => UN ReevaluationContext, même si l'événement ne contribue
+      plus (observation -> zéro) ou pas encore (zéro -> observation) à la
+      compétence.
+
+    Horodatages : ordre TECHNIQUE de capture uniquement, jamais exposés ni
+    engagés. finalized sans closed_at, événement finalisé après la capture
+    du snapshot qui le contient, chaîne T3 impossible =>
+    InvalidInferenceState (aucune temporalité inventée)."""
+    parents = (previous_parent.id, current_parent.id)
+    boundaries = {previous_parent.id: previous_parent.started_at, current_parent.id: current_parent.started_at}
+    rows = db.execute(
+        select(LongitudinalAssessmentInput.run_id.label("parent_id"), PedagogicalObservation.id,
+               PedagogicalObservation.evaluation_run_id, PedagogicalObservation.competency_code,
+               PedagogicalObservation.capability_localization, PedagogicalObservation.integrity_status,
+               PedagogicalObservation.invalidated_at, ObservationEvaluationRun.event_id,
+               ObservationEvaluationRun.pedagogical_taxonomy_release_id.label("source_release_id"),
+               CognitiveEvent.closed_at)
+        .select_from(LongitudinalAssessmentInput)
+        .join(PedagogicalObservation, PedagogicalObservation.id == LongitudinalAssessmentInput.observation_id)
+        .join(ObservationEvaluationRun, ObservationEvaluationRun.id == PedagogicalObservation.evaluation_run_id)
+        .join(CognitiveEvent, CognitiveEvent.id == ObservationEvaluationRun.event_id)
+        .where(LongitudinalAssessmentInput.run_id.in_(parents))
+    ).all()
+    observations = {row.id: row for row in rows}
+    mappings = db.execute(
+        select(ObservationCapability.observation_id, CapabilityTaxonomyMembership.taxonomy_release_id,
+               CoreCapabilityDefinition.id.label("definition_id"), CoreCapabilityDefinition.competency_code)
+        .join(CapabilityTaxonomyMembership,
+              CapabilityTaxonomyMembership.id == ObservationCapability.capability_membership_id)
+        .join(CoreCapabilityDefinition,
+              CoreCapabilityDefinition.id == CapabilityTaxonomyMembership.capability_definition_id)
+        .where(ObservationCapability.observation_id.in_(_sorted_ids(observations)))
+    ).all()
+    run_rows = db.execute(
+        select(ObservationEvaluationRun.id, ObservationEvaluationRun.event_id,
+               ObservationEvaluationRun.execution_status, ObservationEvaluationRun.re_evaluates_run_id,
+               ObservationEvaluationRun.created_at, ObservationEvaluationRun.started_at,
+               ObservationEvaluationRun.completed_at,
+               *(getattr(ObservationEvaluationRun, name) for name in T3_SPECIFICATION_FIELDS))
+        .where(ObservationEvaluationRun.event_id.in_(_sorted_ids({row.event_id for row in rows})))
+    ).all()
+
+    # Périmètre sémantique : localisation T4 de l'observation (release de SON
+    # run T3, même compétence), par capability_definition_id.
+    definitions = {}
+    for row in mappings:
+        observation = observations[row.observation_id]
+        if (observation.capability_localization == LOCALIZED and row.taxonomy_release_id == observation.source_release_id
+                and row.competency_code == observation.competency_code):
+            definitions.setdefault(row.observation_id, set()).add(row.definition_id)
+    snapshots = {parent_id: {} for parent_id in parents}
+    anchored = {parent_id: {} for parent_id in parents}
+    for row in rows:
+        snapshots[row.parent_id][row.id] = row.event_id
+        anchored[row.parent_id].setdefault(row.event_id, set()).add(row.evaluation_run_id)
+    undated = sorted({str(row.event_id) for row in rows if row.closed_at is None})
+    if undated:
+        raise InvalidInferenceState(f"CognitiveEvent finalized sans closed_at : {undated}")
+    closed = {row.event_id: row.closed_at for row in rows}
+    for parent_id in parents:
+        late = sorted({str(e) for e in snapshots[parent_id].values() if closed[e] > boundaries[parent_id]})
+        if late:
+            raise InvalidInferenceState(f"snapshot T5 {parent_id} : CognitiveEvent finalisé après sa capture {late}")
+    previous, current = snapshots[previous_parent.id], snapshots[current_parent.id]
+    lower, upper = previous_parent.started_at, current_parent.started_at
+
+    new_events = {e for e in current.values() if closed[e] > lower}
+    integrity = [IntegrityChangeContext(
+        observation_id=observation_id,
+        event_id=event_id,
+        evaluation_run_id=observations[observation_id].evaluation_run_id,
+        capability_definition_ids=_sorted_ids(definitions.get(observation_id, ())),
+    ) for observation_id, event_id in previous.items()
+        if observations[observation_id].integrity_status == INVALIDATED
+        and observations[observation_id].invalidated_at is not None
+        and lower < observations[observation_id].invalidated_at <= upper]
+
+    runs = {row.id: row for row in run_rows}
+    runs_by_event = {}
+    for row in run_rows:
+        runs_by_event.setdefault(row.event_id, []).append(row)
+    reevaluations = []
+    for event_id in _sorted_ids((set(previous.values()) | set(current.values())) - new_events):
+        before = _effective_run(event_id, anchored[previous_parent.id].get(event_id, set()),
+                                runs_by_event.get(event_id, []), lower, runs, "précédent")
+        after = _effective_run(event_id, anchored[current_parent.id].get(event_id, set()),
+                               runs_by_event.get(event_id, []), upper, runs, "courant")
+        if (None if before is None else before.id) == (None if after is None else after.id):
+            continue
+        # Un run completed ne redevient jamais non effectif : l'interprétation
+        # courante est strictement postérieure à la précédente.
+        if after is None or before is not None and after.completed_at <= before.completed_at:
+            raise InvalidInferenceState(f"événement {event_id} : interprétation T3 effective antérieure à celle du"
+                                        " snapshot précédent")
+        _check_reevaluation_chain(after, runs)
+        previous_observations = _sorted_ids(o for o, e in previous.items() if e == event_id)
+        current_observations = _sorted_ids(o for o, e in current.items() if e == event_id)
+        reevaluations.append(ReevaluationContext(
+            event_id=event_id,
+            previous_evaluation_run_id=None if before is None else before.id,
+            replacement_evaluation_run_id=after.id,
+            replacement_re_evaluates_run_id=after.re_evaluates_run_id,
+            previous_observation_ids=previous_observations,
+            current_observation_ids=current_observations,
+            previous_capability_definition_ids=_sorted_ids(
+                {d for o in previous_observations for d in definitions.get(o, ())}),
+            current_capability_definition_ids=_sorted_ids(
+                {d for o in current_observations for d in definitions.get(o, ())}),
+            changed_evaluation_specification_fields=() if before is None else tuple(sorted(
+                name for name in T3_SPECIFICATION_FIELDS if getattr(before, name) != getattr(after, name))),
+        ))
+    return _CausalFacts(_sorted_ids(new_events), tuple(sorted(integrity, key=lambda c: str(c.observation_id))),
+                        tuple(reevaluations), previous, current)
+
+
+def _id_delta(previous, current) -> tuple:
+    """(ajoutés, retirés, conservés), chaque ensemble trié par UUID."""
+    previous, current = set(previous), set(current)
+    return _sorted_ids(current - previous), _sorted_ids(previous - current), _sorted_ids(previous & current)
+
+
+def _relation_family_delta(previous: list, current: list) -> RelationFamilyDeltaContext:
+    previous = {_canonical_json(item): item for item in previous}
+    current = {_canonical_json(item): item for item in current}
+
+    def pick(keys, source):
+        return tuple(_freeze(source[key]) for key in sorted(keys))
+
+    return RelationFamilyDeltaContext(added=pick(current.keys() - previous.keys(), current),
+                                      removed=pick(previous.keys() - current.keys(), previous),
+                                      retained=pick(previous.keys() & current.keys(), current))
+
+
+def _version_changes(previous: Mapping, current: Mapping, names) -> tuple:
+    return tuple(VersionChangeContext(field_name=name, previous_value=previous[name], current_value=current[name])
+                 for name in sorted(names) if previous[name] != current[name])
+
+
+def _build_transition_causality(db, *, previous_parent, current_parent, current_relations: _Relations,
+                                previous_specification: Mapping,
+                                current_specification: Mapping) -> TransitionCausalityContext:
+    """TransitionCausalityContext complet d'un candidat : faits causaux
+    (_causal_facts) + deltas DÉRIVÉS des deux snapshots T5 (observations,
+    événements, relations par identité sémantique), de leurs release /
+    versions T5 et des spécifications T6 (predecessor vs candidat : au
+    start, le mapping reçu ; à la reprise, le run persisté). Lecture seule ;
+    ne choisit jamais de cause."""
+    facts = _causal_facts(db, previous_parent, current_parent)
+    previous_relations = current_relations if previous_parent.id == current_parent.id else _relations(
+        db, previous_parent.id)
+    observations = _id_delta(facts.previous_snapshot, facts.current_snapshot)
+    events = _id_delta(facts.previous_snapshot.values(), facts.current_snapshot.values())
+    return TransitionCausalityContext(
+        causality_schema_version=TRANSITION_CAUSALITY_SCHEMA_VERSION,
+        new_user_event_ids=facts.new_user_event_ids,
+        integrity_changes=facts.integrity_changes,
+        reevaluations=facts.reevaluations,
+        observation_delta=ObservationDeltaContext(
+            added_observation_ids=observations[0], removed_observation_ids=observations[1],
+            retained_observation_ids=observations[2], added_event_ids=events[0], removed_event_ids=events[1],
+            retained_event_ids=events[2]),
+        relation_delta=RelationDeltaContext(**{
+            family: _relation_family_delta(previous_relations.payload[family], current_relations.payload[family])
+            for family in ("dependencies", "transfers", "revalidations")}),
+        taxonomy_release_changed=(previous_parent.pedagogical_taxonomy_release_id
+                                  != current_parent.pedagogical_taxonomy_release_id),
+        previous_taxonomy_release_id=previous_parent.pedagogical_taxonomy_release_id,
+        current_taxonomy_release_id=current_parent.pedagogical_taxonomy_release_id,
+        t5_version_changes=_version_changes({n: getattr(previous_parent, n) for n in T5_VERSION_FIELDS},
+                                            {n: getattr(current_parent, n) for n in T5_VERSION_FIELDS},
+                                            T5_VERSION_FIELDS),
+        t6_specification_changes=_version_changes(previous_specification, current_specification,
+                                                  SPECIFICATION_FIELDS),
     )
 
 
@@ -1878,45 +2419,110 @@ def _check_decision(db, run, inputs: _Inputs, predecessor, decision: _Decision) 
         raise error(f"transition {transition} sans ref transition")
 
     if predecessor is not None:
-        previous_parent = _parent_row(db, predecessor.longitudinal_assessment_run_id, lock=False)
-        if previous_parent is None:
-            raise InvalidInferenceState(f"predecessor {predecessor.id} : run T5 parent introuvable")
-        new_user_events = _new_user_events(observations, previous_parent)
-        if decision.cause == NEW_USER_EVIDENCE and not new_user_events:
-            raise error(f"{NEW_USER_EVIDENCE} sans aucun CognitiveEvent finalisé après la capture du dossier du"
-                        " predecessor (une réévaluation, même d'un événement jusqu'ici absent de cette"
-                        " compétence, n'est jamais une nouvelle démonstration utilisateur)")
-        if decision.cause == PEDAGOGICAL_REINTERPRETATION and _specification(run) == _specification(predecessor):
-            # Sans changement de spécification T6 : seulement si le dossier
-            # logique a changé SANS nouvelle démonstration (réévaluation
-            # T3 / T4 / T5 d'événements déjà capturés).
-            if new_user_events or _dossier_payload(previous_parent, _relations(db, previous_parent.id)) == \
-                    _dossier_payload(inputs.parent, inputs.relations):
-                raise error(f"{PEDAGOGICAL_REINTERPRETATION} sans spécification T6 différente ni dossier"
-                            " réinterprété sans nouvelle démonstration utilisateur")
-        if decision.cause == EVIDENCE_INTEGRITY_CHANGE:
-            invalidated = db.execute(
-                select(func.count()).select_from(LongitudinalAssessmentInput)
-                .join(PedagogicalObservation, PedagogicalObservation.id == LongitudinalAssessmentInput.observation_id)
-                .where(LongitudinalAssessmentInput.run_id == previous_parent.id,
-                       PedagogicalObservation.integrity_status != VALID)
-            ).scalar_one()
-            if not invalidated:
-                raise error(f"{EVIDENCE_INTEGRITY_CHANGE} sans aucune observation du dossier du predecessor"
-                            " invalidée (une simple réévaluation relève de pedagogical_reinterpretation)")
-        unresolved = (predecessor.unresolved_revision_context is not None
-                      or predecessor.tension_state == TENSION_OPEN or predecessor.transition == REVISED_DOWN)
-        if unresolved and transition == UPGRADED and decision.cause == NEW_USER_EVIDENCE:
-            cited = set()
-            for ref in decision.refs:
-                if ref.role in REBOUND_ROLES:
-                    cited |= ({ref.source_id} if ref.source_kind == SOURCE_OBSERVATION
-                              else inputs.relations.endpoints[(ref.source_kind, ref.source_id)])
-            if not {observations[o].event_id for o in cited if o in observations} & new_user_events:
-                raise error("remontée après une révision non résolue : aucune ref positive_basis / transition ne"
-                            " cite une observation d'un CognitiveEvent nouveau (finalisé après la capture du dossier du"
-                            " predecessor ; les anciennes démonstrations, même réévaluées, ne suffisent jamais)")
+        if inputs.input_schema_version == LEGACY_INPUT_SCHEMA_VERSION:
+            _check_legacy_causes(db, run, inputs, predecessor, decision, transition, observations)
+        else:
+            _check_transition_causes(inputs, predecessor, decision, transition, observations)
     return previous_stage, transition, tension_state, membership_definitions
+
+
+def _check_legacy_causes(db, run, inputs: _Inputs, predecessor, decision: _Decision, transition,
+                         observations: dict) -> None:
+    """Chemin de COMPATIBILITÉ des seuls candidats V1 (créés avant T6-B.2),
+    inchangé : causes et anti-oscillation relues au présent, comme
+    lorsqu'ils ont été démarrés. Jamais utilisé pour un candidat V2."""
+    error = InvalidInferenceDecision
+    previous_parent = _parent_row(db, predecessor.longitudinal_assessment_run_id, lock=False)
+    if previous_parent is None:
+        raise InvalidInferenceState(f"predecessor {predecessor.id} : run T5 parent introuvable")
+    new_user_events = _new_user_events(observations, previous_parent)
+    if decision.cause == NEW_USER_EVIDENCE and not new_user_events:
+        raise error(f"{NEW_USER_EVIDENCE} sans aucun CognitiveEvent finalisé après la capture du dossier du"
+                    " predecessor (une réévaluation, même d'un événement jusqu'ici absent de cette"
+                    " compétence, n'est jamais une nouvelle démonstration utilisateur)")
+    if decision.cause == PEDAGOGICAL_REINTERPRETATION and _specification(run) == _specification(predecessor):
+        # Sans changement de spécification T6 : seulement si le dossier
+        # logique a changé SANS nouvelle démonstration (réévaluation
+        # T3 / T4 / T5 d'événements déjà capturés).
+        if new_user_events or _dossier_payload(previous_parent, _relations(db, previous_parent.id)) == \
+                _dossier_payload(inputs.parent, inputs.relations):
+            raise error(f"{PEDAGOGICAL_REINTERPRETATION} sans spécification T6 différente ni dossier"
+                        " réinterprété sans nouvelle démonstration utilisateur")
+    if decision.cause == EVIDENCE_INTEGRITY_CHANGE:
+        invalidated = db.execute(
+            select(func.count()).select_from(LongitudinalAssessmentInput)
+            .join(PedagogicalObservation, PedagogicalObservation.id == LongitudinalAssessmentInput.observation_id)
+            .where(LongitudinalAssessmentInput.run_id == previous_parent.id,
+                   PedagogicalObservation.integrity_status != VALID)
+        ).scalar_one()
+        if not invalidated:
+            raise error(f"{EVIDENCE_INTEGRITY_CHANGE} sans aucune observation du dossier du predecessor"
+                        " invalidée (une simple réévaluation relève de pedagogical_reinterpretation)")
+    unresolved = (predecessor.unresolved_revision_context is not None
+                  or predecessor.tension_state == TENSION_OPEN or predecessor.transition == REVISED_DOWN)
+    if unresolved and transition == UPGRADED and decision.cause == NEW_USER_EVIDENCE:
+        cited = set()
+        for ref in decision.refs:
+            if ref.role in REBOUND_ROLES:
+                cited |= ({ref.source_id} if ref.source_kind == SOURCE_OBSERVATION
+                          else inputs.relations.endpoints[(ref.source_kind, ref.source_id)])
+        if not {observations[o].event_id for o in cited if o in observations} & new_user_events:
+            raise error("remontée après une révision non résolue : aucune ref positive_basis / transition ne"
+                        " cite une observation d'un CognitiveEvent nouveau (finalisé après la capture du dossier du"
+                        " predecessor ; les anciennes démonstrations, même réévaluées, ne suffisent jamais)")
+
+
+def _cited_events(decision: _Decision, inputs: _Inputs, observations: dict, roles) -> set:
+    """CognitiveEvent atteints par les refs de ces rôles : observation citée,
+    ou extrémité d'une relation T5 citée."""
+    cited = set()
+    for ref in decision.refs:
+        if ref.role in roles:
+            cited |= ({ref.source_id} if ref.source_kind == SOURCE_OBSERVATION
+                      else inputs.relations.endpoints[(ref.source_kind, ref.source_id)])
+    return {observations[o].event_id for o in cited if o in observations}
+
+
+def _check_transition_causes(inputs: _Inputs, predecessor, decision: _Decision, transition,
+                             observations: dict) -> None:
+    """Candidat V2 : support STRUCTUREL de la cause déclarée par T6-C, lu
+    UNIQUEMENT dans la causalité figée et engagée par input_fingerprint V2
+    (aucune relecture live). Plusieurs familles de faits peuvent coexister :
+    chacune rend sa cause possible, aucune n'est exclusive ; T6-B ne choisit
+    jamais et ne juge jamais si le fait explique pédagogiquement le
+    changement (T6-C)."""
+    error = InvalidInferenceDecision
+    causality = inputs.transition_causality
+    if causality is None:
+        raise InvalidInferenceState(f"candidat V2 : predecessor {predecessor.id} sans transition_causality")
+    new_events = set(causality.new_user_event_ids)
+    if decision.cause == NEW_USER_EVIDENCE:
+        if not new_events:
+            raise error(f"{NEW_USER_EVIDENCE} sans aucun CognitiveEvent finalisé dans la fenêtre causale (après la"
+                        " capture du dossier du predecessor, au plus tard à celle du dossier courant) : une"
+                        " réévaluation, même d'un événement jusqu'ici absent de cette compétence, n'est jamais une"
+                        " nouvelle démonstration utilisateur")
+        # Toute ref légale peut documenter la décision, pas seulement transition.
+        if not _cited_events(decision, inputs, observations, REF_ROLES) & new_events:
+            raise error(f"{NEW_USER_EVIDENCE} : aucune ref de la décision ne cite une observation d'un CognitiveEvent"
+                        " nouveau, directement ou comme extrémité d'une relation T5 (les anciennes démonstrations,"
+                        " même réévaluées, ne suffisent jamais)")
+    if decision.cause == EVIDENCE_INTEGRITY_CHANGE and not causality.integrity_changes:
+        # L'observation invalidée peut avoir disparu du dossier courant.
+        raise error(f"{EVIDENCE_INTEGRITY_CHANGE} sans aucune observation du dossier du predecessor invalidée dans la"
+                    " fenêtre causale (une simple réévaluation relève de pedagogical_reinterpretation)")
+    if decision.cause == PEDAGOGICAL_REINTERPRETATION and not (
+            causality.reevaluations or causality.taxonomy_release_changed or causality.t5_version_changes
+            or causality.t6_specification_changes):
+        raise error(f"{PEDAGOGICAL_REINTERPRETATION} sans réévaluation T3 effective, sans release ni version T5"
+                    " différente et sans spécification T6 différente (aucune évolution contrôlée)")
+    unresolved = (predecessor.unresolved_revision_context is not None
+                  or predecessor.tension_state == TENSION_OPEN or predecessor.transition == REVISED_DOWN)
+    if unresolved and transition == UPGRADED and decision.cause == NEW_USER_EVIDENCE:
+        if not _cited_events(decision, inputs, observations, REBOUND_ROLES) & new_events:
+            raise error("remontée après une révision non résolue : aucune ref positive_basis / transition ne cite une"
+                        " observation d'un CognitiveEvent nouveau de la fenêtre causale (les anciennes"
+                        " démonstrations, même réévaluées, ne suffisent jamais)")
 
 
 # --------------------------------------------------------------------------
@@ -2033,7 +2639,9 @@ def start_competency_inference(
     competency_code, predecessor, input_fingerprint et inference_dedup_key
     sont dérivés ; aucune sortie ni ligne enfant n'est créée. Le contenu
     historique du predecessor est reconstruit et vérifié AVANT l'INSERT
-    (historique corrompu => InvalidInferenceState, aucun candidat).
+    (historique corrompu => InvalidInferenceState, aucun candidat), puis la
+    causalité de transition est figée et input_fingerprint calculé au
+    format V2 (INPUT_SCHEMA_VERSION) : aucun nouveau run V1.
 
     Déduplication : inference_dedup_key déjà présente, ou réinterprétation à
     l'identique (même dossier logique, mêmes spécifications) du dossier de
@@ -2071,15 +2679,21 @@ def start_competency_inference(
     # Contenu historique vérifié AVANT tout INSERT : jamais un candidat dont
     # le contexte ne pourrait pas être construit (predecessor corrompu).
     decision_context = None if active is None else _build_predecessor_decision_context(db, active)
+    previous_parent = None if active is None else _predecessor_parent(db, active)
+    # Faits causaux entre les deux snapshots (T6-B.2), engagés par V2 ; la
+    # spécification T6 courante est celle reçue (le run n'existe pas encore).
+    causality = None if active is None else _build_transition_causality(
+        db, previous_parent=previous_parent, current_parent=parent, current_relations=relations,
+        previous_specification=_specification(active), current_specification=specification)
     dossier_payload = _dossier_payload(parent, relations)
-    fingerprint = _input_fingerprint(dossier_payload, _predecessor_payload(
-        snapshot, None if active is None else active.unresolved_revision_context))
+    fingerprint = _input_fingerprint_v2(dossier_payload, _predecessor_payload(
+        snapshot, None if active is None else active.unresolved_revision_context),
+        _causality_fingerprint_payload(causality))
     dedup_key = _inference_dedup_key(fingerprint, specification)
 
+    # Reroll : même dossier logique, mêmes spécifications, quel que soit le
+    # format d'empreinte de l'active (V1 -> V2 n'autorise aucun reroll).
     if active is not None and _specification(active) == specification:
-        previous_parent = _parent_row(db, active.longitudinal_assessment_run_id, lock=False)
-        if previous_parent is None:
-            raise InvalidInferenceState(f"active {active.id} : run T5 parent introuvable")
         if _dossier_payload(previous_parent, _relations(db, previous_parent.id)) == dossier_payload:
             raise DuplicateInference(f"réinterprétation à l'identique de l'active {active.id} (même dossier"
                                      " logique, mêmes spécifications) : changer une version")
@@ -2122,13 +2736,17 @@ def start_competency_inference(
         if _is_dedup_violation(exc):
             raise DuplicateInference(dedup_key) from exc
         raise
-    return _context(run, _Inputs(parent, dossier, relations, active, snapshot, fingerprint), decision_context)
+    return _context(run, _Inputs(parent, dossier, relations, active, snapshot, INPUT_SCHEMA_VERSION, causality,
+                                 fingerprint), decision_context)
 
 
 def get_inference_context(db, *, run_id: uuid.UUID) -> InferenceContext:
     """Reconstruit, pour la reprise d'un candidat running / candidate, le
     contexte EXACT attendu par T6-C, contenu historique du predecessor
-    compris (reconstruit et revérifié). Entrée devenue non courante =>
+    compris (reconstruit et revérifié), égal à celui retourné par start :
+    candidat V2 => causalité de transition reconstruite et engagée ;
+    candidat legacy V1 => input_schema_version 1, transition_causality None.
+    Entrée devenue non courante =>
     StaleInferenceInput ; active remplacé => StaleInferencePredecessor ;
     corruption, y compris de l'historique du predecessor =>
     InvalidInferenceState. Jamais de nouveau candidat, aucune mutation."""
