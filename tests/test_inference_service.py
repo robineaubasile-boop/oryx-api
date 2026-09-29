@@ -63,6 +63,8 @@ from core.inference_service import (
     LongitudinalParentNotUsable,
     PredecessorBasisRefContext,
     PredecessorDecisionContext,
+    PredecessorHistoricalObservation,
+    PredecessorLongitudinalContext,
     PredecessorSnapshot,
     PredecessorStageClaimContext,
     PredecessorTensionContext,
@@ -131,7 +133,10 @@ VERSIONS = ("positive_basis_version", "confidence_profile_version", "state_decis
 STAGES = ("discovery", "comprehension", "application", "mastery")
 PROFILE = {"diagnosticity": {"note": "décrit par T6-C"}, "coverage": {"note": "qualitatif"}}
 PREDECESSOR_CONTEXT_CLASSES = (PredecessorDecisionContext, PredecessorStageClaimContext, PredecessorTensionContext,
-                               PredecessorBasisRefContext)
+                               PredecessorBasisRefContext, PredecessorLongitudinalContext,
+                               PredecessorHistoricalObservation)
+# Propriétés de la vue T5-C relues au présent : jamais dans l'entrée T6-C.
+LIVE_OBSERVATION_FIELDS = ("current_integrity_status", "current_evaluation_run_interpretation_status")
 INVALID_UUIDS = [None, "", str(uuid.UUID(int=7)), 1, uuid.UUID(int=7).bytes]
 
 
@@ -318,7 +323,8 @@ def test_predecessor_context_structures():
         "input_fingerprint", "output_fingerprint"]
     assert names(PredecessorDecisionContext) == [
         "inference_run_id", "longitudinal_assessment_run_id", "pedagogical_taxonomy_release_id",
-        "longitudinal_dossier", "claims", "tensions", "run_basis_refs", "validation_needs", "state_decision_summary"]
+        "historical_longitudinal_context", "claims", "tensions", "run_basis_refs", "validation_needs",
+        "state_decision_summary"]
     assert names(PredecessorStageClaimContext) == [
         "stage", "positive_basis_status", "basis_mode", "basis_summary", "scope_summary", "confidence_profile",
         "mastery_assessment", "basis_refs"]
@@ -326,6 +332,22 @@ def test_predecessor_context_structures():
         "fragilized_stage", "scope_mode", "summary", "revision_status", "capability_membership_ids",
         "capability_definition_ids", "basis_refs"]
     assert names(PredecessorBasisRefContext) == ["ref_role", "confidence_dimension", "source_kind", "source_id"]
+    # Projection stable : les faits du snapshot T5-C, sans ce qui est relu au
+    # présent (omis, jamais remplacé par une valeur supposée).
+    assert names(PredecessorHistoricalObservation) == [
+        n for n in names(view.HistoryObservation) if n not in LIVE_OBSERVATION_FIELDS]
+    dossier_fields = names(view.LongitudinalDossier)
+    assert names(PredecessorLongitudinalContext) == [
+        *(n for n in dossier_fields if n not in ("execution_status", "interpretation_status",
+                                                 "run_completed_at_technical", "active_history",
+                                                 "dependency_profile", "coverage_profile", "variety_profile",
+                                                 "transfer_profile", "consistency_profile",
+                                                 "temporal_validation_profile", "limitations")),
+        "observations", "episodes", "dependency_profile", "coverage_profile", "variety_profile",
+        "transfer_profile", "consistency_profile", "temporal_validation_profile", "limitations"]
+    for cls in (PredecessorLongitudinalContext, PredecessorHistoricalObservation):
+        assert not any(n.startswith("current_") or n.endswith("_status") for n in names(cls)), cls
+    assert svc.LIVE_LIMITATION_CODES == {view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT}
     fields = {f.name: f for f in dataclasses.fields(InferenceContext)}
     assert fields["predecessor_decision_context"].type == "PredecessorDecisionContext | None" or \
         fields["predecessor_decision_context"].type == PredecessorDecisionContext | None
@@ -394,8 +416,9 @@ def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
     # Seuls ajouts : les quatre structures historiques et deux helpers internes.
     assert set(after) - set(before) == {
         "PredecessorDecisionContext", "PredecessorStageClaimContext", "PredecessorTensionContext",
-        "PredecessorBasisRefContext", "_build_predecessor_decision_context", "_historical_ref_order",
-        "_historical_ref_contexts"}
+        "PredecessorBasisRefContext", "PredecessorLongitudinalContext", "PredecessorHistoricalObservation",
+        "LIVE_LIMITATION_CODES", "_build_predecessor_decision_context", "_historical_longitudinal_context",
+        "_historical_ref_order", "_historical_ref_contexts"}
     assert set(before) - set(after) == set()
 
 
@@ -2634,6 +2657,27 @@ def _rich_decision(w, **overrides):
     return decision("application", **kwargs)
 
 
+def _assert_stable_projection(history, live):
+    """history = vue T5-C `live` du même run T5, moins ce qu'elle relit au
+    présent : statut du run, current_* des observations, limitation
+    upstream_evidence_changed_since_snapshot."""
+    assert history.run_id == live.run_id
+    for f in dataclasses.fields(PredecessorLongitudinalContext):
+        if f.name not in ("observations", "episodes", "limitations"):
+            assert getattr(history, f.name) == getattr(live, f.name), f.name
+    assert history.episodes == live.active_history.episodes
+    assert len(history.observations) == len(live.active_history.observations)
+    for projected, observed in zip(history.observations, live.active_history.observations):
+        assert isinstance(projected, PredecessorHistoricalObservation)
+        for f in dataclasses.fields(PredecessorHistoricalObservation):
+            assert getattr(projected, f.name) == getattr(observed, f.name), f.name
+        for name in LIVE_OBSERVATION_FIELDS:
+            assert not hasattr(projected, name)
+    assert history.limitations == tuple(lim for lim in live.limitations
+                                        if lim.code != view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT)
+    assert not hasattr(history, "interpretation_status") and not hasattr(history, "execution_status")
+
+
 def _refs_view(refs):
     return [(r.ref_role, r.confidence_dimension, r.source_kind, r.source_id) for r in refs]
 
@@ -2660,10 +2704,14 @@ def test_pg_predecessor_decision_context_is_the_persisted_historical_decision(en
     assert (p.inference_run_id, p.longitudinal_assessment_run_id) == (first, w.t5)
     assert (rich.inference_run_id, rich.longitudinal_assessment_run_id) == (first, w.t5)
     assert rich.pedagogical_taxonomy_release_id == w.tx.id
-    # Dossier HISTORIQUE (L1, superseded : normal), distinct du dossier courant.
-    assert rich.longitudinal_dossier.run_id == w.t5 and context.longitudinal_dossier.run_id != w.t5
-    assert rich.longitudinal_dossier.interpretation_status == "superseded"
-    assert rich.longitudinal_dossier == view.build_longitudinal_dossier(db, run_id=w.t5)
+    # Dossier HISTORIQUE (L1, superseded : normal), distinct du dossier courant,
+    # exposé comme projection stable de la vue T5-C.
+    history = rich.historical_longitudinal_context
+    assert isinstance(history, PredecessorLongitudinalContext)
+    assert history.run_id == w.t5 and context.longitudinal_dossier.run_id != w.t5
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    assert live.interpretation_status == "superseded"
+    _assert_stable_projection(history, live)
     # Quatre claims, ordre conceptuel, contenus exacts.
     assert [c.stage for c in rich.claims] == list(STAGES)
     assert [(c.positive_basis_status, c.basis_mode, c.basis_summary, c.scope_summary) for c in rich.claims] == [
@@ -2732,18 +2780,42 @@ def test_pg_historical_ref_and_tension_order_is_deterministic(engine, Sessions, 
         assert keys == sorted(keys)
 
 
+def _event_of(engine, observation_id):
+    return _rows(engine, "SELECT r.event_id FROM pedagogical_observations o JOIN observation_evaluation_runs r"
+                         " ON r.id = o.evaluation_run_id WHERE o.id = :o", o=observation_id)[0]["event_id"]
+
+
 def test_pg_start_and_resume_expose_the_same_rich_context(engine, Sessions, db, world):
+    """start == get_inference_context, immédiatement ET malgré une mutation
+    LIVE d'un amont historique qui ne touche pas le T5 courant : w.kB (citée
+    par une ref validation de R1) est invalidée avant L2, donc absente de
+    L2 ; APRÈS le start de R2, son événement est réévalué par les services
+    T3 normaux (run T3 de w.kB superseded)."""
     w = world
-    _, started, _ = _rich_predecessor(Sessions, w)
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    _invalidate(Sessions, w.kB)
+    l2, _ = _new_t5(Sessions, w)
+    started = _start(Sessions, l2)
+    assert w.kB not in {o.observation_id for o in started.longitudinal_dossier.active_history.observations}
+    history = started.predecessor_decision_context.historical_longitudinal_context
+    assert w.kB in {o.observation_id for o in history.observations}
+    assert svc.get_inference_context(db, run_id=started.run_id) == started
+    db.rollback()
+    _t3(Sessions, w.tx.id, contra(w.B), event_id=_event_of(engine, w.kB))
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_kb = {o.observation_id: o for o in live.active_history.observations}[w.kB]
+    assert (live_kb.current_integrity_status, live_kb.current_evaluation_run_interpretation_status) == (
+        "invalidated", "superseded")
     resumed = svc.get_inference_context(db, run_id=started.run_id)
     assert resumed == started
     a, b = started.predecessor_decision_context, resumed.predecessor_decision_context
-    assert a is not b and a == b
-    assert (a.longitudinal_dossier, a.claims, a.tensions, a.run_basis_refs, a.validation_needs,
-            a.state_decision_summary) == (b.longitudinal_dossier, b.claims, b.tensions, b.run_basis_refs,
-                                          b.validation_needs, b.state_decision_summary)
+    assert a is not b and a == b and a.inference_run_id == first
+    assert (a.historical_longitudinal_context, a.claims, a.tensions, a.run_basis_refs, a.validation_needs,
+            a.state_decision_summary) == (b.historical_longitudinal_context, b.claims, b.tensions,
+                                          b.run_basis_refs, b.validation_needs, b.state_decision_summary)
     assert resumed.predecessor == started.predecessor
     assert resumed.longitudinal_dossier == started.longitudinal_dossier
+    _assert_stable_projection(b.historical_longitudinal_context, live)
     assert _count(engine, "competency_inference_runs") == 2 and not db.new and not db.dirty
 
 
@@ -2793,8 +2865,9 @@ def test_pg_rich_context_is_deeply_immutable_and_orm_free(engine, Sessions, db, 
 def test_pg_historical_t5_superseded_and_t3_reevaluated_stay_readable(engine, Sessions, db, world):
     """Après activation du predecessor : réévaluation T3 de l'événement de
     sa positive_basis (run T3 superseded), puis nouveau T5 qui supersede L1.
-    Le dossier historique L1 reste reconstruit tel quel : l'ancienne
-    observation y figure, son statut courant est exposé et signalé."""
+    Le contexte historique L1 garde l'ancienne observation comme fait du
+    snapshot, sans statut relu au présent ; la vue T5-C live l'expose et le
+    signale (audit)."""
     w = world
     first = _activate_first(Sessions, w, _rich_decision(w))
     before = _run(engine, first)
@@ -2803,11 +2876,15 @@ def test_pg_historical_t5_superseded_and_t3_reevaluated_stay_readable(engine, Se
     _complete_t5(Sessions, l2)
     context = _start(Sessions, l2)
     rich = context.predecessor_decision_context
-    historical = {o.observation_id: o for o in rich.longitudinal_dossier.active_history.observations}
-    assert w.app in historical and o2 not in historical
-    assert historical[w.app].current_evaluation_run_interpretation_status == "superseded"
-    assert rich.longitudinal_dossier.interpretation_status == "superseded"
-    assert view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT in {lim.code for lim in rich.longitudinal_dossier.limitations}
+    history = rich.historical_longitudinal_context
+    assert w.app in {o.observation_id for o in history.observations}
+    assert o2 not in {o.observation_id for o in history.observations}
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_app = {o.observation_id: o for o in live.active_history.observations}[w.app]
+    assert live_app.current_evaluation_run_interpretation_status == "superseded"
+    assert view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT in {lim.code for lim in live.limitations}
+    assert view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT not in {lim.code for lim in history.limitations}
+    _assert_stable_projection(history, live)
     assert ("positive_basis", None, "observation", w.app) in _refs_view(rich.claims[2].basis_refs)
     # Le dossier courant contient la réévaluation ; l'historique reste l'ancien.
     assert o2 in {o.observation_id for o in context.longitudinal_dossier.active_history.observations}
@@ -2815,10 +2892,10 @@ def test_pg_historical_t5_superseded_and_t3_reevaluated_stay_readable(engine, Se
 
 
 def test_pg_invalidated_observation_never_erases_the_historical_decision(engine, Sessions, db, world):
-    """O (positive_basis du predecessor) invalidée ensuite : le dossier
-    historique la contient toujours (current_integrity_status invalidated),
-    la positive_basis historique est toujours exposée ; aucun recalcul ni
-    réécriture du predecessor."""
+    """O (positive_basis du predecessor) invalidée ensuite : le contexte
+    historique la contient toujours comme fait du snapshot (la vue T5-C live
+    montre invalidated), la positive_basis historique est toujours exposée ;
+    aucun recalcul ni réécriture du predecessor."""
     w = world
     first = _activate_first(Sessions, w, _rich_decision(w))
     t6_before = _t6_snapshot(engine)
@@ -2827,8 +2904,11 @@ def test_pg_invalidated_observation_never_erases_the_historical_decision(engine,
     context = _start(Sessions, l2)
     rich = context.predecessor_decision_context
     assert w.app not in {o.observation_id for o in context.longitudinal_dossier.active_history.observations}
-    historical = {o.observation_id: o for o in rich.longitudinal_dossier.active_history.observations}
-    assert historical[w.app].current_integrity_status == "invalidated"
+    assert w.app in {o.observation_id for o in rich.historical_longitudinal_context.observations}
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    assert {o.observation_id: o for o in live.active_history.observations}[w.app].current_integrity_status == \
+        "invalidated"
+    _assert_stable_projection(rich.historical_longitudinal_context, live)
     assert ("positive_basis", None, "observation", w.app) in _refs_view(rich.claims[2].basis_refs)
     assert ("transition", None, "observation", w.app) in _refs_view(rich.run_basis_refs)
     assert [c.positive_basis_status for c in rich.claims] == ["established"] * 3 + ["not_established"]
@@ -2858,7 +2938,7 @@ def test_pg_cross_release_scope_stays_historical(engine, Sessions, db, world):
     rich = context.predecessor_decision_context
     assert context.pedagogical_taxonomy_release_id == r2.id
     assert rich.inference_run_id == first and rich.pedagogical_taxonomy_release_id == w.tx.id
-    assert rich.longitudinal_dossier.pedagogical_taxonomy_release_id == w.tx.id
+    assert rich.historical_longitudinal_context.pedagogical_taxonomy_release_id == w.tx.id
     (localized,) = [t for t in rich.tensions if t.scope_mode == "localized"]
     assert localized.capability_membership_ids == (w.A,) and localized.capability_definition_ids == (w.dA,)
     assert r2.m["C7_A"] not in localized.capability_membership_ids
@@ -3102,3 +3182,31 @@ def test_pg_rich_context_query_count_is_constant(engine, Sessions, db, world):
             assert sum(f"FROM {table}" in sql for sql, _ in statements) == 1, table
     assert _count(engine, "competency_inference_basis_refs", "inference_run_id = :r", r=rich) == 10
     assert counts[rich] == counts[minimal]
+
+
+def test_pg_historical_upstream_mutation_after_start_never_changes_the_candidate_input(engine, Sessions, db, world):
+    """R1 fondé sur O1 ; réévaluation du même événement (O2, T3 de O1
+    superseded) ; L2 avec O2 ; start R2. APRÈS le start, O1 (hors de L2) est
+    invalidée : l'entrée courante de R2 reste valide et son contexte
+    historique ne change pas. La vue T5-C live, elle, expose la mutation."""
+    w = world
+    o1 = w.app
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    o2 = _t3(Sessions, w.tx.id, app(w.A), event_id=w.app_t3.event).id
+    l2 = _start_t5(Sessions, w.tx.id)
+    _complete_t5(Sessions, l2)
+    started = _start(Sessions, l2)
+    current = {o.observation_id for o in started.longitudinal_dossier.active_history.observations}
+    assert o2 in current and o1 not in current
+    assert started.predecessor.inference_run_id == first
+    _invalidate(Sessions, o1)
+    resumed = svc.get_inference_context(db, run_id=started.run_id)
+    assert resumed.predecessor_decision_context == started.predecessor_decision_context
+    assert resumed == started
+    # Audit T5-C live : la mutation y est visible (séparation voulue).
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_o1 = {o.observation_id: o for o in live.active_history.observations}[o1]
+    assert (live_o1.current_integrity_status, live_o1.current_evaluation_run_interpretation_status) == (
+        "invalidated", "superseded")
+    upstream = [lim for lim in live.limitations if lim.code == view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT]
+    assert upstream and o1 in upstream[0].observation_ids

@@ -95,8 +95,10 @@ Invariants :
                                      concurrence, no-reroll) ;
       predecessor_decision_context = PredecessorDecisionContext, contenu
                                      décisionnel HISTORIQUE détaillé destiné
-                                     au futur T6-C : dossier T5-C du parent
-                                     historique, quatre claims (profils,
+                                     au futur T6-C : projection STABLE du
+                                     dossier T5 du parent historique
+                                     (PredecessorLongitudinalContext),
+                                     quatre claims (profils,
                                      mastery_assessment, refs), tensions
                                      (memberships de la release historique
                                      + capability_definition_ids), refs
@@ -108,8 +110,12 @@ Invariants :
   quel dossier, jamais ce qui reste valide aujourd'hui. Aucune décision
   ancienne n'est recalculée ni revalidée pédagogiquement : parent T5
   superseded, release retirée, run T3 superseded ou observation invalidée
-  depuis sont normaux et n'effacent aucun fait historique (la vue T5-C les
-  expose en current_* / limitations). Seule la cohérence est vérifiée :
+  depuis sont normaux et n'effacent aucun fait historique. Entrée stable :
+  ce que la vue T5-C relit au présent (statut du run T5, current_* des
+  observations, limitation upstream_evidence_changed_since_snapshot) est
+  omis, jamais remplacé ; la vue T5-C live reste l'outil d'audit. Une
+  mutation amont historique après start ne change donc jamais l'entrée
+  d'un candidat. Seule la cohérence est vérifiée :
   structure, rattachements, existence et appartenance des sources au parent
   historique, input_fingerprint et output_fingerprint recalculés avec les
   formats V1 inchangés ; écart => InvalidInferenceState, jamais réparé.
@@ -224,7 +230,7 @@ import json
 import math
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import NamedTuple
@@ -234,8 +240,15 @@ from sqlalchemy.exc import IntegrityError
 
 from core.longitudinal_view import (
     UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT,
+    ConsistencyProfile,
+    CoverageProfile,
+    DependencyProfile,
+    EventProvenance,
     LongitudinalDossier,
     LongitudinalViewError,
+    TemporalValidationProfile,
+    TransferProfile,
+    VarietyProfile,
     build_longitudinal_dossier,
 )
 from core.models import (
@@ -351,6 +364,11 @@ OUTPUT_SCHEMA_VERSION = 1
 ACTIVATION_LOCK_NAMESPACE = "oryx-t6"
 
 DEDUP_CONSTRAINT = "uq_competency_inference_runs_dedup_key"
+
+# Limitation T5-C dérivée de l'état amont ACTUEL (audit légitime) : exclue
+# de l'entrée historique de T6-C, comme les current_* des observations et le
+# statut du run T5 (voir PredecessorLongitudinalContext).
+LIVE_LIMITATION_CODES = frozenset({UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT})
 
 
 class InferenceServiceError(Exception):
@@ -487,17 +505,82 @@ class PredecessorTensionContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PredecessorHistoricalObservation:
+    """Observation qui APPARTENAIT au snapshot T5 historique, telle que
+    persistée (T3) et localisée (T4) : HistoryObservation (T5-C) sans ses
+    current_* relus au présent. Aucun statut historique n'est inventé à leur
+    place : ce statut n'est pas persisté comme tel."""
+    observation_id: uuid.UUID
+    evaluation_run_id: uuid.UUID
+    event_id: uuid.UUID
+    ordinal: int
+    competency_code: str
+    polarity: str
+    evidence_strength: str
+    local_stage: str | None
+    contradiction_scope: str | None
+    error_type: str | None
+    observation_role: str
+    task_kind: str | None
+    elicitation_mode: str
+    support_level: str
+    capability_localization: str
+    observation_text: str
+    primary_user_action: Mapping
+    contributive_user_actions: tuple
+    residual_cognitive_work: Mapping
+    source_contribution_refs: tuple
+    compatible_capabilities: tuple
+    source_taxonomy_release_id: uuid.UUID
+    re_evaluates_run_id: uuid.UUID | None
+    event: EventProvenance
+    observation_created_at_inference: datetime
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorLongitudinalContext:
+    """Projection STABLE du dossier T5 qui a alimenté le predecessor : faits
+    du snapshot (observations, épisodes, relations persistées et profils
+    T5-C qui en dérivent, limitations structurelles) et rien de ce que T5-C
+    relit au présent (statut du run T5, current_* des observations,
+    upstream_evidence_changed_since_snapshot). Deux reconstructions pour un
+    même candidat sont donc égales quelles que soient les mutations amont
+    ultérieures ; la vue T5-C live reste l'outil d'audit. Horodatages
+    techniques seulement (doctrine T5-C inchangée)."""
+    view_schema_version: int
+    run_id: uuid.UUID
+    user_id: str
+    competency_code: str
+    pedagogical_taxonomy_release_id: uuid.UUID
+    input_fingerprint: str
+    dependency_version: str
+    transfer_version: str
+    revalidation_version: str
+    relation_schema_version: str
+    observations: tuple
+    episodes: tuple
+    dependency_profile: DependencyProfile
+    coverage_profile: CoverageProfile
+    variety_profile: VarietyProfile
+    transfer_profile: TransferProfile
+    consistency_profile: ConsistencyProfile
+    temporal_validation_profile: TemporalValidationProfile
+    limitations: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
 class PredecessorDecisionContext:
     """Contenu décisionnel HISTORIQUE du predecessor, vérifié contre son
     output_fingerprint : quelle décision Oryx a prise, et sur quel dossier
-    T5 (longitudinal_dossier, parent historique, souvent superseded depuis).
-    Ce dossier dit ce qu'Oryx avait interprété, pas ce qui reste valide
-    aujourd'hui (voir ses current_* et limitations). Jamais une preuve
-    nouvelle, jamais recalculé, hors input_fingerprint."""
+    T5 (historical_longitudinal_context : projection stable du parent
+    historique, souvent superseded depuis). Il dit ce qu'Oryx avait
+    interprété, pas ce qui reste valide aujourd'hui. Jamais une preuve
+    nouvelle, jamais recalculé, hors input_fingerprint ; identique pour un
+    même candidat entre start et get_inference_context."""
     inference_run_id: uuid.UUID
     longitudinal_assessment_run_id: uuid.UUID
     pedagogical_taxonomy_release_id: uuid.UUID
-    longitudinal_dossier: LongitudinalDossier
+    historical_longitudinal_context: PredecessorLongitudinalContext
     claims: tuple
     tensions: tuple
     run_basis_refs: tuple
@@ -1403,6 +1486,22 @@ def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext 
 # Contexte décisionnel historique du predecessor (T6-B.1)
 # --------------------------------------------------------------------------
 
+def _historical_longitudinal_context(dossier: LongitudinalDossier) -> PredecessorLongitudinalContext:
+    """Projection de la vue T5-C sur les seuls faits du snapshot : les
+    propriétés LIVE sont OMISES (jamais remplacées par une valeur supposée),
+    tout le reste est repris tel quel (structures T5-C déjà immuables)."""
+    observation_fields = [f.name for f in fields(PredecessorHistoricalObservation)]
+    snapshot_fields = [f.name for f in fields(PredecessorLongitudinalContext)
+                       if f.name not in ("observations", "episodes", "limitations")]
+    return PredecessorLongitudinalContext(
+        **{name: getattr(dossier, name) for name in snapshot_fields},
+        observations=tuple(PredecessorHistoricalObservation(**{name: getattr(o, name) for name in observation_fields})
+                           for o in dossier.active_history.observations),
+        episodes=dossier.active_history.episodes,
+        limitations=tuple(lim for lim in dossier.limitations if lim.code not in LIVE_LIMITATION_CODES),
+    )
+
+
 def _historical_ref_order(ref: _Ref) -> tuple:
     """Ordre technique stable (ref_role, confidence_dimension, source_kind,
     source_id) : jamais une hiérarchie probante."""
@@ -1424,8 +1523,10 @@ def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionC
 
     Historique != état courant : le parent T5 peut être superseded, sa
     release retirée, ses observations invalidées ou ses runs T3 superseded
-    depuis ; rien de cela n'est une erreur ni n'efface le passé (la vue T5-C
-    l'expose en current_* / limitations). Aucune revalidation pédagogique :
+    depuis ; rien de cela n'est une erreur ni n'efface le passé. La vue T5-C
+    live (qui l'expose en current_* / limitations) sert aux vérifications ;
+    le contexte retourné n'en garde que la projection stable
+    (PredecessorLongitudinalContext). Aucune revalidation pédagogique :
     la décision n'est jamais recalculée, seulement vérifiée STRUCTURELLEMENT
     (sorties complètes, exactement quatre claims, rattachements, sources
     existantes et appartenant au parent historique, memberships de sa
@@ -1607,7 +1708,7 @@ def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionC
         inference_run_id=predecessor.id,
         longitudinal_assessment_run_id=parent.id,
         pedagogical_taxonomy_release_id=parent.pedagogical_taxonomy_release_id,
-        longitudinal_dossier=dossier,
+        historical_longitudinal_context=_historical_longitudinal_context(dossier),
         claims=claim_contexts,
         # Ordre sémantique stable (jamais celui des UUID ni de l'insertion).
         tensions=tuple(sorted(tension_contexts, key=lambda t: _canonical_json({
