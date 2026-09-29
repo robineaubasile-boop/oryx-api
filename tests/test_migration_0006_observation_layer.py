@@ -534,7 +534,11 @@ def test_t3a_tables_are_not_wired_to_the_application():
                "core/longitudinal_view.py",
                # T6-A : FK de provenance des basis refs vers
                # pedagogical_observations (aucun branchement applicatif).
-               "alembic/versions/0009_competency_inference_state.py"}
+               "alembic/versions/0009_competency_inference_state.py",
+               # T6-B : service d'inférence, qui LIT et verrouille en FOR
+               # SHARE les observations et runs T3 du dossier (jamais
+               # d'écriture T3 ; non branché : tests/test_inference_service.py).
+               "core/inference_service.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0

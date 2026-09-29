@@ -621,7 +621,12 @@ def test_t4a_tables_are_not_wired_to_the_application():
                "core/longitudinal_view.py",
                # T6-A : FK du périmètre des tensions vers les memberships
                # (aucun branchement applicatif).
-               "alembic/versions/0009_competency_inference_state.py"}
+               "alembic/versions/0009_competency_inference_state.py",
+               # T6-B : service d'inférence, qui LIT la release du dossier
+               # (FOR SHARE), les memberships et définitions des tensions
+               # (jamais d'écriture T4 ; non branché :
+               # tests/test_inference_service.py).
+               "core/inference_service.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
     checked = 0

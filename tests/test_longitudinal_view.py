@@ -329,7 +329,9 @@ def test_view_is_not_wired_to_the_application():
         if path.suffix == ".py":
             source = _code_tokens(source)
         checked += 1
-        if rel != "core/longitudinal_view.py":
+        # T6-B : seul consommateur de la vue (InferenceContext), lui-même
+        # non branché : tests/test_inference_service.py.
+        if rel not in ("core/longitudinal_view.py", "core/inference_service.py"):
             assert "longitudinal_view" not in source, rel
             for name in PUBLIC_API:
                 assert name not in source, (rel, name)
