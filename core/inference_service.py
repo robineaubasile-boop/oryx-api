@@ -88,6 +88,43 @@ Invariants :
   a changé, StaleInferencePredecessor si l'active a changé). Jamais de
   second candidat automatique.
 
+- Predecessor dans InferenceContext (T6-B.1), deux objets distincts :
+      predecessor                  = PredecessorSnapshot, identité
+                                     HISTORIQUE minimale (lifecycle,
+                                     input_fingerprint, transition,
+                                     concurrence, no-reroll) ;
+      predecessor_decision_context = PredecessorDecisionContext, contenu
+                                     décisionnel HISTORIQUE détaillé destiné
+                                     au futur T6-C : projection STABLE du
+                                     dossier T5 du parent historique
+                                     (PredecessorLongitudinalContext),
+                                     quatre claims (profils,
+                                     mastery_assessment, refs), tensions
+                                     (memberships de la release historique
+                                     + capability_definition_ids), refs
+                                     run-level, validation_needs,
+                                     state_decision_summary.
+  Première inférence : les deux None ; sinon les deux présents, même
+  inference_run_id et même run T5 (sinon InvalidInferenceState). Historique
+  != preuve nouvelle : ce contexte dit quelle décision Oryx a prise et sur
+  quel dossier, jamais ce qui reste valide aujourd'hui. Aucune décision
+  ancienne n'est recalculée ni revalidée pédagogiquement : parent T5
+  superseded, release retirée, run T3 superseded ou observation invalidée
+  depuis sont normaux et n'effacent aucun fait historique. Entrée stable :
+  ce que la vue T5-C relit au présent (statut du run T5, current_* des
+  observations, limitation upstream_evidence_changed_since_snapshot) est
+  omis, jamais remplacé ; la vue T5-C live reste l'outil d'audit. Une
+  mutation amont historique après start ne change donc jamais l'entrée
+  d'un candidat. Seule la cohérence est vérifiée :
+  structure, rattachements, existence et appartenance des sources au parent
+  historique, input_fingerprint et output_fingerprint recalculés avec les
+  formats V1 inchangés ; écart => InvalidInferenceState, jamais réparé.
+  Construit par start (avant l'INSERT) et get_inference_context, en
+  lecture seule ; complete ne l'utilise pas. Ce contexte n'entre PAS dans
+  input_fingerprint ni dans inference_dedup_key : il développe une décision
+  déjà engagée par output_fingerprint du predecessor, présent dans le
+  payload predecessor.
+
 - complete : reçoit uniquement run_id et une InferenceDecision (sans
   previous_stage, transition, tension_state ni empreinte : dérivés). Tout
   est vérifié AVANT la première mutation ; l'ancien active est superseded
@@ -184,14 +221,16 @@ Invariants :
 
 - Anti-N+1 : SELECT groupés (parent, chaîne observations + runs T3 +
   événements en une jointure, chaque famille de relations, memberships,
-  predecessor / cache) ; aucune requête par ref ni par observation.
+  predecessor / cache ; contexte historique : parent, vue T5-C, relations,
+  run antérieur, claims, tensions + périmètres + définitions, refs) ;
+  aucune requête par ref, par tension ni par observation.
 """
 import hashlib
 import json
 import math
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import NamedTuple
@@ -201,8 +240,15 @@ from sqlalchemy.exc import IntegrityError
 
 from core.longitudinal_view import (
     UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT,
+    ConsistencyProfile,
+    CoverageProfile,
+    DependencyProfile,
+    EventProvenance,
     LongitudinalDossier,
     LongitudinalViewError,
+    TemporalValidationProfile,
+    TransferProfile,
+    VarietyProfile,
     build_longitudinal_dossier,
 )
 from core.models import (
@@ -319,6 +365,11 @@ ACTIVATION_LOCK_NAMESPACE = "oryx-t6"
 
 DEDUP_CONSTRAINT = "uq_competency_inference_runs_dedup_key"
 
+# Limitation T5-C dérivée de l'état amont ACTUEL (audit légitime) : exclue
+# de l'entrée historique de T6-C, comme les current_* des observations et le
+# statut du run T5 (voir PredecessorLongitudinalContext).
+LIVE_LIMITATION_CODES = frozenset({UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT})
+
 
 class InferenceServiceError(Exception):
     """Erreur métier du service d'inférence T6-B."""
@@ -411,9 +462,138 @@ class PredecessorSnapshot:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PredecessorBasisRefContext:
+    """Provenance HISTORIQUE telle que persistée par le predecessor. Le
+    rattachement (claim, tension ou run) est donné par le conteneur : aucun
+    identifiant de ligne T6. La source peut avoir changé de statut depuis
+    (observation invalidated, run T3 superseded) : la ref reste le fait
+    historique « cette source a été citée », jamais une preuve nouvelle."""
+    ref_role: str
+    confidence_dimension: str | None
+    source_kind: str
+    source_id: uuid.UUID
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorStageClaimContext:
+    """Claim du predecessor telle que décidée et persistée ; identité
+    fonctionnelle = stage (aucun stage_claim_id). confidence_profile et
+    mastery_assessment sont relus tels quels, jamais réinterprétés."""
+    stage: str
+    positive_basis_status: str
+    basis_mode: str
+    basis_summary: str | None
+    scope_summary: str | None
+    confidence_profile: Mapping | None
+    mastery_assessment: Mapping | None
+    basis_refs: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorTensionContext:
+    """Tension du predecessor (aucun tension_id). capability_membership_ids
+    = périmètre exact dans la release HISTORIQUE ; capability_definition_ids
+    = mêmes capacités par leur sens, comparables entre releases. Aucun
+    remapping vers la release courante."""
+    fragilized_stage: str
+    scope_mode: str
+    summary: str
+    revision_status: str
+    capability_membership_ids: tuple
+    capability_definition_ids: tuple
+    basis_refs: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorHistoricalObservation:
+    """Observation qui APPARTENAIT au snapshot T5 historique, telle que
+    persistée (T3) et localisée (T4) : HistoryObservation (T5-C) sans ses
+    current_* relus au présent. Aucun statut historique n'est inventé à leur
+    place : ce statut n'est pas persisté comme tel."""
+    observation_id: uuid.UUID
+    evaluation_run_id: uuid.UUID
+    event_id: uuid.UUID
+    ordinal: int
+    competency_code: str
+    polarity: str
+    evidence_strength: str
+    local_stage: str | None
+    contradiction_scope: str | None
+    error_type: str | None
+    observation_role: str
+    task_kind: str | None
+    elicitation_mode: str
+    support_level: str
+    capability_localization: str
+    observation_text: str
+    primary_user_action: Mapping
+    contributive_user_actions: tuple
+    residual_cognitive_work: Mapping
+    source_contribution_refs: tuple
+    compatible_capabilities: tuple
+    source_taxonomy_release_id: uuid.UUID
+    re_evaluates_run_id: uuid.UUID | None
+    event: EventProvenance
+    observation_created_at_inference: datetime
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorLongitudinalContext:
+    """Projection STABLE du dossier T5 qui a alimenté le predecessor : faits
+    du snapshot (observations, épisodes, relations persistées et profils
+    T5-C qui en dérivent, limitations structurelles) et rien de ce que T5-C
+    relit au présent (statut du run T5, current_* des observations,
+    upstream_evidence_changed_since_snapshot). Deux reconstructions pour un
+    même candidat sont donc égales quelles que soient les mutations amont
+    ultérieures ; la vue T5-C live reste l'outil d'audit. Horodatages
+    techniques seulement (doctrine T5-C inchangée)."""
+    view_schema_version: int
+    run_id: uuid.UUID
+    user_id: str
+    competency_code: str
+    pedagogical_taxonomy_release_id: uuid.UUID
+    input_fingerprint: str
+    dependency_version: str
+    transfer_version: str
+    revalidation_version: str
+    relation_schema_version: str
+    observations: tuple
+    episodes: tuple
+    dependency_profile: DependencyProfile
+    coverage_profile: CoverageProfile
+    variety_profile: VarietyProfile
+    transfer_profile: TransferProfile
+    consistency_profile: ConsistencyProfile
+    temporal_validation_profile: TemporalValidationProfile
+    limitations: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class PredecessorDecisionContext:
+    """Contenu décisionnel HISTORIQUE du predecessor, vérifié contre son
+    output_fingerprint : quelle décision Oryx a prise, et sur quel dossier
+    T5 (historical_longitudinal_context : projection stable du parent
+    historique, souvent superseded depuis). Il dit ce qu'Oryx avait
+    interprété, pas ce qui reste valide aujourd'hui. Jamais une preuve
+    nouvelle, jamais recalculé, hors input_fingerprint ; identique pour un
+    même candidat entre start et get_inference_context."""
+    inference_run_id: uuid.UUID
+    longitudinal_assessment_run_id: uuid.UUID
+    pedagogical_taxonomy_release_id: uuid.UUID
+    historical_longitudinal_context: PredecessorLongitudinalContext
+    claims: tuple
+    tensions: tuple
+    run_basis_refs: tuple
+    validation_needs: tuple
+    state_decision_summary: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class InferenceContext:
     """Unique entrée autorisée du futur T6-C : le dossier T5 courant (vue
-    T5-C), le predecessor (ou None) et l'identité figée du candidat."""
+    T5-C), le predecessor (identité minimale + contenu décisionnel
+    historique, tous deux None pour une première inférence) et l'identité
+    figée du candidat."""
     run_id: uuid.UUID
     user_id: str
     competency_code: str
@@ -422,6 +602,7 @@ class InferenceContext:
     pedagogical_taxonomy_release_id: uuid.UUID
     longitudinal_dossier: LongitudinalDossier
     predecessor: PredecessorSnapshot | None
+    predecessor_decision_context: PredecessorDecisionContext | None
     input_fingerprint: str
     inference_dedup_key: str
     positive_basis_version: str
@@ -1279,7 +1460,12 @@ def _verified_inputs(db, run, *, lock: bool) -> _Inputs:
     return _Inputs(parent, dossier, relations, predecessor, snapshot, fingerprint)
 
 
-def _context(run, inputs: _Inputs) -> InferenceContext:
+def _context(run, inputs: _Inputs, decision_context: PredecessorDecisionContext | None) -> InferenceContext:
+    snapshot = inputs.snapshot
+    if (snapshot is None) != (decision_context is None) or snapshot is not None and (
+            (snapshot.inference_run_id, snapshot.longitudinal_assessment_run_id)
+            != (decision_context.inference_run_id, decision_context.longitudinal_assessment_run_id)):
+        raise InvalidInferenceState(f"{run.id} : predecessor et predecessor_decision_context divergents")
     return InferenceContext(
         run_id=run.id,
         user_id=run.user_id,
@@ -1288,10 +1474,253 @@ def _context(run, inputs: _Inputs) -> InferenceContext:
         longitudinal_assessment_run_id=inputs.parent.id,
         pedagogical_taxonomy_release_id=inputs.parent.pedagogical_taxonomy_release_id,
         longitudinal_dossier=inputs.dossier,
-        predecessor=inputs.snapshot,
+        predecessor=snapshot,
+        predecessor_decision_context=decision_context,
         input_fingerprint=run.input_fingerprint,
         inference_dedup_key=run.inference_dedup_key,
         **{name: getattr(run, name) for name in SPECIFICATION_FIELDS},
+    )
+
+
+# --------------------------------------------------------------------------
+# Contexte décisionnel historique du predecessor (T6-B.1)
+# --------------------------------------------------------------------------
+
+def _historical_longitudinal_context(dossier: LongitudinalDossier) -> PredecessorLongitudinalContext:
+    """Projection de la vue T5-C sur les seuls faits du snapshot : les
+    propriétés LIVE sont OMISES (jamais remplacées par une valeur supposée),
+    tout le reste est repris tel quel (structures T5-C déjà immuables)."""
+    observation_fields = [f.name for f in fields(PredecessorHistoricalObservation)]
+    snapshot_fields = [f.name for f in fields(PredecessorLongitudinalContext)
+                       if f.name not in ("observations", "episodes", "limitations")]
+    return PredecessorLongitudinalContext(
+        **{name: getattr(dossier, name) for name in snapshot_fields},
+        observations=tuple(PredecessorHistoricalObservation(**{name: getattr(o, name) for name in observation_fields})
+                           for o in dossier.active_history.observations),
+        episodes=dossier.active_history.episodes,
+        limitations=tuple(lim for lim in dossier.limitations if lim.code not in LIVE_LIMITATION_CODES),
+    )
+
+
+def _historical_ref_order(ref: _Ref) -> tuple:
+    """Ordre technique stable (ref_role, confidence_dimension, source_kind,
+    source_id) : jamais une hiérarchie probante."""
+    return ref.role, ref.dimension or "", ref.source_kind, str(ref.source_id)
+
+
+def _historical_ref_contexts(refs) -> tuple:
+    return tuple(PredecessorBasisRefContext(ref_role=r.role, confidence_dimension=r.dimension,
+                                            source_kind=r.source_kind, source_id=r.source_id)
+                 for r in sorted(refs, key=_historical_ref_order))
+
+
+def _build_predecessor_decision_context(db, predecessor) -> PredecessorDecisionContext:
+    """Relit la décision PERSISTÉE du predecessor (run T6 completed) et le
+    dossier T5 qui l'a alimentée ; SELECT seulement, sous no_autoflush,
+    sans verrou ni écriture, un nombre constant de requêtes (run T5 parent,
+    vue T5-C, relations, run antérieur, claims, tensions + périmètres +
+    définitions en une jointure, refs).
+
+    Historique != état courant : le parent T5 peut être superseded, sa
+    release retirée, ses observations invalidées ou ses runs T3 superseded
+    depuis ; rien de cela n'est une erreur ni n'efface le passé. La vue T5-C
+    live (qui l'expose en current_* / limitations) sert aux vérifications ;
+    le contexte retourné n'en garde que la projection stable
+    (PredecessorLongitudinalContext). Aucune revalidation pédagogique :
+    la décision n'est jamais recalculée, seulement vérifiée STRUCTURELLEMENT
+    (sorties complètes, exactement quatre claims, rattachements, sources
+    existantes et appartenant au parent historique, memberships de sa
+    release et de sa compétence), puis par recalcul de input_fingerprint
+    depuis ce parent et de output_fingerprint (formats V1 inchangés) depuis
+    les lignes persistées. Tout écart => InvalidInferenceState (historique
+    corrompu, jamais StaleInferenceInput) ; jamais réparé ni réécrit."""
+    def corrupt(message):
+        return InvalidInferenceState(f"predecessor {predecessor.id} : historique corrompu ({message})")
+
+    with db.no_autoflush:
+        if predecessor.execution_status != COMPLETED or predecessor.interpretation_status not in (ACTIVE, SUPERSEDED):
+            raise corrupt(f"{predecessor.execution_status} / {predecessor.interpretation_status}")
+        missing = [name for name in ("current_stage", "tension_state", "validation_needs", "state_decision_summary",
+                                     "output_fingerprint", "completed_at") if getattr(predecessor, name) is None]
+        if missing:
+            raise corrupt(f"sorties absentes : {', '.join(missing)}")
+        _require_choice(predecessor.current_stage, "current_stage", CURRENT_STAGES, corrupt)
+        _require_choice(predecessor.tension_state, "tension_state", TENSION_STATES, corrupt)
+        if not isinstance(predecessor.validation_needs, list):
+            raise corrupt("validation_needs n'est pas un tableau JSON")
+
+        # Dossier T5 HISTORIQUE : completed / active ou superseded (normal).
+        parent = _parent_row(db, predecessor.longitudinal_assessment_run_id, lock=False)
+        if parent is None:
+            raise corrupt(f"run T5 parent {predecessor.longitudinal_assessment_run_id} introuvable")
+        if (parent.user_id, parent.competency_code) != (predecessor.user_id, predecessor.competency_code):
+            raise corrupt(f"run T5 parent {parent.id} d'un autre couple")
+        try:
+            dossier = build_longitudinal_dossier(db, run_id=parent.id)
+        except LongitudinalViewError as exc:
+            raise corrupt(f"dossier T5 {parent.id} non reconstructible : {exc}") from exc
+        relations = _relations(db, parent.id)
+        earlier = earlier_snapshot = None
+        if predecessor.predecessor_inference_run_id is not None:
+            earlier = _run_row(db, predecessor.predecessor_inference_run_id)
+            if earlier is None:
+                raise corrupt(f"run T6 antérieur {predecessor.predecessor_inference_run_id} introuvable")
+            earlier_snapshot = _snapshot(db, earlier)
+        if _input_fingerprint(_dossier_payload(parent, relations), _predecessor_payload(
+                earlier_snapshot, None if earlier is None else earlier.unresolved_revision_context)) \
+                != predecessor.input_fingerprint:
+            raise corrupt(f"input_fingerprint non reproductible depuis le run T5 {parent.id}")
+
+        claim_rows = db.execute(
+            select(CompetencyStageClaim.id, CompetencyStageClaim.stage, CompetencyStageClaim.positive_basis_status,
+                   CompetencyStageClaim.basis_mode, CompetencyStageClaim.basis_summary,
+                   CompetencyStageClaim.scope_summary, CompetencyStageClaim.confidence_profile,
+                   CompetencyStageClaim.mastery_assessment)
+            .where(CompetencyStageClaim.inference_run_id == predecessor.id)
+        ).all()
+        tension_rows = db.execute(
+            select(CompetencyInferenceTension.id, CompetencyInferenceTension.fragilized_stage,
+                   CompetencyInferenceTension.scope_mode, CompetencyInferenceTension.summary,
+                   CompetencyInferenceTension.revision_status)
+            .where(CompetencyInferenceTension.inference_run_id == predecessor.id)
+        ).all()
+        scope_rows = db.execute(
+            select(CompetencyInferenceTensionCapability.tension_id,
+                   CompetencyInferenceTensionCapability.capability_membership_id,
+                   CapabilityTaxonomyMembership.taxonomy_release_id,
+                   CoreCapabilityDefinition.id.label("definition_id"), CoreCapabilityDefinition.competency_code)
+            .join(CompetencyInferenceTension,
+                  CompetencyInferenceTension.id == CompetencyInferenceTensionCapability.tension_id)
+            .outerjoin(CapabilityTaxonomyMembership,
+                       CapabilityTaxonomyMembership.id == CompetencyInferenceTensionCapability.capability_membership_id)
+            .outerjoin(CoreCapabilityDefinition,
+                       CoreCapabilityDefinition.id == CapabilityTaxonomyMembership.capability_definition_id)
+            .where(CompetencyInferenceTension.inference_run_id == predecessor.id)
+        ).all()
+        ref_rows = db.execute(
+            select(*CompetencyInferenceBasisRef.__table__.c)
+            .where(CompetencyInferenceBasisRef.inference_run_id == predecessor.id)
+        ).all()
+
+    # Claims : exactement les quatre stades, identité fonctionnelle = stage.
+    claims, claim_stages = {}, {}
+    for row in claim_rows:
+        stage = _require_choice(row.stage, "claim.stage", CLAIM_STAGES, corrupt)
+        if stage in claims:
+            raise corrupt(f"claim {stage} en double")
+        claims[stage] = _Claim(
+            stage, _require_choice(row.positive_basis_status, f"{stage}.positive_basis_status",
+                                   POSITIVE_BASIS_STATUSES, corrupt),
+            _require_choice(row.basis_mode, f"{stage}.basis_mode", BASIS_MODES, corrupt),
+            row.basis_summary, row.scope_summary, row.confidence_profile, row.mastery_assessment)
+        claim_stages[row.id] = stage
+    if len(claims) != len(CLAIM_STAGES):
+        raise corrupt(f"{len(claims)} claim(s) ({', '.join(claims)}), exactement quatre attendues")
+
+    # Tensions et périmètres : release et compétence du parent HISTORIQUE.
+    if bool(tension_rows) != (predecessor.tension_state == TENSION_OPEN):
+        raise corrupt(f"{len(tension_rows)} tension(s) pour tension_state {predecessor.tension_state}")
+    scopes, membership_definitions = {}, {}
+    for row in scope_rows:
+        membership_id = row.capability_membership_id
+        if row.definition_id is None:
+            raise corrupt(f"membership {membership_id} inconnu")
+        if row.taxonomy_release_id != parent.pedagogical_taxonomy_release_id:
+            raise corrupt(f"membership {membership_id} hors de la release historique"
+                          f" {parent.pedagogical_taxonomy_release_id}")
+        if row.competency_code != predecessor.competency_code:
+            raise corrupt(f"membership {membership_id} hors de {predecessor.competency_code}")
+        scopes.setdefault(row.tension_id, []).append(membership_id)
+        membership_definitions[membership_id] = row.definition_id
+    tensions = {}
+    for row in tension_rows:
+        # Clé LOCALE de reconstruction (rattachement des refs) : jamais dans
+        # output_fingerprint ni dans le contexte.
+        key = str(row.id)
+        mode = _require_choice(row.scope_mode, f"{key}.scope_mode", TENSION_SCOPE_MODES, corrupt)
+        memberships = tuple(sorted(scopes.get(row.id, ()), key=str))
+        if (mode == LOCALIZED) != bool(memberships):
+            raise corrupt(f"tension {key} {mode} avec {len(memberships)} membership(s)")
+        tensions[row.id] = _Tension(
+            key, _require_choice(row.fragilized_stage, f"{key}.fragilized_stage", CLAIM_STAGES, corrupt), mode,
+            _require_text(row.summary, f"{key}.summary", corrupt),
+            _require_choice(row.revision_status, f"{key}.revision_status", REVISION_STATUSES, corrupt), memberships)
+
+    # Refs : rattachement au run lui-même, source existante et appartenant au
+    # dossier T5 historique (observation du snapshot ou relation du parent).
+    snapshot_observations = {o.observation_id for o in dossier.active_history.observations}
+    refs = []
+    for row in ref_rows:
+        role = _require_choice(row.ref_role, "ref_role", REF_ROLES, corrupt)
+        kind = _require_choice(row.source_kind, f"ref {row.id}.source_kind", SOURCE_KINDS, corrupt)
+        source_id = getattr(row, f"source_{kind}_id")
+        if source_id is None or any(getattr(row, f"source_{other}_id") is not None
+                                    for other in SOURCE_KINDS - {kind}):
+            raise corrupt(f"ref {row.id} : colonnes source incohérentes avec {kind}")
+        dimension = None if row.confidence_dimension is None else _require_choice(
+            row.confidence_dimension, f"ref {row.id}.confidence_dimension", CONFIDENCE_DIMENSIONS, corrupt)
+        if row.stage_claim_id is not None and row.stage_claim_id not in claim_stages:
+            raise corrupt(f"ref {row.id} rattachée à une claim d'un autre run")
+        if row.tension_id is not None and row.tension_id not in tensions:
+            raise corrupt(f"ref {row.id} rattachée à une tension d'un autre run")
+        stage = claim_stages.get(row.stage_claim_id)
+        key = None if row.tension_id is None else tensions[row.tension_id].key
+        if (stage is not None, key is not None, dimension is not None) != REF_ATTACHMENTS[role]:
+            raise corrupt(f"ref {row.id} {role} : rattachement incohérent")
+        if kind == SOURCE_OBSERVATION:
+            if source_id not in snapshot_observations:
+                raise corrupt(f"ref {row.id} : observation {source_id} absente du snapshot du run T5 {parent.id}")
+        elif (kind, source_id) not in relations.identities:
+            raise corrupt(f"ref {row.id} : {kind} {source_id} absente ou hors du run T5 {parent.id}")
+        refs.append(_Ref(role, stage, key, dimension, kind, source_id))
+
+    # La décision persistée doit reproduire EXACTEMENT output_fingerprint.
+    decision = _Decision(predecessor.current_stage, predecessor.transition_cause,
+                         predecessor.unresolved_revision_context, predecessor.validation_needs,
+                         predecessor.state_decision_summary, claims, tuple(tensions.values()), tuple(refs))
+    if _output_fingerprint(
+            input_fingerprint=predecessor.input_fingerprint, specification=_specification(predecessor),
+            decision=decision, previous_stage=predecessor.previous_stage, transition=predecessor.transition,
+            tension_state=predecessor.tension_state, relations=relations,
+            membership_definitions=membership_definitions) != predecessor.output_fingerprint:
+        raise corrupt("output_fingerprint non reproductible depuis la décision persistée")
+
+    claim_contexts = tuple(PredecessorStageClaimContext(
+        stage=stage,
+        positive_basis_status=claims[stage].status,
+        basis_mode=claims[stage].mode,
+        basis_summary=claims[stage].basis_summary,
+        scope_summary=claims[stage].scope_summary,
+        confidence_profile=_freeze(claims[stage].confidence_profile),
+        mastery_assessment=_freeze(claims[stage].mastery_assessment),
+        basis_refs=_historical_ref_contexts(r for r in refs if r.claim_stage == stage),
+    ) for stage in CLAIM_STAGES)
+    tension_contexts = tuple(PredecessorTensionContext(
+        fragilized_stage=t.fragilized_stage,
+        scope_mode=t.scope_mode,
+        summary=t.summary,
+        revision_status=t.revision_status,
+        capability_membership_ids=t.membership_ids,
+        capability_definition_ids=tuple(sorted({membership_definitions[m] for m in t.membership_ids}, key=str)),
+        basis_refs=_historical_ref_contexts(r for r in refs if r.tension_key == t.key),
+    ) for t in tensions.values())
+    return PredecessorDecisionContext(
+        inference_run_id=predecessor.id,
+        longitudinal_assessment_run_id=parent.id,
+        pedagogical_taxonomy_release_id=parent.pedagogical_taxonomy_release_id,
+        historical_longitudinal_context=_historical_longitudinal_context(dossier),
+        claims=claim_contexts,
+        # Ordre sémantique stable (jamais celui des UUID ni de l'insertion).
+        tensions=tuple(sorted(tension_contexts, key=lambda t: _canonical_json({
+            "fragilized_stage": t.fragilized_stage, "scope_mode": t.scope_mode, "summary": t.summary,
+            "revision_status": t.revision_status,
+            "capability_definition_ids": [str(d) for d in t.capability_definition_ids],
+            "capability_membership_ids": [str(m) for m in t.capability_membership_ids],
+            "refs": [[r.ref_role, r.confidence_dimension, r.source_kind, str(r.source_id)] for r in t.basis_refs],
+        }))),
+        run_basis_refs=_historical_ref_contexts(r for r in refs if r.claim_stage is None and r.tension_key is None),
+        validation_needs=_freeze(predecessor.validation_needs),
+        state_decision_summary=predecessor.state_decision_summary,
     )
 
 
@@ -1602,7 +2031,9 @@ def start_competency_inference(
     Le run T5 parent doit être le dossier COURANT du couple (voir la
     docstring du module), sinon LongitudinalParentNotUsable. user_id,
     competency_code, predecessor, input_fingerprint et inference_dedup_key
-    sont dérivés ; aucune sortie ni ligne enfant n'est créée.
+    sont dérivés ; aucune sortie ni ligne enfant n'est créée. Le contenu
+    historique du predecessor est reconstruit et vérifié AVANT l'INSERT
+    (historique corrompu => InvalidInferenceState, aucun candidat).
 
     Déduplication : inference_dedup_key déjà présente, ou réinterprétation à
     l'identique (même dossier logique, mêmes spécifications) du dossier de
@@ -1637,6 +2068,9 @@ def start_competency_inference(
         _require_completed_active(active)
     _check_cache(active, cache, parent.user_id, parent.competency_code)
     snapshot = None if active is None else _snapshot(db, active)
+    # Contenu historique vérifié AVANT tout INSERT : jamais un candidat dont
+    # le contexte ne pourrait pas être construit (predecessor corrompu).
+    decision_context = None if active is None else _build_predecessor_decision_context(db, active)
     dossier_payload = _dossier_payload(parent, relations)
     fingerprint = _input_fingerprint(dossier_payload, _predecessor_payload(
         snapshot, None if active is None else active.unresolved_revision_context))
@@ -1688,15 +2122,16 @@ def start_competency_inference(
         if _is_dedup_violation(exc):
             raise DuplicateInference(dedup_key) from exc
         raise
-    return _context(run, _Inputs(parent, dossier, relations, active, snapshot, fingerprint))
+    return _context(run, _Inputs(parent, dossier, relations, active, snapshot, fingerprint), decision_context)
 
 
 def get_inference_context(db, *, run_id: uuid.UUID) -> InferenceContext:
     """Reconstruit, pour la reprise d'un candidat running / candidate, le
-    contexte EXACT attendu par T6-C. Entrée devenue non courante =>
+    contexte EXACT attendu par T6-C, contenu historique du predecessor
+    compris (reconstruit et revérifié). Entrée devenue non courante =>
     StaleInferenceInput ; active remplacé => StaleInferencePredecessor ;
-    corruption => InvalidInferenceState. Jamais de nouveau candidat, aucune
-    mutation."""
+    corruption, y compris de l'historique du predecessor =>
+    InvalidInferenceState. Jamais de nouveau candidat, aucune mutation."""
     _require_uuid(run_id, "run_id")
     with db.no_autoflush:
         run = _run_row(db, run_id)
@@ -1708,7 +2143,9 @@ def get_inference_context(db, *, run_id: uuid.UUID) -> InferenceContext:
         if (None if active is None else active.id) != run.predecessor_inference_run_id:
             raise StaleInferencePredecessor(f"{run_id} : l'active courant n'est plus le predecessor capturé")
         _check_cache(active, cache, run.user_id, run.competency_code)
-        return _context(run, inputs)
+        decision_context = None if inputs.predecessor is None else _build_predecessor_decision_context(
+            db, inputs.predecessor)
+        return _context(run, inputs, decision_context)
 
 
 def complete_competency_inference(db, *, run_id: uuid.UUID, decision: InferenceDecision) -> CompetencyInferenceRun:

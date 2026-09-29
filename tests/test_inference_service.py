@@ -61,7 +61,13 @@ from core.inference_service import (
     InvalidInferenceTension,
     InvalidStageClaim,
     LongitudinalParentNotUsable,
+    PredecessorBasisRefContext,
+    PredecessorDecisionContext,
+    PredecessorHistoricalObservation,
+    PredecessorLongitudinalContext,
     PredecessorSnapshot,
+    PredecessorStageClaimContext,
+    PredecessorTensionContext,
     StageClaimDecision,
     StaleInferenceChain,
     StaleInferenceInput,
@@ -126,6 +132,11 @@ VERSIONS = ("positive_basis_version", "confidence_profile_version", "state_decis
             "inference_schema_version", "evaluator_version")
 STAGES = ("discovery", "comprehension", "application", "mastery")
 PROFILE = {"diagnosticity": {"note": "décrit par T6-C"}, "coverage": {"note": "qualitatif"}}
+PREDECESSOR_CONTEXT_CLASSES = (PredecessorDecisionContext, PredecessorStageClaimContext, PredecessorTensionContext,
+                               PredecessorBasisRefContext, PredecessorLongitudinalContext,
+                               PredecessorHistoricalObservation)
+# Propriétés de la vue T5-C relues au présent : jamais dans l'entrée T6-C.
+LIVE_OBSERVATION_FIELDS = ("current_integrity_status", "current_evaluation_run_interpretation_status")
 INVALID_UUIDS = [None, "", str(uuid.UUID(int=7)), 1, uuid.UUID(int=7).bytes]
 
 
@@ -271,7 +282,7 @@ def test_exceptions_are_a_small_business_hierarchy():
 
 def test_structures_are_frozen_keyword_only_dataclasses():
     for cls in (InferenceContext, PredecessorSnapshot, InferenceDecision, StageClaimDecision, TensionDecision,
-                BasisRefDecision, ValidatedCompetencyState):
+                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES):
         assert cls.__dataclass_params__.frozen, cls
         assert all(f.kw_only for f in dataclasses.fields(cls)), cls
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -287,7 +298,8 @@ def test_structures_are_frozen_keyword_only_dataclasses():
     assert names(BasisRefDecision) == ["ref_role", "source_kind", "source_id", "claim_stage", "tension_key",
                                        "confidence_dimension"]
     for field in ("run_id", "user_id", "competency_code", "longitudinal_assessment_run_id", "longitudinal_dossier",
-                  "predecessor", "input_fingerprint", *VERSIONS, "model_id", "prompt_spec_version"):
+                  "predecessor", "predecessor_decision_context", "input_fingerprint", *VERSIONS, "model_id",
+                  "prompt_spec_version"):
         assert field in names(InferenceContext), field
     for field in ("inference_run_id", "current_stage", "tension_state", "unresolved_revision_context",
                   "input_fingerprint", "output_fingerprint", "longitudinal_assessment_run_id"):
@@ -298,6 +310,116 @@ def test_structures_are_frozen_keyword_only_dataclasses():
                       "confidence_score", "confidence_level", "overall_confidence", "percentage", "stage_claim_id",
                       "tension_id", "score"):
             assert field not in names(cls), (cls, field)
+
+
+def test_predecessor_context_structures():
+    """T6-B.1 : identité minimale (PredecessorSnapshot, inchangé) et contenu
+    décisionnel historique (PredecessorDecisionContext) restent séparés ;
+    aucune identité de ligne T6 n'est exposée comme clé sémantique."""
+    names = lambda cls: [f.name for f in dataclasses.fields(cls)]  # noqa: E731
+    assert names(PredecessorSnapshot) == [
+        "inference_run_id", "longitudinal_assessment_run_id", "current_stage", "previous_stage", "transition",
+        "transition_cause", "tension_state", "unresolved_revision_context", "established_claim_stages",
+        "input_fingerprint", "output_fingerprint"]
+    assert names(PredecessorDecisionContext) == [
+        "inference_run_id", "longitudinal_assessment_run_id", "pedagogical_taxonomy_release_id",
+        "historical_longitudinal_context", "claims", "tensions", "run_basis_refs", "validation_needs",
+        "state_decision_summary"]
+    assert names(PredecessorStageClaimContext) == [
+        "stage", "positive_basis_status", "basis_mode", "basis_summary", "scope_summary", "confidence_profile",
+        "mastery_assessment", "basis_refs"]
+    assert names(PredecessorTensionContext) == [
+        "fragilized_stage", "scope_mode", "summary", "revision_status", "capability_membership_ids",
+        "capability_definition_ids", "basis_refs"]
+    assert names(PredecessorBasisRefContext) == ["ref_role", "confidence_dimension", "source_kind", "source_id"]
+    # Projection stable : les faits du snapshot T5-C, sans ce qui est relu au
+    # présent (omis, jamais remplacé par une valeur supposée).
+    assert names(PredecessorHistoricalObservation) == [
+        n for n in names(view.HistoryObservation) if n not in LIVE_OBSERVATION_FIELDS]
+    dossier_fields = names(view.LongitudinalDossier)
+    assert names(PredecessorLongitudinalContext) == [
+        *(n for n in dossier_fields if n not in ("execution_status", "interpretation_status",
+                                                 "run_completed_at_technical", "active_history",
+                                                 "dependency_profile", "coverage_profile", "variety_profile",
+                                                 "transfer_profile", "consistency_profile",
+                                                 "temporal_validation_profile", "limitations")),
+        "observations", "episodes", "dependency_profile", "coverage_profile", "variety_profile",
+        "transfer_profile", "consistency_profile", "temporal_validation_profile", "limitations"]
+    for cls in (PredecessorLongitudinalContext, PredecessorHistoricalObservation):
+        assert not any(n.startswith("current_") or n.endswith("_status") for n in names(cls)), cls
+    assert svc.LIVE_LIMITATION_CODES == {view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT}
+    fields = {f.name: f for f in dataclasses.fields(InferenceContext)}
+    assert fields["predecessor_decision_context"].type == "PredecessorDecisionContext | None" or \
+        fields["predecessor_decision_context"].type == PredecessorDecisionContext | None
+    for cls in PREDECESSOR_CONTEXT_CLASSES:
+        for field in ("stage_claim_id", "tension_id", "id", "score", "confidence_score", "weight", "rank",
+                      "active_validation_plan", "tension_key"):
+            assert field not in names(cls), (cls, field)
+        # Aucune annotation vers un modèle ORM (seul LongitudinalDossier, T5-C).
+        from core import models as orm
+        orm_models = {n for n, o in vars(orm).items() if isinstance(o, type) and hasattr(o, "__table__")}
+        for f in dataclasses.fields(cls):
+            assert not any(model in str(f.type) for model in orm_models), (cls, f.name)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        PredecessorBasisRefContext(ref_role="validation", confidence_dimension=None, source_kind="observation",
+                                   source_id=X).source_id = Y
+
+
+T6B_MERGE = "0435aa4dd00cc5cf5cab38f686805b6d94075cb0"
+# Formats canoniques, identité logique, verrous, lifecycle, activation et
+# cache : strictement ceux de T6-B (PR #188).
+UNCHANGED_BY_T6B1 = (
+    "INPUT_SCHEMA_VERSION", "DEDUP_SCHEMA_VERSION", "OUTPUT_SCHEMA_VERSION", "ACTIVATION_LOCK_NAMESPACE",
+    "SPECIFICATION_FIELDS", "VERSION_FIELDS", "REF_ATTACHMENTS", "_canonical_json", "_canonical_sha256",
+    "_specification", "_dossier_payload", "_predecessor_payload", "_input_fingerprint", "_inference_dedup_key",
+    "_activation_lock_key", "_ref_source_identity", "_ref_payload", "_output_fingerprint", "_relations",
+    "_snapshot", "_verified_inputs", "_check_decision", "_membership_definitions", "_validated_decision",
+    "_validated_claims", "_validated_tensions", "_validated_refs", "_parent_problems", "_share_chain",
+    "_require_completed_active", "_active_and_cache", "_check_cache", "_children", "_require_pristine_candidate",
+    "_lock_couple", "_lock_run", "_lock_active", "_lock_cache", "_persist_children", "_Decision", "_Inputs",
+    "PredecessorSnapshot", "InferenceDecision", "complete_competency_inference", "fail_competency_inference",
+    "get_validated_user_competency_state", "get_competency_inference", "get_active_competency_inference",
+    "get_stage_claims", "get_inference_tensions", "get_inference_basis_refs", "get_user_competency_state")
+
+
+def _top_level(source):
+    definitions = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            definitions[node.name] = ast.dump(node)
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            definitions[node.targets[0].id] = ast.dump(node)
+    return definitions
+
+
+def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
+    """T6-B.1 n'est qu'une reconstruction historique : les versions et
+    formats V1 (input, dédup, output), _predecessor_payload, les verrous,
+    complete / fail, l'activation, le cache et la lecture validée sont
+    identiques (AST) à ceux du merge de T6-B."""
+    assert (svc.INPUT_SCHEMA_VERSION, svc.DEDUP_SCHEMA_VERSION, svc.OUTPUT_SCHEMA_VERSION) == (1, 1, 1)
+    assert list(inspect.signature(svc._predecessor_payload).parameters) == ["snapshot", "raw_context"]
+    snapshot = PredecessorSnapshot(
+        inference_run_id=X, longitudinal_assessment_run_id=Y, current_stage="application", previous_stage=None,
+        transition=None, transition_cause=None, tension_state="none", unresolved_revision_context=None,
+        established_claim_stages=("discovery",), input_fingerprint="in", output_fingerprint="out")
+    assert svc._predecessor_payload(snapshot, None) == {
+        "inference_run_id": str(X), "current_stage": "application", "tension_state": "none",
+        "unresolved_revision_context": None, "output_fingerprint": "out"}
+    base = subprocess.run(["git", "show", f"{T6B_MERGE}:core/inference_service.py"], cwd=REPO_ROOT,
+                          capture_output=True, text=True)
+    if base.returncode != 0:
+        pytest.skip("historique git indisponible")
+    before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
+    for name in UNCHANGED_BY_T6B1:
+        assert name in before and after.get(name) == before[name], name
+    # Seuls ajouts : les quatre structures historiques et deux helpers internes.
+    assert set(after) - set(before) == {
+        "PredecessorDecisionContext", "PredecessorStageClaimContext", "PredecessorTensionContext",
+        "PredecessorBasisRefContext", "PredecessorLongitudinalContext", "PredecessorHistoricalObservation",
+        "LIVE_LIMITATION_CODES", "_build_predecessor_decision_context", "_historical_longitudinal_context",
+        "_historical_ref_order", "_historical_ref_contexts"}
+    assert set(before) - set(after) == set()
 
 
 def _imports(path):
@@ -345,7 +467,7 @@ def test_no_score_rank_or_numeric_pedagogy():
         assert word not in tokens.split("\n") and f"{word}_" not in tokens and f"_{word}" not in tokens, word
     assert svc.STAGE_SEQUENCE == ("non_etabli", "discovery", "comprehension", "application", "mastery")
     # Aucun champ d'état numérique dans les structures du service.
-    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState):
+    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES):
         for f in dataclasses.fields(cls):
             assert f.type not in (float, "float"), (cls, f.name)
 
@@ -1084,6 +1206,7 @@ def test_pg_start_creates_a_running_candidate_with_derived_identity(engine, Sess
     assert (row["model_id"], row["prompt_spec_version"]) == ("m", "p")
     # Contexte immuable, unique entrée de T6-C.
     assert isinstance(context, InferenceContext) and context.predecessor is None
+    assert context.predecessor_decision_context is None
     assert context.longitudinal_dossier.run_id == w.t5 and context.user_id == USER
     assert context.input_fingerprint == row["input_fingerprint"]
     assert {o.observation_id for o in context.longitudinal_dossier.active_history.observations} == {
@@ -2490,3 +2613,600 @@ def test_pg_upstream_evidence_is_never_modified(engine, Sessions, db, world):
     _second(Sessions, w)
     svc.get_validated_user_competency_state(db, user_id=USER, competency_code="C7")
     assert {t: sorted(map(repr, _rows(engine, f"SELECT * FROM {t}"))) for t in tables} == before
+
+
+# --- L. T6-B.1 : contexte décisionnel historique du predecessor --------------------------
+
+RICH_NEEDS = [{"besoin": "revalider le levier", "portée": ["C7_A"], "détail": {"ordre": 1, "réel": 2.5}},
+              {"besoin": "observer un transfert"}]
+RICH_SUMMARY = "Application établie ; levier C7_A fragilisé."
+
+
+def _rich_decision(w, **overrides):
+    """Predecessor riche : Discovery / Comprehension implied, Application
+    direct, Mastery not_established (mastery_assessment) ; refs de chaque
+    rôle ; tensions localized / whole_competency / competency_only."""
+    claim_set = (
+        claim("discovery", "established", "implied_by_higher_claim", basis_summary="impliquée par Application",
+              confidence_profile={"coverage": {"note": "impliquée"}}),
+        claim("comprehension", "established", "implied_by_higher_claim", scope_summary="C7_A, C7_B",
+              confidence_profile={"coverage": {"note": "deux capacités"}}),
+        claim("application", "established", "direct", basis_summary="application démontrée",
+              scope_summary="C7_A", confidence_profile={"diagnosticity": {"note": "élevée"},
+                                                        "independence": {"sources": ["transfert", 1, 2.5, True,
+                                                                                     None]}}),
+        claim("mastery", mastery_assessment={"transfert": ["un seul"], "verdict": "insuffisant"}),
+    )
+    refs = [pos("application", w.app),
+            ref("confidence", "transfer", w.tr, claim_stage="application", confidence_dimension="independence"),
+            ref("confidence", "observation", w.comp, claim_stage="comprehension", confidence_dimension="coverage"),
+            ref("mastery", "transfer", w.tr, claim_stage="mastery"),
+            ref("tension", "observation", w.k, tension_key="levier"),
+            ref("tension", "observation", w.k_only, tension_key="global"),
+            ref("tension", "dependency", w.dep, tension_key="seul"),
+            ref("transition", "observation", w.app),
+            ref("validation", "revalidation", w.rv),
+            ref("validation", "observation", w.kB)]
+    tensions = [tension("levier", mode="localized", memberships=(w.A,)),
+                tension("global", mode="whole_competency", summary="fragilité globale",
+                        revision_status="revalidation_needed"),
+                tension("seul", stage="comprehension", mode="competency_only", summary="compétence seule")]
+    kwargs = {"claim_set": claim_set, "refs": refs, "tensions": tensions, "needs": RICH_NEEDS,
+              "summary": RICH_SUMMARY}
+    kwargs.update(overrides)
+    return decision("application", **kwargs)
+
+
+def _assert_stable_projection(history, live):
+    """history = vue T5-C `live` du même run T5, moins ce qu'elle relit au
+    présent : statut du run, current_* des observations, limitation
+    upstream_evidence_changed_since_snapshot."""
+    assert history.run_id == live.run_id
+    for f in dataclasses.fields(PredecessorLongitudinalContext):
+        if f.name not in ("observations", "episodes", "limitations"):
+            assert getattr(history, f.name) == getattr(live, f.name), f.name
+    assert history.episodes == live.active_history.episodes
+    assert len(history.observations) == len(live.active_history.observations)
+    for projected, observed in zip(history.observations, live.active_history.observations):
+        assert isinstance(projected, PredecessorHistoricalObservation)
+        for f in dataclasses.fields(PredecessorHistoricalObservation):
+            assert getattr(projected, f.name) == getattr(observed, f.name), f.name
+        for name in LIVE_OBSERVATION_FIELDS:
+            assert not hasattr(projected, name)
+    assert history.limitations == tuple(lim for lim in live.limitations
+                                        if lim.code != view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT)
+    assert not hasattr(history, "interpretation_status") and not hasattr(history, "execution_status")
+
+
+def _refs_view(refs):
+    return [(r.ref_role, r.confidence_dimension, r.source_kind, r.source_id) for r in refs]
+
+
+def _rich_predecessor(Sessions, w):
+    """R1 riche actif sur L1, puis L2 (nouvelle observation) qui supersede L1
+    et candidat R2. Retourne (R1, contexte de R2, observation nouvelle)."""
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    l2, (new,) = _new_t5(Sessions, w, sup(w.A))
+    return first, _start(Sessions, l2), new
+
+
+def test_pg_first_inference_has_neither_predecessor_nor_decision_context(engine, Sessions, db, world):
+    context = _start(Sessions, world.t5)
+    assert context.predecessor is None and context.predecessor_decision_context is None
+    assert svc.get_inference_context(db, run_id=context.run_id).predecessor_decision_context is None
+
+
+def test_pg_predecessor_decision_context_is_the_persisted_historical_decision(engine, Sessions, db, world):
+    w = world
+    first, context, _ = _rich_predecessor(Sessions, w)
+    p, rich = context.predecessor, context.predecessor_decision_context
+    assert isinstance(rich, PredecessorDecisionContext)
+    assert (p.inference_run_id, p.longitudinal_assessment_run_id) == (first, w.t5)
+    assert (rich.inference_run_id, rich.longitudinal_assessment_run_id) == (first, w.t5)
+    assert rich.pedagogical_taxonomy_release_id == w.tx.id
+    # Dossier HISTORIQUE (L1, superseded : normal), distinct du dossier courant,
+    # exposé comme projection stable de la vue T5-C.
+    history = rich.historical_longitudinal_context
+    assert isinstance(history, PredecessorLongitudinalContext)
+    assert history.run_id == w.t5 and context.longitudinal_dossier.run_id != w.t5
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    assert live.interpretation_status == "superseded"
+    _assert_stable_projection(history, live)
+    # Quatre claims, ordre conceptuel, contenus exacts.
+    assert [c.stage for c in rich.claims] == list(STAGES)
+    assert [(c.positive_basis_status, c.basis_mode, c.basis_summary, c.scope_summary) for c in rich.claims] == [
+        ("established", "implied_by_higher_claim", "impliquée par Application", None),
+        ("established", "implied_by_higher_claim", None, "C7_A, C7_B"),
+        ("established", "direct", "application démontrée", "C7_A"),
+        ("not_established", "none", None, None)]
+    discovery, comprehension, application, mastery = rich.claims
+    assert application.confidence_profile == {"diagnosticity": {"note": "élevée"},
+                                              "independence": {"sources": ("transfert", 1, 2.5, True, None)}}
+    assert mastery.confidence_profile is None and application.mastery_assessment is None
+    assert mastery.mastery_assessment == {"transfert": ("un seul",), "verdict": "insuffisant"}
+    # Refs rattachées à leur claim (aucun stage_claim_id exposé).
+    assert _refs_view(application.basis_refs) == [
+        ("confidence", "independence", "transfer", w.tr), ("positive_basis", None, "observation", w.app)]
+    assert _refs_view(comprehension.basis_refs) == [("confidence", "coverage", "observation", w.comp)]
+    assert _refs_view(mastery.basis_refs) == [("mastery", None, "transfer", w.tr)]
+    assert discovery.basis_refs == ()
+    # Refs run-level : transition + validation, et seulement elles.
+    assert sorted(_refs_view(rich.run_basis_refs), key=str) == sorted([
+        ("transition", None, "observation", w.app), ("validation", None, "observation", w.kB),
+        ("validation", None, "revalidation", w.rv)], key=str)
+    assert [r.ref_role for r in rich.run_basis_refs] == ["transition", "validation", "validation"]
+    # Tensions, scopes (membership historique + définition), provenance.
+    by_mode = {t.scope_mode: t for t in rich.tensions}
+    assert set(by_mode) == {"localized", "whole_competency", "competency_only"} and len(rich.tensions) == 3
+    localized = by_mode["localized"]
+    assert (localized.fragilized_stage, localized.summary, localized.revision_status) == (
+        "application", "contradiction récente", "unresolved")
+    assert localized.capability_membership_ids == (w.A,) and localized.capability_definition_ids == (w.dA,)
+    assert _refs_view(localized.basis_refs) == [("tension", None, "observation", w.k)]
+    whole, only_c = by_mode["whole_competency"], by_mode["competency_only"]
+    assert (whole.summary, whole.revision_status, only_c.fragilized_stage) == (
+        "fragilité globale", "revalidation_needed", "comprehension")
+    for t in (whole, only_c):
+        assert t.capability_membership_ids == () and t.capability_definition_ids == ()
+    assert _refs_view(whole.basis_refs) == [("tension", None, "observation", w.k_only)]
+    assert _refs_view(only_c.basis_refs) == [("tension", None, "dependency", w.dep)]
+    # validation_needs et state_decision_summary tels que persistés.
+    assert rich.validation_needs == (
+        {"besoin": "revalider le levier", "portée": ("C7_A",), "détail": {"ordre": 1, "réel": 2.5}},
+        {"besoin": "observer un transfert"})
+    assert rich.state_decision_summary == RICH_SUMMARY
+    # La vérification repose sur l'empreinte persistée, jamais réécrite.
+    assert p.output_fingerprint == _run(engine, first)["output_fingerprint"]
+
+
+def test_pg_historical_ref_and_tension_order_is_deterministic(engine, Sessions, db, world):
+    """Même décision fournie dans un autre ordre (refs, tensions, clés
+    locales) : contexte historique identique ; ordre des refs = (ref_role,
+    confidence_dimension, source_kind, source_id)."""
+    w = world
+    d = _rich_decision(w)
+    shuffled = dataclasses.replace(d, claims=tuple(reversed(d.claims)), tensions=tuple(reversed(d.tensions)),
+                                   basis_refs=tuple(reversed(d.basis_refs)))
+    contexts = []
+    for i, variant in enumerate((d, shuffled)):
+        context = _start(Sessions, w.t5, evaluator_version=f"e-{i}")
+        run = svc.complete_competency_inference(db, run_id=context.run_id, decision=variant)
+        contexts.append(svc._build_predecessor_decision_context(db, svc._run_row(db, run.id)))
+        db.rollback()
+    one, two = contexts
+    assert (one.claims, one.tensions, one.run_basis_refs) == (two.claims, two.tensions, two.run_basis_refs)
+    for refs in (one.run_basis_refs, *(c.basis_refs for c in one.claims), *(t.basis_refs for t in one.tensions)):
+        keys = [(r.ref_role, r.confidence_dimension or "", r.source_kind, str(r.source_id)) for r in refs]
+        assert keys == sorted(keys)
+
+
+def _event_of(engine, observation_id):
+    return _rows(engine, "SELECT r.event_id FROM pedagogical_observations o JOIN observation_evaluation_runs r"
+                         " ON r.id = o.evaluation_run_id WHERE o.id = :o", o=observation_id)[0]["event_id"]
+
+
+def test_pg_start_and_resume_expose_the_same_rich_context(engine, Sessions, db, world):
+    """start == get_inference_context, immédiatement ET malgré une mutation
+    LIVE d'un amont historique qui ne touche pas le T5 courant : w.kB (citée
+    par une ref validation de R1) est invalidée avant L2, donc absente de
+    L2 ; APRÈS le start de R2, son événement est réévalué par les services
+    T3 normaux (run T3 de w.kB superseded)."""
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    _invalidate(Sessions, w.kB)
+    l2, _ = _new_t5(Sessions, w)
+    started = _start(Sessions, l2)
+    assert w.kB not in {o.observation_id for o in started.longitudinal_dossier.active_history.observations}
+    history = started.predecessor_decision_context.historical_longitudinal_context
+    assert w.kB in {o.observation_id for o in history.observations}
+    assert svc.get_inference_context(db, run_id=started.run_id) == started
+    db.rollback()
+    _t3(Sessions, w.tx.id, contra(w.B), event_id=_event_of(engine, w.kB))
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_kb = {o.observation_id: o for o in live.active_history.observations}[w.kB]
+    assert (live_kb.current_integrity_status, live_kb.current_evaluation_run_interpretation_status) == (
+        "invalidated", "superseded")
+    resumed = svc.get_inference_context(db, run_id=started.run_id)
+    assert resumed == started
+    a, b = started.predecessor_decision_context, resumed.predecessor_decision_context
+    assert a is not b and a == b and a.inference_run_id == first
+    assert (a.historical_longitudinal_context, a.claims, a.tensions, a.run_basis_refs, a.validation_needs,
+            a.state_decision_summary) == (b.historical_longitudinal_context, b.claims, b.tensions,
+                                          b.run_basis_refs, b.validation_needs, b.state_decision_summary)
+    assert resumed.predecessor == started.predecessor
+    assert resumed.longitudinal_dossier == started.longitudinal_dossier
+    _assert_stable_projection(b.historical_longitudinal_context, live)
+    assert _count(engine, "competency_inference_runs") == 2 and not db.new and not db.dirty
+
+
+def _walk(value, path="context"):
+    """Chaque valeur atteignable : aucun dict / list / set mutable, aucun
+    objet ORM ni ligne SQLAlchemy."""
+    assert not isinstance(value, (dict, list, set, bytearray)), path
+    assert not hasattr(type(value), "__table__") and not isinstance(value, sa.engine.Row), path
+    if dataclasses.is_dataclass(value):
+        assert type(value).__dataclass_params__.frozen, path
+        for f in dataclasses.fields(value):
+            _walk(getattr(value, f.name), f"{path}.{f.name}")
+    elif isinstance(value, MappingProxyType):
+        for key, item in value.items():
+            _walk(item, f"{path}[{key!r}]")
+    elif isinstance(value, tuple):
+        for i, item in enumerate(value):
+            _walk(item, f"{path}[{i}]")
+    else:
+        assert value is None or isinstance(value, (str, int, float, bool, uuid.UUID, type(svc._utcnow()))), (
+            path, type(value))
+
+
+def test_pg_rich_context_is_deeply_immutable_and_orm_free(engine, Sessions, db, world):
+    w = world
+    _, context, _ = _rich_predecessor(Sessions, w)
+    rich = context.predecessor_decision_context
+    _walk(context)
+    application = rich.claims[2]
+    for mapping, key in ((application.confidence_profile, "x"), (application.confidence_profile["independence"], "x"),
+                         (rich.claims[3].mastery_assessment, "verdict"), (rich.validation_needs[0], "besoin"),
+                         (rich.validation_needs[0]["détail"], "ordre")):
+        with pytest.raises(TypeError):
+            mapping[key] = "muté"
+    for collection in (rich.claims, rich.tensions, rich.run_basis_refs, rich.validation_needs,
+                       application.basis_refs, rich.tensions[0].capability_membership_ids,
+                       rich.tensions[0].capability_definition_ids,
+                       application.confidence_profile["independence"]["sources"]):
+        assert isinstance(collection, tuple)
+    for target, field in ((rich, "claims"), (rich, "validation_needs"), (application, "confidence_profile"),
+                          (rich.tensions[0], "capability_membership_ids"), (rich.run_basis_refs[0], "source_id"),
+                          (context, "predecessor_decision_context")):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(target, field, None)
+
+
+def test_pg_historical_t5_superseded_and_t3_reevaluated_stay_readable(engine, Sessions, db, world):
+    """Après activation du predecessor : réévaluation T3 de l'événement de
+    sa positive_basis (run T3 superseded), puis nouveau T5 qui supersede L1.
+    Le contexte historique L1 garde l'ancienne observation comme fait du
+    snapshot, sans statut relu au présent ; la vue T5-C live l'expose et le
+    signale (audit)."""
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    before = _run(engine, first)
+    o2 = _t3(Sessions, w.tx.id, app(w.A), event_id=w.app_t3.event).id
+    l2 = _start_t5(Sessions, w.tx.id)
+    _complete_t5(Sessions, l2)
+    context = _start(Sessions, l2)
+    rich = context.predecessor_decision_context
+    history = rich.historical_longitudinal_context
+    assert w.app in {o.observation_id for o in history.observations}
+    assert o2 not in {o.observation_id for o in history.observations}
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_app = {o.observation_id: o for o in live.active_history.observations}[w.app]
+    assert live_app.current_evaluation_run_interpretation_status == "superseded"
+    assert view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT in {lim.code for lim in live.limitations}
+    assert view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT not in {lim.code for lim in history.limitations}
+    _assert_stable_projection(history, live)
+    assert ("positive_basis", None, "observation", w.app) in _refs_view(rich.claims[2].basis_refs)
+    # Le dossier courant contient la réévaluation ; l'historique reste l'ancien.
+    assert o2 in {o.observation_id for o in context.longitudinal_dossier.active_history.observations}
+    assert _run(engine, first) == before  # predecessor jamais recalculé ni réécrit
+
+
+def test_pg_invalidated_observation_never_erases_the_historical_decision(engine, Sessions, db, world):
+    """O (positive_basis du predecessor) invalidée ensuite : le contexte
+    historique la contient toujours comme fait du snapshot (la vue T5-C live
+    montre invalidated), la positive_basis historique est toujours exposée ;
+    aucun recalcul ni réécriture du predecessor."""
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    t6_before = _t6_snapshot(engine)
+    _invalidate(Sessions, w.app)
+    l2, _ = _new_t5(Sessions, w)
+    context = _start(Sessions, l2)
+    rich = context.predecessor_decision_context
+    assert w.app not in {o.observation_id for o in context.longitudinal_dossier.active_history.observations}
+    assert w.app in {o.observation_id for o in rich.historical_longitudinal_context.observations}
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    assert {o.observation_id: o for o in live.active_history.observations}[w.app].current_integrity_status == \
+        "invalidated"
+    _assert_stable_projection(rich.historical_longitudinal_context, live)
+    assert ("positive_basis", None, "observation", w.app) in _refs_view(rich.claims[2].basis_refs)
+    assert ("transition", None, "observation", w.app) in _refs_view(rich.run_basis_refs)
+    assert [c.positive_basis_status for c in rich.claims] == ["established"] * 3 + ["not_established"]
+    assert context.predecessor.current_stage == "application"
+    # Predecessor et ses lignes enfants intacts (seul le candidat est nouveau).
+    after = _t6_snapshot(engine)
+    assert {t: v for t, v in after.items() if t != "competency_inference_runs"} == {
+        t: v for t, v in t6_before.items() if t != "competency_inference_runs"}
+    assert _run(engine, first)["output_fingerprint"] == context.predecessor.output_fingerprint
+
+
+def test_pg_cross_release_scope_stays_historical(engine, Sessions, db, world):
+    """Predecessor sur R1 (localized C7_A = membership M1 de R1) ; R2 réutilise
+    la même définition sous un autre membership, R1 est retirée. Le contexte
+    courant est sur R2 ; l'historique expose M1 (R1) et la définition, sans
+    aucun remapping vers R2."""
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    r2 = _taxonomy(Sessions, {"C7_A": w.dA, "C7_B": w.dB, "C7_C": w.tx.d["C7_C"]})
+    assert r2.m["C7_A"] != w.A and r2.d["C7_A"] == w.dA
+    assert _rows(engine, "SELECT status FROM pedagogical_taxonomy_releases WHERE id = :i",
+                 i=w.tx.id)[0]["status"] == "retired"
+    _t3(Sessions, r2.id, sup(r2.m["C7_A"]))
+    l2 = _start_t5(Sessions, r2.id)
+    _complete_t5(Sessions, l2)
+    context = _start(Sessions, l2)
+    rich = context.predecessor_decision_context
+    assert context.pedagogical_taxonomy_release_id == r2.id
+    assert rich.inference_run_id == first and rich.pedagogical_taxonomy_release_id == w.tx.id
+    assert rich.historical_longitudinal_context.pedagogical_taxonomy_release_id == w.tx.id
+    (localized,) = [t for t in rich.tensions if t.scope_mode == "localized"]
+    assert localized.capability_membership_ids == (w.A,) and localized.capability_definition_ids == (w.dA,)
+    assert r2.m["C7_A"] not in localized.capability_membership_ids
+
+
+def _corrupt_ref(engine, first, role, sql_set, **params):
+    _exec(engine, f"UPDATE competency_inference_basis_refs SET {sql_set} WHERE inference_run_id = :r"
+                  f" AND ref_role = '{role}'", r=first, **params)
+
+
+def _foreign_revalidation(Sessions, w):
+    other = _start_t5(Sessions, w.tx.id)
+    with Sessions() as s:
+        foreign = t5.add_revalidation(s, run_id=other, source_contradiction_observation_id=w.k,
+                                      target_supportive_observation_id=w.app, scope_mode="competency_only",
+                                      revalidation_basis={"w": 1}).id
+        s.commit()
+    return foreign
+
+
+def _apply_historical_corruption(Sessions, engine, w, first, case):
+    run = "UPDATE competency_inference_runs SET {} WHERE id = :r"
+    claim_sql = "UPDATE competency_stage_claims SET {} WHERE inference_run_id = :r AND stage = '{}'"
+    tension_sql = "UPDATE competency_inference_tensions SET {} WHERE inference_run_id = :r AND scope_mode = '{}'"
+    scope_sql = ("UPDATE competency_inference_tension_capabilities SET capability_membership_id = :m WHERE"
+                 " tension_id IN (SELECT id FROM competency_inference_tensions WHERE inference_run_id = :r)")
+    corruption = {
+        "claim_basis_summary": (claim_sql.format("basis_summary = 'réécrit'", "application"), {}),
+        "claim_scope_summary": (claim_sql.format("scope_summary = 'C7_B'", "application"), {}),
+        "claim_confidence_profile": (claim_sql.format(
+            "confidence_profile = '{\"diagnosticity\": {\"note\": \"faible\"}}'", "application"), {}),
+        "claim_mastery_assessment": (claim_sql.format("mastery_assessment = NULL", "mastery"), {}),
+        "claim_status": (claim_sql.format("positive_basis_status = 'not_established', basis_mode = 'none',"
+                                          " confidence_profile = NULL", "discovery"), {}),
+        "missing_claim": ("DELETE FROM competency_stage_claims WHERE inference_run_id = :r AND stage = 'discovery'",
+                          {}),
+        "tension_summary": (tension_sql.format("summary = 'autre motif'", "whole_competency"), {}),
+        "tension_revision_status": (tension_sql.format("revision_status = 'unresolved'", "whole_competency"), {}),
+        "tension_stage": (tension_sql.format("fragilized_stage = 'discovery'", "localized"), {}),
+        "tension_scope_mode": (tension_sql.format("scope_mode = 'whole_competency'", "competency_only"), {}),
+        "tension_membership_swapped": (scope_sql, {"m": w.B}),
+        "tension_membership_removed": ("DELETE FROM competency_inference_tension_capabilities", {}),
+        "tension_membership_other_competency": (scope_sql, {"m": w.tx.m["C8_A"]}),
+        "missing_tension": ("DELETE FROM competency_inference_basis_refs WHERE inference_run_id = :r AND tension_id"
+                            " IN (SELECT id FROM competency_inference_tensions WHERE scope_mode = 'competency_only');"
+                            " DELETE FROM competency_inference_tensions WHERE inference_run_id = :r"
+                            " AND scope_mode = 'competency_only'", {}),
+        "validation_needs": (run.format("validation_needs = '[{\"besoin\": \"autre\"}]'"), {}),
+        "validation_needs_null": (run.format("validation_needs = NULL"), {}),
+        "state_decision_summary": (run.format("state_decision_summary = 'réécrit'"), {}),
+        "transition_cause": (run.format("transition_cause = 'new_user_evidence'"), {}),
+        "specification": (run.format("evaluator_version = 'autre'"), {}),
+        "input_fingerprint": (run.format("input_fingerprint = 'x'"), {}),
+        "output_fingerprint": (run.format("output_fingerprint = repeat('0', 64)"), {}),
+        "output_fingerprint_null": (run.format("output_fingerprint = NULL"), {}),
+        "completed_at_null": (run.format("completed_at = NULL"), {}),
+    }
+    if case in corruption:
+        sql, params = corruption[case]
+        for statement in sql.split("; "):
+            _exec(engine, statement, r=first, **params)
+    elif case == "tension_membership_other_release":
+        other = _taxonomy(Sessions, ("C7_A",), activate=False)
+        _exec(engine, scope_sql, r=first, m=other.m["C7_A"])
+    elif case == "ref_source_swapped":
+        _corrupt_ref(engine, first, "positive_basis", "source_observation_id = :o", o=w.comp)
+    elif case == "ref_moved_to_another_claim":
+        _corrupt_ref(engine, first, "mastery", "stage_claim_id = (SELECT id FROM competency_stage_claims"
+                                               " WHERE inference_run_id = :r AND stage = 'application')")
+    elif case == "ref_deleted":
+        _exec(engine, "DELETE FROM competency_inference_basis_refs WHERE inference_run_id = :r"
+                      " AND source_kind = 'revalidation'", r=first)
+    elif case == "ref_added":
+        _exec(engine, "INSERT INTO competency_inference_basis_refs (id, inference_run_id, ref_role, source_kind,"
+                      " source_observation_id, created_at) VALUES (:i, :r, 'validation', 'observation', :o, now())",
+              i=uuid.uuid4(), r=first, o=w.comp)
+    elif case == "ref_observation_outside_snapshot":
+        _corrupt_ref(engine, first, "positive_basis", "source_observation_id = :o",
+                     o=_t3(Sessions, w.tx.id, app(w.A)).id)
+    elif case == "ref_relation_outside_parent":
+        _exec(engine, "UPDATE competency_inference_basis_refs SET source_revalidation_id = :v WHERE"
+                      " inference_run_id = :r AND source_kind = 'revalidation'", r=first,
+              v=_foreign_revalidation(Sessions, w))
+    elif case in ("ref_missing_observation", "ref_missing_relation"):
+        # Une FK PostgreSQL rend une source absente impossible en temps
+        # normal ; on la contourne (superuser, triggers de FK désactivés
+        # localement) pour simuler une corruption réelle.
+        column = "source_observation_id" if case == "ref_missing_observation" else "source_revalidation_id"
+        with engine.begin() as conn:
+            conn.execute(sa.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(sa.text(f"UPDATE competency_inference_basis_refs SET {column} = :v WHERE"
+                                 f" inference_run_id = :r AND {column} IS NOT NULL"), {"v": uuid.uuid4(), "r": first})
+    elif case == "parent_other_couple":
+        _t3(Sessions, w.tx.id, sup(w.tx.m["C8_A"], competency_code="C8"))
+        c8 = _start_t5(Sessions, w.tx.id, competency_code="C8")
+        _complete_t5(Sessions, c8)
+        _exec(engine, run.format("longitudinal_assessment_run_id = :t"), r=first, t=c8)
+    else:
+        raise AssertionError(case)
+
+
+HISTORICAL_CORRUPTIONS = [
+    "claim_basis_summary", "claim_scope_summary", "claim_confidence_profile", "claim_mastery_assessment",
+    "claim_status", "missing_claim", "tension_summary", "tension_revision_status", "tension_stage",
+    "tension_scope_mode", "tension_membership_swapped", "tension_membership_removed",
+    "tension_membership_other_competency", "tension_membership_other_release", "missing_tension",
+    "ref_source_swapped", "ref_moved_to_another_claim", "ref_deleted", "ref_added",
+    "ref_observation_outside_snapshot", "ref_relation_outside_parent", "ref_missing_observation",
+    "ref_missing_relation", "validation_needs", "validation_needs_null", "state_decision_summary",
+    "transition_cause", "specification", "input_fingerprint", "output_fingerprint", "output_fingerprint_null",
+    "completed_at_null", "parent_other_couple",
+]
+# Motif attendu ; par défaut, le contenu modifié ne reproduit plus
+# output_fingerprint (jamais recalculé ni réécrit).
+CORRUPTION_REASONS = {
+    "missing_claim": "exactement quatre attendues",
+    "tension_membership_removed": "localized avec 0 membership",
+    "tension_membership_other_competency": "hors de C7",
+    "tension_membership_other_release": "hors de la release historique",
+    "ref_observation_outside_snapshot": "absente du snapshot",
+    "ref_missing_observation": "absente du snapshot",
+    "ref_relation_outside_parent": "absente ou hors du run T5",
+    "ref_missing_relation": "absente ou hors du run T5",
+    "validation_needs_null": "sorties absentes : validation_needs",
+    "output_fingerprint_null": "sorties absentes : output_fingerprint",
+    "completed_at_null": "sorties absentes : completed_at",
+    "input_fingerprint": "input_fingerprint non reproductible",
+    "parent_other_couple": "d'un autre couple",
+}
+# Champs du payload predecessor de input_fingerprint (T6-B, inchangé) : leur
+# corruption rend d'abord l'entrée du candidat non reproductible.
+PAYLOAD_CORRUPTIONS = {"output_fingerprint", "output_fingerprint_null"}
+
+
+@pytest.mark.parametrize("case", HISTORICAL_CORRUPTIONS)
+def test_pg_corrupted_predecessor_history_is_refused_never_repaired(engine, Sessions, db, world, case):
+    """Historique corrompu (SQL direct, output_fingerprint jamais mis à
+    jour) : InvalidInferenceState, ni candidat créé, ni reprise, ni
+    réparation. Jamais StaleInferenceInput pour la reconstruction elle-même."""
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    candidate = _start(Sessions, w.t5, state_decision_version="state-2")
+    _apply_historical_corruption(Sessions, engine, w, first, case)
+    before = _t6_snapshot(engine)
+    reason = CORRUPTION_REASONS.get(case, "output_fingerprint non reproductible depuis la décision persistée")
+    with pytest.raises(InvalidInferenceState, match=f"historique corrompu .*{reason}"):
+        svc._build_predecessor_decision_context(db, svc._run_row(db, first))
+    db.rollback()
+    with pytest.raises(InvalidInferenceState):
+        svc.start_competency_inference(db, **_start_kwargs(w.t5, state_decision_version="state-3"))
+    db.rollback()
+    with pytest.raises(StaleInferenceInput if case in PAYLOAD_CORRUPTIONS else InvalidInferenceState):
+        svc.get_inference_context(db, run_id=candidate.run_id)
+    db.rollback()
+    assert _t6_snapshot(engine) == before
+    assert _count(engine, "competency_inference_runs") == 2
+    assert _state(engine, first) == ("completed", "active")
+
+
+def test_pg_duplicate_or_unknown_claims_are_prevented_by_the_schema(engine, Sessions, db, world):
+    """Claim dupliquée / inconnue : impossibles à persister (UNIQUE
+    (inference_run_id, stage), CHECK stage) ; la reconstruction les refuse
+    néanmoins (défense en profondeur, testée par les chemins manquants)."""
+    first = _activate_first(Sessions, world, _rich_decision(world))
+    for stage in ("mastery", "non_etabli"):
+        with pytest.raises(sa.exc.IntegrityError):
+            _exec(engine, "INSERT INTO competency_stage_claims (id, inference_run_id, stage, positive_basis_status,"
+                          " basis_mode, created_at) VALUES (:i, :r, :s, 'not_established', 'none', now())",
+                  i=uuid.uuid4(), r=first, s=stage)
+    assert svc._build_predecessor_decision_context(db, svc._run_row(db, first)).inference_run_id == first
+
+
+def test_pg_rich_context_changes_neither_input_fingerprint_nor_dedup_key(engine, Sessions, db, world):
+    """Le contexte riche n'entre ni dans input_fingerprint ni dans
+    inference_dedup_key : recalcul T6-B V1 depuis le dossier et le seul
+    payload predecessor ; aucune nouvelle identité logique."""
+    w = world
+    first, context, _ = _rich_predecessor(Sessions, w)
+    row = _run(engine, context.run_id)
+    parent = svc._parent_row(db, context.longitudinal_assessment_run_id, lock=False)
+    predecessor = svc._run_row(db, first)
+    expected = svc._input_fingerprint(svc._dossier_payload(parent, svc._relations(db, parent.id)),
+                                      svc._predecessor_payload(context.predecessor,
+                                                               predecessor.unresolved_revision_context))
+    assert row["input_fingerprint"] == context.input_fingerprint == expected
+    assert row["inference_dedup_key"] == svc._inference_dedup_key(expected, svc._specification(row))
+    # Même entrée logique : toujours un doublon, jamais un nouveau run.
+    with pytest.raises(DuplicateInference):
+        svc.start_competency_inference(db, **_start_kwargs(context.longitudinal_assessment_run_id,
+                                                           trigger="manual_audit"))
+    db.rollback()
+    assert _count(engine, "competency_inference_runs") == 2
+
+
+def test_pg_rich_context_reconstruction_is_select_only(engine, Sessions, db, world):
+    w = world
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    tables = (*T6_CLEANUP, "longitudinal_assessment_runs", "longitudinal_assessment_inputs",
+              "observation_dependencies", "observation_transfers", "observation_revalidations",
+              "pedagogical_observations", "observation_evaluation_runs", "cognitive_events",
+              "pedagogical_taxonomy_releases", "capability_taxonomy_memberships")
+    before = {t: sorted(map(repr, _rows(engine, f"SELECT * FROM {t}"))) for t in tables}
+    statements, record = _recording(engine)
+    events = []
+    listeners = {name: (lambda *a, _n=name: events.append(_n)) for name in ("commit", "rollback", "savepoint")}
+    listeners["before_cursor_execute"] = record
+    for name, fn in listeners.items():
+        sa.event.listen(engine, name, fn)
+    try:
+        rich = svc._build_predecessor_decision_context(db, svc._run_row(db, first))
+    finally:
+        for name, fn in listeners.items():
+            sa.event.remove(engine, name, fn)
+    assert rich.inference_run_id == first
+    assert statements and all(sql.startswith("SELECT") and " FOR " not in sql for sql, _ in statements)
+    assert events == [] and not db.new and not db.dirty and not db.deleted
+    db.commit()
+    assert {t: sorted(map(repr, _rows(engine, f"SELECT * FROM {t}"))) for t in tables} == before
+
+
+def test_pg_rich_context_query_count_is_constant(engine, Sessions, db, world):
+    """Anti-N+1 : même nombre de requêtes pour un predecessor minimal et pour
+    un predecessor à dix refs et trois tensions (même dossier T5) ; une
+    seule requête par famille T6."""
+    w = world
+    _activate_first(Sessions, w)
+    rich_context = _start(Sessions, w.t5, state_decision_version="state-2")
+    rich = _complete(Sessions, rich_context.run_id, _rich_decision(w, cause="pedagogical_reinterpretation"))
+    minimal_context = _start(Sessions, w.t5, state_decision_version="state-3")
+    minimal = _complete(Sessions, minimal_context.run_id, _app_decision(w, cause="pedagogical_reinterpretation"))
+    counts = {}
+    for run_id in (rich, minimal):
+        statements, record = _recording(engine)
+        sa.event.listen(engine, "before_cursor_execute", record)
+        try:
+            svc._build_predecessor_decision_context(db, svc._run_row(db, run_id))
+        finally:
+            sa.event.remove(engine, "before_cursor_execute", record)
+        counts[run_id] = len(statements)
+        for table in ("competency_inference_basis_refs", "competency_inference_tension_capabilities"):
+            assert sum(f"FROM {table}" in sql for sql, _ in statements) == 1, table
+    assert _count(engine, "competency_inference_basis_refs", "inference_run_id = :r", r=rich) == 10
+    assert counts[rich] == counts[minimal]
+
+
+def test_pg_historical_upstream_mutation_after_start_never_changes_the_candidate_input(engine, Sessions, db, world):
+    """R1 fondé sur O1 ; réévaluation du même événement (O2, T3 de O1
+    superseded) ; L2 avec O2 ; start R2. APRÈS le start, O1 (hors de L2) est
+    invalidée : l'entrée courante de R2 reste valide et son contexte
+    historique ne change pas. La vue T5-C live, elle, expose la mutation."""
+    w = world
+    o1 = w.app
+    first = _activate_first(Sessions, w, _rich_decision(w))
+    o2 = _t3(Sessions, w.tx.id, app(w.A), event_id=w.app_t3.event).id
+    l2 = _start_t5(Sessions, w.tx.id)
+    _complete_t5(Sessions, l2)
+    started = _start(Sessions, l2)
+    current = {o.observation_id for o in started.longitudinal_dossier.active_history.observations}
+    assert o2 in current and o1 not in current
+    assert started.predecessor.inference_run_id == first
+    _invalidate(Sessions, o1)
+    resumed = svc.get_inference_context(db, run_id=started.run_id)
+    assert resumed.predecessor_decision_context == started.predecessor_decision_context
+    assert resumed == started
+    # Audit T5-C live : la mutation y est visible (séparation voulue).
+    live = view.build_longitudinal_dossier(db, run_id=w.t5)
+    live_o1 = {o.observation_id: o for o in live.active_history.observations}[o1]
+    assert (live_o1.current_integrity_status, live_o1.current_evaluation_run_interpretation_status) == (
+        "invalidated", "superseded")
+    upstream = [lim for lim in live.limitations if lim.code == view.UPSTREAM_EVIDENCE_CHANGED_SINCE_SNAPSHOT]
+    assert upstream and o1 in upstream[0].observation_ids
