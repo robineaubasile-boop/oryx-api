@@ -145,18 +145,25 @@ Invariants :
   cause obligatoire. upgraded et revised_down (hors non_etabli) exigent la
   claim du stade d'arrivée established et au moins une ref transition ;
   revised_down vers non_etabli seulement sans aucune claim established et
-  par evidence_integrity_change ou pedagogical_reinterpretation. Un
-  current_stage au-dessus de la plus haute claim established n'est
-  acceptable que comme maintien du stade précédent sous tension ouverte
-  avec unresolved_revision_context non vide. new_user_evidence exige au
-  moins une observation absente du snapshot T5 du predecessor ;
-  pedagogical_reinterpretation exige une spécification différente de
-  celle du predecessor. Anti-oscillation (garde STRUCTURELLE seulement) :
-  remonter après une révision non résolue par new_user_evidence exige
-  qu'au moins une ref positive_basis ou transition cite une observation
-  nouvelle (directement ou comme extrémité d'une relation) : les anciennes
-  preuves seules ne provoquent jamais une remontée ; T6-C reste seul juge
-  de la résolution du motif.
+  par evidence_integrity_change ou pedagogical_reinterpretation, sans ref
+  transition obligatoire (le dossier courant peut être vide après
+  invalidation de la dernière preuve ; une ref fournie reste soumise aux
+  règles normales). Un current_stage au-dessus de la plus haute claim
+  established n'est acceptable que comme maintien du stade précédent sous
+  tension ouverte avec unresolved_revision_context non vide. Causes
+  (conditions STRUCTURELLES minimales, jamais la causalité métier) :
+  new_user_evidence exige au moins un CognitiveEvent absent du dossier T5
+  du predecessor (unité = l'événement, jamais l'observation : une
+  réévaluation T3 du même événement n'est pas une nouvelle démonstration) ;
+  evidence_integrity_change exige un dossier T5 logique (_dossier_payload)
+  différent de celui du predecessor (une correction peut retirer une
+  observation) ; pedagogical_reinterpretation exige une spécification
+  différente de celle du predecessor. Anti-oscillation : remonter après une
+  révision non résolue par new_user_evidence exige qu'au moins une ref
+  positive_basis ou transition cite une observation d'un CognitiveEvent
+  NOUVEAU (directement ou comme extrémité d'une relation T5) : les
+  anciennes démonstrations, même réévaluées, ne provoquent jamais une
+  remontée ; T6-C reste seul juge de la résolution du motif.
 
 - Lecture validée (get_validated_user_competency_state) : cache -> active
   T6 -> parent T5 active -> observations valid -> runs T3 completed /
@@ -1407,19 +1414,42 @@ def _check_decision(db, run, inputs: _Inputs, predecessor, decision: _Decision) 
             raise error(f"current_stage {current} au-dessus de la plus haute claim established ({highest}) :"
                         " acceptable seulement comme maintien du stade précédent, sous tension ouverte, avec"
                         " unresolved_revision_context")
-    if transition in (UPGRADED, REVISED_DOWN) and not any(r.role == TRANSITION for r in decision.refs):
+    # Seule exception STRUCTURELLE : revised_down -> non_etabli sans aucune
+    # claim established, par intégrité ou réinterprétation. Le dossier
+    # courant peut alors ne plus contenir aucune source (dernière preuve
+    # invalidée) : aucune ref transition n'est exigée ; si une ref existe,
+    # elle reste soumise aux règles normales (source du dossier courant).
+    technical_reset = (transition == REVISED_DOWN and current == NON_ETABLI and highest == NON_ETABLI
+                       and decision.cause in (EVIDENCE_INTEGRITY_CHANGE, PEDAGOGICAL_REINTERPRETATION))
+    if transition in (UPGRADED, REVISED_DOWN) and not technical_reset and not any(
+            r.role == TRANSITION for r in decision.refs):
         raise error(f"transition {transition} sans ref transition")
 
     if predecessor is not None:
-        previous_inputs = set(db.execute(
-            select(LongitudinalAssessmentInput.observation_id)
+        # Nouvelle preuve = nouvelle démonstration de l'utilisateur, donc un
+        # CognitiveEvent absent du dossier du predecessor. Une réévaluation T3
+        # du même événement crée de nouvelles observations (nouveaux UUID)
+        # mais jamais une nouvelle démonstration.
+        previous_events = set(db.execute(
+            select(ObservationEvaluationRun.event_id)
+            .join(PedagogicalObservation, PedagogicalObservation.evaluation_run_id == ObservationEvaluationRun.id)
+            .join(LongitudinalAssessmentInput, LongitudinalAssessmentInput.observation_id == PedagogicalObservation.id)
             .where(LongitudinalAssessmentInput.run_id == predecessor.longitudinal_assessment_run_id)
         ).scalars())
-        new_observations = set(observations) - previous_inputs
-        if decision.cause == NEW_USER_EVIDENCE and not new_observations:
-            raise error(f"{NEW_USER_EVIDENCE} sans aucune observation absente du dossier du predecessor")
+        new_user_events = {o.event_id for o in observations.values()} - previous_events
+        if decision.cause == NEW_USER_EVIDENCE and not new_user_events:
+            raise error(f"{NEW_USER_EVIDENCE} sans aucun CognitiveEvent absent du dossier du predecessor (une"
+                        " réévaluation ou un recalcul n'est jamais une nouvelle démonstration utilisateur)")
         if decision.cause == PEDAGOGICAL_REINTERPRETATION and _specification(run) == _specification(predecessor):
             raise error(f"{PEDAGOGICAL_REINTERPRETATION} sans aucune spécification différente du predecessor")
+        if decision.cause == EVIDENCE_INTEGRITY_CHANGE:
+            previous_parent = _parent_row(db, predecessor.longitudinal_assessment_run_id, lock=False)
+            if previous_parent is None:
+                raise InvalidInferenceState(f"predecessor {predecessor.id} : run T5 parent introuvable")
+            if _dossier_payload(previous_parent, _relations(db, previous_parent.id)) == _dossier_payload(
+                    inputs.parent, inputs.relations):
+                raise error(f"{EVIDENCE_INTEGRITY_CHANGE} sans changement du dossier longitudinal (même dossier"
+                            " logique que celui du predecessor)")
         unresolved = (predecessor.unresolved_revision_context is not None
                       or predecessor.tension_state == TENSION_OPEN or predecessor.transition == REVISED_DOWN)
         if unresolved and transition == UPGRADED and decision.cause == NEW_USER_EVIDENCE:
@@ -1428,9 +1458,10 @@ def _check_decision(db, run, inputs: _Inputs, predecessor, decision: _Decision) 
                 if ref.role in REBOUND_ROLES:
                     cited |= ({ref.source_id} if ref.source_kind == SOURCE_OBSERVATION
                               else inputs.relations.endpoints[(ref.source_kind, ref.source_id)])
-            if not cited & new_observations:
+            if not {observations[o].event_id for o in cited if o in observations} & new_user_events:
                 raise error("remontée après une révision non résolue : aucune ref positive_basis / transition ne"
-                            " cite une observation nouvelle (les anciennes preuves seules ne suffisent jamais)")
+                            " cite une observation d'un CognitiveEvent nouveau (les anciennes démonstrations, même"
+                            " réévaluées, ne suffisent jamais)")
     return previous_stage, transition, tension_state, membership_definitions
 
 
