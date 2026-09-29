@@ -899,25 +899,32 @@ def _application_sources():
 
 
 # T6-B : le service transactionnel core/inference_service.py (non branché,
-# voir tests/test_inference_service.py) est le SEUL module T6 ; il ne porte
-# que ces deux opérations de la liste ci-dessus (aucun moteur T6-C).
+# voir tests/test_inference_service.py) est le SEUL module T6 d'écriture ; il
+# ne porte que ces deux opérations de la liste ci-dessus.
 T6B_SERVICE = "core/inference_service.py"
 T6B_SERVICE_OPERATIONS = ("start_competency_inference", "complete_competency_inference")
+# T6-C1 : policies versionnées et moteur PUR de base positive (non branchés,
+# sans base ni opération T6-B : voir tests/test_inference_positive_basis.py
+# et tests/test_inference_policies.py). Aucun autre moteur T6-C.
+T6C1_MODULES = ("core/inference_policies.py", "core/inference_positive_basis.py")
 
 
 def test_no_t6_service_engine_or_inference_anywhere():
     """T6-A = persistance seulement : aucun module d'inférence / d'état
-    autre que le service transactionnel T6-B core/inference_service.py
-    (aucun core/inference_engine.py, aucun moteur T6-C), aucune opération
+    autre que le service transactionnel T6-B core/inference_service.py et,
+    depuis T6-C1, les deux modules purs de base positive (aucun
+    core/inference_engine.py, aucun autre moteur T6-C), aucune opération
     T6-B (démarrer, compléter, activer, ajouter claim / tension, écrire le
-    cache, inférer un stade) ailleurs que dans ce service, et, dans ce
-    service, seulement start / complete (jamais infer_stage, add_claim,
-    activate...), hors docstrings et commentaires."""
+    cache, inférer un stade) ailleurs que dans ce service — les modules
+    T6-C1 n'en portent aucune — et, dans ce service, seulement start /
+    complete (jamais infer_stage, add_claim, activate...), hors docstrings
+    et commentaires."""
     modules = [p.relative_to(REPO_ROOT).as_posix()
                for p in [*(REPO_ROOT / "core").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"),
                          REPO_ROOT / "api.py"]]
-    assert [m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
-                                                        "tension", "user_state"))] == [T6B_SERVICE]
+    assert sorted(m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
+                                                              "tension", "user_state"))) == sorted(
+        [T6B_SERVICE, *T6C1_MODULES])
     assert not (REPO_ROOT / "core" / "inference_engine.py").exists()
     checked = 0
     for rel, source in _application_sources():
