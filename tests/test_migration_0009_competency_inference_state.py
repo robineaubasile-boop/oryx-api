@@ -907,6 +907,10 @@ T6B_SERVICE_OPERATIONS = ("start_competency_inference", "complete_competency_inf
 # sans base ni opération T6-B : voir tests/test_inference_positive_basis.py
 # et tests/test_inference_policies.py). Aucun autre moteur T6-C.
 T6C1_MODULES = ("core/inference_policies.py", "core/inference_positive_basis.py")
+# T6-C2 : policies versionnées et moteurs PURS de confiance / tension / état
+# (non branchés, sans base ni opération T6-B : voir
+# tests/test_inference_confidence.py et tests/test_inference_state.py).
+T6C2_MODULES = ("core/inference_state_policies.py", "core/inference_confidence.py", "core/inference_state.py")
 
 
 def test_no_t6_service_engine_or_inference_anywhere():
@@ -924,7 +928,7 @@ def test_no_t6_service_engine_or_inference_anywhere():
                          REPO_ROOT / "api.py"]]
     assert sorted(m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
                                                               "tension", "user_state"))) == sorted(
-        [T6B_SERVICE, *T6C1_MODULES])
+        [T6B_SERVICE, *T6C1_MODULES, *T6C2_MODULES])
     assert not (REPO_ROOT / "core" / "inference_engine.py").exists()
     checked = 0
     for rel, source in _application_sources():
