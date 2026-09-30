@@ -40,6 +40,7 @@ from core.inference_state_policies import (
     COMPETENCY_ONLY_REPRESENTATIVE_BASIS,
     COMPETENCY_ONLY_SCOPE,
     CONFIDENCE_PROFILE_V1,
+    DIMENSION_FACT_CODES,
     INDEPENDENCE_EVIDENCE_PRESENT,
     INDEPENDENCE_NOT_ESTABLISHED,
     INDEPENDENT_REMOBILIZATION_PRESENT,
@@ -118,6 +119,7 @@ INTEGRITY_CHANGE_IN_CAUSAL_WINDOW = "integrity_change_in_causal_window"
 REEVALUATION_CHANGED_INTERPRETATION = "reevaluation_changed_interpretation"
 TAXONOMY_CHANGE_CHANGED_INTERPRETATION = "taxonomy_change_changed_interpretation"
 T5_VERSION_CHANGE_CHANGED_INTERPRETATION = "t5_version_change_changed_interpretation"
+T5_RELATION_CHANGE_CHANGED_INTERPRETATION = "t5_relation_change_changed_interpretation"
 T6_SPECIFICATION_CHANGE_CHANGED_INTERPRETATION = "t6_specification_change_changed_interpretation"
 MAINTAINED_AFTER_NEW_USER_EVIDENCE = "maintained_after_new_user_evidence"
 MAINTAINED_AFTER_INTEGRITY_CHANGE = "maintained_after_integrity_change"
@@ -128,7 +130,8 @@ TRANSITION_REASON_CODES = (
     INTEGRITY_CHANGE_SUPERSEDED_REVISION_MOTIF, INTEGRITY_CHANGE_REMOVED_PREVIOUS_BASIS,
     INTEGRITY_CHANGE_REMOVED_PREVIOUS_CONTRADICTION, INTEGRITY_CHANGE_REMOVED_PREVIOUS_SOURCE,
     INTEGRITY_CHANGE_IN_CAUSAL_WINDOW, REEVALUATION_CHANGED_INTERPRETATION, TAXONOMY_CHANGE_CHANGED_INTERPRETATION,
-    T5_VERSION_CHANGE_CHANGED_INTERPRETATION, T6_SPECIFICATION_CHANGE_CHANGED_INTERPRETATION,
+    T5_VERSION_CHANGE_CHANGED_INTERPRETATION, T5_RELATION_CHANGE_CHANGED_INTERPRETATION,
+    T6_SPECIFICATION_CHANGE_CHANGED_INTERPRETATION,
     MAINTAINED_AFTER_NEW_USER_EVIDENCE, MAINTAINED_AFTER_INTEGRITY_CHANGE, MAINTAINED_AFTER_CONTROLLED_REINTERPRETATION)
 
 # --------------------------------------------------------------------------
@@ -239,7 +242,7 @@ FINAL_INFERENCE_POLICIES = MappingProxyType({
      EVALUATOR_V1): FINAL_INFERENCE_V1_POLICY,
 })
 
-_DIMENSIONS = ("diagnosticity", "coverage", "independence", "consistency", "temporal_validation")
+_DIMENSIONS = tuple(DIMENSION_FACT_CODES)  # vocabulaire T6-C2, jamais recopié
 
 
 def validate_final_inference_policy(policy) -> None:
@@ -256,8 +259,18 @@ def validate_final_inference_policy(policy) -> None:
         if type(rule) is not ConfirmationMotifRule or rule.reason_code not in VALIDATION_REASON_CODES or \
                 rule.dimension not in _DIMENSIONS or not rule.any_of:
             raise InvalidFinalInferencePolicy("confirmation_motifs invalides")
-        if not all(dimension in _DIMENSIONS for dimension, _ in (*rule.all_of, *rule.none_of)):
-            raise InvalidFinalInferencePolicy("confirmation_motifs : dimension inconnue")
+        # Chaque fact_code doit appartenir au vocabulaire T6-C2 de SA
+        # dimension (DIMENSION_FACT_CODES) : un code inconnu n'est jamais
+        # ignoré silencieusement (une règle muette serait un faux « aucun
+        # besoin »).
+        pairs = [*((rule.dimension, code) for code in rule.any_of), *rule.all_of, *rule.none_of]
+        for pair in pairs:
+            if type(pair) is not tuple or tuple(map(type, pair)) != (str, str):
+                raise InvalidFinalInferencePolicy(f"{rule.reason_code} : couple (dimension, fact_code) attendu")
+            dimension, code = pair
+            if dimension not in _DIMENSIONS or code not in DIMENSION_FACT_CODES[dimension]:
+                raise InvalidFinalInferencePolicy(f"{rule.reason_code} : fact_code {code!r} hors du vocabulaire"
+                                                  f" de {dimension!r}")
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +307,13 @@ class FinalInferencePolicyResolver:
         if rules is None:
             raise UnsupportedFinalInferencePolicy(f"combinaison {prefix} non déclarée (T6-C V1)")
         validate_final_inference_policy(rules)
+        # La clé du registry et la policy qu'elle désigne doivent déclarer
+        # EXACTEMENT la même combinaison : jamais une policy evaluator-1
+        # servie sous une clé evaluator-2.
+        declared = (rules.positive_basis_version, rules.confidence_profile_version, rules.state_decision_version,
+                    rules.validation_version, rules.inference_schema_version, rules.evaluator_version)
+        if declared != prefix:
+            raise InvalidFinalInferencePolicy(f"registry incohérent : clé {prefix} -> policy {declared}")
         return ResolvedFinalPolicy(state=state, rules=rules)
 
 

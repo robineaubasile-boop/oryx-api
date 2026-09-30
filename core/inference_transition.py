@@ -32,7 +32,9 @@ décision, et échoue fermé si deux familles l'expliquent également.
           matérielles, ou base précédente sortie du dossier), sinon (stade
           précédent déjà tenu sous tension) la base du stade retenu ;
        B2 stade sans source attribuable : release / version T5 /
-          spécification T6 différente => pedagogical_reinterpretation ;
+          spécification T6 différente, ou changement SÉMANTIQUE des
+          relations T5 (relation_delta added / removed, jamais retained)
+          qu'aucune autre famille n'explique => pedagogical_reinterpretation ;
        B3 tensions apparues (sources présentes) ou disparues (sources
           sorties) ; B4 idem B2 pour un changement de tensions.
     C. Sources SUBSTANTIELLES de la décision (positive_basis, mastery,
@@ -53,6 +55,14 @@ SORTIE du dossier et invalidée (integrity_changes) => evidence_integrity_change
 (l'invalidation suffit à la retirer, même si l'événement a aussi été
 réévalué) ; sortie et seulement réévaluée => pedagogical_reinterpretation.
 Une relation T5 citée atteint un événement nouveau par ses extrémités.
+Relations T5 (relation_delta) : interprétations structurées du dossier,
+jamais une preuve utilisateur. Un ajout / retrait dont une extrémité est
+une observation d'un événement nouveau, invalidée ou réévaluée appartient à
+cette famille ; sinon il est une réinterprétation contrôlée
+(t5_relation_change_changed_interpretation), au même rang que les
+changements de release / versions : jamais new_user_evidence. Les refs
+transition restent les seules sources présentes du dossier courant (aucun
+UUID de relation n'est reconstruit depuis le payload sémantique).
 
 Contrats T6-B respectés par construction : new_user_evidence n'est jamais la
 cause d'un retour à non_etabli (une contradiction nouvelle ne remet jamais à
@@ -86,6 +96,7 @@ from core.inference_final_policies import (
     NEW_USER_EVIDENCE_RESOLVES_REVISION_MOTIF,
     NEW_USER_EVIDENCE_SUPPORTS_CURRENT_DECISION,
     REEVALUATION_CHANGED_INTERPRETATION,
+    T5_RELATION_CHANGE_CHANGED_INTERPRETATION,
     T5_VERSION_CHANGE_CHANGED_INTERPRETATION,
     T6_SPECIFICATION_CHANGE_CHANGED_INTERPRETATION,
     TAXONOMY_CHANGE_CHANGED_INTERPRETATION,
@@ -131,6 +142,7 @@ LOST_SOURCE = "lost_source"
 SNAPSHOT = "snapshot"
 TAXONOMY = "taxonomy"
 T5_VERSIONS = "t5_versions"
+RELATION_DELTA = "relation_delta"
 T6_SPECIFICATION = "t6_specification"
 SUBSTANTIVE_ROLES = frozenset({POSITIVE_BASIS, MASTERY_REF, TENSION})
 DESCRIPTIVE_ROLES = frozenset({CONFIDENCE, TRANSITION, VALIDATION})
@@ -148,6 +160,7 @@ _REASONS = {
     (EVIDENCE_INTEGRITY_CHANGE, SNAPSHOT): INTEGRITY_CHANGE_IN_CAUSAL_WINDOW,
     (PEDAGOGICAL_REINTERPRETATION, TAXONOMY): TAXONOMY_CHANGE_CHANGED_INTERPRETATION,
     (PEDAGOGICAL_REINTERPRETATION, T5_VERSIONS): T5_VERSION_CHANGE_CHANGED_INTERPRETATION,
+    (PEDAGOGICAL_REINTERPRETATION, RELATION_DELTA): T5_RELATION_CHANGE_CHANGED_INTERPRETATION,
     (PEDAGOGICAL_REINTERPRETATION, T6_SPECIFICATION): T6_SPECIFICATION_CHANGE_CHANGED_INTERPRETATION,
 }
 _MAINTAINED = {
@@ -219,20 +232,46 @@ def relation_endpoints(dossier) -> dict:
     return endpoints
 
 
+def _autonomous_relation_change(causality, attributed: frozenset) -> bool:
+    """Changement SÉMANTIQUE des relations T5 (added / removed ; retained
+    n'est jamais un changement) dont AUCUNE extrémité n'est une observation
+    déjà attribuée à une autre famille (événement nouveau, invalidation,
+    réévaluation) : une relation créée autour d'une preuve nouvelle ou
+    retirée avec une observation invalidée relève de cette famille, jamais
+    d'une réinterprétation. Seules les extrémités *_observation_id du
+    payload sémantique sont lues (aucun UUID de relation : le contrat n'en
+    fournit pas)."""
+    delta = causality.relation_delta
+    for family in (delta.dependencies, delta.transfers, delta.revalidations):
+        for item in (*family.added, *family.removed):
+            ends = {value for key, value in item.items() if key.endswith("_observation_id") and value is not None}
+            if ends.isdisjoint(attributed):
+                return True
+    return False
+
+
 def _facts(context) -> _Facts:
     dossier, causality = context.longitudinal_dossier, context.transition_causality
     endpoints = relation_endpoints(dossier)
+    observations = {o.observation_id: o for o in dossier.active_history.observations}
+    new_events = frozenset(causality.new_user_event_ids)
+    invalidated = frozenset(c.observation_id for c in causality.integrity_changes)
+    reevaluated_previous = frozenset(i for r in causality.reevaluations for i in r.previous_observation_ids)
+    reevaluated_current = frozenset(i for r in causality.reevaluations for i in r.current_observation_ids)
+    attributed = frozenset(str(i) for i in (*invalidated, *reevaluated_previous, *reevaluated_current,
+                                            *(o for o, item in observations.items() if item.event_id in new_events)))
     global_kinds = tuple(kind for kind, present in (
         (TAXONOMY, causality.taxonomy_release_changed), (T5_VERSIONS, bool(causality.t5_version_changes)),
+        (RELATION_DELTA, _autonomous_relation_change(causality, attributed)),
         (T6_SPECIFICATION, bool(causality.t6_specification_changes))) if present)
     decision = context.predecessor_decision_context
     return _Facts(
-        observations={o.observation_id: o for o in dossier.active_history.observations},
+        observations=observations,
         endpoints=endpoints,
-        new_events=frozenset(causality.new_user_event_ids),
-        invalidated=frozenset(c.observation_id for c in causality.integrity_changes),
-        reevaluated_previous=frozenset(i for r in causality.reevaluations for i in r.previous_observation_ids),
-        reevaluated_current=frozenset(i for r in causality.reevaluations for i in r.current_observation_ids),
+        new_events=new_events,
+        invalidated=invalidated,
+        reevaluated_previous=reevaluated_previous,
+        reevaluated_current=reevaluated_current,
         global_kinds=global_kinds,
         predecessor_claims={c.stage: c for c in decision.claims},
         predecessor_tensions=tuple(decision.tensions),
@@ -434,7 +473,8 @@ def _level_snapshot(context, facts: _Facts) -> list:
 # --------------------------------------------------------------------------
 
 def _reason(family: str, kind: str, transition: str) -> str:
-    if family == PEDAGOGICAL_REINTERPRETATION and kind not in (TAXONOMY, T5_VERSIONS, T6_SPECIFICATION):
+    if family == PEDAGOGICAL_REINTERPRETATION and kind not in (TAXONOMY, T5_VERSIONS, RELATION_DELTA,
+                                                               T6_SPECIFICATION):
         return REEVALUATION_CHANGED_INTERPRETATION
     if (family, kind) == (NEW_USER_EVIDENCE, CONTRADICTION) and transition == REVISED_DOWN:
         return NEW_CONTRADICTION_DRIVES_REVISION

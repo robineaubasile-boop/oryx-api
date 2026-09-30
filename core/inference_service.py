@@ -267,7 +267,9 @@ Invariants :
   T5 ; evidence_integrity_change exige au moins un integrity_change (même
   si l'observation invalidée a quitté le dossier) ;
   pedagogical_reinterpretation exige une réévaluation, une release, une
-  version T5 ou une spécification T6 différente. Plusieurs familles
+  version T5, une spécification T6 différente ou un changement sémantique
+  des relations T5 (relation_delta : added / removed, jamais retained seul ;
+  une relation T5 est une interprétation structurée, jamais une preuve). Plusieurs familles
   coexistent : chacune rend sa cause possible, aucune n'est exclusive.
   Anti-oscillation : remonter après une révision non résolue par
   new_user_evidence exige qu'au moins une ref positive_basis ou transition
@@ -2625,11 +2627,15 @@ def _check_transition_causes(inputs: _Inputs, predecessor, decision: _Decision, 
         # L'observation invalidée peut avoir disparu du dossier courant.
         raise error(f"{EVIDENCE_INTEGRITY_CHANGE} sans aucune observation du dossier du predecessor invalidée dans la"
                     " fenêtre causale (une simple réévaluation relève de pedagogical_reinterpretation)")
+    relations_changed = any(family.added or family.removed for family in (
+        causality.relation_delta.dependencies, causality.relation_delta.transfers,
+        causality.relation_delta.revalidations))  # retained seul n'est jamais un changement
     if decision.cause == PEDAGOGICAL_REINTERPRETATION and not (
             causality.reevaluations or causality.taxonomy_release_changed or causality.t5_version_changes
-            or causality.t6_specification_changes):
+            or causality.t6_specification_changes or relations_changed):
         raise error(f"{PEDAGOGICAL_REINTERPRETATION} sans réévaluation T3 effective, sans release ni version T5"
-                    " différente et sans spécification T6 différente (aucune évolution contrôlée)")
+                    " différente, sans changement sémantique des relations T5 et sans spécification T6"
+                    " différente (aucune évolution contrôlée)")
     unresolved = (predecessor.unresolved_revision_context is not None
                   or predecessor.tension_state == TENSION_OPEN or predecessor.transition == REVISED_DOWN)
     if unresolved and transition == UPGRADED and decision.cause == NEW_USER_EVIDENCE:

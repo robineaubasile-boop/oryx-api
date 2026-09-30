@@ -38,12 +38,28 @@ NEW, INTEGRITY, REINTERPRETATION = "new_user_evidence", "evidence_integrity_chan
 # Chaînage réaliste (predecessor reconstruit depuis la décision précédente)
 # --------------------------------------------------------------------------
 
+def relation(family, source, target):
+    """Identité SÉMANTIQUE d'une relation T5 telle que T6-B la place dans
+    relation_delta (aucun UUID de relation)."""
+    ends = {"dependencies": ("source_observation_id", "target_observation_id"),
+            "transfers": ("source_observation_id", "target_observation_id"),
+            "revalidations": ("source_contradiction_observation_id", "target_supportive_observation_id")}[family]
+    extra = {"source_kind": "observation", "source_support_trace_id": None} if family == "dependencies" else {}
+    return svc._freeze({ends[0]: str(source), ends[1]: str(target), "scope_fingerprint": "sha256:x", **extra})
+
+
 def causality(new_events=(), integrity=(), reevaluated=None, *, taxonomy_changed=False, t5_changes=(),
-              t6_changes=()):
+              t6_changes=(), relations=None):
     """TransitionCausalityContext : reevaluated = {ancienne observation:
-    (observations de remplacement présentes dans le dossier courant)}."""
-    empty = svc.RelationFamilyDeltaContext(added=(), removed=(), retained=())
+    (observations de remplacement présentes dans le dossier courant)} ;
+    relations = {famille: {"added" | "removed" | "retained": (identités,)}}."""
+    relations = relations or {}
     reevaluated = reevaluated or {}
+
+    def family(name):
+        parts = relations.get(name, {})
+        return svc.RelationFamilyDeltaContext(**{k: tuple(parts.get(k, ())) for k in ("added", "removed", "retained")})
+
     return svc.TransitionCausalityContext(
         causality_schema_version=1, new_user_event_ids=tuple(new_events),
         integrity_changes=tuple(svc.IntegrityChangeContext(
@@ -58,7 +74,8 @@ def causality(new_events=(), integrity=(), reevaluated=None, *, taxonomy_changed
         observation_delta=svc.ObservationDeltaContext(added_observation_ids=(), removed_observation_ids=(),
                                                       retained_observation_ids=(), added_event_ids=(),
                                                       removed_event_ids=(), retained_event_ids=()),
-        relation_delta=svc.RelationDeltaContext(dependencies=empty, transfers=empty, revalidations=empty),
+        relation_delta=svc.RelationDeltaContext(dependencies=family("dependencies"), transfers=family("transfers"),
+                                                revalidations=family("revalidations")),
         taxonomy_release_changed=taxonomy_changed, previous_taxonomy_release_id=RELEASE,
         current_taxonomy_release_id=RELEASE,
         t5_version_changes=tuple(svc.VersionChangeContext(field_name=f, previous_value="a", current_value="b")
@@ -527,3 +544,123 @@ def test_motif_superseded_by_mixed_integrity_and_reevaluation_fails_closed():
     # Chaque famille seule reste attribuable.
     context = chain.context(drop(d, k1, k2), integrity=[k1, k2])
     assert infer_competency(context).transition_cause == INTEGRITY
+
+
+# --------------------------------------------------------------------------
+# relation_delta : changement sémantique des relations T5 seul
+# --------------------------------------------------------------------------
+
+def _relation_base():
+    d = Dossier("C2")
+    c = d.observe("e0", "C2_C", stage="discovery", name="c")
+    a = d.observe("e1", "C2_A", "C2_B", name="a")
+    return d, c, a
+
+
+def test_dependency_added_only_is_a_controlled_reinterpretation():
+    """Mêmes observations, aucun événement nouveau, aucune intégrité,
+    réévaluation ni version : seul un ensemble de relations différent."""
+    chain, (d, c, a) = DecisionChain(), _relation_base()
+    chain.step(clone(d))
+    d.dependency(a, c, kind="partially_dependent", caps=["C2_A"])
+    context, decision = chain.step(d, relations={"dependencies": {"added": [relation("dependencies", c, a)]}})
+    c_ = context.transition_causality
+    assert (c_.new_user_event_ids, c_.integrity_changes, c_.reevaluations, c_.taxonomy_release_changed,
+            c_.t5_version_changes, c_.t6_specification_changes) == ((), (), (), False, (), ())
+    assert (decision.current_stage, decision.transition_cause) == ("application", REINTERPRETATION)
+    assert assessment(context).reason_codes == ("t5_relation_change_changed_interpretation",
+                                                "maintained_after_controlled_reinterpretation")
+    assert refs(decision, "transition") == []
+
+
+def test_transfer_added_only_explains_a_stage_change_as_reinterpretation():
+    """Transfert T5 entre deux démonstrations ANCIENNES : Mastery apparaît,
+    jamais par new_user_evidence ; la base courante porte la ref transition."""
+    chain, d = DecisionChain(), Dossier("C2")
+    a = d.observe("e1", "C2_A", "C2_B", name="m-a")
+    b = d.observe("e2", "C2_A", "C2_B", name="m-b")
+    assert chain.step(clone(d))[1].current_stage == "application"
+    t = d.transfer(a, b)
+    context, decision = chain.step(d, relations={"transfers": {"added": [relation("transfers", a, b)]}})
+    assert (decision.current_stage, decision.transition_cause) == ("mastery", REINTERPRETATION)
+    assert assessment(context).reason_codes == ("t5_relation_change_changed_interpretation",)
+    assert {(r.source_kind, r.source_id) for r in refs(decision, "transition")} == {
+        ("observation", a), ("observation", b), ("transfer", t)}
+
+
+def test_revalidation_added_only_changes_tensions_as_reinterpretation():
+    chain, d = DecisionChain(), Dossier("C2")
+    a = d.observe("e1", "C2_A", "C2_B", name="a")
+    k = d.contra("e2", "C2_B", name="k")
+    assert chain.step(clone(d))[1].tensions
+    d.revalidation(k, a)
+    context, decision = chain.step(d, relations={"revalidations": {"added": [relation("revalidations", k, a)]}})
+    assert decision.tensions == ()
+    assert (decision.current_stage, decision.transition_cause) == ("application", REINTERPRETATION)
+    assert "t5_relation_change_changed_interpretation" in assessment(context).reason_codes
+
+
+def test_relation_removed_only_is_a_controlled_reinterpretation():
+    chain, (d, c, a) = DecisionChain(), _relation_base()
+    d.dependency(a, c, kind="partially_dependent", caps=["C2_A"])
+    chain.step(clone(d))
+    d.dependencies = []
+    _, decision = chain.step(d, relations={"dependencies": {"removed": [relation("dependencies", c, a)]}})
+    assert decision.transition_cause == REINTERPRETATION
+
+
+def test_retained_relations_only_are_not_a_causal_change():
+    chain, (d, c, a) = DecisionChain(), _relation_base()
+    d.dependency(a, c, kind="partially_dependent", caps=["C2_A"])
+    chain.step(clone(d))
+    with pytest.raises(UnattributableTransitionCause):
+        infer_competency(chain.context(clone(d), relations={
+            "dependencies": {"retained": [relation("dependencies", c, a)]}}))
+
+
+def test_relation_change_and_unrelated_new_event_are_equally_explanatory():
+    """Même niveau (snapshot) : relation autonome ajoutée + événement nouveau
+    sans rapport => aucune priorité arbitraire, fail closed."""
+    chain, (d, c, a) = DecisionChain(), _relation_base()
+    chain.step(clone(d))
+    d.dependency(a, c, kind="partially_dependent", caps=["C2_A"])
+    d.observe("e3", "C2_C", stage="none", name="u")
+    with pytest.raises(AmbiguousTransitionCause):
+        infer_competency(chain.context(d, new=["e3"], relations={
+            "dependencies": {"added": [relation("dependencies", c, a)]}}))
+
+
+def test_relation_created_around_new_evidence_is_never_a_reinterpretation():
+    """Une relation dont une extrémité est une preuve nouvelle appartient à
+    new_user_evidence (jamais une seconde famille « réinterprétation »)."""
+    chain, (d, _, a) = DecisionChain(), _relation_base()
+    chain.step(clone(d))
+    u = d.observe("e3", "C2_A", stage="none", name="u")
+    d.dependency(u, a, caps=["C2_A"])
+    context, decision = chain.step(d, new=["e3"], relations={
+        "dependencies": {"added": [relation("dependencies", a, u)]}})
+    assert decision.transition_cause == NEW
+    assert assessment(context).reason_codes == ("new_user_evidence_in_current_snapshot",
+                                                "maintained_after_new_user_evidence")
+    # Preuve nouvelle directement utilisée : elle reste la cause d'un upgrade.
+    chain, d = DecisionChain(), Dossier("C2")
+    a = d.observe("e1", "C2_A", "C2_B", name="m-a")
+    chain.step(clone(d))
+    n = d.observe("e2", "C2_A", "C2_B", name="m-b")
+    d.transfer(a, n)
+    _, decision = chain.step(d, new=["e2"], relations={"transfers": {"added": [relation("transfers", a, n)]}})
+    assert (decision.current_stage, decision.transition_cause) == ("mastery", NEW)
+
+
+def test_direct_integrity_change_is_not_masked_by_an_autonomous_relation_change():
+    chain, d = DecisionChain(), Dossier("C2")
+    c = d.observe("e0", "C2_C", stage="discovery", name="c")
+    y = d.observe("e5", "C2_C", stage="discovery", name="y")
+    a = d.observe("e1", "C2_A", "C2_B", name="a")
+    chain.step(clone(d))
+    current = drop(d, a)
+    current.dependency(y, c)
+    context, decision = chain.step(current, integrity=[a], relations={
+        "dependencies": {"added": [relation("dependencies", c, y)]}})
+    assert (decision.current_stage, decision.transition_cause) == ("discovery", INTEGRITY)
+    assert assessment(context).reason_codes == ("integrity_change_removed_previous_basis",)

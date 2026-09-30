@@ -29,6 +29,7 @@ from core.inference_engine import (
 )
 from core.inference_final_policies import (
     FINAL_INFERENCE_POLICIES,
+    ConfirmationMotifRule,
     FINAL_INFERENCE_V1_POLICY,
     FinalInferenceError,
     FinalInferencePolicyResolver,
@@ -148,6 +149,42 @@ def test_unknown_t6c3_versions_fail_closed_without_default(field, value):
     context = _single()[0].context(**{field: value})
     with pytest.raises(UnsupportedFinalInferencePolicy, match=field):
         infer_competency(context)
+
+
+@pytest.mark.parametrize("broken", [
+    {"any_of": ("unknown_fact_code",)},
+    {"any_of": ("single_episode_only",)},  # code d'independence déclaré sous diagnosticity
+    {"all_of": (("independence", "single_episode_onlyy"),)},
+    {"none_of": (("coverage", "independence_evidence_present"),)},
+    {"none_of": (("confidence", "single_episode_only"),)},
+    {"all_of": ("independence",)},
+])
+def test_confirmation_rules_with_unknown_fact_codes_fail_closed(broken):
+    """Un fact_code hors de DIMENSION_FACT_CODES[dimension] n'est jamais
+    ignoré silencieusement."""
+    rule = dataclasses.replace(FINAL_INFERENCE_V1_POLICY.confirmation_motifs[0], **broken)
+    assert type(rule) is ConfirmationMotifRule
+    policy = dataclasses.replace(FINAL_INFERENCE_V1_POLICY, confirmation_motifs=(rule,))
+    with pytest.raises(InvalidFinalInferencePolicy):
+        validate_final_inference_policy(policy)
+    resolver = FinalInferencePolicyResolver(registry={next(iter(FINAL_INFERENCE_POLICIES)): policy})
+    with pytest.raises(InvalidFinalInferencePolicy):
+        resolver.resolve(_single()[0].context())
+
+
+def test_registry_key_must_match_the_policy_it_serves():
+    """Clé evaluator-2 -> policy interne evaluator-1 : fail closed."""
+    key = ("positive_basis-1", "confidence_profile-1", "state_decision-1", "validation-1", "inference_schema-1",
+           "evaluator-2")
+    resolver = FinalInferencePolicyResolver(registry={key: FINAL_INFERENCE_V1_POLICY})
+    with pytest.raises(InvalidFinalInferencePolicy, match="registry incohérent"):
+        resolver.resolve(_single()[0].context(evaluator_version="evaluator-2"))
+    for field in ("validation_version", "inference_schema_version"):
+        mismatched = dataclasses.replace(FINAL_INFERENCE_V1_POLICY, **{field: "autre-1"})
+        resolver = FinalInferencePolicyResolver(registry={next(iter(FINAL_INFERENCE_POLICIES)): mismatched})
+        with pytest.raises(InvalidFinalInferencePolicy, match="registry incohérent"):
+            resolver.resolve(_single()[0].context())
+    assert resolve_final_inference_policy(_single()[0].context()).rules is FINAL_INFERENCE_V1_POLICY
 
 
 def test_t6c1_t6c2_guards_are_composed_not_duplicated():
@@ -611,10 +648,16 @@ class Pipeline:
         from tests.test_longitudinal_service import contra
         return contra(*(self.m[c] for c in codes), **overrides)
 
-    def infer(self):
+    def infer(self, relations=None):
+        """relations(session, t5_run_id) : relations T5 ajoutées au run T5
+        candidat avant sa complétion (même snapshot d'observations)."""
         from core import longitudinal_service as t5
         from tests.test_longitudinal_service import _start as start_t5
         parent = start_t5(self.Sessions, self.release_id)
+        if relations is not None:
+            with self.Sessions() as session:
+                relations(session, parent)
+                session.commit()
         with self.Sessions() as session:
             t5.complete_longitudinal_assessment(session, run_id=parent)
             session.commit()
@@ -766,3 +809,45 @@ def test_pg_scenario_e_invalidation_of_the_only_evidence_is_an_integrity_reset(S
     run = p.run(context.run_id)
     assert (run.previous_stage, run.transition) == ("application", "revised_down")
     assert p.state(context).current_stage == "non_etabli"
+
+
+def test_pg_scenario_f_relation_only_change_is_a_controlled_reinterpretation(Sessions):  # noqa: F811
+    """F : même snapshot d'observations, mêmes versions, aucun événement
+    nouveau, aucune intégrité ni réévaluation : seul l'ensemble des
+    relations T5 change (dépendance ajoutée). pedagogical_reinterpretation,
+    acceptée par la vraie complétion T6-B."""
+    from core import longitudinal_service as t5
+    p = Pipeline(Sessions)
+    c = p.t3(p.app("C7_C", local_stage="discovery")).id
+    a = p.t3(p.app("C7_A", "C7_B", evidence_strength="strong")).id
+    first, before = p.infer()
+    assert before.current_stage == "application"
+
+    def dependency(session, run_id):
+        t5.add_dependency(session, run_id=run_id, target_observation_id=a, source_kind="observation",
+                          source_observation_id=c, dependency_type="partially_dependent", scope_mode="localized",
+                          dependency_basis={"why": "reprend un raisonnement antérieur"},
+                          capability_membership_ids=[p.m["C7_A"]])
+
+    context, decision = p.infer(relations=dependency)
+    causality = context.transition_causality
+    assert causality.new_user_event_ids == ()
+    assert causality.integrity_changes == ()
+    assert causality.reevaluations == ()
+    assert causality.taxonomy_release_changed is False
+    assert causality.t5_version_changes == ()
+    assert causality.t6_specification_changes == ()
+    observations = causality.observation_delta
+    assert observations.added_observation_ids == () == observations.removed_observation_ids
+    delta = causality.relation_delta.dependencies
+    assert (len(delta.added), delta.removed, delta.retained) == (1, (), ())
+    assert (delta.added[0]["target_observation_id"], delta.added[0]["source_observation_id"]) == (str(a), str(c))
+    assert (decision.current_stage, decision.transition_cause) == ("application", "pedagogical_reinterpretation")
+    assert "transition_cause=pedagogical_reinterpretation" in decision.state_decision_summary
+    run = p.run(context.run_id)
+    assert (run.interpretation_status, run.previous_stage, run.transition, run.transition_cause) == (
+        "active", "application", "maintained", "pedagogical_reinterpretation")
+    assert p.run(first.run_id).interpretation_status == "superseded"
+    state = p.state(context)
+    assert (state.active_inference_run_id, state.current_stage, state.state_generation) == (
+        context.run_id, "application", 2)
