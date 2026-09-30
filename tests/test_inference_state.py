@@ -1186,3 +1186,107 @@ def test_pg_real_contexts_are_evaluated_chained_and_accepted_by_t6b(Sessions):  
     with Sessions() as session:
         state = svc.get_validated_user_competency_state(session, user_id=third.user_id, competency_code="C7")
         assert (state.current_stage, state.tension_state) == ("comprehension", "open")
+
+
+# --------------------------------------------------------------------------
+# whole_competency : scope T6-B relu, préservé et transmis (jamais produit)
+# --------------------------------------------------------------------------
+
+def _whole_competency_context(d, k, *, new=()):
+    """Predecessor portant un revision-context-v1 dont le motif est
+    application / whole_competency / aucune capacité / [K]."""
+    from tests.test_inference_validation import predecessor_with_motif
+    return predecessor_with_motif(d, stage="application", scope_mode="whole_competency", motif_definition_ids=[],
+                                  sources=[k], new=new)
+
+
+def _whole_payload(k, caps=(), scope_mode="whole_competency"):
+    return {"schema_version": "revision-context-v1", "origin_inference_run_id": str(RUNS[0]),
+            "reason_code": "higher_claim_materially_fragilized_defensible_lower_claim_retained",
+            "resolution_status": "unresolved",
+            "motifs": [{"fragilized_stage": "application", "scope_mode": scope_mode,
+                        "capability_definition_ids": [str(definition_id(c)) for c in caps],
+                        "source_contradiction_observation_ids": [str(k)],
+                        "reason_codes": ["claim_representative_contradiction"]}]}
+
+
+def test_revision_context_reads_the_three_t6b_scopes_with_their_capability_rules():
+    """1-3 : whole_competency + aucune capacité accepté ; whole_competency
+    avec capacités et localized sans capacité : fail closed."""
+    from core.inference_state import _parse_revision_context
+    from core.inference_state_policies import resolve_state_decision_policy
+    d = Dossier("C8")
+    d.observe("e1", "C8_B", "C8_C", name="a")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    policy = resolve_state_decision_policy(d.context())
+    parsed = _parse_revision_context(svc._freeze(_whole_payload(k)), policy)
+    (motif,) = parsed.motifs
+    assert (motif.scope_mode, motif.capability_definition_ids, motif.source_contradiction_observation_ids) == (
+        "whole_competency", (), (k,))
+    for scope_mode, caps in (("competency_only", ()), ("localized", ("C8_C",))):
+        assert _parse_revision_context(svc._freeze(_whole_payload(k, caps, scope_mode)), policy).motifs[0] \
+            .scope_mode == scope_mode
+    for scope_mode, caps in (("whole_competency", ("C8_C",)), ("localized", ()), ("competency_only", ("C8_C",)),
+                             ("whole_observation", ())):
+        with pytest.raises(UnsupportedRevisionContext):
+            _parse_revision_context(svc._freeze(_whole_payload(k, caps, scope_mode)), policy)
+
+
+def test_unresolved_whole_competency_motif_keeps_its_scope_through_resolution_and_context():
+    """4 + 6 : RevisionMotifResolution et revision_context conservent
+    whole_competency ; to_payload() fait un aller-retour exact."""
+    from core.inference_state import _parse_revision_context
+    from core.inference_state_policies import resolve_state_decision_policy
+    d = Dossier("C8")
+    d.observe("e1", "C8_B", "C8_C", name="a")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    context = _whole_competency_context(d, k, new=["e2"])
+    result = evaluate_inference_state(context, evaluate_positive_basis(context))
+    (resolution,) = result.revision_resolutions
+    assert resolution.resolution_status == "unresolved"
+    assert (resolution.motif.scope_mode, resolution.motif.capability_definition_ids) == ("whole_competency", ())
+    assert result.revision_context.motifs == (resolution.motif,)
+    payload = result.revision_context.to_payload()
+    assert payload["motifs"] == [{"fragilized_stage": "application", "scope_mode": "whole_competency",
+                                  "capability_definition_ids": [], "source_contradiction_observation_ids": [str(k)],
+                                  "reason_codes": ["claim_representative_contradiction"]}]
+    policy = resolve_state_decision_policy(context)
+    assert _parse_revision_context(svc._freeze(payload), policy) == result.revision_context
+    # Les tensions COURANTES restent localized / competency_only.
+    assert {t.scope_mode for t in result.tensions} == {"localized"}
+
+
+def test_historical_whole_competency_tension_has_no_capability():
+    """5 : claim Application établie par le predecessor seulement, motif
+    whole_competency non résolu, K ouverte."""
+    d = Dossier("C8")
+    d.observe("e1", "C8_A", "C8_B", stage="comprehension", name="c")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    context = _whole_competency_context(d, k, new=["e1", "e2"])
+    result = evaluate_inference_state(context, evaluate_positive_basis(context))
+    (tension,) = result.tensions
+    assert (tension.fragilized_stage, tension.scope_mode, tension.capability_definition_ids,
+            tension.contradiction_observation_ids, tension.compatibility_effect, tension.reason_codes) == (
+        "application", "whole_competency", (), (k,), "tensioned", ("predecessor_claim_in_revision_context",))
+    assert result.revision_context.motifs[0].scope_mode == "whole_competency"
+
+
+def test_whole_competency_motif_is_resolved_only_by_a_new_representative_demonstration():
+    """Aucune capacité artificielle : une démonstration nouvelle de
+    profondeur suffisante mais non représentative ne résout rien ; une
+    démonstration nouvelle représentative et diagnostique le résout (scope
+    du motif conservé)."""
+    d = Dossier("C8")
+    d.observe("e1", "C8_B", "C8_C", name="a")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    narrow = _clone(d)
+    narrow.observe("e3", "C8_A", name="n")  # C8_A seule : pas la relation représentative d'Application
+    context = _whole_competency_context(narrow, k, new=["e3"])
+    (resolution,) = evaluate_inference_state(context, evaluate_positive_basis(context)).revision_resolutions
+    assert resolution.resolution_status == "unresolved"
+    d.observe("e3", "C8_B", "C8_C", name="n")
+    context = _whole_competency_context(d, k, new=["e3"])
+    (resolution,) = evaluate_inference_state(context, evaluate_positive_basis(context)).revision_resolutions
+    assert resolution.resolution_status == "resolved_supportively"
+    assert (resolution.motif.scope_mode, resolution.motif.capability_definition_ids) == ("whole_competency", ())
+

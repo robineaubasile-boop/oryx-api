@@ -486,3 +486,56 @@ def test_other_release_reusing_the_exact_definition_is_compatible():
     assert item.capability_membership_ids == (current["C8_C"],)
     assert item.revision_status == "revalidation_needed"
     svc._validated_decision(decision)
+
+
+def test_historical_whole_competency_motif_is_revalidated_without_scope_conversion():
+    """revision-context-v1 historique : motif application / whole_competency
+    / aucune capacité, contradiction K toujours courante et pertinente. Le
+    besoin garde EXACTEMENT ce scope (jamais competency_only ni localized),
+    aucun membership n'est inventé."""
+    d, k = _c8_motif()
+    context = predecessor_with_motif(d, stage="application", scope_mode="whole_competency",
+                                     motif_definition_ids=[], sources=[k], new=["e2"])
+    motif = context.predecessor.unresolved_revision_context["motifs"][0]
+    assert (motif["scope_mode"], tuple(motif["capability_definition_ids"])) == ("whole_competency", ())
+    decision = infer_competency(context)
+    motif_needs = [n for n in decision.validation_needs if "unresolved_revision_motif" in n["reason_codes"]]
+    assert [{key: n[key] for key in ("intent", "target_stage", "scope_mode", "capability_definition_ids")}
+            for n in motif_needs] == [{"intent": "revalidation", "target_stage": "application",
+                                       "scope_mode": "whole_competency", "capability_definition_ids": []}]
+    # Aucune conversion : jamais competency_only ; le seul besoin localized
+    # est celui, distinct, de la tension COURANTE sur C8_C (Application reste
+    # établie), jamais une localisation du motif.
+    assert not [n for n in decision.validation_needs if n["scope_mode"] == "competency_only"]
+    assert [(n["scope_mode"], n["capability_definition_ids"], n["reason_codes"]) for n in decision.validation_needs
+            if n["scope_mode"] == "localized"] == [("localized", ids("C8_C"), ["current_stage_under_tension"])]
+    assert decision.unresolved_revision_context["motifs"][0]["scope_mode"] == "whole_competency"
+    for tension in decision.tensions:
+        if tension.scope_mode == "whole_competency":
+            assert tension.capability_membership_ids == ()
+            assert tension.revision_status == "revalidation_needed"
+    svc._validated_decision(decision)
+
+
+def test_historical_whole_competency_tension_is_preserved_and_covered_by_its_revalidation():
+    """Claim Application établie par le predecessor, non établie aujourd'hui
+    (seule Comprehension) ; motif whole_competency non résolu, K ouverte :
+    tension historique whole_competency sans capacité ni membership,
+    couverte par le besoin de revalidation du motif."""
+    d = Dossier("C8")
+    d.observe("e1", "C8_A", "C8_B", stage="comprehension", name="c")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    context = predecessor_with_motif(d, stage="application", scope_mode="whole_competency",
+                                     motif_definition_ids=[], sources=[k], new=["e1", "e2"])
+    decision = infer_competency(context)
+    assert decision.current_stage == "comprehension"
+    (tension,) = decision.tensions
+    assert (tension.fragilized_stage, tension.scope_mode, tension.capability_membership_ids,
+            tension.revision_status) == ("application", "whole_competency", (), "revalidation_needed")
+    assert [(r.source_kind, r.source_id) for r in decision.basis_refs if r.tension_key == tension.tension_key] == [
+        ("observation", k)]
+    (need,) = [n for n in decision.validation_needs if n["intent"] == "revalidation"]
+    assert (need["target_stage"], need["scope_mode"], need["capability_definition_ids"], need["reason_codes"]) == (
+        "application", "whole_competency", [], ["unresolved_revision_motif"])
+    assert decision.unresolved_revision_context["motifs"][0]["scope_mode"] == "whole_competency"
+    svc._validated_decision(decision)
