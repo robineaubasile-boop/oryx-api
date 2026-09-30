@@ -24,8 +24,12 @@ Doctrine :
   base T6-C1 ; une claim implied_by_higher_claim remonte à la claim directe
   désignée par implied_from_stage et réutilise son périmètre représentatif
   pour l'analyse (effective_basis_*), sans jamais devenir une seconde base
-  positive : ses faits de confiance ne recitent aucune observation ni
-  relation de preuve positive (provenance portée par la claim source).
+  positive : aucune basis_observation_ids nouvelle, T6-C1 inchangé. Son
+  profil de confiance reste explicable : ses faits citent les observations
+  et relations de la base supérieure qui les expliquent (rôle confidence,
+  distinct de positive_basis : un même observation_id peut être base
+  positive de la claim directe et provenance de confiance de la claim
+  implied, sans devenir une seconde preuve).
 - diagnosticity ne recalcule jamais T3 (support_level, residual work,
   evidence_strength, elicitation_mode, local_stage) : elle projette la
   nature de la base établie par T6-C1 (representativeness_reason).
@@ -48,7 +52,10 @@ Doctrine :
   positive_basis-1 portés par la claim, capacités représentées),
   l'attribution (dépendances T5 du périmètre contradictoire) et les
   revalidations T5 décident : périphérique, pertinente (tension) ou
-  représentative (incompatibilité matérielle possible). Une contradiction
+  représentative (incompatibilité matérielle possible). La représentativité
+  est lue au niveau cognitif de LA claim testée (policy de son propre
+  stade ; Mastery : Application), jamais à celui de la claim source d'une
+  claim implied. Une contradiction
   competency_only reste competency_only (aucune capacité inventée) : elle
   n'est comparable qu'au niveau de la compétence ; une contradiction
   localisée n'est pas comparable à une claim purement competency_only.
@@ -324,9 +331,16 @@ def project_claim_contexts(positive_basis: PositiveBasisAssessment) -> dict:
 
 def claim_patterns(context: ClaimEvidenceContext, policy: ResolvedStatePolicy) -> tuple:
     """SemanticPattern résolus (positive_basis-1) qui portent le périmètre
-    affirmé par la claim : ceux de sa claim directe source, lus dans la
-    policy de représentativité de ce stade (Mastery : Application)."""
-    stage_policy = policy.positive_basis.stage_policies[policy.rules.pattern_stage[context.effective_basis_stage]]
+    affirmé par la claim, lus au niveau cognitif de LA CLAIM TESTÉE : policy
+    de représentativité de son propre stade (Mastery : Application).
+    Claim directe : les patterns qui l'ont établie. Claim implied : les
+    patterns de SON stade que porte le périmètre hérité de la claim source
+    (effective_basis_* ne sert qu'à la provenance, jamais à choisir le
+    niveau cognitif) ; aucun si ce périmètre n'en porte aucun."""
+    stage_policy = policy.positive_basis.stage_policies[policy.rules.pattern_stage[context.stage]]
+    if context.basis_mode == IMPLIED_BY_HIGHER_CLAIM:
+        return tuple(p for p in stage_policy.representative_patterns
+                     if p.satisfied_by(context.represented_capability_definition_ids))
     by_name = {p.name: p for p in stage_policy.representative_patterns}
     missing = [name for name in context.representative_pattern_names if name not in by_name]
     if missing:
@@ -529,15 +543,16 @@ def _dimension(name: str, facts, limitations, policy: ResolvedStatePolicy) -> Co
     )
 
 
-def _fact(code, observation_ids=(), structural_refs=(), capability_definition_ids=(), *, policy, positive=True,
-          implied=False) -> ConfidenceFact:
-    """Fait canonique ; sur une claim implied, la provenance de PREUVE
-    POSITIVE (observations, relations) n'est jamais recitée."""
-    strip = positive and implied
+def _fact(code, observation_ids=(), structural_refs=(), capability_definition_ids=(), *, policy) -> ConfidenceFact:
+    """Fait canonique et sa provenance DESCRIPTIVE. Sur une claim implied,
+    les observations / relations de la base directe supérieure qui
+    expliquent le fait restent citées : c'est une provenance de confiance
+    (rôle confidence), jamais une seconde base positive (positive_basis
+    reste portée par la seule claim directe, T6-C1 inchangé)."""
     return ConfidenceFact(
         code=code,
-        observation_ids=() if strip else sorted_ids(observation_ids),
-        structural_refs=() if strip else sorted_refs(structural_refs),
+        observation_ids=sorted_ids(observation_ids),
+        structural_refs=sorted_refs(structural_refs),
         capability_definition_ids=policy.positive_basis.ordered(capability_definition_ids),
     )
 
@@ -547,16 +562,17 @@ def _inherited(dimension: str, dossier) -> tuple:
     return tuple(code for code in DOSSIER_LIMITATIONS.get(dimension, ()) if code in present)
 
 
-def _diagnosticity(context, policy, implied):
+def _diagnosticity(context, policy):
     fact = lambda code: _fact(code, context.effective_basis_observation_ids,  # noqa: E731
                               context.effective_structural_refs, context.represented_capability_definition_ids,
-                              policy=policy, implied=implied)
+                              policy=policy)
+    implied = context.basis_mode == IMPLIED_BY_HIGHER_CLAIM
     facts = [fact(IMPLIED_FROM_HIGHER_CLAIM if implied else DIRECT_REPRESENTATIVE_BASIS),
              fact(BASIS_KIND_FACTS[context.effective_basis_kind])]
     return _dimension(DIAGNOSTICITY, facts, context.positive_basis_limitations, policy)
 
 
-def _coverage(context, dossier, policy, implied):
+def _coverage(context, dossier, policy):
     represented = frozenset(context.represented_capability_definition_ids)
     observed = [entry.capability.definition_id for entry in dossier.coverage_profile.capabilities
                 if entry.positive_observation_status == OBSERVED_POSITIVE]
@@ -567,8 +583,7 @@ def _coverage(context, dossier, policy, implied):
     if represented:
         facts.append(_fact(LOCALIZED_REPRESENTATIVE_SCOPE, capability_definition_ids=represented, policy=policy))
     if context.competency_only_observation_ids:
-        facts.append(_fact(COMPETENCY_ONLY_SCOPE, context.competency_only_observation_ids, policy=policy,
-                           implied=implied))
+        facts.append(_fact(COMPETENCY_ONLY_SCOPE, context.competency_only_observation_ids, policy=policy))
     facts.append(_fact(ADDITIONAL_POSITIVE_SCOPE_PRESENT, capability_definition_ids=additional, policy=policy)
                  if additional else _fact(COVERAGE_CONCENTRATED_ON_CLAIM_SCOPE, policy=policy,
                                           capability_definition_ids=represented))
@@ -601,34 +616,32 @@ def _remobilizations(context, dossier):
             if r.target_observation_id in basis]
 
 
-def _remobilization_fact(code, context, relations, policy, implied):
+def _remobilization_fact(code, context, relations, policy):
     basis = frozenset(context.effective_basis_observation_ids)
     return _fact(code, [i for r in relations for i in (r.source_observation_id, r.target_observation_id)
                         if i in basis],
                  [StructuralRef(relation_kind=r.relation_kind, relation_id=r.relation_id) for r in relations],
-                 [c.definition_id for r in relations for c in r.scope.capabilities], policy=policy, implied=implied)
+                 [c.definition_id for r in relations for c in r.scope.capabilities], policy=policy)
 
 
-def _independence(context, dossier, index, policy, implied):
+def _independence(context, dossier, index, policy):
     readings = _basis_readings(context, index)
     by_class = {c: [(u, r) for u, r in readings if r.classification == c] for c in SCOPE_CLASSIFICATIONS}
 
     def reading_fact(code, classification, relation_ids):
         items = by_class[classification]
         return _fact(code, [r.observation_id for _, r in items], relation_refs(
-            (i for _, r in items for i in relation_ids(r)), index), [u for u, _ in items], policy=policy,
-            implied=implied)
+            (i for _, r in items for i in relation_ids(r)), index), [u for u, _ in items], policy=policy)
 
     facts = []
     if single(index.observations[i].event_id for i in context.effective_basis_observation_ids):
-        facts.append(_fact(SINGLE_EPISODE_ONLY, context.effective_basis_observation_ids, policy=policy,
-                           implied=implied))
+        facts.append(_fact(SINGLE_EPISODE_ONLY, context.effective_basis_observation_ids, policy=policy))
     if by_class[INDEPENDENCE_EVIDENCE]:
         facts.append(reading_fact(INDEPENDENCE_EVIDENCE_PRESENT, INDEPENDENCE_EVIDENCE,
                                   lambda r: r.independence_evidence_relation_ids))
     relations = _remobilizations(context, dossier)
     if relations:
-        facts.append(_remobilization_fact(INDEPENDENT_REMOBILIZATION_PRESENT, context, relations, policy, implied))
+        facts.append(_remobilization_fact(INDEPENDENT_REMOBILIZATION_PRESENT, context, relations, policy))
     if by_class[DEPENDENT]:
         facts.append(reading_fact(DEPENDENCY_PRESENT, DEPENDENT, lambda r: r.dependency_relation_ids))
     if by_class[PARTIALLY_DEPENDENT]:
@@ -650,14 +663,14 @@ def _consistency(readings, dossier, policy):
     if open_:
         facts.append(_fact(OPEN_COMPARABLE_CONTRADICTION_PRESENT, [r.contradiction.observation_id for r in open_],
                            [ref for r in open_ for ref in r.contradiction.dependency_refs],
-                           [u for r in open_ for u in r.relevant_units], policy=policy, positive=False))
+                           [u for r in open_ for u in r.relevant_units], policy=policy))
     else:
         facts.append(_fact(NO_OBSERVED_CURRENT_TENSION, policy=policy))
     if revalidated:
         facts.append(_fact(HISTORICALLY_REVALIDATED_CONTRADICTION_PRESENT,
                            [r.contradiction.observation_id for r in revalidated],
                            [ref for r in revalidated for ref in r.contradiction.revalidation_refs],
-                           [u for r in revalidated for u in r.revalidated_units], policy=policy, positive=False))
+                           [u for r in revalidated for u in r.revalidated_units], policy=policy))
     open_ids = frozenset(r.contradiction.observation_id for r in open_)
     candidates = [c for c in dossier.consistency_profile.structural_recurrence_candidates
                   if not open_ids.isdisjoint(c.observation_ids)]
@@ -665,29 +678,29 @@ def _consistency(readings, dossier, policy):
         facts.append(_fact(STRUCTURAL_RECURRENCE_CANDIDATE_PRESENT, [i for c in candidates for i in c.observation_ids],
                            capability_definition_ids=[c.common_scope.capability.definition_id for c in candidates
                                                       if c.common_scope.capability is not None],
-                           policy=policy, positive=False))
+                           policy=policy))
     if outside:
         facts.append(_fact(CONTRADICTION_OUTSIDE_CLAIM_SCOPE_PRESENT, [r.contradiction.observation_id for r in outside],
                            capability_definition_ids=[u for r in outside for u in r.contradiction.open_units],
-                           policy=policy, positive=False))
+                           policy=policy))
     if open_ and revalidated:
         facts.append(_fact(MIXED_CONSISTENCY_HISTORY, policy=policy))
     limitations = _inherited(CONSISTENCY, dossier) if open_ or revalidated else ()
     return _dimension(CONSISTENCY, facts, limitations, policy)
 
 
-def _temporal_validation(context, dossier, index, policy, implied):
+def _temporal_validation(context, dossier, index, policy):
     profile = dossier.temporal_validation_profile
     basis = context.effective_basis_observation_ids
     facts = [_fact(SINGLE_EPISODE_ONLY if single(index.observations[i].event_id for i in basis)
-                   else DISTINCT_POSITIVE_EPISODES_PRESENT, basis, policy=policy, implied=implied)]
+                   else DISTINCT_POSITIVE_EPISODES_PRESENT, basis, policy=policy)]
     relations = _remobilizations(context, dossier)
     if relations:
-        facts.append(_remobilization_fact(INDEPENDENT_REMOBILIZATION_PRESENT, context, relations, policy, implied))
+        facts.append(_remobilization_fact(INDEPENDENT_REMOBILIZATION_PRESENT, context, relations, policy))
     durable = frozenset((e.relation_kind, e.relation_id) for e in profile.durability_evidence_events)
     lasting = [r for r in relations if (r.relation_kind, r.relation_id) in durable]
     if lasting:
-        facts.append(_remobilization_fact(DURABILITY_EVIDENCE_PRESENT, context, lasting, policy, implied))
+        facts.append(_remobilization_fact(DURABILITY_EVIDENCE_PRESENT, context, lasting, policy))
     facts.append(_fact(EXACT_DEMONSTRATION_TIME_AVAILABLE if profile.exact_demonstration_time_available is True
                        else EXACT_DEMONSTRATION_TIME_UNAVAILABLE, policy=policy))
     return _dimension(TEMPORAL_VALIDATION, facts, (), policy)
@@ -697,13 +710,12 @@ def confidence_profile(context: ClaimEvidenceContext, readings: tuple, dossier, 
                        policy: ResolvedStatePolicy) -> ConfidenceProfileAssessment:
     """Profil de confiance d'UNE claim established. diagnosticity, coverage,
     independence et temporal_validation ne lisent aucune contradiction."""
-    implied = context.basis_mode == IMPLIED_BY_HIGHER_CLAIM
     return ConfidenceProfileAssessment(
         schema_version=CONFIDENCE_PROFILE_SCHEMA_VERSION,
         stage=context.stage,
-        diagnosticity=_diagnosticity(context, policy, implied),
-        coverage=_coverage(context, dossier, policy, implied),
-        independence=_independence(context, dossier, index, policy, implied),
+        diagnosticity=_diagnosticity(context, policy),
+        coverage=_coverage(context, dossier, policy),
+        independence=_independence(context, dossier, index, policy),
         consistency=_consistency(readings, dossier, policy),
-        temporal_validation=_temporal_validation(context, dossier, index, policy, implied),
+        temporal_validation=_temporal_validation(context, dossier, index, policy),
     )

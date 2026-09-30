@@ -157,16 +157,19 @@ def test_direct_representative_basis_projects_the_t6c1_basis_kind():
     assert diagnosticity.capability_definition_ids == (definition_id("C2_A"), definition_id("C2_B"))
 
 
-def test_implied_claim_reuses_the_higher_scope_without_duplicating_proof():
-    """§5 : Comprehension implied depuis Application : même périmètre
-    représentatif, aucune observation / relation de preuve recitée."""
-    d, o = _expert()
+def test_implied_claim_keeps_descriptive_provenance_without_a_second_positive_basis():
+    """§5 : Application directe O42, Comprehension / Discovery implied. O42
+    reste la base positive de la SEULE claim Application (T6-C1 inchangé),
+    mais le profil de confiance des claims implied reste explicable par O42
+    (provenance descriptive, rôle confidence), sur le périmètre hérité."""
+    d = Dossier("C2")
+    o42 = d.observe("e42", "C2_A", "C2_B", name="O42")
     positive = evaluate_positive_basis(d.context())
     contexts = project_claim_contexts(positive)
     comprehension = contexts["comprehension"]
     assert (comprehension.basis_mode, comprehension.implied_from_stage, comprehension.effective_basis_stage) == (
         "implied_by_higher_claim", "application", "application")
-    assert comprehension.effective_basis_observation_ids == (o,)
+    assert comprehension.effective_basis_observation_ids == (o42,)
     assert comprehension.represented_capability_definition_ids == \
         contexts["application"].represented_capability_definition_ids
     assert "mastery" not in contexts
@@ -174,12 +177,28 @@ def test_implied_claim_reuses_the_higher_scope_without_duplicating_proof():
     for stage in ("discovery", "comprehension"):
         implied = profile(result, stage)
         assert implied.diagnosticity.fact_codes == ("implied_from_higher_claim", "single_representative_demonstration")
-        for name in ("diagnosticity", "coverage", "independence", "temporal_validation"):
-            assert getattr(implied, name).observation_ids == (), (stage, name)
-            assert getattr(implied, name).structural_refs == (), (stage, name)
+        assert implied.diagnosticity.observation_ids == (o42,)
+        assert all(f.observation_ids == (o42,) for f in implied.diagnosticity.facts)
         assert implied.diagnosticity.capability_definition_ids == (definition_id("C2_A"), definition_id("C2_B"))
-    # T6-C1 inchangé : aucune seconde base positive.
-    assert [c.basis_observation_ids for c in positive.claims] == [(), (), (o,), ()]
+        assert implied.independence.observation_ids == (o42,)
+        assert implied.temporal_validation.observation_ids == (o42,)
+    # T6-C1 inchangé : O42 n'est base positive que d'Application.
+    assert [c.basis_observation_ids for c in positive.claims] == [(), (), (o42,), ()]
+    assert [c.basis_mode for c in positive.claims] == ["implied_by_higher_claim", "implied_by_higher_claim",
+                                                        "direct", "none"]
+
+
+def test_claims_implied_by_mastery_keep_the_t5_structure_as_confidence_provenance():
+    d, a, b, t = _mastery_dossier()
+    result = evaluate(d)
+    application = profile(result, "application")
+    assert application.diagnosticity.fact_codes == ("implied_from_higher_claim", "longitudinal_mastery_basis")
+    assert application.diagnosticity.structural_refs == (StructuralRef(relation_kind="transfer", relation_id=t),)
+    assert set(application.diagnosticity.observation_ids) == {a, b}
+    assert "durability_evidence_present" in application.temporal_validation.fact_codes
+    assert application.temporal_validation.structural_refs == (StructuralRef(relation_kind="transfer", relation_id=t),)
+    positive = evaluate_positive_basis(d.context())
+    assert [c.basis_observation_ids for c in positive.claims[:3]] == [(), (), ()]
 
 
 def test_evidence_strength_never_changes_diagnosticity():

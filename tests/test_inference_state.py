@@ -249,11 +249,24 @@ def test_localized_isolated_contradiction_keeps_application_under_tension():
 
 
 def _held(scope="recognition"):
-    """Application (C5_B + C5_C) ; Comprehension / Discovery implied portent
-    son périmètre ; contradiction unique, diagnostique, représentative."""
+    """Application (C2_A + C2_B) ; Comprehension / Discovery implied, dont le
+    périmètre hérité porte aussi la relation représentative de LEUR niveau
+    (C2 Comprehension : C2_A reliée à C2_B | C2_C ; Discovery : toute
+    capacité) ; contradiction unique, diagnostique, représentative à chacun
+    de ces niveaux."""
+    d = Dossier("C2")
+    d.observe("e1", "C2_A", "C2_B", name="a")
+    k = d.contra("e2", "C2_A", "C2_B", scope=scope, name="k")
+    return d, k
+
+
+def _c5_fragilized():
+    """Application (C5_B + C5_C) fragilisée par une contradiction
+    représentative de niveau recognition. La Comprehension C5 (C5_A) n'est
+    PAS portée par ce périmètre : évaluée à son propre niveau cognitif."""
     d = Dossier("C5")
     d.observe("e1", "C5_B", "C5_C", name="a")
-    k = d.contra("e2", "C5_B", "C5_C", scope=scope, name="k")
+    k = d.contra("e2", "C5_B", "C5_C", scope="recognition", name="k")
     return d, k
 
 
@@ -274,10 +287,10 @@ def test_application_materially_fragilized_without_defensible_lower_stage_is_hel
     (motif,) = context.motifs
     assert (motif.fragilized_stage, motif.scope_mode, motif.capability_definition_ids,
             motif.source_contradiction_observation_ids) == (
-        "application", "localized", (definition_id("C5_B"), definition_id("C5_C")), (k,))
+        "application", "localized", (definition_id("C2_A"), definition_id("C2_B")), (k,))
     # Avec un predecessor Application : maintien temporaire du stade précédent.
-    chain, base = Chain(), Dossier("C5")
-    base.observe("e1", "C5_B", "C5_C", name="a")
+    chain, base = Chain(), Dossier("C2")
+    base.observe("e1", "C2_A", "C2_B", name="a")
     assert chain.step(base).current_stage == "application"
     held = chain.step(d, new=["e2"])
     assert held.current_stage == "application"
@@ -287,9 +300,14 @@ def test_application_materially_fragilized_without_defensible_lower_stage_is_hel
 
 
 def test_defensible_lower_comprehension_becomes_the_current_stage():
-    """4 : même contradiction, mais Comprehension positivement établie (base
-    directe distincte sur C5_A) et hors du périmètre contredit."""
-    d, k = _held()
+    """4 : Application materially fragilisée, Comprehension positivement
+    établie (base directe distincte sur C5_A) et hors du périmètre contredit.
+    Sans cette base directe, la Comprehension implied reste aussi défendable :
+    son niveau cognitif (C5_A) n'est pas porté par le périmètre contredit."""
+    d, k = _c5_fragilized()
+    implied = evaluate(d)
+    assert compat(implied, "comprehension").status == "tensioned"
+    assert implied.current_stage == "comprehension"
     d.observe("e0", "C5_A", stage="comprehension", name="c")
     result = evaluate(d)
     assert compat(result, "application").status == "materially_incompatible"
@@ -306,19 +324,67 @@ def test_defensible_lower_comprehension_becomes_the_current_stage():
 
 
 def test_downward_revision_can_skip_several_stages():
-    """5 : Comprehension (implied) aussi fragilisée ; Discovery directe hors
-    d'atteinte d'une contradiction de niveau comprehension."""
-    d = Dossier("C5")
-    d.observe("e0", "C5_D", stage="discovery", name="x")
-    d.observe("e1", "C5_B", "C5_C", name="a")
+    """5 : Comprehension (implied, relation C2 portée par le périmètre) aussi
+    fragilisée à son propre niveau ; Discovery directe hors d'atteinte d'une
+    contradiction de niveau comprehension."""
+    d = Dossier("C2")
+    d.observe("e0", "C2_C", stage="discovery", name="x")
+    d.observe("e1", "C2_A", "C2_B", name="a")
     chain = Chain()
     assert chain.step(_clone(d)).current_stage == "application"
-    d.contra("e2", "C5_B", "C5_C", scope="comprehension", name="k")
+    d.contra("e2", "C2_A", "C2_B", scope="comprehension", name="k")
     result = chain.step(d, new=["e2"])
     assert [c.status for c in result.claim_compatibilities[:3]] == [
         "compatible", "materially_incompatible", "materially_incompatible"]
     assert (result.current_stage, result.state_reason_code) == ("discovery",
                                                                 "downward_revision_to_defensible_lower_claim")
+
+
+def _c10_application():
+    """Application directe C10_B + C10_D ; Comprehension / Discovery implied."""
+    d = Dossier("C10")
+    a = d.observe("e1", "C10_B", "C10_D", name="a")
+    return d, a
+
+
+def test_implied_comprehension_is_tested_at_its_own_cognitive_level():
+    """Correction d'audit : C10_B seule ne représente pas l'Application C10
+    (C10_B reliée à C10_A | C10_C | C10_D) mais représente la Comprehension
+    C10 (le prix dépend d'hypothèses). Une contradiction forte de niveau
+    comprehension sur C10_B est donc lue selon CHAQUE niveau testé."""
+    d, a = _c10_application()
+    positive = evaluate_positive_basis(d.context())
+    comprehension_claim = positive.claims[STAGES.index("comprehension")]
+    assert (comprehension_claim.basis_mode, comprehension_claim.implied_from_stage) == ("implied_by_higher_claim",
+                                                                                       "application")
+    k = d.contra("e2", "C10_B", scope="comprehension", name="k")
+    result = evaluate(d)
+    (application,) = tensions_on(result, "application")
+    (comprehension,) = tensions_on(result, "comprehension")
+    assert (application.compatibility_effect, application.reason_codes) == ("tensioned",
+                                                                            ("claim_relevant_contradiction",))
+    assert (comprehension.compatibility_effect, comprehension.reason_codes) == (
+        "materially_incompatible", ("claim_representative_contradiction",))
+    for tension in (application, comprehension):
+        assert (tension.capability_definition_ids, tension.contradiction_observation_ids) == (
+            (definition_id("C10_B"),), (k,))
+    assert tensions_on(result, "discovery") == []  # niveau comprehension : Discovery hors d'atteinte
+    assert [c.status for c in result.claim_compatibilities[:3]] == ["compatible", "materially_incompatible",
+                                                                    "tensioned"]
+    # La base positive T6-C1 n'est pas touchée par la contradiction.
+    assert evaluate_positive_basis(d.context()) == positive
+
+
+def test_application_scope_still_never_fragilizes_implied_comprehension_c10():
+    """Non-régression : contradiction_scope=application représentative de
+    l'Application ne touche pas la Comprehension implied."""
+    d, a = _c10_application()
+    d.contra("e2", "C10_B", "C10_D", scope="application", name="k")
+    result = evaluate(d)
+    assert compat(result, "application").status == "materially_incompatible"
+    assert compat(result, "comprehension").status == "compatible"
+    assert tensions_on(result, "comprehension") == [] and tensions_on(result, "discovery") == []
+    assert result.current_stage == "comprehension"
 
 
 def test_application_scope_does_not_fragilize_comprehension():
@@ -701,7 +767,7 @@ def test_contradiction_alone_never_leads_to_non_etabli():
     base = _drop(d, uuid.uuid5(NS, "observation:k"))
     chain.step(base)
     for i in range(3):
-        d.contra(f"z{i}", "C5_B", "C5_C", scope="recognition", name=f"z{i}")
+        d.contra(f"z{i}", "C2_A", "C2_B", scope="recognition", name=f"z{i}")
     result = chain.step(d, new=["e2", "z0", "z1", "z2"])
     assert result.current_stage == "application"
     assert result.state_reason_code == "previous_stage_temporarily_held_under_unresolved_tension"
@@ -711,9 +777,10 @@ def test_held_stage_can_come_down_when_a_lower_claim_becomes_defensible():
     chain = Chain()
     d, k = _held()
     chain.step(d)
-    d.observe("e3", "C5_A", stage="comprehension", name="c")
+    d.observe("e3", "C2_C", stage="discovery", name="x")  # hors du périmètre contredit
     result = chain.step(d, new=["e3"])
-    assert (result.current_stage, result.state_reason_code) == ("comprehension",
+    assert compat(result, "discovery").status == "tensioned"
+    assert (result.current_stage, result.state_reason_code) == ("discovery",
                                                                 "downward_revision_to_defensible_lower_claim")
 
 
@@ -1014,6 +1081,28 @@ def test_t6c2_outputs_satisfy_t6b_structural_validation(builder):
     context = builder().context()
     result = evaluate_inference_state(context, evaluate_positive_basis(context))
     svc._validated_decision(decision_from(context, result))
+
+
+def test_implied_confidence_provenance_is_accepted_by_t6b_without_a_second_positive_basis():
+    """Correction d'audit : O42 est positive_basis de la seule Application ;
+    un adaptateur T6-C3 peut citer O42 comme provenance confidence de la
+    Comprehension implied (diagnosticity), jamais comme sa positive_basis.
+    La validation structurelle de T6-B l'accepte."""
+    d = Dossier("C2")
+    o42 = d.observe("e42", "C2_A", "C2_B", name="O42")
+    context = d.context()
+    result = evaluate_inference_state(context, evaluate_positive_basis(context))
+    decision = decision_from(context, result)
+    refs = {(r.ref_role, r.claim_stage, r.confidence_dimension, r.source_id) for r in decision.basis_refs}
+    assert ("confidence", "comprehension", "diagnosticity", o42) in refs
+    assert ("positive_basis", "application", None, o42) in refs
+    assert not [r for r in decision.basis_refs if r.ref_role == "positive_basis" and r.claim_stage != "application"]
+    svc._validated_decision(decision)
+    # Une seconde positive_basis de O42 serait, elle, refusée par T6-B.
+    forged = dataclasses.replace(decision, basis_refs=(*decision.basis_refs, BasisRefDecision(
+        ref_role="positive_basis", source_kind="observation", source_id=o42, claim_stage="comprehension")))
+    with pytest.raises(svc.InferenceServiceError):
+        svc._validated_decision(forged)
 
 
 # --------------------------------------------------------------------------
