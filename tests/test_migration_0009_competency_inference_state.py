@@ -911,13 +911,21 @@ T6C1_MODULES = ("core/inference_policies.py", "core/inference_positive_basis.py"
 # (non branchés, sans base ni opération T6-B : voir
 # tests/test_inference_confidence.py et tests/test_inference_state.py).
 T6C2_MODULES = ("core/inference_state_policies.py", "core/inference_confidence.py", "core/inference_state.py")
+# T6-C3 : policies finales et moteur PUR d'assemblage (cause de transition,
+# besoins de validation latents, memberships, décision finale ;
+# core/inference_engine.py porte l'unique point d'entrée infer_competency).
+# Non branchés, sans base ni opération T6-B : voir
+# tests/test_inference_transition.py, tests/test_inference_validation.py et
+# tests/test_inference_engine.py.
+T6C3_MODULES = ("core/inference_final_policies.py", "core/inference_transition.py", "core/inference_validation.py",
+                "core/inference_engine.py")
 
 
 def test_no_t6_service_engine_or_inference_anywhere():
     """T6-A = persistance seulement : aucun module d'inférence / d'état
     autre que le service transactionnel T6-B core/inference_service.py et,
-    depuis T6-C1, les deux modules purs de base positive (aucun
-    core/inference_engine.py, aucun autre moteur T6-C), aucune opération
+    depuis T6-C1 / T6-C2 / T6-C3, les modules purs du moteur T6-C (dont
+    core/inference_engine.py depuis T6-C3 ; aucun autre), aucune opération
     T6-B (démarrer, compléter, activer, ajouter claim / tension, écrire le
     cache, inférer un stade) ailleurs que dans ce service — les modules
     T6-C1 n'en portent aucune — et, dans ce service, seulement start /
@@ -928,8 +936,7 @@ def test_no_t6_service_engine_or_inference_anywhere():
                          REPO_ROOT / "api.py"]]
     assert sorted(m for m in modules if any(w in m for w in ("inference", "competency_state", "stage_claim",
                                                               "tension", "user_state"))) == sorted(
-        [T6B_SERVICE, *T6C1_MODULES, *T6C2_MODULES])
-    assert not (REPO_ROOT / "core" / "inference_engine.py").exists()
+        [T6B_SERVICE, *T6C1_MODULES, *T6C2_MODULES, *T6C3_MODULES])
     checked = 0
     for rel, source in _application_sources():
         checked += 1

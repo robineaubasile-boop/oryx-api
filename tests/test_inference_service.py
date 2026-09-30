@@ -422,6 +422,10 @@ T6C0_ADDITIONS = {"CurrentTaxonomyCapability", "CurrentTaxonomyContext", "_build
 # Seules définitions T6-B.2 modifiées par T6-C0 : le champ du contexte, son
 # assemblage et ses deux constructeurs (start / get).
 CHANGED_BY_T6C0 = {"InferenceContext", "_context", "start_competency_inference", "get_inference_context"}
+# Seule définition T6-B modifiée par T6-C3 : la garde structurelle de cause,
+# qui reconnaît un changement sémantique des relations T5 (relation_delta
+# added / removed) comme support de pedagogical_reinterpretation.
+CHANGED_BY_T6C3 = {"_check_transition_causes"}
 
 
 def _top_level(source):
@@ -2332,7 +2336,30 @@ def test_pg_pedagogical_reinterpretation_is_not_a_cover_for_new_evidence(engine,
     la cause plausible est new_user_evidence, pas une réinterprétation ;
     et un dossier identique sous mêmes spécifications est un reroll."""
     w = world
-    _, context, (new,) = _second(Sessions, w, new=[sup(w.A)])  # nouveau dossier, mêmes spécifications
+    # Nouveau dossier (événement nouveau), mêmes spécifications et relations
+    # T5 recréées à l'identique (relation_delta : retained seulement) : aucun
+    # fait d'évolution contrôlée (depuis T6-C3, un changement sémantique des
+    # relations T5 en serait un).
+    _activate_first(Sessions, w)
+    new = _t3(Sessions, w.tx.id, sup(w.A)).id
+    l2 = _start_t5(Sessions, w.tx.id)
+    with Sessions() as s:
+        t5.add_dependency(s, run_id=l2, target_observation_id=w.comp, source_kind="observation",
+                          source_observation_id=w.disc, dependency_type="partially_dependent",
+                          scope_mode="localized", dependency_basis={"why": "reprend la décomposition"},
+                          capability_membership_ids=[w.B])
+        t5.add_transfer(s, run_id=l2, source_observation_id=w.comp, target_observation_id=w.app,
+                        scope_mode="localized", transfer_basis={"adaptation": "structure différente"},
+                        capability_membership_ids=[w.A])
+        t5.add_revalidation(s, run_id=l2, source_contradiction_observation_id=w.kB,
+                            target_supportive_observation_id=w.app_b, scope_mode="whole_observation",
+                            revalidation_basis={"mechanism": "démontré sans aide"})
+        s.commit()
+    _complete_t5(Sessions, l2)
+    context = _start(Sessions, l2)
+    delta = context.transition_causality.relation_delta
+    assert all(not f.added and not f.removed and f.retained
+               for f in (delta.dependencies, delta.transfers, delta.revalidations))
     with pytest.raises(InvalidInferenceDecision, match="sans spécification T6 différente"):
         svc.complete_competency_inference(db, run_id=context.run_id,
                                           decision=_app_decision(w, cause="pedagogical_reinterpretation"))
@@ -3871,10 +3898,60 @@ def test_pg_relation_delta_is_semantic(engine, Sessions, db, world):
     c = context.transition_causality
     assert c.observation_delta.added_observation_ids == () == c.observation_delta.removed_observation_ids
     _walk(c)
-    # Un delta de relations n'est pas à lui seul une évolution contrôlée.
-    with pytest.raises(InvalidInferenceDecision, match="sans spécification T6 différente"):
+    # Depuis T6-C3 : un changement SÉMANTIQUE des relations T5 (ici transfert
+    # entré / sorti, revalidation sortie), sans autre fait, supporte
+    # structurellement pedagogical_reinterpretation (jamais new_user_evidence).
+    assert (c.new_user_event_ids, c.integrity_changes, c.reevaluations, c.t5_version_changes,
+            c.t6_specification_changes, c.taxonomy_release_changed) == ((), (), (), (), (), False)
+    with pytest.raises(InvalidInferenceDecision, match="new_user_evidence"):
         svc.complete_competency_inference(db, run_id=context.run_id,
-                                          decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+                                          decision=_app_decision(w, cause="new_user_evidence"))
+    svc.complete_competency_inference(db, run_id=context.run_id,
+                                      decision=_app_decision(w, cause="pedagogical_reinterpretation"))
+    db.commit()
+
+
+def _relation_only_causality(**families):
+    empty = RelationFamilyDeltaContext(added=(), removed=(), retained=())
+    release = uuid.uuid5(uuid.NAMESPACE_URL, "oryx:t6c3:relation-only")
+    return svc.TransitionCausalityContext(
+        causality_schema_version=1, new_user_event_ids=(), integrity_changes=(), reevaluations=(),
+        observation_delta=ObservationDeltaContext(added_observation_ids=(), removed_observation_ids=(),
+                                                  retained_observation_ids=(), added_event_ids=(),
+                                                  removed_event_ids=(), retained_event_ids=()),
+        relation_delta=RelationDeltaContext(**{f: families.get(f, empty)
+                                               for f in ("dependencies", "transfers", "revalidations")}),
+        taxonomy_release_changed=False, previous_taxonomy_release_id=release, current_taxonomy_release_id=release,
+        t5_version_changes=(), t6_specification_changes=())
+
+
+@pytest.mark.parametrize("family", ["dependencies", "transfers", "revalidations"])
+@pytest.mark.parametrize("change", ["added", "removed", "retained"])
+def test_relation_delta_alone_supports_reinterpretation_but_retained_never_counts(family, change):
+    """_check_transition_causes (V2) : added / removed d'une famille de
+    relations T5 suffit à pedagogical_reinterpretation ; retained seul n'est
+    jamais un changement ; aucune autre cause n'en devient possible."""
+    item = svc._freeze({"source_observation_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "s")),
+                        "target_observation_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "t")),
+                        "scope_fingerprint": "sha256:x"})
+    delta = RelationFamilyDeltaContext(**{name: (item,) if name == change else ()
+                                          for name in ("added", "removed", "retained")})
+    inputs = SimpleNamespace(transition_causality=_relation_only_causality(**{family: delta}), relations=None)
+    predecessor = SimpleNamespace(id=uuid.uuid5(uuid.NAMESPACE_URL, "p"), unresolved_revision_context=None,
+                                  tension_state="none", transition=None)
+
+    def check(cause):
+        decision = svc._Decision("application", cause, None, [], "résumé", {}, (), ())
+        svc._check_transition_causes(inputs, predecessor, decision, "maintained", {})
+
+    if change == "retained":
+        with pytest.raises(InvalidInferenceDecision, match="aucune évolution contrôlée"):
+            check("pedagogical_reinterpretation")
+    else:
+        check("pedagogical_reinterpretation")
+    for cause in ("new_user_evidence", "evidence_integrity_change"):
+        with pytest.raises(InvalidInferenceDecision):
+            check(cause)
 
 
 @pytest.mark.parametrize("field, value", [("dependency_version", "dependency-2"), ("transfer_version", "transfer-2"),
@@ -4020,10 +4097,11 @@ def test_t6c0_changes_only_the_inference_context_surface():
     before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
     assert set(after) - set(before) == T6C0_ADDITIONS
     assert set(before) - set(after) == set()
-    for name in set(before) - CHANGED_BY_T6C0:
+    for name in set(before) - CHANGED_BY_T6C0 - CHANGED_BY_T6C3:
         assert after[name] == before[name], name
-    for name in CHANGED_BY_T6C0:
+    for name in CHANGED_BY_T6C0 | CHANGED_BY_T6C3:
         assert after[name] != before[name], name
+    assert "relation_delta" in after["_check_transition_causes"]
     for name in ("_input_fingerprint_v1", "_input_fingerprint_v2", "_causality_fingerprint_payload",
                  "_predecessor_payload", "_dossier_payload", "_detect_input_identity", "_inference_dedup_key",
                  "_output_fingerprint", "_Inputs", "_verified_inputs", "_membership_definitions",

@@ -113,6 +113,7 @@ from core.inference_service import (
     CLAIM_STAGES,
     NON_ETABLI,
     STAGE_SEQUENCE,
+    TENSION_SCOPE_MODES,
     PredecessorDecisionContext,
     PredecessorSnapshot,
     TransitionCausalityContext,
@@ -169,7 +170,12 @@ from core.inference_state_policies import (
     resolve_state_decision_policy,
 )
 
-TENSION_SCOPE_MODES = (LOCALIZED, COMPETENCY_ONLY)
+# Relecture de revision-context-v1 : vocabulaire T6-B des tensions
+# (TENSION_SCOPE_MODES : localized, competency_only, whole_competency),
+# une seule source de vérité. Les tensions COURANTES restent dérivées en
+# localized / competency_only (_claim_tensions) ; un motif historique
+# whole_competency (aucune capacité) est relu, préservé et transmis tel
+# quel, jamais converti ni doté d'une capacité inventée.
 REVISION_CONTEXT_FIELDS = ("schema_version", "origin_inference_run_id", "reason_code", "resolution_status", "motifs")
 REVISION_MOTIF_FIELDS = ("fragilized_stage", "scope_mode", "capability_definition_ids",
                          "source_contradiction_observation_ids", "reason_codes")
