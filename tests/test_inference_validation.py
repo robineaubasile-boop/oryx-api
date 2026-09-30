@@ -15,13 +15,33 @@ from core import inference_service as svc
 from core.inference_engine import infer_competency
 from core.inference_final_policies import (
     VALIDATION_REASON_CODES,
+    VALIDATION_SCOPE_MODES,
     FinalInferenceError,
+    InvalidValidationNeedScope,
     MissingValidationProvenance,
+    UnresolvableCapabilityMembership,
+    check_validation_scope,
+    resolve_final_inference_policy,
 )
+from core.inference_policies import UnsupportedTaxonomySemantics
 from core.inference_positive_basis import evaluate_positive_basis
 from core.inference_state import evaluate_inference_state
-from core.inference_validation import ValidationNeedAssessment, evaluate_validation_needs, tension_revision_status
-from tests.test_inference_positive_basis import EPOCH, NS, RELEASE, STAGES, Dossier, _mastery_dossier, definition_id
+from core.inference_validation import (
+    ValidationNeedAssessment,
+    _order_key,
+    evaluate_validation_needs,
+    tension_revision_status,
+)
+from tests.test_inference_positive_basis import (
+    EPOCH,
+    NS,
+    RELEASE,
+    STAGES,
+    Dossier,
+    _mastery_dossier,
+    definition_id,
+    taxonomy,
+)
 from tests.test_inference_state import _held
 from tests.test_inference_transition import DecisionChain, causality, clone, revised
 
@@ -44,16 +64,19 @@ def tension(decision, stage):
     return item
 
 
-def predecessor_with_motif(d, *, stage, motif_caps, sources, established=("discovery", "comprehension",
-                                                                           "application"), new=()):
+def predecessor_with_motif(d, *, stage, motif_caps=(), sources, established=("discovery", "comprehension",
+                                                                              "application"), new=(),
+                           motif_definition_ids=None, scope_mode="localized"):
     """Contexte dont le predecessor porte un revision-context-v1 exact (motif
-    choisi), pour tester le plus petit périmètre fragilisé."""
+    choisi), pour tester le plus petit périmètre fragilisé. motif_definition_ids
+    : definition_id historiques explicites (sinon révision 1 des codes)."""
     run = uuid.uuid5(NS, "t6c3-motif-origin")
+    definitions = ids(*motif_caps) if motif_definition_ids is None else [str(i) for i in motif_definition_ids]
     payload = {"schema_version": "revision-context-v1", "origin_inference_run_id": str(run),
                "reason_code": "higher_claim_materially_fragilized_defensible_lower_claim_retained",
                "resolution_status": "unresolved",
-               "motifs": [{"fragilized_stage": stage, "scope_mode": "localized",
-                           "capability_definition_ids": ids(*motif_caps),
+               "motifs": [{"fragilized_stage": stage, "scope_mode": scope_mode,
+                           "capability_definition_ids": definitions,
                            "source_contradiction_observation_ids": [str(s) for s in sorted(sources, key=str)],
                            "reason_codes": ["claim_representative_contradiction"]}]}
     dossier = d.dossier()
@@ -359,3 +382,107 @@ def test_tension_revision_status_requires_exact_semantic_coverage():
                   dataclasses.replace(need, scope_mode="competency_only"),
                   dataclasses.replace(need, intent="confirmation")):
         assert tension_revision_status(item, (other,)) == "unresolved"
+
+
+# --------------------------------------------------------------------------
+# Scopes des besoins : trois modes T6-B, invariants, taxonomie courante
+# --------------------------------------------------------------------------
+
+def test_validation_scope_vocabulary_is_exactly_the_t6b_tension_vocabulary():
+    assert VALIDATION_SCOPE_MODES == ("localized", "competency_only", "whole_competency")
+    assert frozenset(VALIDATION_SCOPE_MODES) == svc.TENSION_SCOPE_MODES
+
+
+@pytest.mark.parametrize("scope_mode, caps, accepted", [
+    ("localized", ("C8_C",), True),
+    ("localized", (), False),
+    ("competency_only", (), True),
+    ("competency_only", ("C8_C",), False),
+    ("whole_competency", (), True),
+    ("whole_competency", ("C8_C",), False),
+])
+def test_validation_need_scope_invariants(scope_mode, caps, accepted):
+    current = taxonomy("C8")
+    definitions = tuple(definition_id(c) for c in caps)
+    if accepted:
+        check_validation_scope(scope_mode, definitions, current)
+    else:
+        with pytest.raises(InvalidValidationNeedScope):
+            check_validation_scope(scope_mode, definitions, current)
+
+
+def test_unknown_scope_mode_fails_closed_with_a_business_error_not_a_value_error():
+    with pytest.raises(InvalidValidationNeedScope):
+        check_validation_scope("whole_observation", (), taxonomy("C8"))
+    # L'ordre canonique connaît les trois modes (aucun ValueError).
+    d, _ = _c8_motif()
+    key = _order_key(resolve_final_inference_policy(d.context()))
+    needs = [ValidationNeedAssessment(schema_version="validation-need-v1", intent="revalidation",
+                                      target_stage="application", scope_mode=mode,
+                                      capability_definition_ids=caps, reason_codes=(), observation_ids=(),
+                                      structural_refs=())
+             for mode, caps in (("whole_competency", ()), ("competency_only", ()),
+                                ("localized", (definition_id("C8_C"),)))]
+    assert [n.scope_mode for n in sorted(needs, key=key)] == ["localized", "competency_only", "whole_competency"]
+
+
+def test_confirmations_are_never_whole_competency():
+    single = Dossier("C2")
+    single.observe("e1", "C2_A", "C2_B")
+    only = Dossier("C10")
+    only.observe("e1", name="a")
+    scopes = {n.scope_mode for d in (single, only) for n in needs_of(d.context()) if n.intent == "confirmation"}
+    assert scopes == {"localized", "competency_only"}
+
+
+def test_localized_need_on_a_definition_absent_from_the_current_taxonomy_fails_closed():
+    """Motif historique localized sur C8_C révision 2 (autre definition_id,
+    même capability_code) ; la taxonomie courante porte C8_C révision 1.
+    T6-C2 conserve le motif (fait historique) ; T6-C3 ne le remappe jamais
+    par code et ne persiste jamais un besoin vers une définition absente."""
+    d, k = _c8_motif()
+    other = definition_id("C8_C", 2)
+    context = predecessor_with_motif(d, stage="application", motif_definition_ids=[other], sources=[k],
+                                     new=["e2"])
+    assert other not in {c.definition_id for c in context.current_taxonomy_context.capabilities}
+    state = evaluate_inference_state(context, evaluate_positive_basis(context))
+    assert [m.capability_definition_ids for m in state.revision_context.motifs] == [(other,)]
+    with pytest.raises(UnresolvableCapabilityMembership):
+        needs_of(context)
+    with pytest.raises(UnresolvableCapabilityMembership):
+        infer_competency(context)
+
+
+def test_current_taxonomy_with_a_new_semantic_revision_is_never_remapped():
+    """Taxonomie courante : C8_C en révision 2 (nouvelle définition) ; motif
+    ancien sur C8_C révision 1. Aucun remapping : positive_basis-1 échoue
+    fermé avant toute sérialisation (UnsupportedTaxonomySemantics)."""
+    d = Dossier("C8", revisions={"C8_C": 2})
+    d.observe("e1", "C8_B", "C8_C", name="a")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    context = predecessor_with_motif(d, stage="application", motif_definition_ids=[definition_id("C8_C", 1)],
+                                     sources=[k], new=["e2"])
+    assert {(c.capability_code, c.semantic_revision) for c in context.current_taxonomy_context.capabilities
+            if c.capability_code == "C8_C"} == {("C8_C", 2)}
+    with pytest.raises(UnsupportedTaxonomySemantics):
+        infer_competency(context)
+
+
+def test_other_release_reusing_the_exact_definition_is_compatible():
+    """Release courante différente, MÊME definition_id C8_C (révision 1) :
+    même sens, besoin localized conservé ; membership de la release
+    courante pour la tension."""
+    other_release = uuid.uuid5(NS, "release:oryx-v1-bis")
+    d = Dossier("C8", release=other_release)
+    d.observe("e1", "C8_B", "C8_C", name="a")
+    k = d.contra("e2", "C8_C", scope="application", name="k")
+    context = predecessor_with_motif(d, stage="application", motif_caps=["C8_C"], sources=[k], new=["e2"])
+    assert context.current_taxonomy_context.release_id == other_release != RELEASE
+    decision = infer_competency(context)
+    (need,) = [n for n in decision.validation_needs if n["intent"] == "revalidation"]
+    assert (need["scope_mode"], need["capability_definition_ids"]) == ("localized", ids("C8_C"))
+    (item,) = [t for t in decision.tensions if t.fragilized_stage == "application"]
+    current = {c.capability_code: c.membership_id for c in context.current_taxonomy_context.capabilities}
+    assert item.capability_membership_ids == (current["C8_C"],)
+    assert item.revision_status == "revalidation_needed"
+    svc._validated_decision(decision)

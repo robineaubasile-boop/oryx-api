@@ -24,7 +24,11 @@ latents, résout les memberships et SÉRIALISE.
   la release COURANTE (CurrentTaxonomyContext uniquement, ordre naturel de
   ses capacités). Même definition_id = même sens ; jamais de correspondance
   par capability_code (même code, autre révision = autre capacité).
-  definition_id absent ou doublon => UnresolvableCapabilityMembership.
+  definition_id absent ou doublon => UnresolvableCapabilityMembership. La
+  primitive (current_membership_ids, core/inference_final_policies.py) est
+  UNIQUE : elle résout les tensions localized et vérifie aussi, avant
+  l'assemblage, les capability_definition_ids des besoins de validation
+  localized (qui restent sérialisés par definition_id, sans membership).
 - StageClaimDecision : exactement quatre, discovery -> mastery ;
   basis_summary / scope_summary = gabarits fermés, AUDIT SEULEMENT (aucune
   logique ne les relit) ; confidence_profile = lecture qualitative
@@ -54,10 +58,14 @@ from collections.abc import Mapping
 
 from core.inference_final_policies import (
     VALIDATION_INTENTS,
+    FinalInferenceError,
     InvalidAssembledDecision,
     UnresolvableCapabilityMembership,
+    check_validation_scope,
+    current_capabilities,
     resolve_final_inference_policy,
 )
+from core.inference_final_policies import current_membership_ids as _membership_ids
 from core.inference_positive_basis import MASTERY_PROPERTIES, ClaimLimitation, evaluate_positive_basis
 from core.inference_service import (
     BASIS_MODE_NONE,
@@ -113,37 +121,12 @@ _VALIDATION_NEED_KEYS = frozenset({"schema_version", "intent", "target_stage", "
 
 
 # --------------------------------------------------------------------------
-# TaxonomyMembershipResolver
+# TaxonomyMembershipResolver (primitive : current_membership_ids)
 # --------------------------------------------------------------------------
-
-def _capabilities(taxonomy) -> dict:
-    """{definition_id: CurrentTaxonomyCapability} de la release courante ;
-    doublon de définition ou de membership => fail closed."""
-    by_definition, memberships = {}, set()
-    for capability in taxonomy.capabilities:
-        if capability.definition_id in by_definition or capability.membership_id in memberships:
-            raise UnresolvableCapabilityMembership(f"{capability.capability_code} en double dans la taxonomie"
-                                                   " courante")
-        by_definition[capability.definition_id] = capability
-        memberships.add(capability.membership_id)
-    return by_definition
-
-
-def _membership_ids(definition_ids, taxonomy) -> tuple:
-    """definition_id -> membership_id exact de la release courante, dans
-    l'ordre naturel de CurrentTaxonomyContext.capabilities. Aucun repli."""
-    known = _capabilities(taxonomy)
-    missing = [str(d) for d in definition_ids if d not in known]
-    if missing or not definition_ids:
-        raise UnresolvableCapabilityMembership(f"capability_definition_ids {missing} absents de la release"
-                                               f" courante {taxonomy.release_id} (aucune correspondance par code)")
-    wanted = frozenset(definition_ids)
-    return tuple(c.membership_id for c in taxonomy.capabilities if c.definition_id in wanted)
-
 
 def _scope_labels(definition_ids, taxonomy) -> str:
     """Libellé d'AUDIT « C10_B@r1,C10_D@r1 » (jamais relu par une logique)."""
-    known = _capabilities(taxonomy)
+    known = current_capabilities(taxonomy)
     missing = [str(d) for d in definition_ids if d not in known]
     if missing:
         raise UnresolvableCapabilityMembership(f"capability_definition_ids {missing} absents de la release courante")
@@ -414,6 +397,13 @@ def _guard_state(context, state, decision) -> None:
     for need in decision.validation_needs:
         _fail(not isinstance(need, Mapping) or set(need) != _VALIDATION_NEED_KEYS, "validation_need hors format")
         _check_payload(need, "validation_need")
+        definitions = {str(d): d for d in current_capabilities(context.current_taxonomy_context)}
+        try:
+            check_validation_scope(need["scope_mode"],
+                                   tuple(definitions.get(d, d) for d in need["capability_definition_ids"]),
+                                   context.current_taxonomy_context)
+        except FinalInferenceError as exc:
+            raise InvalidAssembledDecision(f"validation_need : {exc}") from exc
     _fail(bool(decision.validation_needs) and not any(r.ref_role == VALIDATION for r in refs),
           "validation_needs sans ref validation")
     _fail(type(decision.state_decision_summary) is not str or not decision.state_decision_summary,

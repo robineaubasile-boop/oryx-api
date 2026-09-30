@@ -119,7 +119,8 @@ def test_single_public_entry_point():
         "inference_transition.py": {"resolve_transition_cause", "relation_endpoints"},
         "inference_validation.py": {"evaluate_validation_needs", "tension_revision_status"},
         "inference_final_policies.py": {"validate_final_inference_policy", "resolve_final_inference_policy",
-                                        "check_inference_assessments"},
+                                        "check_inference_assessments", "current_capabilities",
+                                        "current_membership_ids", "check_validation_scope"},
     }
 
 
@@ -488,6 +489,14 @@ def _mutations(decision):
     yield "contexte de révision parallèle", dataclasses.replace(decision, unresolved_revision_context={"x": "y"})
     yield "besoin hors format", dataclasses.replace(decision, validation_needs=(
         {**decision.validation_needs[0], "priority": "1"},))
+    yield "whole_competency avec capacités", dataclasses.replace(decision, validation_needs=(
+        {**decision.validation_needs[0], "scope_mode": "whole_competency"},))
+    yield "localized sans capacité", dataclasses.replace(decision, validation_needs=(
+        {**decision.validation_needs[0], "capability_definition_ids": []},))
+    yield "définition hors taxonomie courante", dataclasses.replace(decision, validation_needs=(
+        {**decision.validation_needs[0], "capability_definition_ids": [str(definition_id("C2_B", 2))]},))
+    yield "scope inconnu", dataclasses.replace(decision, validation_needs=(
+        {**decision.validation_needs[0], "scope_mode": "whole_observation"},))
     yield "tension inconnue", dataclasses.replace(decision, tensions=(TensionDecision(
         tension_key="t9", fragilized_stage="application", scope_mode="competency_only", summary="x",
         revision_status="unresolved"),))
@@ -496,6 +505,10 @@ def _mutations(decision):
 def test_invariant_guard_accepts_the_assembled_decision_and_rejects_violations():
     context, state, decision = _valid()
     _guard(context, state, decision)
+    assert decision.validation_needs[0]["scope_mode"] == "localized"
+    for scope in ("competency_only", "whole_competency"):
+        _guard(context, state, dataclasses.replace(decision, validation_needs=(
+            {**decision.validation_needs[0], "scope_mode": scope, "capability_definition_ids": []},)))
     for label, mutated in _mutations(decision):
         with pytest.raises(InvalidAssembledDecision):
             _guard(context, state, mutated)

@@ -39,6 +39,15 @@ fabriquée). Deux sources qui justifient le même besoin (identité intent,
 target_stage, scope_mode, capability_definition_ids) => un seul besoin,
 raisons et provenance réunies. Ordre canonique : intent, stade, scope_mode,
 capacités (ordre naturel de la taxonomie).
+
+Scopes (vocabulaire T6-B des tensions, VALIDATION_SCOPE_MODES) : localized
+(capability_definition_ids non vides, TOUS présents exactement dans la
+taxonomie courante : même primitive que les memberships des tensions, aucune
+correspondance par code), competency_only et whole_competency (aucune
+capacité). Le scope d'un motif / d'une tension est conservé tel quel,
+jamais converti ; une confirmation n'est jamais whole_competency. Toute
+incohérence => InvalidValidationNeedScope ou UnresolvableCapabilityMembership,
+avant tout ordre ou assemblage.
 """
 from dataclasses import dataclass
 
@@ -54,6 +63,7 @@ from core.inference_final_policies import (
     VALIDATION_SCOPE_MODES,
     MissingValidationProvenance,
     check_inference_assessments,
+    check_validation_scope,
     resolve_final_inference_policy,
 )
 from core.inference_positive_basis import REVALIDATION as REVALIDATION_RELATION
@@ -184,6 +194,8 @@ def evaluate_validation_needs(context, positive_basis, state) -> tuple:
         links.update(r for r in refs if (r.relation_kind, r.relation_id) in relations)
     needs = []
     for (intent, stage, mode, caps), (reasons, sources, links) in merged.items():
+        # Scope et taxonomie courante vérifiés AVANT tout ordre / assemblage.
+        check_validation_scope(mode, caps, context.current_taxonomy_context)
         if not sources and not links:
             raise MissingValidationProvenance(f"besoin {intent} {stage} {mode} sans aucune source courante légale")
         needs.append(ValidationNeedAssessment(

@@ -34,7 +34,7 @@ from types import MappingProxyType
 
 from core.inference_policies import APPLICATION, COMPREHENSION, DISCOVERY, POSITIVE_BASIS_V1
 from core.inference_positive_basis import PositiveBasisAssessment
-from core.inference_service import COMPETENCY_ONLY, LOCALIZED
+from core.inference_service import COMPETENCY_ONLY, LOCALIZED, TENSION_SCOPE_MODES, WHOLE_COMPETENCY
 from core.inference_state import T6C2Assessment
 from core.inference_state_policies import (
     COMPETENCY_ONLY_REPRESENTATIVE_BASIS,
@@ -92,6 +92,12 @@ class UnresolvableCapabilityMembership(FinalInferenceError):
     courante : jamais de correspondance par capability_code."""
 
 
+class InvalidValidationNeedScope(FinalInferenceError):
+    """Besoin de validation dont le scope_mode est hors vocabulaire ou
+    incohérent avec ses capability_definition_ids (localized : non vides ;
+    competency_only / whole_competency : vides)."""
+
+
 class MissingValidationProvenance(FinalInferenceError):
     """Besoin de validation sans aucune source courante légale : aucune
     source n'est jamais fabriquée."""
@@ -141,7 +147,14 @@ TRANSITION_REASON_CODES = (
 CONFIRMATION = "confirmation"
 REVALIDATION = "revalidation"
 VALIDATION_INTENTS = (CONFIRMATION, REVALIDATION)
-VALIDATION_SCOPE_MODES = (LOCALIZED, COMPETENCY_ONLY)
+# Ordre canonique des scopes d'un besoin : le vocabulaire est EXACTEMENT
+# celui des tensions T6-B (TENSION_SCOPE_MODES, vérifié par
+# validate_final_inference_policy). Une revalidation garde le plus petit
+# scope RÉELLEMENT connu (localized exact, competency_only ou
+# whole_competency, sans capacité) : jamais whole_competency ->
+# competency_only, jamais une capacité inventée. Une confirmation n'est
+# jamais whole_competency (base localized ou competency_only seulement).
+VALIDATION_SCOPE_MODES = (LOCALIZED, COMPETENCY_ONLY, WHOLE_COMPETENCY)
 
 # Revalidation : le plus petit périmètre fragilisé, jamais « toute la
 # compétence » ni « revalider la Mastery ».
@@ -249,6 +262,8 @@ def validate_final_inference_policy(policy) -> None:
     """Validation statique stricte (pure)."""
     if type(policy) is not FinalInferencePolicy:
         raise InvalidFinalInferencePolicy("FinalInferencePolicy attendue")
+    if frozenset(VALIDATION_SCOPE_MODES) != TENSION_SCOPE_MODES:
+        raise InvalidFinalInferencePolicy("VALIDATION_SCOPE_MODES diverge du vocabulaire T6-B des tensions")
     if policy.validation_need_schema_version != VALIDATION_NEED_SCHEMA_VERSION:
         raise InvalidFinalInferencePolicy("validation_need_schema_version inconnue")
     if not policy.confirmation_stages or not set(policy.confirmation_stages) <= {DISCOVERY, COMPREHENSION,
@@ -338,3 +353,49 @@ def check_inference_assessments(context, positive_basis, state) -> None:
         raise InconsistentInferenceAssessment("compétence divergente entre contexte, T6-C1 et T6-C2")
     if (context.predecessor is None) != (context.transition_causality is None):
         raise InconsistentInferenceAssessment("predecessor et transition_causality incohérents (V2 exigé)")
+
+
+# --------------------------------------------------------------------------
+# Taxonomie courante : primitive unique (tensions ET besoins de validation)
+# --------------------------------------------------------------------------
+
+def current_capabilities(taxonomy) -> dict:
+    """{definition_id: CurrentTaxonomyCapability} de la release COURANTE ;
+    doublon de définition ou de membership => fail closed."""
+    by_definition, memberships = {}, set()
+    for capability in taxonomy.capabilities:
+        if capability.definition_id in by_definition or capability.membership_id in memberships:
+            raise UnresolvableCapabilityMembership(f"{capability.capability_code} en double dans la taxonomie"
+                                                   " courante")
+        by_definition[capability.definition_id] = capability
+        memberships.add(capability.membership_id)
+    return by_definition
+
+
+def current_membership_ids(definition_ids, taxonomy) -> tuple:
+    """definition_id -> membership_id EXACT de la release courante, dans
+    l'ordre naturel de CurrentTaxonomyContext.capabilities. Même
+    definition_id = même sens ; aucune correspondance par capability_code
+    (même code, autre definition_id / semantic_revision = autre capacité) ;
+    définition absente ou liste vide => UnresolvableCapabilityMembership."""
+    known = current_capabilities(taxonomy)
+    missing = [str(d) for d in definition_ids if d not in known]
+    if missing or not definition_ids:
+        raise UnresolvableCapabilityMembership(f"capability_definition_ids {missing} absents de la release"
+                                               f" courante {taxonomy.release_id} (aucune correspondance par code)")
+    wanted = frozenset(definition_ids)
+    return tuple(c.membership_id for c in taxonomy.capabilities if c.definition_id in wanted)
+
+
+def check_validation_scope(scope_mode, capability_definition_ids, taxonomy) -> None:
+    """Invariants de scope d'un besoin de validation : scope_mode du
+    vocabulaire ; localized => capacités NON vides, toutes résolues dans la
+    taxonomie courante (même primitive que les tensions) ; competency_only /
+    whole_competency => aucune capacité. Fail closed, jamais un repli."""
+    if scope_mode not in VALIDATION_SCOPE_MODES:
+        raise InvalidValidationNeedScope(f"scope_mode {scope_mode!r} hors vocabulaire {VALIDATION_SCOPE_MODES}")
+    if (scope_mode == LOCALIZED) != bool(capability_definition_ids):
+        raise InvalidValidationNeedScope(f"{scope_mode} : capability_definition_ids"
+                                         f" {'requis' if scope_mode == LOCALIZED else 'interdits'}")
+    if scope_mode == LOCALIZED:
+        current_membership_ids(capability_definition_ids, taxonomy)
