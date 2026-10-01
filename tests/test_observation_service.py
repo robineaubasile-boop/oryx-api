@@ -89,6 +89,7 @@ PUBLIC_API = {
     "fail_evaluation_run",
     "invalidate_observation",
     "get_evaluation_run",
+    "get_observation",
     "get_observations",
 }
 EXCEPTIONS = {
@@ -242,7 +243,7 @@ def test_no_migration_added_by_t3b_head_is_0009():
     assert files == [f"{rev}.py" for rev in revisions]
 
 
-def test_public_api_is_exactly_the_seven_operations():
+def test_public_api_is_exactly_the_eight_operations():
     """Pas d'activate/supersede séparés, pas d'update/delete d'observation,
     pas de get_or_create, pas d'inférence."""
     tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
@@ -277,6 +278,7 @@ def test_exact_signatures():
     assert params(svc.fail_evaluation_run) == {"run_id": empty, "failure_code": empty}
     assert params(svc.invalidate_observation) == {"observation_id": empty, "reason": empty}
     assert params(svc.get_evaluation_run) == {"run_id": empty}
+    assert params(svc.get_observation) == {"observation_id": empty}
     assert params(svc.get_observations) == {"run_id": empty}
 
 
@@ -578,6 +580,7 @@ UUID_CALLS = {
     "fail_evaluation_run": lambda db, v: svc.fail_evaluation_run(db, run_id=v, failure_code="f"),
     "invalidate_observation": lambda db, v: svc.invalidate_observation(db, observation_id=v, reason="r"),
     "get_evaluation_run": lambda db, v: svc.get_evaluation_run(db, run_id=v),
+    "get_observation": lambda db, v: svc.get_observation(db, observation_id=v),
     "get_observations": lambda db, v: svc.get_observations(db, run_id=v),
 }
 
@@ -1650,6 +1653,29 @@ def test_pg_get_evaluation_run_and_observations_unknown(db):
         svc.get_evaluation_run(db, run_id=uuid.uuid4())
     with pytest.raises(EvaluationRunNotFound):
         svc.get_observations(db, run_id=uuid.uuid4())
+    with pytest.raises(ObservationNotFound):
+        svc.get_observation(db, observation_id=uuid.uuid4())
+
+
+def test_pg_get_observation_reads_one_observation_including_invalidated(engine, Sessions, db):
+    """Lecture simple (6-1A) : sans verrou, sans écriture, invalidated comprise."""
+    event_id = _event(Sessions)
+    run_id = _committed_run(Sessions, event_id, observations=2)
+    first, second = (row["id"] for row in _obs_rows(engine, run_id))
+    svc.invalidate_observation(db, observation_id=second, reason="r")
+    db.commit()
+
+    statements, record = _recording(engine)
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        observation = svc.get_observation(db, observation_id=first)
+        invalidated = svc.get_observation(db, observation_id=second)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+    assert isinstance(observation, PedagogicalObservation)
+    assert (observation.id, observation.evaluation_run_id, observation.integrity_status) == (first, run_id, "valid")
+    assert (invalidated.id, invalidated.integrity_status) == (second, "invalidated")
+    assert all(sql.lstrip().startswith("SELECT") and "FOR " not in sql for sql, _ in statements)
 
 
 def test_pg_get_observations_orders_by_ordinal_and_includes_invalidated(engine, Sessions, db):
