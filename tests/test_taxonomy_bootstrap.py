@@ -202,9 +202,17 @@ def test_t4c_is_not_wired_to_the_application():
     mentionnent T4-C ; api.py ne parle ni de taxonomie ni de capacités."""
     allowed = {"core/pedagogy/__init__.py", "core/pedagogy/taxonomy_v1.py", "core/pedagogy/taxonomy_bootstrap.py",
                "scripts/bootstrap_pedagogical_taxonomy_v1.py"}
+    # Étape 6.1B1 : lecteur Step 6 non branché de la SPEC canonique, par la
+    # seule lecture load_taxonomy_v1 et l'identité « oryx-v1 » figée dans son
+    # registre de policies (jamais bootstrap / verify / activate, jamais
+    # taxonomy_bootstrap ; voir tests/test_adaptation_focus.py).
+    step6_reads = {"core/adaptation_focus.py": ("load_taxonomy_v1", "oryx-v1")}
     checked = 0
     for rel, source in _application_sources():
         checked += 1
+        for name in step6_reads.get(rel, ()):
+            assert name in source, (rel, name)
+            source = source.replace(name, "")
         if rel not in allowed:
             for needle in ("core.pedagogy", "taxonomy_bootstrap", "taxonomy_v1", "bootstrap_taxonomy_v1",
                            "verify_taxonomy_v1", "activate_taxonomy_v1", "oryx-v1"):
