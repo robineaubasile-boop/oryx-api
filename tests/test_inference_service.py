@@ -598,6 +598,11 @@ def test_service_is_the_only_writer_of_t6_tables():
     """Hors core/models.py, la migration 0009 et CE service, aucun code
     applicatif ne mentionne les modèles / tables T6-A ; aucune route."""
     allowed = {"core/models.py", f"alembic/versions/{T6A}.py", "core/inference_service.py"}
+    # Étape 6.1A : seul lecteur autorisé, et seulement par les lectures
+    # rattachées à un run (jamais une écriture, jamais le cache brut).
+    step6_readers = {"core/adaptation_state.py": {
+        "get_validated_user_competency_state", "get_competency_inference", "get_stage_claims",
+        "get_inference_tensions", "get_inference_basis_refs"}}
     needles = (*(m.__name__ for m in T6A_MODELS), *T6A_TABLES, "inference_service")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
@@ -612,8 +617,11 @@ def test_service_is_the_only_writer_of_t6_tables():
         if rel not in allowed:
             for needle in needles:
                 assert needle not in source, (rel, needle)
-            for name in PUBLIC_API:
+            for name in PUBLIC_API - step6_readers.get(rel, set()):
                 assert name not in source, (rel, name)
+    for rel, reads in step6_readers.items():
+        tokens = _code_tokens((REPO_ROOT / rel).read_text(encoding="utf-8")).split()
+        assert reads <= set(tokens), rel
     assert checked > 0
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8")).lower()
     for word in ("inference", "stage_claim", "competency_state", "tension"):

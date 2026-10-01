@@ -642,6 +642,16 @@ def get_evaluation_run(db, *, run_id: uuid.UUID) -> ObservationEvaluationRun:
     return run
 
 
+def get_observation(db, *, observation_id: uuid.UUID) -> PedagogicalObservation:
+    """Lecture simple, sans verrou, d'UNE observation (invalidated comprise :
+    historique)."""
+    _require_uuid(observation_id, "observation_id")
+    observation = db.get(PedagogicalObservation, observation_id)
+    if observation is None:
+        raise ObservationNotFound(str(observation_id))
+    return observation
+
+
 def get_observations(db, *, run_id: uuid.UUID) -> list[PedagogicalObservation]:
     """Toutes les observations du run, invalidated comprises (historique),
     toujours ORDER BY ordinal ASC."""
