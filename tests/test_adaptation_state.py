@@ -914,9 +914,10 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     assert versions[-1] == "0009_competency_inference_state.py" and len(versions) == 9
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Adaptation" not in models
-    users = [p.relative_to(REPO_ROOT).as_posix() for p in REPO_ROOT.rglob("*.py")
-             if ".git" not in p.parts and "adaptation_state" in p.read_text(encoding="utf-8")]
-    assert sorted(users) == ["core/adaptation_state.py", "tests/test_adaptation_state.py"]
+    users = [p.relative_to(REPO_ROOT).as_posix() for p in REPO_ROOT.rglob("*")
+             if p.suffix in (".py", ".js", ".html") and p.is_file() and not {".git", "tests", "node_modules"} & set(
+                 p.relative_to(REPO_ROOT).parts) and "adaptation_state" in p.read_text(encoding="utf-8", errors="replace")]
+    assert users == ["core/adaptation_state.py"]
 
 
 # --------------------------------------------------------------------------

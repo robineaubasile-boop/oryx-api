@@ -376,6 +376,9 @@ def test_service_creates_no_evidence_and_mutates_only_t5_runs():
 def test_service_is_not_wired_to_the_application():
     """Aucune route, aucun module applicatif n'importe le service (seuls les
     tests l'utilisent) ; api.py ne parle pas de longitudinal."""
+    # Étape 6.1A : lecteur Step 6 non branché, par les seules lectures du run
+    # T5 parent et de son snapshot (jamais une écriture T5).
+    step6_readers = {"core/adaptation_state.py": {"get_longitudinal_assessment", "get_longitudinal_inputs"}}
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -388,7 +391,7 @@ def test_service_is_not_wired_to_the_application():
         checked += 1
         if rel != "core/longitudinal_service.py":
             assert "longitudinal_service" not in source, rel
-            for name in PUBLIC_API:
+            for name in PUBLIC_API - step6_readers.get(rel, set()):
                 assert name not in source, (rel, name)
     assert checked > 0
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8")).lower()

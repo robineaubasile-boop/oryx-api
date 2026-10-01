@@ -629,9 +629,15 @@ def test_t4a_tables_are_not_wired_to_the_application():
                "core/inference_service.py"}
     needles = (*(m.__name__ for m in T4A_MODELS), RELEASES, "core_capability_definition",
                "capability_taxonomy_membership", "observation_capabilit")
+    # Étape 6.1A : lecteur Step 6 non branché, par les seules lectures T4-B
+    # (aucun modèle, aucune table, aucune écriture T4).
+    step6_reads = {"core/adaptation_state.py": ("get_observation_capabilities", "get_release_capabilities")}
     checked = 0
     for rel, source in _application_sources():
         checked += 1
+        for name in step6_reads.get(rel, ()):
+            assert name in source, (rel, name)
+            source = source.replace(name, "")
         if rel not in allowed:
             for needle in needles:
                 assert needle not in source, (rel, needle)
