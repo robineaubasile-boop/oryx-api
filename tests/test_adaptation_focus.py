@@ -1149,13 +1149,27 @@ def test_no_response_logic_nor_later_step6_brick():
 
 
 def test_module_is_not_wired_to_the_application():
+    # Étape 6.1B2 : classificateur sémantique non branché, consommateur de la
+    # seule frontière publique 6-1B1 (contrats + validate_focus_proposal ;
+    # jamais load_current_focus_taxonomy, jamais un privé) ; lui-même non
+    # branché : tests/test_adaptation_focus_classifier.py.
+    step6_consumers = {"core/adaptation_focus_classifier.py": {
+        "AMBIGUOUS", "COMPETENCY_ONLY", "COMPOSITE", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED",
+        "NEUTRAL", "RESOLVED", "CurrentFocusTaxonomy", "FocusError", "FocusProposal", "InvalidFocusProposal",
+        "ProposedCompetencyFocus", "UnsupportedFocusPolicy", "validate_focus_proposal"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "adaptation_focus" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.adaptation_focus", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
         if (path.suffix not in (".py", ".js", ".html") or not path.is_file()
                 or {".git", "tests", "node_modules"} & set(path.relative_to(REPO_ROOT).parts)):
             continue
-        if rel != "core/adaptation_focus.py" and "adaptation_focus" in path.read_text(encoding="utf-8", errors="replace"):
+        if (rel != "core/adaptation_focus.py" and rel not in step6_consumers
+                and "adaptation_focus" in path.read_text(encoding="utf-8", errors="replace")):
             users.append(rel)
     assert users == []
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
