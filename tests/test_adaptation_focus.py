@@ -1153,10 +1153,16 @@ def test_module_is_not_wired_to_the_application():
     # seule frontière publique 6-1B1 (contrats + validate_focus_proposal ;
     # jamais load_current_focus_taxonomy, jamais un privé) ; lui-même non
     # branché : tests/test_adaptation_focus_classifier.py.
+    # Étape 6.1C : socle positif localisé, consommateur du seul focus VALIDÉ
+    # (contrats de sortie ; jamais FocusProposal, validate_focus_proposal ni
+    # load_current_focus_taxonomy) ; non branché : tests/test_adaptation_assumptions.py.
     step6_consumers = {"core/adaptation_focus_classifier.py": {
         "AMBIGUOUS", "COMPETENCY_ONLY", "COMPOSITE", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED",
         "NEUTRAL", "RESOLVED", "CurrentFocusTaxonomy", "FocusError", "FocusProposal", "InvalidFocusProposal",
-        "ProposedCompetencyFocus", "UnsupportedFocusPolicy", "validate_focus_proposal"}}
+        "ProposedCompetencyFocus", "UnsupportedFocusPolicy", "validate_focus_proposal"},
+        "core/adaptation_assumptions.py": {
+        "COMPETENCY_ONLY", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED", "RESOLUTION_STATUSES",
+        "RESOLVED", "SCOPE_MODES", "CompetencyFocus", "InteractionCompetencyFocus"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

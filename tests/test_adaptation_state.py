@@ -914,10 +914,21 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     assert versions[-1] == "0009_competency_inference_state.py" and len(versions) == 9
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Adaptation" not in models
+    # Étape 6.1C : socle positif localisé non branché, consommateur des seuls
+    # contrats publics du snapshot (jamais load_adaptation_state, jamais un
+    # privé) ; lui-même non branché : tests/test_adaptation_assumptions.py.
+    step6_consumers = {"core/adaptation_assumptions.py": {
+        "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
+        "CompetencyAdaptationSnapshot"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "adaptation_state" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.adaptation_state", name) for name in names), rel
     users = [p.relative_to(REPO_ROOT).as_posix() for p in REPO_ROOT.rglob("*")
              if p.suffix in (".py", ".js", ".html") and p.is_file() and not {".git", "tests", "node_modules"} & set(
                  p.relative_to(REPO_ROOT).parts) and "adaptation_state" in p.read_text(encoding="utf-8", errors="replace")]
-    assert users == ["core/adaptation_state.py"]
+    assert sorted(users) == sorted(["core/adaptation_state.py", *step6_consumers])
 
 
 # --------------------------------------------------------------------------

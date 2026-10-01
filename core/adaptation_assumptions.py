@@ -311,7 +311,7 @@ def _check_snapshot(snapshot: CompetencyAdaptationSnapshot, competency_code: str
     if any(type(claim) is not AdaptationStageClaim for claim in snapshot.claims):
         raise _state_fail(competency_code, "claim d'un type inattendu")
     stages = tuple(claim.stage for claim in snapshot.claims)
-    if stages != ASSUMPTION_STAGE_ORDER:
+    if any(type(stage) is not str for stage in stages) or stages != ASSUMPTION_STAGE_ORDER:
         raise _state_fail(competency_code, f"claims {stages!r} : exactement {ASSUMPTION_STAGE_ORDER} attendues")
     for claim in snapshot.claims:
         if type(claim.status) is not str or claim.status not in _CLAIM_STATUSES:
