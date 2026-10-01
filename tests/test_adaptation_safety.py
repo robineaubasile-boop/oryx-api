@@ -743,12 +743,12 @@ def test_97_98_tensions_and_motifs_share_one_cutoff():
 # --------------------------------------------------------------------------
 
 def test_99_canonical_needs_are_accepted():
-    needs = [N("confirmation", "mastery", "localized", A, B),
+    needs = [N("confirmation", "application", "localized", A, B),
              N("revalidation", "application", "competency_only"),
              N("revalidation", "application", "whole_competency",
                reasons=("unresolved_revision_motif", "current_stage_under_tension"))]
     assert target_of(state(s8(needs=needs)), A).validation_constraints == (
-        constraint("confirmation", "mastery", "localized", A),
+        constraint("confirmation", "application", "localized", A),
         constraint("revalidation", "application", "localized", A))
 
 
@@ -787,6 +787,91 @@ def test_needs_container_must_be_a_tuple():
         target_of(st, A)
 
 
+CONFIRMATION_FAMILY = ("single_representative_episode_would_benefit_from_independent_context",
+                       "independence_not_established_on_current_basis",
+                       "competency_only_basis_would_benefit_from_localization")
+REVALIDATION_FAMILY = ("unresolved_revision_motif", "current_stage_under_tension",
+                       "materially_incompatible_higher_claim")
+
+
+def test_reason_code_families_are_those_of_the_t6c3_v1_policy():
+    from core import adaptation_safety
+    from core.inference_final_policies import FINAL_INFERENCE_V1_POLICY
+    assert FINAL_INFERENCE_V1_POLICY.confirmation_stages == DCA  # jamais Mastery
+    assert adaptation_safety._CONFIRMATION_REASON_CODES == frozenset(CONFIRMATION_FAMILY) == frozenset(
+        rule.reason_code for rule in FINAL_INFERENCE_V1_POLICY.confirmation_motifs)
+    assert adaptation_safety._REVALIDATION_REASON_CODES == frozenset(REVALIDATION_FAMILY)
+    # Partition exacte du vocabulaire validation-need-v1.
+    assert not set(CONFIRMATION_FAMILY) & set(REVALIDATION_FAMILY)
+    assert set(CONFIRMATION_FAMILY) | set(REVALIDATION_FAMILY) == set(VALIDATION_REASON_CODES)
+
+
+@pytest.mark.parametrize("need, match", [
+    (N("confirmation", "mastery", "localized", A), "confirmation_stages"),                      # 1
+    (N("confirmation", "mastery", "competency_only"), "confirmation_stages"),
+    (N("confirmation", "application", "whole_competency"), "whole_competency"),                 # 2
+    (N("confirmation", "discovery", "whole_competency"), "whole_competency"),
+    *((N("confirmation", "application", "localized", A, reasons=(r,)), "famille")              # 3
+      for r in REVALIDATION_FAMILY),
+    *((N("revalidation", "application", "localized", A, reasons=(r,)), "famille")              # 4
+      for r in CONFIRMATION_FAMILY),
+    (N("confirmation", "application", "localized", A,                                          # 5
+       reasons=("current_stage_under_tension", "independence_not_established_on_current_basis")), "famille"),
+    (N("revalidation", "application", "localized", A,
+       reasons=("unresolved_revision_motif", "competency_only_basis_would_benefit_from_localization")), "famille"),
+])
+def test_impossible_t6c3_combinations_fail_closed(need, match):
+    for needs in ([need], [N("revalidation", "application", "localized", A), need]):
+        with pytest.raises(InvalidSafeAssumptionState, match=match):
+            target_of(state(s8(needs=needs)), A)
+        with pytest.raises(InvalidSafeAssumptionState, match=match):
+            plan(state(s8(needs=needs)), focus(cf("C8")))
+
+
+@pytest.mark.parametrize("need, fo, expected", [
+    *((N("confirmation", stage, "localized", A, reasons=(r,)), focus(cf("C8", A)),             # 6
+       constraint("confirmation", stage, "localized", A)) for stage in DCA for r in CONFIRMATION_FAMILY),
+    (N("confirmation", "comprehension", "competency_only",                                     # 7
+       reasons=("competency_only_basis_would_benefit_from_localization",)), focus(cf("C8")),
+     constraint("confirmation", "comprehension", "competency_only")),
+    (N("confirmation", "application", "localized", A, reasons=CONFIRMATION_FAMILY[:2]), focus(cf("C8", A)),
+     constraint("confirmation", "application", "localized", A)),
+    *((N("revalidation", stage, "localized", A, reasons=(r,)), focus(cf("C8", A)),             # 8
+       constraint("revalidation", stage, "localized", A)) for stage in STAGES for r in REVALIDATION_FAMILY),
+    (N("revalidation", "application", "competency_only"), focus(cf("C8")),                    # 9
+     constraint("revalidation", "application", "competency_only")),
+    (N("revalidation", "mastery", "whole_competency", reasons=REVALIDATION_FAMILY[:2]), focus(cf("C8", A)),  # 10
+     constraint("revalidation", "mastery", "localized", A)),
+    (N("revalidation", "discovery", "whole_competency"), focus(cf("C8")),
+     constraint("revalidation", "discovery", "competency_only")),
+])
+def test_possible_t6c3_combinations_are_still_accepted(need, fo, expected):
+    result = plan(state(s8(needs=[need])), fo)
+    assert result.target.validation_constraints == (expected,)
+    assert result.target.coverages == plan(state(s8()), fo).target.coverages  # aucun stade retiré
+
+
+def test_12_an_impossible_need_never_reaches_the_projection(monkeypatch):
+    from core import adaptation_safety
+    calls = []
+    original = adaptation_safety._constraints
+
+    def recording(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(adaptation_safety, "_constraints", recording)
+    valid = N("revalidation", "application", "localized", A)
+    assert target_of(state(s8(needs=[valid])), A).validation_constraints and len(calls) == 1
+    calls.clear()
+    for impossible in (N("confirmation", "mastery", "localized", A),
+                       N("confirmation", "application", "whole_competency"),
+                       N("revalidation", "application", "localized", A, reasons=CONFIRMATION_FAMILY[:1])):
+        with pytest.raises(InvalidSafeAssumptionState):
+            target_of(state(s8(needs=[valid, impossible])), A)
+    assert calls == []  # jamais projeté, aucune MinimalValidationConstraint produite
+
+
 # --------------------------------------------------------------------------
 # 11. Séparation absolue fragilité / besoin (112-117)
 # --------------------------------------------------------------------------
@@ -795,7 +880,7 @@ def test_needs_container_must_be_a_tuple():
     [N("confirmation", "application", "localized", A)],                                    # 112
     [N("revalidation", "application", "localized", A)],                                    # 113
     [N("revalidation", "discovery", "whole_competency")],
-    [N("revalidation", "comprehension", "competency_only"), N("confirmation", "mastery", "localized", A, B)],
+    [N("revalidation", "comprehension", "competency_only"), N("confirmation", "comprehension", "localized", A, B)],
 ])
 def test_112_113_114_validation_needs_never_reduce_safe_stages(needs):
     without = target_of(state(s8()), A, B)
@@ -1104,8 +1189,10 @@ def test_106_imports_are_exactly_public_contracts_and_step5_vocabularies():
                                   "InteractionCompetencyFocus"},
         "core.adaptation_state": {"AdaptationStateSnapshot", "AdaptationTension", "AdaptationValidationNeed"},
         # Vocabulaires / versions propriétaires Step 5 : constantes seulement.
-        "core.inference_final_policies": {"VALIDATION_INTENTS", "VALIDATION_REASON_CODES",
-                                          "VALIDATION_SCOPE_MODES"},
+        "core.inference_final_policies": {"CONFIRMATION", "CURRENT_STAGE_UNDER_TENSION", "FINAL_INFERENCE_V1_POLICY",
+                                          "MATERIALLY_INCOMPATIBLE_HIGHER_CLAIM", "REVALIDATION",
+                                          "UNRESOLVED_REVISION_MOTIF", "VALIDATION_INTENTS",
+                                          "VALIDATION_REASON_CODES", "VALIDATION_SCOPE_MODES"},
         "core.inference_service": {"CLAIM_STAGES", "REVISION_STATUSES", "TENSION_NONE", "TENSION_OPEN",
                                    "TENSION_SCOPE_MODES", "WHOLE_COMPETENCY"},
         "core.inference_state_policies": {"REVISION_CONTEXT_SCHEMA_VERSION", "REVISION_REASON_CODES",

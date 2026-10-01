@@ -87,7 +87,12 @@ Invariants :
 
 - validation_needs : validés structurellement (vocabulaires validation-need-v1,
   capacités localized de la release courante, reason_codes non vides,
-  distincts, ordre du vocabulaire, aucun besoin en double), puis
+  distincts, ordre du vocabulaire, aucun besoin en double) ET comme
+  combinaison POSSIBLE de la policy T6-C3 V1 (confirmation : stade de
+  confirmation_stages, jamais Mastery, jamais whole_competency, raisons de
+  la seule famille confirmation ; revalidation : raisons de la seule
+  famille revalidation ; familles jamais mêlées), sans jamais rechercher
+  pourquoi le besoin existe, puis
   PROJETÉS sur le focus de l'interaction :
       besoin \\ focus        localized (ids F)          competency_only
       localized N            localized F ∩ N (ordre F)  aucun
@@ -150,7 +155,17 @@ from core.adaptation_focus import (
     InteractionCompetencyFocus,
 )
 from core.adaptation_state import AdaptationStateSnapshot, AdaptationTension, AdaptationValidationNeed
-from core.inference_final_policies import VALIDATION_INTENTS, VALIDATION_REASON_CODES, VALIDATION_SCOPE_MODES
+from core.inference_final_policies import (
+    CONFIRMATION,
+    CURRENT_STAGE_UNDER_TENSION,
+    FINAL_INFERENCE_V1_POLICY,
+    MATERIALLY_INCOMPATIBLE_HIGHER_CLAIM,
+    REVALIDATION,
+    UNRESOLVED_REVISION_MOTIF,
+    VALIDATION_INTENTS,
+    VALIDATION_REASON_CODES,
+    VALIDATION_SCOPE_MODES,
+)
 from core.inference_service import (
     CLAIM_STAGES,
     REVISION_STATUSES,
@@ -181,6 +196,18 @@ _REVISION_CONTEXT_FIELDS = ("schema_version", "origin_inference_run_id", "reason
                             "motifs")
 _REVISION_MOTIF_FIELDS = ("fragilized_stage", "scope_mode", "capability_definition_ids",
                           "source_contradiction_observation_ids", "reason_codes")
+
+# Combinaisons qu'un besoin validation-need-v1 peut RÉELLEMENT porter selon
+# la policy T6-C3 V1 (core/inference_validation.py), lues sur ses
+# constantes propriétaires, jamais recalculées : une confirmation vient
+# d'un confirmation_motif (stades confirmation_stages, jamais Mastery ; scope
+# localized ou competency_only, jamais whole_competency) ; une revalidation
+# vient d'un motif de révision ou d'une tension (tout stade, tout scope).
+# intent fait partie de l'identité de fusion T6-C3 : jamais de familles
+# mêlées.
+_CONFIRMATION_REASON_CODES = frozenset(rule.reason_code for rule in FINAL_INFERENCE_V1_POLICY.confirmation_motifs)
+_REVALIDATION_REASON_CODES = frozenset({UNRESOLVED_REVISION_MOTIF, CURRENT_STAGE_UNDER_TENSION,
+                                        MATERIALLY_INCOMPATIBLE_HIGHER_CLAIM})
 
 
 class SafeAssumptionPlanError(Exception):
@@ -370,6 +397,23 @@ def _current_fragilities(snapshot, known: frozenset) -> tuple:
     return tuple(fragilities)
 
 
+def _check_possible_need(intent: str, stage: str, mode: str, reasons: tuple, code: str, name: str) -> None:
+    """La COMBINAISON doit être une sortie possible de la policy T6-C3 V1 ;
+    jamais convertie en une autre combinaison."""
+    if intent == CONFIRMATION:
+        if stage not in FINAL_INFERENCE_V1_POLICY.confirmation_stages:
+            raise _state_fail(code, f"{name} : {CONFIRMATION} {stage} impossible (confirmation_stages V1)")
+        if mode == WHOLE_COMPETENCY:
+            raise _state_fail(code, f"{name} : {CONFIRMATION} {WHOLE_COMPETENCY} impossible")
+        family = _CONFIRMATION_REASON_CODES
+    elif intent == REVALIDATION:
+        family = _REVALIDATION_REASON_CODES
+    else:
+        raise _state_fail(code, f"{name}.intent : valeur {intent!r} hors vocabulaire")
+    if not set(reasons) <= family:
+        raise _state_fail(code, f"{name}.reason_codes : hors de la famille {intent} (familles jamais mêlées)")
+
+
 def _validation_needs(snapshot, known: frozenset) -> tuple:
     code = snapshot.competency_code
     needs = snapshot.validation_needs
@@ -391,6 +435,7 @@ def _validation_needs(snapshot, known: frozenset) -> tuple:
             _state_choice(reason, code, f"{name}.reason_codes", VALIDATION_REASON_CODES)
         if reasons != tuple(r for r in VALIDATION_REASON_CODES if r in reasons):
             raise _state_fail(code, f"{name}.reason_codes : distincts, ordre du vocabulaire attendu")
+        _check_possible_need(intent, stage, mode, reasons, code, name)
         identity = (intent, stage, mode, frozenset(ids))
         if identity in identities:
             raise _state_fail(code, f"{name} : besoin {intent} {stage} {mode} en double")
