@@ -961,14 +961,25 @@ def test_98_99_not_wired_to_api_nor_web_chat():
     tokens = _code_tokens(_source())
     for word in ("web_chat", "web-chat", "_classify_intent", "fastapi", "request"):
         assert word not in tokens, word
+    # Étape 6.1D : présupposés sûrs, consommateur du seul contrat public du
+    # baseline (preflight canonique via build_assumption_baseline) ; non
+    # branché : tests/test_adaptation_safety.py.
+    step6_consumers = {"core/adaptation_safety.py": {
+        "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "AssumptionBaseline",
+        "AssumptionBaselineError", "CompetencyAssumptionBaseline", "build_assumption_baseline"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "adaptation_assumptions" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.adaptation_assumptions", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
         if (path.suffix not in (".py", ".js", ".html") or not path.is_file()
                 or {".git", "tests", "node_modules"} & set(path.relative_to(REPO_ROOT).parts)):
             continue
-        if rel != "core/adaptation_assumptions.py" and "adaptation_assumptions" in path.read_text(
-                encoding="utf-8", errors="replace"):
+        if (rel != "core/adaptation_assumptions.py" and rel not in step6_consumers
+                and "adaptation_assumptions" in path.read_text(encoding="utf-8", errors="replace")):
             users.append(rel)
     assert users == []
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
