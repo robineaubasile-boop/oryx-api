@@ -61,6 +61,16 @@ Invariants :
 
 - Validateur PUR : validate_focus_proposal ne touche ni base, ni horloge,
   ni environnement, ni hasard. Même entrée => même sortie.
+  * frontière publique : CurrentFocusTaxonomy est une dataclass publique,
+    donc constructible à la main. Avant toute résolution, le catalogue
+    fourni est revérifié EXACTEMENT contre la SPEC canonique de la policy que
+    désigne son identité (policy.load_spec, Python pur) : schéma, 12
+    compétences C1 -> C12 (code, libellé, question centrale), 45 capacités
+    dans l'ordre canonique (six champs sémantiques), taxonomy_release_id et
+    definition_id uuid.UUID, definition_id uniques. Tout écart =>
+    InvalidFocusTaxonomy : un focus n'est jamais lié au fingerprint officiel
+    d'un catalogue qui ne le représente pas. Le lien definition_id <->
+    PostgreSQL reste garanti par load_current_focus_taxonomy ;
   * resolved => exactement une cible, 0..N supports ;
     neutral / ambiguous / composite => aucune cible, aucun support (rien de
     partiel n'est conservé : 6-1C ne personnalise jamais depuis une
@@ -341,17 +351,29 @@ def _canonical(value, path: str) -> str:
         raise InvalidFocusTaxonomy(f"{path} : valeur non JSON ({exc})") from exc
 
 
-def _policy_spec(policy: _FocusPolicy, release: _ReleaseRecord) -> dict:
-    """SPEC canonique de la policy, validée, de la MÊME identité que la
-    release (version_key, fingerprint recalculé)."""
+def _canonical_spec(policy: _FocusPolicy) -> dict:
+    """SPEC canonique de la policy (Python pur, déterministe), validée et
+    de la MÊME identité que la policy (version_key, fingerprint recalculé).
+    Partagée par le chargement et par le validateur."""
     try:
         spec, fingerprint = policy.load_spec()
     except TaxonomySpecError as exc:
         raise InvalidFocusTaxonomy(f"SPEC canonique de {policy.policy_version} invalide : {exc}") from exc
-    if (spec["version_key"], fingerprint) != (release.version_key, release.spec_fingerprint):
+    if (spec["version_key"], fingerprint) != (policy.taxonomy_version_key, policy.taxonomy_spec_fingerprint):
         raise InvalidFocusTaxonomy(
-            f"SPEC canonique {spec['version_key']!r} / {fingerprint} différente de la release"
-            f" {release.version_key!r} / {release.spec_fingerprint}")
+            f"SPEC canonique {spec['version_key']!r} / {fingerprint} différente de l'identité de"
+            f" {policy.policy_version} {policy.taxonomy_version_key!r} / {policy.taxonomy_spec_fingerprint}")
+    return spec
+
+
+def _policy_spec(policy: _FocusPolicy, release: _ReleaseRecord) -> dict:
+    """SPEC canonique de la policy, de la MÊME identité que la release."""
+    spec = _canonical_spec(policy)
+    if (policy.taxonomy_version_key, policy.taxonomy_spec_fingerprint) != (release.version_key,
+                                                                           release.spec_fingerprint):
+        raise InvalidFocusTaxonomy(
+            f"release {release.version_key!r} / {release.spec_fingerprint} hors de l'identité de"
+            f" {policy.policy_version}")
     return spec
 
 
@@ -445,29 +467,85 @@ def _token(capability: FocusCapabilityDefinition) -> str:
     return f"{capability.capability_code}@r{capability.semantic_revision}"
 
 
+def _thawed(value):
+    """Valeur figée (mappingproxy / tuple) -> JSON (dict / list), pour la
+    comparaison canonique avec la SPEC."""
+    if isinstance(value, Mapping):
+        return {key: _thawed(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thawed(item) for item in value]
+    return value
+
+
 def _index(taxonomy: CurrentFocusTaxonomy) -> _Index:
-    """Index pur du catalogue fourni ; un catalogue incohérent avec le
-    registre ou avec lui-même => InvalidFocusTaxonomy / UnsupportedFocusPolicy."""
+    """Défense PURE de la frontière publique : le catalogue fourni doit être
+    EXACTEMENT celui que son identité (version_key, spec_fingerprint)
+    désigne. Policy résolue dans le registre, SPEC canonique rechargée
+    (policy.load_spec, Python pur), puis comparaison complète : schéma,
+    12 compétences (C1 -> C12, une fois chacune, libellé et question
+    centrale exacts), 45 capacités (ordre canonique de la policy, aucune
+    absente / en trop / dupliquée, six champs sémantiques exacts),
+    definition_id uuid.UUID uniques. Aucune base, aucune reconstruction,
+    aucun remapping par capability_code. Toute divergence =>
+    InvalidFocusTaxonomy (identité non enregistrée => UnsupportedFocusPolicy).
+    Ne prouve pas que les definition_id viennent de PostgreSQL (garanti par
+    load_current_focus_taxonomy)."""
+    if type(taxonomy.taxonomy_release_id) is not uuid.UUID:
+        raise InvalidFocusTaxonomy(f"taxonomy_release_id {taxonomy.taxonomy_release_id!r} non uuid.UUID")
     policy = _resolve_policy(taxonomy.taxonomy_version_key, taxonomy.taxonomy_spec_fingerprint)
-    if taxonomy.focus_policy_version != policy.policy_version:
+    if type(taxonomy.focus_policy_version) is not str or taxonomy.focus_policy_version != policy.policy_version:
         raise InvalidFocusTaxonomy(
             f"catalogue {taxonomy.taxonomy_version_key} annoncé sous {taxonomy.focus_policy_version!r},"
             f" policy enregistrée {policy.policy_version!r}")
-    if not isinstance(taxonomy.taxonomy_release_id, uuid.UUID):
-        raise InvalidFocusTaxonomy("taxonomy_release_id doit être un uuid.UUID")
+    spec = _canonical_spec(policy)
+    label = f"catalogue {taxonomy.taxonomy_version_key}"
+    if _canonical(taxonomy.taxonomy_schema_version, "taxonomy_schema_version") != _canonical(
+            spec["taxonomy_schema_version"], "SPEC taxonomy_schema_version"):
+        raise InvalidFocusTaxonomy(
+            f"{label} : taxonomy_schema_version {taxonomy.taxonomy_schema_version!r},"
+            f" SPEC {spec['taxonomy_schema_version']!r}")
+
+    spec_competencies = {c["competency_code"]: c for c in spec["competencies"]}
+    if len(taxonomy.competencies) != len(policy.competency_order):
+        raise InvalidFocusTaxonomy(
+            f"{label} : {len(taxonomy.competencies)} compétence(s), {len(policy.competency_order)} attendues")
     competencies = {}
-    for position, competency in enumerate(taxonomy.competencies):
-        if type(competency) is not FocusCompetencyDefinition or competency.competency_code in competencies:
-            raise InvalidFocusTaxonomy(f"catalogue : compétence {position} invalide ou en double")
-        competencies[competency.competency_code] = position
+    for position, (code, competency) in enumerate(zip(policy.competency_order, taxonomy.competencies)):
+        if type(competency) is not FocusCompetencyDefinition:
+            raise InvalidFocusTaxonomy(f"{label} : compétence {position} de type {type(competency).__name__}")
+        canonical = spec_competencies[code]
+        differing = [name for name in ("competency_code", "label", "central_question")
+                     if type(getattr(competency, name)) is not str or getattr(competency, name) != canonical[name]]
+        if differing:
+            raise InvalidFocusTaxonomy(
+                f"{label} : compétence {position} ({competency.competency_code!r}) diffère de la SPEC {code}"
+                f" sur {', '.join(differing)} (ordre C1 -> C12, une fois chacune)")
+        competencies[code] = position
+
+    spec_capabilities = {c["capability_code"]: c for c in spec["capabilities"]}
+    if len(taxonomy.capabilities) != len(policy.capability_order):
+        raise InvalidFocusTaxonomy(
+            f"{label} : {len(taxonomy.capabilities)} capacité(s), {len(policy.capability_order)} attendues")
     by_token, position = {}, {}
-    for capability in taxonomy.capabilities:
-        if type(capability) is not FocusCapabilityDefinition or capability.competency_code not in competencies:
-            raise InvalidFocusTaxonomy(f"catalogue : capacité {capability!r} invalide")
-        token = _token(capability)
-        if token in by_token or capability.definition_id in position:
-            raise InvalidFocusTaxonomy(f"catalogue : capacité {token} ({capability.definition_id}) en double")
-        by_token[token] = capability
+    for index, (code, capability) in enumerate(zip(policy.capability_order, taxonomy.capabilities)):
+        if type(capability) is not FocusCapabilityDefinition:
+            raise InvalidFocusTaxonomy(f"{label} : capacité {index} de type {type(capability).__name__}")
+        canonical = spec_capabilities[code]
+        differing = [name for name in _COMPARED_FIELDS
+                     if _canonical(_thawed(getattr(capability, name)), f"{code}.{name}")
+                     != _canonical(canonical[name], f"SPEC {code}.{name}")]
+        if (type(capability.capability_code) is not str or type(capability.competency_code) is not str
+                or type(capability.label) is not str or type(capability.definition) is not str):
+            differing.append("type")
+        if differing:
+            raise InvalidFocusTaxonomy(
+                f"{label} : capacité {index} ({capability.capability_code!r}) diffère de la SPEC {code}"
+                f" sur {', '.join(differing)} (ordre canonique, aucun remapping par capability_code)")
+        if type(capability.definition_id) is not uuid.UUID:
+            raise InvalidFocusTaxonomy(f"{label} : {code} definition_id {capability.definition_id!r} non uuid.UUID")
+        if capability.definition_id in position:
+            raise InvalidFocusTaxonomy(f"{label} : definition_id {capability.definition_id} en double")
+        by_token[_token(capability)] = capability
         position[capability.definition_id] = len(position)
     return _Index(MappingProxyType(competencies), MappingProxyType(by_token), MappingProxyType(position))
 

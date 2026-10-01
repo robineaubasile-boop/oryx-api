@@ -757,7 +757,7 @@ def test_a_hand_built_incoherent_taxonomy_is_refused(taxonomy):
         validate_focus_proposal(_proposal(policy_version="focus-policy-2"),
                                 replace(taxonomy, focus_policy_version="focus-policy-2"))
     doubled = replace(taxonomy, capabilities=taxonomy.capabilities + taxonomy.capabilities[:1])
-    with pytest.raises(InvalidFocusTaxonomy, match="double"):
+    with pytest.raises(InvalidFocusTaxonomy, match="46 capacité"):
         validate_focus_proposal(_proposal(), doubled)
 
 
@@ -777,6 +777,208 @@ def test_errors_are_never_turned_into_neutral(taxonomy):
     for proposal in (_proposal(target=_focus("C10", "C10_B")), _proposal(status="unknown", target=None)):
         with pytest.raises(FocusError):
             validate_focus_proposal(proposal, taxonomy)
+
+
+# --------------------------------------------------------------------------
+# 1c-bis. Frontière publique : catalogue forgé sous l'identité officielle
+# --------------------------------------------------------------------------
+
+def _forged(taxonomy, **changes):
+    """Catalogue construit à la main qui conserve oryx-v1, le fingerprint
+    officiel et focus-policy-1."""
+    forged = replace(taxonomy, **changes)
+    assert (forged.taxonomy_version_key, forged.taxonomy_spec_fingerprint, forged.focus_policy_version) == (
+        "oryx-v1", GOLDEN_V1_FINGERPRINT, "focus-policy-1")
+    return forged
+
+
+def _with_capability(taxonomy, code, **changes):
+    return tuple(replace(c, **changes) if c.capability_code == code else c for c in taxonomy.capabilities)
+
+
+def _with_competency(taxonomy, code, **changes):
+    return tuple(replace(c, **changes) if c.competency_code == code else c for c in taxonomy.competencies)
+
+
+def _never_validated(forged, *proposals, match=None):
+    """Refus fail-closed, quel que soit le statut proposé (le catalogue est
+    vérifié avant toute résolution) : jamais un focus validé."""
+    for proposal in proposals or (_proposal(), _proposal(status="neutral"),
+                                  _proposal(target=_focus("C7"), supporting=(_focus("C2", "C2_A@r1"),))):
+        with pytest.raises(InvalidFocusTaxonomy, match=match):
+            validate_focus_proposal(proposal, forged)
+
+
+def _c99():
+    return FocusCompetencyDefinition(competency_code="C99", label="Compétence forgée",
+                                     central_question="Question forgée ?")
+
+
+def _c99_a():
+    return FocusCapabilityDefinition(definition_id=uuid.uuid4(), capability_code="C99_A", semantic_revision=1,
+                                     competency_code="C99", label="Capacité forgée", definition="forgée",
+                                     mapping_guidance={"include": ["x"], "exclude": ["y"], "boundary_notes": []})
+
+
+@pytest.mark.parametrize("version", [2, 0, True, 1.0, "1", None])
+def test_forged_1_schema_version(taxonomy, version):
+    _never_validated(_forged(taxonomy, taxonomy_schema_version=version), match="taxonomy_schema_version")
+
+
+def test_forged_2_c12_removed(taxonomy):
+    _never_validated(_forged(taxonomy, competencies=taxonomy.competencies[:-1]), match="11 compétence")
+
+
+def test_forged_3_extra_c99_competency(taxonomy):
+    _never_validated(_forged(taxonomy, competencies=taxonomy.competencies + (_c99(),)), match="13 compétence")
+    _never_validated(_forged(taxonomy, competencies=(_c99(),) + taxonomy.competencies[1:]))
+
+
+def test_forged_4_reordered_competencies(taxonomy):
+    swapped = (taxonomy.competencies[1], taxonomy.competencies[0]) + taxonomy.competencies[2:]
+    _never_validated(_forged(taxonomy, competencies=swapped), match="C1 -> C12")
+    lexical = tuple(sorted(taxonomy.competencies, key=lambda c: c.competency_code))
+    _never_validated(_forged(taxonomy, competencies=lexical), match="C1 -> C12")
+    _never_validated(_forged(taxonomy, competencies=taxonomy.competencies[:11] + taxonomy.competencies[:1]))
+
+
+@pytest.mark.parametrize("field", ["label", "central_question"])
+def test_forged_5_and_6_competency_text(taxonomy, field):
+    current = getattr(taxonomy.competencies[9], field)
+    for value in (current + " ", current.upper(), "texte forgé"):
+        forged = _forged(taxonomy, competencies=_with_competency(taxonomy, "C10", **{field: value}))
+        _never_validated(forged, match=field)
+
+
+def test_forged_7_capability_removed(taxonomy):
+    for removed in ("C1_A", "C10_B", "C12_D"):
+        _never_validated(_forged(taxonomy, capabilities=tuple(
+            c for c in taxonomy.capabilities if c.capability_code != removed)), match="44 capacité")
+
+
+def test_forged_8_extra_capability(taxonomy):
+    c10_b = next(c for c in taxonomy.capabilities if c.capability_code == "C10_B")
+    r2 = replace(c10_b, definition_id=uuid.uuid4(), semantic_revision=2, definition="sens révisé")
+    position = taxonomy.capabilities.index(c10_b) + 1
+    inserted = taxonomy.capabilities[:position] + (r2,) + taxonomy.capabilities[position:]
+    _never_validated(_forged(taxonomy, capabilities=inserted), match="46 capacité")
+    _never_validated(_forged(taxonomy, capabilities=taxonomy.capabilities + (_c99_a(),)), match="46 capacité")
+
+
+def test_forged_9_reordered_capabilities(taxonomy):
+    capabilities = list(taxonomy.capabilities)
+    capabilities[0], capabilities[1] = capabilities[1], capabilities[0]
+    _never_validated(_forged(taxonomy, capabilities=tuple(capabilities)), match="ordre canonique")
+    lexical = tuple(sorted(taxonomy.capabilities, key=lambda c: c.capability_code))
+    _never_validated(_forged(taxonomy, capabilities=lexical))
+    shuffled = list(taxonomy.capabilities)
+    random.Random(3).shuffle(shuffled)
+    _never_validated(_forged(taxonomy, capabilities=tuple(shuffled)))
+
+
+@pytest.mark.parametrize("revision", [2, 0, True, 1.0, "1"])
+def test_forged_10_semantic_revision(taxonomy, revision):
+    forged = _forged(taxonomy, capabilities=_with_capability(taxonomy, "C10_B", semantic_revision=revision))
+    _never_validated(forged, match="semantic_revision")
+    _never_validated(forged, _proposal(target=_focus("C10", f"C10_B@r{revision}")), match="semantic_revision")
+
+
+def test_forged_11_capability_competency_code(taxonomy):
+    forged = _forged(taxonomy, capabilities=_with_capability(taxonomy, "C10_B", competency_code="C9"))
+    _never_validated(forged, match="competency_code")
+    _never_validated(forged, _proposal(target=_focus("C9", "C10_B@r1")), match="competency_code")
+
+
+@pytest.mark.parametrize("field", ["label", "definition"])
+def test_forged_12_and_13_capability_text(taxonomy, field):
+    current = getattr(next(c for c in taxonomy.capabilities if c.capability_code == "C7_A"), field)
+    for value in (current + " ", current.upper(), "texte forgé"):
+        _never_validated(_forged(taxonomy, capabilities=_with_capability(taxonomy, "C7_A", **{field: value})),
+                         match=field)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda g: g["include"].append("ajout"),
+    lambda g: g["exclude"].reverse(),
+    lambda g: g.update(extra=[]),
+    lambda g: g.pop("boundary_notes"),
+    lambda g: g.clear(),
+], ids=["include+", "exclude-order", "extra-key", "no-notes", "empty"])
+def test_forged_14_mapping_guidance(taxonomy, mutate):
+    forged = _forged(taxonomy, capabilities=_with_capability(
+        taxonomy, "C9_B", mapping_guidance=_guidance("C9_B", mutate)))
+    _never_validated(forged, match="mapping_guidance")
+
+
+@pytest.mark.parametrize("make", [str, lambda u: u.hex, lambda u: u.int, lambda u: None, lambda u: u.bytes],
+                         ids=["str", "hex", "int", "none", "bytes"])
+def test_forged_15_definition_id_not_uuid(taxonomy, make):
+    c10_b = next(c for c in taxonomy.capabilities if c.capability_code == "C10_B")
+    forged = _forged(taxonomy, capabilities=_with_capability(taxonomy, "C10_B",
+                                                             definition_id=make(c10_b.definition_id)))
+    _never_validated(forged, match="uuid.UUID")
+
+
+def test_forged_15_release_id_not_uuid(taxonomy):
+    _never_validated(_forged(taxonomy, taxonomy_release_id=str(taxonomy.taxonomy_release_id)), match="uuid.UUID")
+
+
+def test_forged_16_duplicated_definition_id(taxonomy):
+    c10_a = next(c for c in taxonomy.capabilities if c.capability_code == "C10_A")
+    forged = _forged(taxonomy, capabilities=_with_capability(taxonomy, "C10_B", definition_id=c10_a.definition_id))
+    _never_validated(forged, match="double")
+
+
+def test_forged_17_fake_c99_catalogue_never_validates_a_c99_focus(taxonomy):
+    with_c99 = _forged(taxonomy, competencies=taxonomy.competencies[:-1] + (_c99(),),
+                       capabilities=taxonomy.capabilities[:-1] + (_c99_a(),))
+    added_c99 = _forged(taxonomy, competencies=taxonomy.competencies + (_c99(),),
+                        capabilities=taxonomy.capabilities + (_c99_a(),))
+    for forged in (with_c99, added_c99):
+        _never_validated(forged, _proposal(target=_focus("C99", "C99_A@r1")),
+                         _proposal(target=_focus("C99")),
+                         _proposal(target=_focus("C10", "C10_B@r1"), supporting=(_focus("C99", "C99_A@r1"),)))
+
+
+def test_forged_wrong_types_of_entries(taxonomy):
+    as_dicts = tuple({"competency_code": c.competency_code} for c in taxonomy.competencies)
+    _never_validated(_forged(taxonomy, competencies=as_dicts))
+    _never_validated(_forged(taxonomy, capabilities=(SimpleNamespace(**taxonomy.capabilities[0].__dict__),)
+                             + taxonomy.capabilities[1:]))
+
+
+def test_loaded_catalogue_passes_the_boundary_unchanged(loaded):
+    """Un catalogue réellement produit par load_current_focus_taxonomy passe
+    la seconde validation pure ; le résultat est inchangé."""
+    taxonomy, release, rows = loaded
+    index = af._index(taxonomy)
+    assert list(index.competencies) == NATURAL_COMPETENCIES
+    assert list(index.by_token) == [f"{code}@r1" for code in NATURAL_CAPABILITIES]
+    db_ids = {d.capability_code: d.id for _, d in rows}
+    assert dict(index.position) == {db_ids[code]: i for i, code in enumerate(NATURAL_CAPABILITIES)}
+    focus = validate_focus_proposal(_proposal(target=_focus("C11", "C11_D@r1", "C11_B@r1"),
+                                              supporting=(_focus("C9", "C9_C@r1"), _focus("C2"))), taxonomy)
+    assert focus == InteractionCompetencyFocus(
+        schema_version=FOCUS_SCHEMA_VERSION, policy_version=FOCUS_POLICY_VERSION,
+        taxonomy_release_id=release.id, taxonomy_spec_fingerprint=GOLDEN_V1_FINGERPRINT,
+        resolution_status="resolved",
+        target=CompetencyFocus(competency_code="C11", scope_mode="localized",
+                               capability_definition_ids=(db_ids["C11_B"], db_ids["C11_D"])),
+        supporting=(CompetencyFocus(competency_code="C2", scope_mode="competency_only", capability_definition_ids=()),
+                    CompetencyFocus(competency_code="C9", scope_mode="localized",
+                                    capability_definition_ids=(db_ids["C9_C"],))))
+    # Un catalogue reconstruit champ à champ (mêmes valeurs) passe aussi.
+    rebuilt = CurrentFocusTaxonomy(**{f.name: getattr(taxonomy, f.name) for f in fields(CurrentFocusTaxonomy)})
+    assert validate_focus_proposal(_proposal(), rebuilt) == validate_focus_proposal(_proposal(), taxonomy)
+
+
+def test_the_boundary_rejects_a_drifted_local_spec(monkeypatch, taxonomy):
+    """Si la SPEC locale ne correspond plus à l'identité enregistrée, même un
+    catalogue chargé auparavant n'est plus utilisable."""
+    drifted = v1.taxonomy_v1_spec()
+    drifted["competencies"][0]["label"] += " "
+    monkeypatch.setattr(v1, "_SPEC", drifted)
+    _never_validated(taxonomy, match="SPEC canonique")
 
 
 # --------------------------------------------------------------------------
@@ -899,17 +1101,20 @@ def _reachable(name, seen=None):
 
 
 def test_51_validator_never_touches_the_database(monkeypatch, taxonomy):
+    """Le validateur ne lit jamais la base ; il recharge seulement la SPEC
+    canonique de la policy (policy.load_spec, Python pur) pour défendre la
+    frontière publique."""
     reachable = _reachable("validate_focus_proposal")
     assert not {"load_current_focus_taxonomy", "_acquire_rows", "_policy_spec"} & reachable
+    assert "_canonical_spec" in reachable
     for name in reachable:
         names = {n.id for n in ast.walk(_function(name)) if isinstance(n, ast.Name)}
-        assert not {"db", "get_active_release", "get_release_capabilities", "load_taxonomy_v1"} & names, name
+        assert not {"db", "get_active_release", "get_release_capabilities"} & names, name
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("lecture inattendue")
-    for name in ("get_active_release", "get_release_capabilities", "load_taxonomy_v1"):
+        raise AssertionError("lecture de la base inattendue")
+    for name in ("get_active_release", "get_release_capabilities"):
         monkeypatch.setattr(af, name, forbidden)
-    monkeypatch.setattr(v1, "load_taxonomy_v1", forbidden)
     assert validate_focus_proposal(_proposal(), taxonomy).target.competency_code == "C10"
 
 
@@ -1053,6 +1258,10 @@ def test_pg_spec_v1_active_release_to_validated_focus(engine, Sessions):  # noqa
     )
     assert _dump(engine) == before
     assert _load_pg(Sessions) == taxonomy
+    forged = replace(taxonomy, capabilities=tuple(
+        replace(c, label="forgé") if c.capability_code == "C10_B" else c for c in taxonomy.capabilities))
+    with pytest.raises(InvalidFocusTaxonomy, match="label"):
+        validate_focus_proposal(proposal, forged)
 
 
 def test_pg_load_never_flushes_pending_caller_changes(engine, Sessions):  # noqa: F811
