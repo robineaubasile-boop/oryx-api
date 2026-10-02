@@ -917,9 +917,13 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     # Étape 6.1C : socle positif localisé non branché, consommateur des seuls
     # contrats publics du snapshot (jamais load_adaptation_state, jamais un
     # privé) ; lui-même non branché : tests/test_adaptation_assumptions.py.
+    # Étape 6.1D : présupposés sûrs, consommateur des seuls contrats publics
+    # du snapshot et de ses fragilités / besoins ; non branché :
+    # tests/test_adaptation_safety.py.
     step6_consumers = {"core/adaptation_assumptions.py": {
         "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
-        "CompetencyAdaptationSnapshot"}}
+        "CompetencyAdaptationSnapshot"},
+        "core/adaptation_safety.py": {"AdaptationStateSnapshot", "AdaptationTension", "AdaptationValidationNeed"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
