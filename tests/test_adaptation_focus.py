@@ -1158,6 +1158,8 @@ def test_module_is_not_wired_to_the_application():
     # load_current_focus_taxonomy) ; non branché : tests/test_adaptation_assumptions.py.
     # Étape 6.1D : présupposés sûrs, focus reconstruit depuis le baseline
     # 6-1C (contrats de sortie seulement) ; non branché : tests/test_adaptation_safety.py.
+    # Étape 6.1E : contexte pédagogique, focus validé reçu tel quel (contrats
+    # de sortie seulement) ; non branché : tests/test_adaptation_context.py.
     step6_consumers = {"core/adaptation_focus_classifier.py": {
         "AMBIGUOUS", "COMPETENCY_ONLY", "COMPOSITE", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED",
         "NEUTRAL", "RESOLVED", "CurrentFocusTaxonomy", "FocusError", "FocusProposal", "InvalidFocusProposal",
@@ -1166,7 +1168,10 @@ def test_module_is_not_wired_to_the_application():
         "COMPETENCY_ONLY", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED", "RESOLUTION_STATUSES",
         "RESOLVED", "SCOPE_MODES", "CompetencyFocus", "InteractionCompetencyFocus"},
         "core/adaptation_safety.py": {
-        "COMPETENCY_ONLY", "LOCALIZED", "RESOLVED", "CompetencyFocus", "InteractionCompetencyFocus"}}
+        "COMPETENCY_ONLY", "LOCALIZED", "RESOLVED", "CompetencyFocus", "InteractionCompetencyFocus"},
+        "core/adaptation_context.py": {
+        "COMPETENCY_ONLY", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED", "RESOLUTION_STATUSES",
+        "RESOLVED", "SCOPE_MODES", "CompetencyFocus", "InteractionCompetencyFocus"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

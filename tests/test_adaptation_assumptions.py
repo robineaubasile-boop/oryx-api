@@ -964,9 +964,14 @@ def test_98_99_not_wired_to_api_nor_web_chat():
     # Étape 6.1D : présupposés sûrs, consommateur du seul contrat public du
     # baseline (preflight canonique via build_assumption_baseline) ; non
     # branché : tests/test_adaptation_safety.py.
+    # Étape 6.1E : contexte pédagogique, version du baseline, ordre des stades
+    # et rôles seulement (jamais build_assumption_baseline) ; non branché :
+    # tests/test_adaptation_context.py.
     step6_consumers = {"core/adaptation_safety.py": {
         "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "AssumptionBaseline",
-        "AssumptionBaselineError", "CompetencyAssumptionBaseline", "build_assumption_baseline"}}
+        "AssumptionBaselineError", "CompetencyAssumptionBaseline", "build_assumption_baseline"},
+        "core/adaptation_context.py": {
+        "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "SUPPORTING", "TARGET"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
