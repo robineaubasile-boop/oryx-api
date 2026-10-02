@@ -643,7 +643,11 @@ def test_19_not_wired_to_api_web_nor_orchestration():
         # tests/test_adaptation_support.py.
         "core/adaptation_support.py": {
         "COGNITIVE_OPERATIONS", "NO_TASK", "REQUEST_STATUSES", "TASK_POLICY_VERSION", "TASK_SCHEMA_VERSION",
-        "InteractionTaskProfile"}}
+        "InteractionTaskProfile"},
+        # Étape 6.2C2 : classificateur du support, bornes publiques de 6-2A
+        # réutilisées pour sa propre garde d'entrée (aucun autre contrat) ;
+        # non branché : tests/test_adaptation_support_classifier.py.
+        "core/adaptation_support_classifier.py": {"MAX_TASK_MESSAGE_CHARS", "MAX_TASK_SEGMENTS"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

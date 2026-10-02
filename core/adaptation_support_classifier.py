@@ -59,9 +59,31 @@ Invariants :
   allocations et règles de posture relèvent de validate_support_plan_proposal,
   seule autorité (aucune règle dupliquée, aucune correction).
 
-- Dépendance unique : ce module n'importe que la surface publique de 6-2C1
-  (contrats, préflight, validateur et vocabulaires fermés qu'elle
-  ré-expose) ; il ne lit aucun module amont directement.
+- Dépendances : la surface publique de 6-2C1 (contrats, préflight,
+  validateur et vocabulaires fermés qu'elle ré-expose) et deux bornes
+  publiques de 6-2A ; aucun autre module amont.
+
+- Entrée BORNÉE, jamais tronquée : le classificateur est une frontière
+  publique et possède sa propre garde, appliquée AVANT tout appel au
+  backend (no_task n'en fait toujours aucun). Un InteractionTaskProfile
+  forgé mais structurellement cohérent peut franchir le préflight sans
+  l'InteractionTaskInput d'origine ; la garde ne dépend donc pas des bornes
+  que 6-2A applique à son propre message. Bornes :
+    MAX_SUPPORT_SEGMENTS (= MAX_TASK_SEGMENTS de 6-2A) segments ;
+    MAX_SUPPORT_EXCERPT_CHARS caractères par source_excerpt et
+    MAX_SUPPORT_EXCERPTS_TOTAL_CHARS cumulés (= MAX_TASK_MESSAGE_CHARS :
+    les extraits sont des citations verbatim, disjointes, d'un seul message
+    6-2A) ;
+    MAX_SUPPORT_CATALOGUE_COMPETENCIES compétences et
+    MAX_SUPPORT_CATALOGUE_CAPABILITIES capacités au catalogue restreint
+    (taxonomie V1 entière : 12 et 45 ; un catalogue restreint n'en est
+    qu'un sous-ensemble) ;
+    MAX_SUPPORT_PAYLOAD_CHARS caractères pour l'entrée JSON sérialisée
+    envoyée au modèle (le maximum légitime, catalogue V1 complet et
+    extraits au pire échappement JSON, reste en dessous).
+  Tout dépassement => InvalidSupportClassifierInput ; rien n'est coupé,
+  résumé ni retiré, aucun segment ni capacité n'est écarté. Ces bornes sont
+  techniques : elles ne disent rien de la tâche ni de la personne.
 
 - Aucune sémantique en Python : ni mot-clé, ni table opération -> stade ou
   opération -> capacité, ni note, ni classement. Python prépare, appelle,
@@ -103,8 +125,17 @@ from core.adaptation_support import (
     prepare_support_planning,
     validate_support_plan_proposal,
 )
+from core.adaptation_task import MAX_TASK_MESSAGE_CHARS, MAX_TASK_SEGMENTS
 
 SUPPORT_CLASSIFIER_PROMPT_VERSION = "support-classifier-prompt-1"
+
+# Bornes de l'entrée du modèle (jamais de troncature).
+MAX_SUPPORT_SEGMENTS = MAX_TASK_SEGMENTS
+MAX_SUPPORT_EXCERPT_CHARS = MAX_TASK_MESSAGE_CHARS
+MAX_SUPPORT_EXCERPTS_TOTAL_CHARS = MAX_TASK_MESSAGE_CHARS
+MAX_SUPPORT_CATALOGUE_COMPETENCIES = 12
+MAX_SUPPORT_CATALOGUE_CAPABILITIES = 45
+MAX_SUPPORT_PAYLOAD_CHARS = 96_000
 
 _OUTPUT_KEYS = frozenset({"schema_version", "policy_version", "segments"})
 _SEGMENT_KEYS = frozenset({"segment_index", "relevant_safe_assumptions", "conceptual_bridges",
@@ -118,8 +149,9 @@ class SupportClassifierError(SupportPlanError):
 
 
 class InvalidSupportClassifierInput(SupportClassifierError):
-    """Backend hors contrat (les entrées sont contrôlées par le préflight
-    6-2C1, dont les erreurs remontent telles quelles)."""
+    """Backend hors contrat ou entrée hors des bornes du classificateur
+    (jamais tronquée). La cohérence des entrées relève du préflight 6-2C1,
+    dont les erreurs remontent telles quelles."""
 
 
 class SupportClassifierCallError(SupportClassifierError):
@@ -181,6 +213,48 @@ def _catalogue_json(catalogue: RestrictedSupportCatalogue) -> dict:
         } for capability in competency.capabilities]
         competencies.append(entry)
     return {"pedagogical_resolution_status": catalogue.resolution_status, "competencies": competencies}
+
+
+def _input_fail(path: str, message: str) -> InvalidSupportClassifierInput:
+    return InvalidSupportClassifierInput(f"{path} : {message} (jamais tronqué)")
+
+
+def _check_segment_count(task_profile) -> None:
+    """Garde AVANT tout préflight : un profil forgé de taille non bornée
+    n'est jamais travaillé."""
+    segments = getattr(task_profile, "segments", None)
+    if type(segments) is tuple and len(segments) > MAX_SUPPORT_SEGMENTS:
+        raise _input_fail("segments", f"{len(segments)} segments pour {MAX_SUPPORT_SEGMENTS} au plus")
+
+
+def _bounded_payload(planning: SupportPlanningInput) -> str:
+    """Entrée task_requested préparée -> message sérialisé pour le modèle,
+    après contrôle de chaque borne ; aucune troncature."""
+    segments = planning.segments
+    if not 1 <= len(segments) <= MAX_SUPPORT_SEGMENTS:
+        raise _input_fail("segments", f"{len(segments)} segment(s), 1 à {MAX_SUPPORT_SEGMENTS} attendus")
+    total = 0
+    for segment in segments:
+        size = len(segment.source_excerpt)
+        if size > MAX_SUPPORT_EXCERPT_CHARS:
+            raise _input_fail(f"segments[{segment.segment_index}].source_excerpt",
+                              f"{size} caractères pour {MAX_SUPPORT_EXCERPT_CHARS} au plus")
+        total += size
+    if total > MAX_SUPPORT_EXCERPTS_TOTAL_CHARS:
+        raise _input_fail("segments", f"extraits cumulés de {total} caractères pour"
+                                      f" {MAX_SUPPORT_EXCERPTS_TOTAL_CHARS} au plus")
+    competencies = planning.catalogue.competencies
+    if len(competencies) > MAX_SUPPORT_CATALOGUE_COMPETENCIES:
+        raise _input_fail("catalogue", f"{len(competencies)} compétences pour"
+                                       f" {MAX_SUPPORT_CATALOGUE_COMPETENCIES} au plus")
+    capabilities = sum(len(competency.capabilities) for competency in competencies)
+    if capabilities > MAX_SUPPORT_CATALOGUE_CAPABILITIES:
+        raise _input_fail("catalogue", f"{capabilities} capacités pour {MAX_SUPPORT_CATALOGUE_CAPABILITIES} au plus")
+    message = _user_payload(planning)
+    if len(message) > MAX_SUPPORT_PAYLOAD_CHARS:
+        raise _input_fail("entrée du modèle", f"{len(message)} caractères sérialisés pour"
+                                              f" {MAX_SUPPORT_PAYLOAD_CHARS} au plus")
+    return message
 
 
 def _user_payload(planning: SupportPlanningInput) -> str:
@@ -598,7 +672,9 @@ def classify_support_plan(
     """Entrées validées 6-2A / 6-2B / 6-1E / 6-1B -> InteractionSupportPlan
     validé, par UN appel au backend (aucun pour no_task).
 
-    Backend hors contrat => InvalidSupportClassifierInput ; entrées refusées
+    Backend hors contrat ou entrée hors bornes (segments, extraits,
+    catalogue, payload sérialisé) => InvalidSupportClassifierInput, backend
+    jamais appelé, rien de tronqué ; entrées refusées
     par le préflight 6-2C1 => son erreur (InvalidSupportPlanArgument,
     UnsupportedSupportPlanVersion, IncompatibleSupportPlanInputs,
     InvalidSupportPlanContent), backend jamais appelé ; échec du backend =>
@@ -606,14 +682,15 @@ def classify_support_plan(
     validate_support_plan_proposal => InvalidSupportClassifierOutput. Aucun
     nouvel essai, aucun repli. Le plan n'est ni persisté ni mémorisé."""
     _check_backend(backend)
+    _check_segment_count(task_profile)
     inputs = dict(task_profile=task_profile, posture_baseline=posture_baseline, context=context, taxonomy=taxonomy)
     planning = prepare_support_planning(**inputs)
     if planning.request_status == NO_TASK:
         return validate_support_plan_proposal(SupportPlanProposal(
             schema_version=SUPPORT_PLAN_SCHEMA_VERSION, policy_version=SUPPORT_POLICY_VERSION, segments=()),
             **inputs)
+    user_message = _bounded_payload(planning)
     system_prompt = _system_prompt()
-    user_message = _user_payload(planning)
     try:
         raw = backend.complete(system_prompt=system_prompt, user_message=user_message)
     except Exception as exc:

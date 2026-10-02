@@ -13,6 +13,8 @@ Backends factices injectés : aucun modèle réel, aucun réseau.
    sous la policy réelle.
 6. Cas frontières pédagogiques de bout en bout.
 7. Contrat statique : pureté, isolation, aucun branchement.
+8. Bornes de l'entrée du modèle : garde propre à 6-2C2, avant tout appel,
+   jamais de troncature.
 """
 import ast
 import dataclasses
@@ -43,6 +45,12 @@ from core.adaptation_support import (
     validate_support_plan_proposal,
 )
 from core.adaptation_support_classifier import (
+    MAX_SUPPORT_CATALOGUE_CAPABILITIES,
+    MAX_SUPPORT_CATALOGUE_COMPETENCIES,
+    MAX_SUPPORT_EXCERPT_CHARS,
+    MAX_SUPPORT_EXCERPTS_TOTAL_CHARS,
+    MAX_SUPPORT_PAYLOAD_CHARS,
+    MAX_SUPPORT_SEGMENTS,
     SUPPORT_CLASSIFIER_PROMPT_VERSION,
     InvalidSupportClassifierInput,
     InvalidSupportClassifierOutput,
@@ -51,7 +59,14 @@ from core.adaptation_support_classifier import (
     SupportClassifierError,
     classify_support_plan,
 )
-from core.adaptation_task import NO_TASK
+from core.adaptation_task import (
+    COGNITIVE_OPERATIONS,
+    MAX_TASK_MESSAGE_CHARS,
+    MAX_TASK_SEGMENTS,
+    NO_TASK,
+    TASK_CHARACTERISTICS,
+)
+from core.pedagogy.taxonomy_v1 import CAPABILITY_CODES, COMPETENCY_CODES
 from tests.test_adaptation_assumptions import FINGERPRINT, RELEASE, d, uid
 from tests.test_adaptation_support import (
     CHALLENGE_SEG,
@@ -629,8 +644,11 @@ def _imports():
     return imported
 
 
-def test_imports_are_only_stdlib_and_the_6_2c1_surface():
-    assert _imports() == {"json", "collections.abc", "typing", "core.adaptation_support"}
+def test_imports_are_only_stdlib_the_6_2c1_surface_and_the_6_2a_bounds():
+    assert _imports() == {"json", "collections.abc", "typing", "core.adaptation_support", "core.adaptation_task"}
+    names = {a.name for n in ast.walk(ast.parse(_source())) if isinstance(n, ast.ImportFrom)
+             and n.module == "core.adaptation_task" for a in n.names}
+    assert names == {"MAX_TASK_MESSAGE_CHARS", "MAX_TASK_SEGMENTS"}
 
 
 def test_no_provider_environment_clock_db_nor_global_client():
@@ -687,3 +705,184 @@ def test_no_actual_support_trace_nor_persisted_state():
 def test_taxonomy_identity_fixture_is_the_v1_one():
     assert TAXONOMY.taxonomy_spec_fingerprint == FINGERPRINT and TAXONOMY.taxonomy_release_id == RELEASE
     assert DCA == ("discovery", "comprehension", "application")
+
+
+# --------------------------------------------------------------------------
+# 8. Bornes de l'entrée du modèle (garde de la frontière 6-2C2)
+# --------------------------------------------------------------------------
+
+LIMIT = MAX_SUPPORT_EXCERPT_CHARS
+
+
+def _explain(excerpt):
+    return seg(excerpt, "unspecified", ("explain_mechanism",))
+
+
+def _out_for(count):
+    return out(*(s(i) for i in range(count)))
+
+
+def _refused_before_call(match, raw=None, **kwargs):
+    backend = FakeBackend(error=AssertionError("aucun appel attendu"))
+    with pytest.raises(InvalidSupportClassifierInput, match=match):
+        classify(backend=backend, **kwargs)
+    assert backend.calls == []
+
+
+def _full_context():
+    """Catalogue restreint maximal : taxonomie V1 entière (12 compétences,
+    45 capacités), quatre stades sûrs partout."""
+    parts = [part("target" if index == 0 else "supporting", code,
+                  *((capability, DCAM) for capability in CAPABILITY_CODES if capability.split("_")[0] == code))
+             for index, code in enumerate(COMPETENCY_CODES)]
+    return context(parts[0], parts[1:])
+
+
+def _forged_planning(monkeypatch, **changes):
+    """Préflight réel, puis structure agrandie au-delà de ce que la chaîne
+    valide peut produire (défense en profondeur de la garde)."""
+    real = classifier.prepare_support_planning
+
+    def forged(**kwargs):
+        planning = real(**kwargs)
+        updated = {key: change(planning) for key, change in changes.items()}
+        return dataclasses.replace(planning, **updated)
+    monkeypatch.setattr(classifier, "prepare_support_planning", forged)
+
+
+def test_bounds_are_explicit_and_reuse_the_6_2a_public_bounds():
+    assert MAX_SUPPORT_SEGMENTS == MAX_TASK_SEGMENTS == 6
+    assert MAX_SUPPORT_EXCERPT_CHARS == MAX_SUPPORT_EXCERPTS_TOTAL_CHARS == MAX_TASK_MESSAGE_CHARS == 6000
+    assert MAX_SUPPORT_PAYLOAD_CHARS == 96_000
+    assert all(type(bound) is int for bound in (MAX_SUPPORT_SEGMENTS, MAX_SUPPORT_EXCERPT_CHARS,
+                                                MAX_SUPPORT_EXCERPTS_TOTAL_CHARS, MAX_SUPPORT_PAYLOAD_CHARS,
+                                                MAX_SUPPORT_CATALOGUE_COMPETENCIES,
+                                                MAX_SUPPORT_CATALOGUE_CAPABILITIES))
+
+
+def test_catalogue_bounds_match_the_current_taxonomy():
+    assert MAX_SUPPORT_CATALOGUE_COMPETENCIES == len(COMPETENCY_CODES) == len(TAXONOMY.competencies) == 12
+    assert MAX_SUPPORT_CATALOGUE_CAPABILITIES == len(CAPABILITY_CODES) == len(TAXONOMY.capabilities) == 45
+
+
+def test_excerpt_at_the_bound_is_accepted_and_sent_untruncated():
+    excerpt = "é" * (LIMIT - 1) + "?"
+    result, backend = classify(_out_for(1), task=profile(_explain(excerpt)))
+    assert len(backend.calls) == 1
+    sent_excerpt = json.loads(backend.calls[0][1]["user_message"])["segments"][0]["source_excerpt"]
+    assert sent_excerpt == excerpt and len(sent_excerpt) == LIMIT
+    assert result.segments[0].source_excerpt == excerpt
+
+
+@pytest.mark.parametrize("size", [LIMIT + 1, LIMIT * 3])
+def test_excerpt_beyond_the_bound_is_refused_before_any_call(size):
+    _refused_before_call(r"source_excerpt.*jamais tronqué", task=profile(_explain("x" * size)))
+
+
+def test_cumulative_excerpts_are_bounded_like_one_6_2a_message():
+    half = LIMIT // 2
+    result, backend = classify(_out_for(2), task=profile(_explain("a" * half), _explain("b" * half)))
+    assert len(backend.calls) == 1 and [len(x.source_excerpt) for x in result.segments] == [half, half]
+    _refused_before_call("extraits cumulés", task=profile(_explain("a" * half), _explain("b" * (half + 1))))
+
+
+def test_maximum_segment_count_is_accepted():
+    task = profile(*(_explain(f"partie {i}") for i in range(MAX_SUPPORT_SEGMENTS)))
+    result, backend = classify(_out_for(MAX_SUPPORT_SEGMENTS), task=task)
+    assert len(backend.calls) == 1 and len(result.segments) == MAX_SUPPORT_SEGMENTS
+
+
+def test_forged_profile_with_too_many_segments_is_refused_before_preflight_and_call(monkeypatch):
+    task = profile(*(_explain(f"partie {i}") for i in range(MAX_SUPPORT_SEGMENTS + 1)))
+    monkeypatch.setattr(classifier, "prepare_support_planning",
+                        lambda **kwargs: (_ for _ in ()).throw(AssertionError("aucun préflight attendu")))
+    backend = FakeBackend(error=AssertionError("aucun appel attendu"))
+    with pytest.raises(InvalidSupportClassifierInput, match="7 segments pour 6 au plus"):
+        classify_support_plan(task_profile=task, posture_baseline=None, context=None, taxonomy=None,
+                              backend=backend)
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("change, match", [
+    (lambda p: (), "0 segment"),
+    (lambda p: p.segments * (MAX_SUPPORT_SEGMENTS + 1), "segment"),
+])
+def test_impossible_segment_count_after_preflight_is_refused(monkeypatch, change, match):
+    _forged_planning(monkeypatch, segments=change)
+    _refused_before_call(match)
+
+
+def test_full_taxonomy_catalogue_is_within_the_bounds():
+    result, backend = classify(_out_for(1), ctx=_full_context())
+    data = json.loads(backend.calls[0][1]["user_message"])
+    assert len(data["catalogue"]["competencies"]) == MAX_SUPPORT_CATALOGUE_COMPETENCIES
+    assert sum(len(c["capabilities"]) for c in data["catalogue"]["competencies"]) == (
+        MAX_SUPPORT_CATALOGUE_CAPABILITIES)
+    assert result.pedagogical_resolution_status == "resolved"
+
+
+@pytest.mark.parametrize("change, match", [
+    (lambda p: dataclasses.replace(p.catalogue, competencies=p.catalogue.competencies * 5), "compétences"),
+    (lambda p: dataclasses.replace(p.catalogue, competencies=(dataclasses.replace(
+        p.catalogue.competencies[0], capabilities=p.catalogue.competencies[0].capabilities * 23),)), "capacités"),
+])
+def test_catalogue_beyond_the_taxonomy_is_refused_before_any_call(monkeypatch, change, match):
+    _forged_planning(monkeypatch, catalogue=change)
+    _refused_before_call(match)
+
+
+def test_largest_legitimate_payload_fits_under_the_payload_bound():
+    # Catalogue V1 complet, six segments, toutes les opérations et
+    # caractéristiques, extraits cumulés à la borne, pire échappement JSON
+    # (caractères de contrôle -> \u00XX).
+    excerpt = "x" + "\x01" * (LIMIT // MAX_SUPPORT_SEGMENTS - 1)
+    task = profile(*(seg(excerpt, "unspecified", COGNITIVE_OPERATIONS, TASK_CHARACTERISTICS)
+                     for _ in range(MAX_SUPPORT_SEGMENTS)))
+    result, backend = classify(_out_for(MAX_SUPPORT_SEGMENTS), task=task, ctx=_full_context())
+    message = backend.calls[0][1]["user_message"]
+    assert len(backend.calls) == 1 and len(message) <= MAX_SUPPORT_PAYLOAD_CHARS
+    assert [x.source_excerpt for x in result.segments] == [excerpt] * MAX_SUPPORT_SEGMENTS
+
+
+def _expected_message(**kwargs):
+    return classifier._user_payload(prepare_support_planning(**inputs(**kwargs)))
+
+
+def test_payload_at_the_bound_is_accepted_unchanged(monkeypatch):
+    expected = _expected_message()
+    monkeypatch.setattr(classifier, "MAX_SUPPORT_PAYLOAD_CHARS", len(expected))
+    _, backend = classify(_out_for(1))
+    assert backend.calls[0][1]["user_message"] == expected
+
+
+def test_payload_beyond_the_bound_is_refused_before_any_call(monkeypatch):
+    monkeypatch.setattr(classifier, "MAX_SUPPORT_PAYLOAD_CHARS", len(_expected_message()) - 1)
+    _refused_before_call("caractères sérialisés")
+
+
+def test_no_task_still_makes_no_call_whatever_the_bounds(monkeypatch):
+    for name in ("MAX_SUPPORT_PAYLOAD_CHARS", "MAX_SUPPORT_EXCERPT_CHARS", "MAX_SUPPORT_CATALOGUE_COMPETENCIES"):
+        monkeypatch.setattr(classifier, name, 0)
+    backend = FakeBackend(error=AssertionError("aucun appel attendu"))
+    result, _ = classify(backend=backend, task=profile(status=NO_TASK), ctx=_full_context())
+    assert backend.calls == [] and result.segments == ()
+
+
+def test_normal_inputs_are_sent_exactly_as_before():
+    # La garde ne modifie jamais l'entrée : même message qu'un rendu direct.
+    task = profile(EXPLAIN_SEG, GUIDE_SEG, JOINT_SEG, CHALLENGE_SEG)
+    raw = out(s(0), s(1, allocations=[a("calculate", USER_RESERVED)]),
+              s(2, allocations=[a("form_conclusion", JOINT)]), s(3))
+    system_prompt, message = sent(raw=raw, task=task)
+    assert message == _expected_message(task=task) and system_prompt == classifier._system_prompt()
+    assert len(message) < MAX_SUPPORT_PAYLOAD_CHARS
+
+
+def test_bounds_never_produce_a_score_or_a_pedagogical_effect():
+    tree = ast.parse(_source())
+    guard = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_bounded_payload")
+    names = {n.id for n in ast.walk(guard) if isinstance(n, ast.Name)}
+    assert not names & {"POSTURES", "OPERATION_ALLOCATIONS", "ASSUMPTION_STAGE_ORDER", "EXPLAIN", "GUIDE",
+                        "CO_REASON", "CHALLENGE", "ORYX", "USER_RESERVED", "JOINT"}
+    returns = [n for n in ast.walk(guard) if isinstance(n, ast.Return)]
+    assert len(returns) == 1 and isinstance(returns[0].value, ast.Name) and returns[0].value.id == "message"
