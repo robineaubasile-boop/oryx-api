@@ -698,14 +698,26 @@ def test_40_no_step5_dependency():
 
 
 def test_41_not_wired_to_api_web_chat_nor_orchestration():
+    # Étape 6.2C : calibration du support, consomme le baseline validé et la
+    # frontière publique build_posture_baseline (préflight : vérifier, jamais
+    # recalculer à la place de 6-2B) ; non branché : tests/test_adaptation_support.py.
+    step6_consumers = {"core/adaptation_support.py": {
+        "CHALLENGE", "CHALLENGE_TASK_OPERATIONS", "CO_REASON", "EXPLAIN", "GUIDE", "POSTURE_BASELINE_SCHEMA_VERSION",
+        "POSTURE_POLICY_VERSION", "POSTURES", "SELECTION_BASES", "InteractionPostureBaseline", "PostureBaselineError",
+        "SegmentPostureDecision", "UnsupportedTaskProfileVersion", "build_posture_baseline"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "adaptation_posture" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.adaptation_posture", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
         if (path.suffix not in (".py", ".js", ".html") or not path.is_file()
                 or {".git", "tests", "node_modules"} & set(path.relative_to(REPO_ROOT).parts)):
             continue
-        if rel != "core/adaptation_posture.py" and "adaptation_posture" in path.read_text(
-                encoding="utf-8", errors="replace"):
+        if (rel != "core/adaptation_posture.py" and rel not in step6_consumers
+                and "adaptation_posture" in path.read_text(encoding="utf-8", errors="replace")):
             users.append(rel)
     assert users == []
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
