@@ -629,13 +629,27 @@ def test_19_no_6_1_nor_step5_object_in_the_code():
 
 
 def test_19_not_wired_to_api_web_nor_orchestration():
+    # Étape 6.2B : posture de base, consomme le profil validé seulement
+    # (contrats de sortie et vocabulaires, jamais le validateur ni le
+    # classificateur) ; non branché : tests/test_adaptation_posture.py.
+    step6_consumers = {"core/adaptation_posture.py": {
+        "CHALLENGE_REQUESTED", "COGNITIVE_OPERATIONS", "DIRECT_ANSWER_REQUESTED", "EVALUATE_EXISTING_REASONING",
+        "EXISTING_REASONING_TO_EVALUATE", "EXPLICIT_INTENTS", "FALSIFY", "JOINT_REASONING_REQUESTED",
+        "MAX_TASK_SEGMENTS", "NO_TASK", "REASONING_RESERVED_FOR_USER", "REQUEST_STATUSES", "STRESS_TEST",
+        "TASK_CHARACTERISTICS", "TASK_POLICY_VERSION", "TASK_SCHEMA_VERSION", "UNSPECIFIED",
+        "InteractionTaskProfile", "TaskSegment"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "adaptation_task" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.adaptation_task", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
         if (path.suffix not in (".py", ".js", ".html") or not path.is_file()
                 or {".git", "tests", "node_modules"} & set(path.relative_to(REPO_ROOT).parts)):
             continue
-        if rel in ("core/adaptation_task.py", "core/adaptation_task_classifier.py"):
+        if rel in ("core/adaptation_task.py", "core/adaptation_task_classifier.py") or rel in step6_consumers:
             continue
         if "adaptation_task" in path.read_text(encoding="utf-8", errors="replace"):
             users.append(rel)
