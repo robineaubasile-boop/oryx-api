@@ -1019,6 +1019,15 @@ def test_not_wired_to_api_runtime_or_any_other_module():
             "NO_STATE_LABEL", "NON_ETABLI", "VISIBLE_STAGE_LABELS", "CompetencyCurrentProgress",
             "VisibleCapabilityProjection"},
         "core/progress_evidence_renderer.py": {"CompetencyCurrentProgress"},
+        # Étape 6.4C1 : même règle que 6-4B1 (égalité exigée avec
+        # project_current_progress(state), aucune règle recopiée) ; 6-4C3 :
+        # libellés visibles des stades et leur version de policy (voir
+        # tests/test_progress_history.py et
+        # tests/test_progress_history_projection.py). Aucun branchement runtime.
+        "core/progress_history.py": {
+            "CompetencyCurrentProgress", "CurrentProgressProjection", "ProgressProjectionError",
+            "project_current_progress"},
+        "core/progress_history_projection.py": {"CURRENT_PROGRESS_POLICY_VERSION", "VISIBLE_STAGE_LABELS"},
     }
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))

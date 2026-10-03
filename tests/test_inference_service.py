@@ -82,6 +82,7 @@ from core.inference_service import (
     StaleInferencePredecessor,
     TensionDecision,
     TransitionCausalityContext,
+    HistoricalInferenceRun,
     UserNotFound,
     ValidatedCompetencyState,
     VersionChangeContext,
@@ -122,6 +123,8 @@ PUBLIC_API = {
     "get_inference_basis_refs",
     "get_user_competency_state",
     "get_validated_user_competency_state",
+    # Étape 6.4C : lecture seule de la lignée adoptée (chaîne predecessor).
+    "get_inference_lineage",
 }
 EXCEPTIONS = {
     InvalidInferenceArgument,
@@ -241,7 +244,7 @@ def test_t6a_schema_files_are_unchanged_by_t6b():
         assert diff.returncode == 0, path
 
 
-def test_public_api_is_exactly_the_eleven_operations():
+def test_public_api_is_exactly_the_twelve_operations():
     tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == PUBLIC_API
@@ -262,7 +265,7 @@ def test_exact_signatures():
     assert params(svc.complete_competency_inference) == {"run_id": empty, "decision": empty}
     assert params(svc.fail_competency_inference) == {"run_id": empty, "failure_code": None}
     for name in ("get_inference_context", "get_competency_inference", "get_stage_claims", "get_inference_tensions",
-                 "get_inference_basis_refs"):
+                 "get_inference_basis_refs", "get_inference_lineage"):
         assert params(getattr(svc, name)) == {"run_id": empty}, name
     for name in ("get_active_competency_inference", "get_user_competency_state",
                  "get_validated_user_competency_state"):
@@ -295,8 +298,8 @@ def test_exceptions_are_a_small_business_hierarchy():
 
 def test_structures_are_frozen_keyword_only_dataclasses():
     for cls in (InferenceContext, PredecessorSnapshot, InferenceDecision, StageClaimDecision, TensionDecision,
-                BasisRefDecision, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES, *CAUSALITY_CLASSES,
-                *TAXONOMY_CONTEXT_CLASSES):
+                BasisRefDecision, ValidatedCompetencyState, HistoricalInferenceRun, *PREDECESSOR_CONTEXT_CLASSES,
+                *CAUSALITY_CLASSES, *TAXONOMY_CONTEXT_CLASSES):
         assert cls.__dataclass_params__.frozen, cls
         assert all(f.kw_only for f in dataclasses.fields(cls)), cls
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -426,6 +429,9 @@ CHANGED_BY_T6C0 = {"InferenceContext", "_context", "start_competency_inference",
 # qui reconnaît un changement sémantique des relations T5 (relation_delta
 # added / removed) comme support de pedagogical_reinterpretation.
 CHANGED_BY_T6C3 = {"_check_transition_causes"}
+# Étape 6.4C : seuls ajouts, une structure et une lecture seule de la lignée
+# adoptée (plus son helper de requête) ; aucune définition existante modifiée.
+STEP64C_ADDITIONS = {"HistoricalInferenceRun", "_lineage_rows", "get_inference_lineage"}
 
 
 def _top_level(source):
@@ -461,7 +467,7 @@ def test_t6b1_leaves_fingerprints_dedup_locks_lifecycle_and_cache_unchanged():
         assert name in before and after.get(name) == before[name], name
     # Seuls ajouts : les structures historiques (T6-B.1), causales (T6-B.2)
     # et la résolution taxonomique courante (T6-C0).
-    assert set(after) - set(before) == T6B1_ADDITIONS | T6B2_ADDITIONS | T6C0_ADDITIONS
+    assert set(after) - set(before) == T6B1_ADDITIONS | T6B2_ADDITIONS | T6C0_ADDITIONS | STEP64C_ADDITIONS
     assert set(before) - set(after) == {"_input_fingerprint"}  # renommé _input_fingerprint_v1 (T6-B.2)
 
 
@@ -488,7 +494,7 @@ def test_t6b2_changes_only_the_input_identity_and_the_causal_checks():
         pytest.skip("historique git indisponible")
     current = SERVICE_PATH.read_text(encoding="utf-8")
     before, after = _top_level(base.stdout), _top_level(current)
-    assert set(after) - set(before) == T6B2_ADDITIONS | T6C0_ADDITIONS
+    assert set(after) - set(before) == T6B2_ADDITIONS | T6C0_ADDITIONS | STEP64C_ADDITIONS
     assert set(before) - set(after) == {"_input_fingerprint"}
     for name in set(before) - CHANGED_BY_T6B2 - {"_input_fingerprint"}:
         assert after[name] == before[name], name
@@ -556,8 +562,8 @@ def test_no_score_rank_or_numeric_pedagogy():
         assert word not in tokens.split("\n") and f"{word}_" not in tokens and f"_{word}" not in tokens, word
     assert svc.STAGE_SEQUENCE == ("non_etabli", "discovery", "comprehension", "application", "mastery")
     # Aucun champ d'état numérique dans les structures du service.
-    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState, *PREDECESSOR_CONTEXT_CLASSES,
-                *CAUSALITY_CLASSES):
+    for cls in (InferenceContext, PredecessorSnapshot, ValidatedCompetencyState, HistoricalInferenceRun,
+                *PREDECESSOR_CONTEXT_CLASSES, *CAUSALITY_CLASSES):
         for f in dataclasses.fields(cls):
             assert f.type not in (float, "float"), (cls, f.name)
     # Deltas causaux : des ensembles, jamais un décompte, un solde ni un score.
@@ -608,7 +614,12 @@ def test_service_is_the_only_writer_of_t6_tables():
         "get_inference_tensions", "get_inference_basis_refs"},
         "core/progress_evidence.py": {
         "get_validated_user_competency_state", "get_competency_inference", "get_stage_claims",
-        "get_inference_basis_refs"}}
+        "get_inference_basis_refs"},
+        # Étape 6.4C1 : lecteur non branché de la lignée adoptée du run
+        # capturé par 6-1A, revalidé avant / après (voir
+        # tests/test_progress_history.py). 6-4C2 / 6-4C3 n'en lisent que
+        # des vocabulaires.
+        "core/progress_history.py": {"get_validated_user_competency_state", "get_inference_lineage"}}
     needles = (*(m.__name__ for m in T6A_MODELS), *T6A_TABLES, "inference_service")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
@@ -4109,7 +4120,7 @@ def test_t6c0_changes_only_the_inference_context_surface():
     if base.returncode != 0:
         pytest.skip("historique git indisponible")
     before, after = _top_level(base.stdout), _top_level(SERVICE_PATH.read_text(encoding="utf-8"))
-    assert set(after) - set(before) == T6C0_ADDITIONS
+    assert set(after) - set(before) == T6C0_ADDITIONS | STEP64C_ADDITIONS
     assert set(before) - set(after) == set()
     for name in set(before) - CHANGED_BY_T6C0 - CHANGED_BY_T6C3:
         assert after[name] == before[name], name
@@ -4450,3 +4461,219 @@ def test_pg_duplicate_capability_code_in_the_release_is_invalid_state(engine, Se
     # Une autre compétence de la même release n'est pas concernée.
     assert [c.capability_code for c in svc._build_current_taxonomy_context(
         db, release_id=w.tx.id, competency_code="C8").capabilities] == ["C8_A"]
+
+
+# --------------------------------------------------------------------------
+# Étape 6.4C : lignée adoptée (get_inference_lineage)
+# --------------------------------------------------------------------------
+
+def test_historical_inference_run_is_a_minimal_frozen_structure():
+    """Identité technique (validation des liens) + sorties de stade : ni
+    tension, ni contexte de révision, ni besoin de validation, ni claim, ni
+    horodatage, ni confiance."""
+    names = [f.name for f in dataclasses.fields(HistoricalInferenceRun)]
+    assert names == ["inference_run_id", "user_id", "competency_code", "predecessor_inference_run_id",
+                     "previous_stage", "current_stage", "transition", "transition_cause"]
+    assert HistoricalInferenceRun.__dataclass_params__.frozen
+    assert all(f.kw_only for f in dataclasses.fields(HistoricalInferenceRun))
+    for field in ("tension_state", "unresolved_revision_context", "validation_needs", "claims", "confidence",
+                  "started_at", "completed_at", "created_at", "output_fingerprint", "state_decision_summary"):
+        assert field not in names, field
+
+
+def test_lineage_argument_is_validated_before_the_database():
+    for value in INVALID_UUIDS:
+        with pytest.raises(InvalidInferenceArgument):
+            svc.get_inference_lineage(_NoDB(), run_id=value)
+
+
+def _lineage_source():
+    tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
+    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+             and n.name in ("_lineage_rows", "get_inference_lineage")]
+    assert len(nodes) == 2
+    return "\n".join(_code_tokens(ast.unparse(_without_docstring(n))) for n in nodes)
+
+
+def test_lineage_follows_predecessor_links_only_never_a_timestamp_order():
+    """Une requête récursive (UNION : un cycle termine) sur
+    predecessor_inference_run_id ; aucun ORDER BY, aucun horodatage, aucun
+    verrou, aucune écriture, aucune lecture de claim, tension, ref,
+    observation ni dossier T5."""
+    tokens = set(_lineage_source().split())
+    assert {"cte", "union", "predecessor_inference_run_id", "reverse"} <= tokens
+    for forbidden in ("order_by", "union_all", "started_at", "completed_at", "created_at", "updated_at",
+                      "with_for_update", "flush", "unresolved_revision_context", "tension_state",
+                      "validation_needs", "CompetencyStageClaim", "CompetencyInferenceTension",
+                      "CompetencyInferenceBasisRef", "PedagogicalObservation", "LongitudinalAssessmentRun",
+                      "build_longitudinal_dossier", "get_validated_user_competency_state", "_children"):
+        assert forbidden not in tokens, forbidden
+    tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
+    used = {a.attr for n in tree.body if isinstance(n, ast.FunctionDef)
+            and n.name in ("_lineage_rows", "get_inference_lineage")
+            for a in ast.walk(n) if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name)
+            and a.value.id == "db"}
+    assert used == {"execute", "no_autoflush"}
+
+
+def _lineage_world(Sessions, w):  # noqa: N803
+    """R1 application (première inférence) -> R2 maintained -> R3
+    revised_down vers comprehension -> R4 upgraded vers application (active).
+    Chaque run successeur change une spécification T6 :
+    pedagogical_reinterpretation a son support structurel."""
+    r1 = _activate_first(Sessions, w)
+    r2 = _start(Sessions, w.t5, state_decision_version="state-2")
+    _complete(Sessions, r2.run_id, _app_decision(w, cause="pedagogical_reinterpretation"))
+    r3 = _start(Sessions, w.t5, state_decision_version="state-3")
+    _complete(Sessions, r3.run_id, decision("comprehension", refs=[pos("comprehension", w.comp),
+                                                                   ref("transition", "observation", w.k)],
+                                            cause="pedagogical_reinterpretation"))
+    r4 = _start(Sessions, w.t5, state_decision_version="state-4")
+    _complete(Sessions, r4.run_id, _app_decision(w, refs=[pos("application", w.app),
+                                                          ref("transition", "observation", w.app)],
+                                                 cause="pedagogical_reinterpretation"))
+    return r1, r2.run_id, r3.run_id, r4.run_id
+
+
+def _lineage(Sessions, run_id):  # noqa: N803
+    with Sessions() as session:
+        result = svc.get_inference_lineage(session, run_id=run_id)
+        assert not session.new and not session.dirty and not session.deleted
+        return result
+
+
+def test_pg_lineage_is_oldest_to_current_with_derived_transitions(engine, Sessions, world):
+    w = world
+    r1, r2, r3, r4 = _lineage_world(Sessions, w)
+    before = _t6_snapshot(engine)
+    statements = []
+
+    def record(conn, cursor, sql, *args):
+        statements.append(" ".join(sql.split()))
+
+    sa.event.listen(engine, "before_cursor_execute", record)
+    try:
+        lineage = _lineage(Sessions, r4)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record)
+    assert _t6_snapshot(engine) == before
+    assert len(statements) == 1 and statements[0].startswith("WITH RECURSIVE")
+    assert " FOR " not in statements[0] and "ORDER BY" not in statements[0]
+    assert "UNION ALL" not in statements[0] and " UNION " in statements[0]
+    assert type(lineage) is tuple and all(type(run) is HistoricalInferenceRun for run in lineage)
+    assert lineage == (
+        HistoricalInferenceRun(inference_run_id=r1, user_id=USER, competency_code="C7",
+                               predecessor_inference_run_id=None, previous_stage=None,
+                               current_stage="application", transition=None, transition_cause=None),
+        HistoricalInferenceRun(inference_run_id=r2, user_id=USER, competency_code="C7",
+                               predecessor_inference_run_id=r1, previous_stage="application",
+                               current_stage="application", transition="maintained",
+                               transition_cause="pedagogical_reinterpretation"),
+        HistoricalInferenceRun(inference_run_id=r3, user_id=USER, competency_code="C7",
+                               predecessor_inference_run_id=r2, previous_stage="application",
+                               current_stage="comprehension", transition="revised_down",
+                               transition_cause="pedagogical_reinterpretation"),
+        HistoricalInferenceRun(inference_run_id=r4, user_id=USER, competency_code="C7",
+                               predecessor_inference_run_id=r3, previous_stage="comprehension",
+                               current_stage="application", transition="upgraded",
+                               transition_cause="pedagogical_reinterpretation"))
+    # Le service est générique : la lignée d'un run superseded est son passé.
+    assert [run.inference_run_id for run in _lineage(Sessions, r2)] == [r1, r2]
+    assert [run.inference_run_id for run in _lineage(Sessions, r1)] == [r1]
+
+
+def test_pg_lineage_order_comes_from_links_never_from_timestamps(engine, Sessions, world):
+    """Horodatages inversés : l'ordre reste celui des liens predecessor."""
+    w = world
+    r1, r2, r3, r4 = _lineage_world(Sessions, w)
+    reference = _lineage(Sessions, r4)
+    for run_id, offset in ((r1, 30), (r2, 20), (r3, 10), (r4, 0)):
+        _exec(engine, "UPDATE competency_inference_runs SET started_at = now() + make_interval(days => :o),"
+                      " completed_at = now() + make_interval(days => :o) WHERE id = :r", o=offset, r=run_id)
+    assert _lineage(Sessions, r4) == reference
+
+
+def test_pg_lineage_excludes_failed_running_and_foreign_runs(engine, Sessions, world):
+    """Un candidat failed / obsolete et un candidat running ont pour
+    predecessor l'active, mais n'en sont pas des ancêtres ; aucun run hors
+    de la chaîne n'est jamais retourné."""
+    w = world
+    r1, r2, r3, r4 = _lineage_world(Sessions, w)
+    failed = _start(Sessions, w.t5, state_decision_version="state-5").run_id
+    with Sessions() as session:
+        svc.fail_competency_inference(session, run_id=failed, failure_code="timeout")
+        session.commit()
+    running = _start(Sessions, w.t5, state_decision_version="state-6").run_id
+    assert {_run(engine, failed)["predecessor_inference_run_id"],
+            _run(engine, running)["predecessor_inference_run_id"]} == {r4}
+    assert [run.inference_run_id for run in _lineage(Sessions, r4)] == [r1, r2, r3, r4]
+    for candidate in (failed, running):
+        with pytest.raises(InvalidInferenceState, match="completed requis"):
+            _lineage(Sessions, candidate)
+    with pytest.raises(InferenceRunNotFound):
+        _lineage(Sessions, uuid.uuid4())
+
+
+def test_pg_lineage_is_history_not_evidence(engine, Sessions, world):
+    """Une preuve ancienne invalidée depuis, un dossier T5 superseded : la
+    lignée reste un fait historique, identique (aucune preuve relue)."""
+    w = world
+    r1, r2, r3, r4 = _lineage_world(Sessions, w)
+    reference = _lineage(Sessions, r4)
+    _invalidate(Sessions, w.app)
+    _new_t5(Sessions, w, sup(w.A))
+    assert _rows(engine, "SELECT interpretation_status FROM longitudinal_assessment_runs WHERE id = :i",
+                 i=w.t5)[0]["interpretation_status"] == "superseded"
+    assert _lineage(Sessions, r4) == reference
+
+
+@pytest.mark.parametrize("case", ["cycle", "missing_predecessor", "other_user", "other_competency"])
+def test_pg_lineage_link_corruption_fails_closed(engine, Sessions, world, case):
+    w = world
+    r1, r2, r3, r4 = _lineage_world(Sessions, w)
+    update = "UPDATE competency_inference_runs SET {} WHERE id = :r"
+    if case == "cycle":
+        _exec(engine, update.format("predecessor_inference_run_id = :p"), r=r1, p=r3)
+        match = "cycle"
+    elif case == "missing_predecessor":
+        # FK contournée (superuser, triggers de FK désactivés localement).
+        with engine.begin() as conn:
+            conn.execute(sa.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(sa.text(update.format("predecessor_inference_run_id = :p")), {"r": r2, "p": uuid.uuid4()})
+        match = "introuvable"
+    elif case == "other_user":
+        _exec(engine, update.format("user_id = :u"), r=r2, u=OTHER_USER)
+        match = "autre couple"
+    else:
+        _exec(engine, update.format("competency_code = 'C8'"), r=r2)
+        match = "autre couple"
+    with pytest.raises(InvalidInferenceState, match=match):
+        _lineage(Sessions, r4)
+
+
+@pytest.mark.parametrize("target, assignment, match", [
+    ("r1", "previous_stage = 'discovery'", "première inférence"),
+    ("r1", "transition = 'upgraded'", "première inférence"),
+    ("r1", "transition_cause = 'new_user_evidence'", "première inférence"),
+    ("r2", "previous_stage = 'comprehension'", "previous_stage"),
+    ("r2", "previous_stage = NULL", "previous_stage"),
+    ("r2", "transition = 'upgraded'", "maintained dérivée"),
+    ("r3", "transition = 'maintained'", "revised_down dérivée"),
+    ("r4", "transition = 'revised_down'", "upgraded dérivée"),
+    ("r4", "transition = NULL", "upgraded dérivée"),
+    ("r3", "transition_cause = NULL", "transition_cause"),
+    ("r2", "current_stage = NULL", "current_stage"),
+    ("r1", "interpretation_status = 'obsolete'", "superseded attendu"),
+    ("r2", "execution_status = 'failed'", "completed requis"),
+    ("r4", "interpretation_status = 'obsolete'", "active / superseded attendu"),
+])
+def test_pg_lineage_transition_corruption_fails_closed(engine, Sessions, world, target, assignment, match):
+    """Transition et cause persistées validées, jamais redécidées ni
+    réparées : première inférence sans transition ; ensuite previous_stage
+    = stade du predecessor, transition dérivée, cause obligatoire ;
+    predecessors superseded ; tous completed."""
+    w = world
+    runs = dict(zip(("r1", "r2", "r3", "r4"), _lineage_world(Sessions, w)))
+    _exec(engine, f"UPDATE competency_inference_runs SET {assignment} WHERE id = :r", r=runs[target])
+    with pytest.raises(InvalidInferenceState, match=match):
+        _lineage(Sessions, runs["r4"])
