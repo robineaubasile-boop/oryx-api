@@ -940,7 +940,9 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
         "core/progress_evidence.py": {
         "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CompetencyAdaptationSnapshot"},
         # 6-4B2 : seul le vocabulaire des compétences, jamais le snapshot.
-        "core/progress_evidence_selection.py": {"COMPETENCY_ORDER"}}
+        "core/progress_evidence_selection.py": {"COMPETENCY_ORDER"},
+        # 6-4B3 : idem (tests/test_progress_evidence_rendering.py).
+        "core/progress_evidence_rendering.py": {"COMPETENCY_ORDER"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
