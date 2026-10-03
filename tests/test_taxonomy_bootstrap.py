@@ -206,7 +206,11 @@ def test_t4c_is_not_wired_to_the_application():
     # seule lecture load_taxonomy_v1 et l'identité « oryx-v1 » figée dans son
     # registre de policies (jamais bootstrap / verify / activate, jamais
     # taxonomy_bootstrap ; voir tests/test_adaptation_focus.py).
-    step6_reads = {"core/adaptation_focus.py": ("load_taxonomy_v1", "oryx-v1")}
+    # Étape 6.4A : projection descriptive non branchée, libellés canoniques des
+    # compétences par la seule lecture load_taxonomy_v1 (jamais bootstrap /
+    # verify / activate ; voir tests/test_progress_projection.py).
+    step6_reads = {"core/adaptation_focus.py": ("load_taxonomy_v1", "oryx-v1"),
+                   "core/progress_projection.py": ("load_taxonomy_v1",)}
     checked = 0
     for rel, source in _application_sources():
         checked += 1
