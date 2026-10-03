@@ -922,11 +922,18 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     # tests/test_adaptation_safety.py.
     # Étape 6.1E : contexte pédagogique, ordre C1 -> C12 seulement (aucun
     # état Step 5 lu) ; non branché : tests/test_adaptation_context.py.
+    # Étape 6.4A : projection descriptive de l'état actuel, consommatrice des
+    # seuls contrats publics du snapshot (stade, claim courante, catalogue ;
+    # jamais load_adaptation_state) ; non branchée :
+    # tests/test_progress_projection.py.
     step6_consumers = {"core/adaptation_assumptions.py": {
         "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
         "CompetencyAdaptationSnapshot"},
         "core/adaptation_safety.py": {"AdaptationStateSnapshot", "AdaptationTension", "AdaptationValidationNeed"},
-        "core/adaptation_context.py": {"COMPETENCY_ORDER"}}
+        "core/adaptation_context.py": {"COMPETENCY_ORDER"},
+        "core/progress_projection.py": {
+        "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
+        "CompetencyAdaptationSnapshot"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
