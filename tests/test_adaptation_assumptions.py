@@ -971,7 +971,11 @@ def test_98_99_not_wired_to_api_nor_web_chat():
         "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "AssumptionBaseline",
         "AssumptionBaselineError", "CompetencyAssumptionBaseline", "build_assumption_baseline"},
         "core/adaptation_context.py": {
-        "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "SUPPORTING", "TARGET"}}
+        "ASSUMPTION_BASELINE_SCHEMA_VERSION", "ASSUMPTION_STAGE_ORDER", "SUPPORTING", "TARGET"},
+        # Étape 6.2C : calibration du support, ordre des stades et rôles
+        # seulement (jamais un calcul sur les stades) ; non branché :
+        # tests/test_adaptation_support.py.
+        "core/adaptation_support.py": {"ASSUMPTION_STAGE_ORDER", "SUPPORTING", "TARGET"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

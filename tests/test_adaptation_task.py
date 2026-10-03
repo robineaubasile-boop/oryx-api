@@ -637,7 +637,17 @@ def test_19_not_wired_to_api_web_nor_orchestration():
         "EXISTING_REASONING_TO_EVALUATE", "EXPLICIT_INTENTS", "FALSIFY", "JOINT_REASONING_REQUESTED",
         "MAX_TASK_SEGMENTS", "NO_TASK", "REASONING_RESERVED_FOR_USER", "REQUEST_STATUSES", "STRESS_TEST",
         "TASK_CHARACTERISTICS", "TASK_POLICY_VERSION", "TASK_SCHEMA_VERSION", "UNSPECIFIED",
-        "InteractionTaskProfile", "TaskSegment"}}
+        "InteractionTaskProfile", "TaskSegment"},
+        # Étape 6.2C : calibration du support, profil validé revérifié via
+        # 6-2B (contrats de sortie et vocabulaires seulement) ; non branché :
+        # tests/test_adaptation_support.py.
+        "core/adaptation_support.py": {
+        "COGNITIVE_OPERATIONS", "NO_TASK", "REQUEST_STATUSES", "TASK_POLICY_VERSION", "TASK_SCHEMA_VERSION",
+        "InteractionTaskProfile"},
+        # Étape 6.2C2 : classificateur du support, bornes publiques de 6-2A
+        # réutilisées pour sa propre garde d'entrée (aucun autre contrat) ;
+        # non branché : tests/test_adaptation_support_classifier.py.
+        "core/adaptation_support_classifier.py": {"MAX_TASK_MESSAGE_CHARS", "MAX_TASK_SEGMENTS"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

@@ -1171,7 +1171,14 @@ def test_module_is_not_wired_to_the_application():
         "COMPETENCY_ONLY", "LOCALIZED", "RESOLVED", "CompetencyFocus", "InteractionCompetencyFocus"},
         "core/adaptation_context.py": {
         "COMPETENCY_ONLY", "FOCUS_POLICY_VERSION", "FOCUS_SCHEMA_VERSION", "LOCALIZED", "RESOLUTION_STATUSES",
-        "RESOLVED", "SCOPE_MODES", "CompetencyFocus", "InteractionCompetencyFocus"}}
+        "RESOLVED", "SCOPE_MODES", "CompetencyFocus", "InteractionCompetencyFocus"},
+        # Étape 6.2C : calibration du support, taxonomie revérifiée par la
+        # frontière publique validate_focus_proposal (proposition neutral
+        # synthétique, comme 6-1B2) ; non branché : tests/test_adaptation_support.py.
+        "core/adaptation_support.py": {
+        "COMPETENCY_ONLY", "FOCUS_SCHEMA_VERSION", "LOCALIZED", "NEUTRAL", "RESOLUTION_STATUSES", "RESOLVED",
+        "SCOPE_MODES", "CurrentFocusTaxonomy", "FocusError", "FocusProposal", "UnsupportedFocusPolicy",
+        "validate_focus_proposal"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
