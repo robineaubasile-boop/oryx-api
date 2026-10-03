@@ -1367,6 +1367,25 @@ def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
     assert versions[-1] == "0009_competency_inference_state.py" and len(versions) == 9
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "ProgressEvidence" not in models and "progress_evidence" not in models
+    # Étape 6.4B2 : seuls consommateurs, eux-mêmes non branchés ; ils lisent
+    # les contrats publics de 6-4B1, jamais acquire_progress_evidence (voir
+    # tests/test_progress_evidence_selection.py et
+    # tests/test_progress_evidence_selector.py).
+    step6_consumers = {
+        "core/progress_evidence_selection.py": {
+            "BASIS_DIRECT", "BASIS_INHERITED_FROM_HIGHER_CLAIM", "BASIS_ORIGINS", "EVIDENCE_AVAILABLE",
+            "EVIDENCE_CURRENT_STAGE_NOT_ESTABLISHED", "EVIDENCE_NO_POSITIVE_BASIS", "EVIDENCE_NO_STATE",
+            "EVIDENCE_STATUSES", "PROGRESS_EVIDENCE_POLICY_VERSION", "PROGRESS_EVIDENCE_SCHEMA_VERSION",
+            "SCOPE_COMPETENCY_ONLY", "SCOPE_LOCALIZED", "SCOPE_MODES", "ProgressEvidenceCandidate",
+            "ProgressEvidenceSet"},
+        "core/progress_evidence_selector.py": {"ProgressEvidenceSet"},
+    }
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if getattr(n, "module", None) == "core.progress_evidence"
+                    or a.name == "core.progress_evidence"]
+        assert sorted(imported) == sorted(("core.progress_evidence", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -1376,7 +1395,7 @@ def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
         if rel != "core/progress_evidence.py" and "progress_evidence" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    assert users == []
+    assert sorted(users) == sorted(step6_consumers)
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
     for name in ("acquire_progress_evidence", "ProgressEvidenceSet", "ProgressEvidenceCandidate"):
         assert name not in api, name

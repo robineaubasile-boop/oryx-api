@@ -997,12 +997,22 @@ def test_taxonomy_v1_is_unchanged_and_fingerprint_is_frozen():
 
 
 def test_not_wired_to_api_runtime_or_any_other_module():
-    # Étape 6.4B1 : seul consommateur, lui-même non branché ; il ne recopie
-    # aucune règle et exige l'égalité avec project_current_progress(state)
-    # (voir tests/test_progress_evidence.py).
-    step6_consumers = {"core/progress_evidence.py": {
-        "COVERAGE_COMPETENCY_ONLY", "COVERAGE_LOCALIZED", "COVERAGE_MIXED", "CompetencyCurrentProgress",
-        "CurrentProgressProjection", "ProgressProjectionError", "project_current_progress"}}
+    # Étape 6.4B1 : il ne recopie aucune règle et exige l'égalité avec
+    # project_current_progress(state) (voir tests/test_progress_evidence.py).
+    # Étape 6.4B2 : contrats publics de la carte seulement (vocabulaires,
+    # versions, dataclasses), jamais project_current_progress. Aucun n'est
+    # branché au runtime.
+    step6_consumers = {
+        "core/progress_evidence.py": {
+            "COVERAGE_COMPETENCY_ONLY", "COVERAGE_LOCALIZED", "COVERAGE_MIXED", "CompetencyCurrentProgress",
+            "CurrentProgressProjection", "ProgressProjectionError", "project_current_progress"},
+        "core/progress_evidence_selection.py": {
+            "CLAIM_STAGE_ORDER", "COVERAGE_COMPETENCY_ONLY", "COVERAGE_LOCALIZED", "COVERAGE_MIXED",
+            "COVERAGE_MODES", "COVERAGE_NONE", "CURRENT_PROGRESS_POLICY_VERSION", "CURRENT_PROGRESS_SCHEMA_VERSION",
+            "NO_STATE_LABEL", "NON_ETABLI", "VISIBLE_STAGE_LABELS", "CompetencyCurrentProgress",
+            "VisibleCapabilityProjection"},
+        "core/progress_evidence_selector.py": {"CompetencyCurrentProgress"},
+    }
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
