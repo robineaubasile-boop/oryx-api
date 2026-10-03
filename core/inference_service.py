@@ -291,6 +291,26 @@ Invariants :
   un NOUVEL état depuis ce dossier (start / complete l'exigent active, comme
   l'activation T5-B).
 
+- Lignée historique (get_inference_lineage, Étape 6.4C) : la SEULE
+  histoire officielle d'un état est la chaîne des runs T6 ADOPTÉS reliés
+  par predecessor_inference_run_id, du run demandé jusqu'à la première
+  inférence ; jamais « tous les runs du couple » triés par date
+  (un candidat failed / obsolete, un running ou une branche jamais adoptée
+  n'en font jamais partie). Une requête récursive (UNION : un cycle
+  corrompu termine) suit les liens predecessor ; l'ordre retourné
+  (oldest -> current) vient UNIQUEMENT de ces liens, jamais d'un
+  horodatage. Lecture seule, sans verrou ; fail-closed (InvalidInferenceState,
+  jamais réparé) : run du même couple, completed, current_stage du
+  vocabulaire, predecessors superseded (le run demandé : active ou
+  superseded), aucun cycle, aucun predecessor manquant ; première
+  inférence sans previous_stage, transition ni cause ; sinon previous_stage
+  = current_stage du predecessor, transition = celle dérivée de l'ordre
+  conceptuel, cause persistée du vocabulaire (validée, jamais redécidée).
+  Historique != preuve : aucune claim, tension, ref, observation ni dossier
+  T5 n'est relu ; une décision ancienne reste un fait même si ses preuves
+  ont été invalidées depuis. Le service ne dit jamais si le run demandé est
+  l'état courant : l'appelant le revérifie (get_validated_user_competency_state).
+
 - Anti-N+1 : SELECT groupés (parent, chaîne observations + runs T3 +
   événements en une jointure, chaque famille de relations, memberships,
   predecessor / cache ; contexte historique : parent, vue T5-C, relations,
@@ -911,6 +931,25 @@ class ValidatedCompetencyState:
     active_inference_run_id: uuid.UUID
     longitudinal_assessment_run_id: uuid.UUID
     state_generation: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class HistoricalInferenceRun:
+    """Un run T6 ADOPTÉ de la lignée d'un état (Étape 6.4C) : identité
+    technique (validation des liens) et sorties de stade persistées,
+    telles quelles. Fait historique, jamais une preuve ni un état courant ;
+    ni claim, ni tension, ni contexte de révision, ni horodatage."""
+    inference_run_id: uuid.UUID
+    user_id: str
+    competency_code: str
+
+    predecessor_inference_run_id: uuid.UUID | None
+
+    previous_stage: str | None
+    current_stage: str
+
+    transition: str | None
+    transition_cause: str | None
 
 
 class _Claim(NamedTuple):
@@ -3131,3 +3170,105 @@ def get_validated_user_competency_state(
             longitudinal_assessment_run_id=parent.id,
             state_generation=cache.state_generation,
         )
+
+
+def _lineage_rows(db, run_id: uuid.UUID) -> dict:
+    """{id: ligne} du run demandé et de ses predecessors, en UNE requête
+    récursive suivant predecessor_inference_run_id (UNION : une ligne déjà
+    vue n'est jamais réémise, donc un cycle corrompu termine). Aucun ORDER
+    BY : l'ordre ne vient que des liens."""
+    runs = CompetencyInferenceRun.__table__.c
+    columns = (runs.id, runs.user_id, runs.competency_code, runs.predecessor_inference_run_id,
+               runs.execution_status, runs.interpretation_status, runs.previous_stage, runs.current_stage,
+               runs.transition, runs.transition_cause)
+    lineage = select(*columns).where(runs.id == run_id).cte("lineage", recursive=True)
+    lineage = lineage.union(
+        select(*columns).select_from(
+            CompetencyInferenceRun.__table__.join(lineage, runs.id == lineage.c.predecessor_inference_run_id)))
+    return {row.id: row for row in db.execute(select(lineage)).all()}
+
+
+def get_inference_lineage(
+    db,
+    *,
+    run_id: uuid.UUID,
+) -> tuple[HistoricalInferenceRun, ...]:
+    """Lignée ADOPTÉE du run demandé, oldest -> current : la chaîne
+    predecessor_inference_run_id jusqu'à la première inférence, et rien
+    d'autre (ni candidat, ni failed / obsolete, ni branche). Ordre défini
+    UNIQUEMENT par les liens predecessor, jamais par un horodatage.
+
+    Lecture seule, sans verrou, en une requête ; aucune claim, tension, ref,
+    observation ni dossier T5 relu : un run ancien reste un fait historique,
+    jamais une preuve revalidée. Le run demandé peut être active ou
+    superseded : dire s'il est l'état COURANT appartient à l'appelant
+    (get_validated_user_competency_state).
+
+    Erreurs : InvalidInferenceArgument, InferenceRunNotFound (run demandé
+    absent), InvalidInferenceState (run non completed, autre couple,
+    predecessor non superseded ou manquant, cycle, stade hors vocabulaire,
+    transition ou cause incohérente) ; jamais réparé."""
+    _require_uuid(run_id, "run_id")
+    with db.no_autoflush:
+        rows = _lineage_rows(db, run_id)
+    head = rows.get(run_id)
+    if head is None:
+        raise InferenceRunNotFound(str(run_id))
+    chain, seen, row = [], set(), head
+    while True:
+        if row.id in seen:
+            raise InvalidInferenceState(f"lignée de {run_id} : cycle de predecessors via {row.id}")
+        seen.add(row.id)
+        chain.append(row)
+        if row.predecessor_inference_run_id is None:
+            break
+        predecessor = rows.get(row.predecessor_inference_run_id)
+        if predecessor is None:
+            raise InvalidInferenceState(f"lignée de {run_id} : predecessor {row.predecessor_inference_run_id}"
+                                        f" de {row.id} introuvable")
+        row = predecessor
+    # Vérifiée du run demandé vers la première inférence (le predecessor de
+    # chain[index] est chain[index + 1]), puis retournée oldest -> current.
+    for index, row in enumerate(chain):
+        label = f"lignée de {run_id} : run {row.id}"
+        if (row.user_id, row.competency_code) != (head.user_id, head.competency_code):
+            raise InvalidInferenceState(f"{label} d'un autre couple ({row.user_id}, {row.competency_code})")
+        if row.execution_status != COMPLETED:
+            raise InvalidInferenceState(f"{label} {row.execution_status} ({COMPLETED} requis)")
+        adopted = (ACTIVE, SUPERSEDED) if row is head else (SUPERSEDED,)
+        if row.interpretation_status not in adopted:
+            raise InvalidInferenceState(f"{label} {row.interpretation_status} ({' / '.join(adopted)} attendu)")
+        if row.current_stage not in CURRENT_STAGES:
+            raise InvalidInferenceState(f"{label} : current_stage {row.current_stage!r} hors vocabulaire")
+    for index, row in enumerate(chain):
+        label = f"lignée de {run_id} : run {row.id}"
+        if row.predecessor_inference_run_id is None:
+            if (row.previous_stage, row.transition, row.transition_cause) != (None, None, None):
+                raise InvalidInferenceState(f"{label} : première inférence avec previous_stage / transition /"
+                                            " transition_cause")
+            continue
+        previous = chain[index + 1].current_stage
+        if row.previous_stage != previous:
+            raise InvalidInferenceState(f"{label} : previous_stage {row.previous_stage!r} != current_stage"
+                                        f" {previous!r} de son predecessor")
+        if row.current_stage == previous:
+            expected = MAINTAINED
+        elif _above(row.current_stage, previous):
+            expected = UPGRADED
+        else:
+            expected = REVISED_DOWN
+        if row.transition != expected:
+            raise InvalidInferenceState(f"{label} : transition {row.transition!r} ({expected} dérivée)")
+        if row.transition_cause not in TRANSITION_CAUSES:
+            raise InvalidInferenceState(f"{label} : transition_cause {row.transition_cause!r} hors vocabulaire")
+    chain.reverse()
+    return tuple(HistoricalInferenceRun(
+        inference_run_id=row.id,
+        user_id=row.user_id,
+        competency_code=row.competency_code,
+        predecessor_inference_run_id=row.predecessor_inference_run_id,
+        previous_stage=row.previous_stage,
+        current_stage=row.current_stage,
+        transition=row.transition,
+        transition_cause=row.transition_cause,
+    ) for row in chain)
