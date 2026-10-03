@@ -631,7 +631,11 @@ def test_t4a_tables_are_not_wired_to_the_application():
                "capability_taxonomy_membership", "observation_capabilit")
     # Étape 6.1A : lecteur Step 6 non branché, par les seules lectures T4-B
     # (aucun modèle, aucune table, aucune écriture T4).
-    step6_reads = {"core/adaptation_state.py": ("get_observation_capabilities", "get_release_capabilities")}
+    # Étape 6.4B1 : acquisition des preuves de la carte 6-4A, non branchée,
+    # par la seule lecture des mappings d'une observation positive citée
+    # (jamais la release active globale ; voir tests/test_progress_evidence.py).
+    step6_reads = {"core/adaptation_state.py": ("get_observation_capabilities", "get_release_capabilities"),
+                   "core/progress_evidence.py": ("get_observation_capabilities",)}
     checked = 0
     for rel, source in _application_sources():
         checked += 1
