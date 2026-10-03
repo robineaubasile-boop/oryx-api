@@ -1446,8 +1446,19 @@ def test_not_wired_to_api_web_chat_nor_migrated():
         if rel != "core/adaptation_support.py" and "adaptation_support" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    # Seul consommateur : le classificateur 6-2C2, lui-même non branché.
-    assert users == ["core/adaptation_support_classifier.py"]
+    # Consommateurs : le classificateur 6-2C2 et, Étape 6.3A, le mouvement
+    # pédagogique (préflight et projection 6-2C réutilisés, jamais le
+    # validateur ni le classificateur), eux-mêmes non branchés.
+    assert sorted(users) == ["core/adaptation_movement.py", "core/adaptation_support_classifier.py"]
+    tree = ast.parse((REPO_ROOT / "core" / "adaptation_movement.py").read_text(encoding="utf-8"))
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                and n.module == "core.adaptation_support" for a in n.names}
+    assert imported == {
+        "COMPETENCY_ONLY", "LOCALIZED", "NO_TASK", "RESOLVED", "CurrentFocusTaxonomy", "IncompatibleSupportPlanInputs",
+        "InteractionPostureBaseline", "InteractionSupportPlan", "InteractionTaskProfile", "InvalidSupportPlanArgument",
+        "PedagogicalResponseContext", "PlannedOperationAllocation", "ProjectedCapability", "ProjectedConceptualBridge",
+        "ProjectedSafeAssumption", "RestrictedSupportCatalogue", "SupportPlanError", "UnsupportedSupportPlanVersion",
+        "prepare_support_planning", "project_support_plan"}
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
     for name in ("validate_support_plan_proposal", "prepare_support_planning", "project_support_plan",
                  "InteractionSupportPlan", "SupportGenerationProjection", "SUPPORT_POLICY_VERSION"):
