@@ -814,7 +814,23 @@ def test_not_wired_to_api_runtime_or_any_module_but_its_selector():
         if rel != "core/progress_evidence_selection.py" and "progress_evidence_selection" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    assert users == ["core/progress_evidence_selector.py"]
+    # Étape 6.4B3 : la frontière de rendu et son renderer lisent les seuls
+    # contrats publics de sortie (SelectedProgressEvidence, versions,
+    # MAX_SELECTED_EVIDENCE), jamais la préparation ni le validateur de
+    # sélection ; aucun n'est branché au runtime.
+    assert sorted(users) == ["core/progress_evidence_renderer.py", "core/progress_evidence_rendering.py",
+                             "core/progress_evidence_selector.py"]
+    step6_b3_imports = {
+        "core/progress_evidence_rendering.py": {
+            "MAX_SELECTED_EVIDENCE", "PROGRESS_EVIDENCE_SELECTION_POLICY_VERSION",
+            "PROGRESS_EVIDENCE_SELECTION_SCHEMA_VERSION", "SelectedProgressEvidence"},
+        "core/progress_evidence_renderer.py": {"MAX_SELECTED_EVIDENCE", "SelectedProgressEvidence"},
+    }
+    for rel, names in step6_b3_imports.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "progress_evidence_selection" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.progress_evidence_selection", name) for name in names), rel
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
     for name in ("SelectedProgressEvidence", "prepare_progress_evidence_selection",
                  "validate_progress_evidence_selection_proposal", "select_representative_progress_evidence"):

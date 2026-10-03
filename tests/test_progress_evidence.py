@@ -1370,7 +1370,12 @@ def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
     # Étape 6.4B2 : seuls consommateurs, eux-mêmes non branchés ; ils lisent
     # les contrats publics de 6-4B1, jamais acquire_progress_evidence (voir
     # tests/test_progress_evidence_selection.py et
-    # tests/test_progress_evidence_selector.py).
+    # tests/test_progress_evidence_selector.py). Étape 6.4B3 : la frontière
+    # de rendu lit les mêmes contrats publics, plus les vocabulaires T3
+    # support_level / elicitation_mode tels que 6-4B1 les applique ; son
+    # renderer n'importe rien de 6-4B1 (voir
+    # tests/test_progress_evidence_rendering.py et
+    # tests/test_progress_evidence_renderer.py).
     step6_consumers = {
         "core/progress_evidence_selection.py": {
             "BASIS_DIRECT", "BASIS_INHERITED_FROM_HIGHER_CLAIM", "BASIS_ORIGINS", "EVIDENCE_AVAILABLE",
@@ -1379,6 +1384,12 @@ def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
             "SCOPE_COMPETENCY_ONLY", "SCOPE_LOCALIZED", "SCOPE_MODES", "ProgressEvidenceCandidate",
             "ProgressEvidenceSet"},
         "core/progress_evidence_selector.py": {"ProgressEvidenceSet"},
+        "core/progress_evidence_rendering.py": {
+            "BASIS_DIRECT", "BASIS_INHERITED_FROM_HIGHER_CLAIM", "BASIS_ORIGINS", "ELICITATION_MODES",
+            "EVIDENCE_AVAILABLE", "EVIDENCE_CURRENT_STAGE_NOT_ESTABLISHED", "EVIDENCE_NO_POSITIVE_BASIS",
+            "EVIDENCE_NO_STATE", "EVIDENCE_STATUSES", "SCOPE_COMPETENCY_ONLY", "SCOPE_LOCALIZED", "SCOPE_MODES",
+            "SUPPORT_LEVELS", "ProgressEvidenceCandidate"},
+        "core/progress_evidence_renderer.py": set(),
     }
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
