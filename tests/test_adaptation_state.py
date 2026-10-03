@@ -926,6 +926,9 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     # seuls contrats publics du snapshot (stade, claim courante, catalogue ;
     # jamais load_adaptation_state) ; non branchée :
     # tests/test_progress_projection.py.
+    # Étape 6.4B1 : acquisition des preuves de la carte 6-4A, consommatrice
+    # des seuls contrats publics du snapshot (jamais load_adaptation_state) ;
+    # non branchée : tests/test_progress_evidence.py.
     step6_consumers = {"core/adaptation_assumptions.py": {
         "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
         "CompetencyAdaptationSnapshot"},
@@ -933,7 +936,9 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
         "core/adaptation_context.py": {"COMPETENCY_ORDER"},
         "core/progress_projection.py": {
         "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CapabilitySemanticRef",
-        "CompetencyAdaptationSnapshot"}}
+        "CompetencyAdaptationSnapshot"},
+        "core/progress_evidence.py": {
+        "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "CompetencyAdaptationSnapshot"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))

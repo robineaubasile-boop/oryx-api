@@ -997,6 +997,17 @@ def test_taxonomy_v1_is_unchanged_and_fingerprint_is_frozen():
 
 
 def test_not_wired_to_api_runtime_or_any_other_module():
+    # Étape 6.4B1 : seul consommateur, lui-même non branché ; il ne recopie
+    # aucune règle et exige l'égalité avec project_current_progress(state)
+    # (voir tests/test_progress_evidence.py).
+    step6_consumers = {"core/progress_evidence.py": {
+        "COVERAGE_COMPETENCY_ONLY", "COVERAGE_LOCALIZED", "COVERAGE_MIXED", "CompetencyCurrentProgress",
+        "CurrentProgressProjection", "ProgressProjectionError", "project_current_progress"}}
+    for rel, names in step6_consumers.items():
+        tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                    for a in n.names if "progress_projection" in f"{getattr(n, 'module', '')}.{a.name}"]
+        assert sorted(imported) == sorted(("core.progress_projection", name) for name in names), rel
     users = []
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -1006,7 +1017,7 @@ def test_not_wired_to_api_runtime_or_any_other_module():
         if rel != "core/progress_projection.py" and "progress_projection" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    assert users == []
+    assert sorted(users) == sorted(step6_consumers)
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
     for name in ("project_current_progress", "CurrentProgressProjection", "CompetencyCurrentProgress"):
         assert name not in api, name

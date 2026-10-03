@@ -378,7 +378,10 @@ def test_service_is_not_wired_to_the_application():
     tests l'utilisent) ; api.py ne parle pas de longitudinal."""
     # Étape 6.1A : lecteur Step 6 non branché, par les seules lectures du run
     # T5 parent et de son snapshot (jamais une écriture T5).
-    step6_readers = {"core/adaptation_state.py": {"get_longitudinal_assessment", "get_longitudinal_inputs"}}
+    # Étape 6.4B1 : mêmes lectures, pour vérifier l'appartenance des bases
+    # positives au snapshot T5 consommé (voir tests/test_progress_evidence.py).
+    step6_readers = {"core/adaptation_state.py": {"get_longitudinal_assessment", "get_longitudinal_inputs"},
+                     "core/progress_evidence.py": {"get_longitudinal_assessment", "get_longitudinal_inputs"}}
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()

@@ -600,9 +600,15 @@ def test_service_is_the_only_writer_of_t6_tables():
     allowed = {"core/models.py", f"alembic/versions/{T6A}.py", "core/inference_service.py"}
     # Étape 6.1A : seul lecteur autorisé, et seulement par les lectures
     # rattachées à un run (jamais une écriture, jamais le cache brut).
+    # Étape 6.4B1 : lecteur non branché des refs positive_basis du run
+    # capturé par 6-1A, revalidé avant / après (jamais l'active courante,
+    # jamais les tensions ; voir tests/test_progress_evidence.py).
     step6_readers = {"core/adaptation_state.py": {
         "get_validated_user_competency_state", "get_competency_inference", "get_stage_claims",
-        "get_inference_tensions", "get_inference_basis_refs"}}
+        "get_inference_tensions", "get_inference_basis_refs"},
+        "core/progress_evidence.py": {
+        "get_validated_user_competency_state", "get_competency_inference", "get_stage_claims",
+        "get_inference_basis_refs"}}
     needles = (*(m.__name__ for m in T6A_MODELS), *T6A_TABLES, "inference_service")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
