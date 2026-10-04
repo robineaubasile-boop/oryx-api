@@ -39,6 +39,8 @@ from core.inference_state import T6C2Assessment
 from core.inference_state_policies import (
     COMPETENCY_ONLY_REPRESENTATIVE_BASIS,
     COMPETENCY_ONLY_SCOPE,
+    CONFIDENCE_DIMENSIONS,
+    CONFIDENCE_PROFILE_SCHEMA_V2,
     CONFIDENCE_PROFILE_V1,
     DIMENSION_FACT_CODES,
     INDEPENDENCE_EVIDENCE_PRESENT,
@@ -57,6 +59,11 @@ VALIDATION_V1 = "validation-1"
 INFERENCE_SCHEMA_V1 = "inference_schema-1"
 EVALUATOR_V1 = "evaluator-1"
 VALIDATION_NEED_SCHEMA_VERSION = "validation-need-v1"
+# confidence-profile-v2 (format sérialisé, voir check_confidence_profile_v2) :
+# une dimension = ses faits et ses limitations ; un fait = son code et SES
+# capacités. Aucune autre clé (ni fact_codes, ni capacités agrégées).
+CONFIDENCE_PROFILE_V2_DIMENSION_KEYS = ("facts", "limitations")
+CONFIDENCE_PROFILE_V2_FACT_KEYS = ("code", "capability_definition_ids")
 
 
 class FinalInferenceError(Exception):
@@ -90,6 +97,11 @@ class UnattributableTransitionCause(FinalInferenceError):
 class UnresolvableCapabilityMembership(FinalInferenceError):
     """capability_definition_id absent (ou en double) de la taxonomie
     courante : jamais de correspondance par capability_code."""
+
+
+class InvalidConfidenceProfilePayload(FinalInferenceError):
+    """Profil de confiance sérialisé hors du format confidence-profile-v2
+    (clé, code, ordre, capacité) : jamais réparé ni converti."""
 
 
 class InvalidValidationNeedScope(FinalInferenceError):
@@ -399,3 +411,73 @@ def check_validation_scope(scope_mode, capability_definition_ids, taxonomy) -> N
                                          f" {'requis' if scope_mode == LOCALIZED else 'interdits'}")
     if scope_mode == LOCALIZED:
         current_membership_ids(capability_definition_ids, taxonomy)
+
+
+# --------------------------------------------------------------------------
+# Format sérialisé du profil de confiance (confidence-profile-v2)
+# --------------------------------------------------------------------------
+
+def _json_array(value) -> bool:
+    return isinstance(value, (list, tuple))
+
+
+def check_confidence_profile_v2(profile, definition_ids) -> None:
+    """Vérifie STRICTEMENT un profil confidence-profile-v2 (fonction pure,
+    unique définition du format, partagée par l'écriture T6-C3 et la lecture
+    6-1A). definition_ids : capability_definition_id SÉRIALISÉS (str
+    canonique) de la taxonomie courante de la compétence, dans son ordre
+    naturel.
+
+        {"schema_version": "confidence-profile-v2",
+         <dimension>: {"facts": [{"code": <code>,
+                                  "capability_definition_ids": [<id>, ...]}, ...],
+                       "limitations": [<code>, ...]}, ...}
+
+    Exactement les cinq dimensions ; chaque fait : code du vocabulaire de SA
+    dimension, au plus une fois, dans l'ordre de DIMENSION_FACT_CODES ; SES
+    capacités telles que produites par ConfidenceFact : chacune présente
+    EXACTEMENT dans definition_ids (identité, jamais capability_code), sans
+    doublon, dans l'ordre de la taxonomie ; limitations : codes str non vides
+    et distincts. Aucune autre clé (ni fact_codes ni capacités agrégées, ni
+    observation, relation, score ou compteur). Sinon
+    InvalidConfidenceProfilePayload."""
+    if not isinstance(profile, Mapping) or set(profile) != {"schema_version", *CONFIDENCE_DIMENSIONS}:
+        raise InvalidConfidenceProfilePayload("schema_version + cinq dimensions exactement attendues")
+    if type(profile["schema_version"]) is not str or profile["schema_version"] != CONFIDENCE_PROFILE_SCHEMA_V2:
+        raise InvalidConfidenceProfilePayload(f"schema_version {profile['schema_version']!r} :"
+                                              f" {CONFIDENCE_PROFILE_SCHEMA_V2} attendu")
+    position = {definition_id: index for index, definition_id in enumerate(definition_ids)}
+    for name in CONFIDENCE_DIMENSIONS:
+        dimension, declared = profile[name], DIMENSION_FACT_CODES[name]
+        if not isinstance(dimension, Mapping) or set(dimension) != set(CONFIDENCE_PROFILE_V2_DIMENSION_KEYS):
+            raise InvalidConfidenceProfilePayload(f"{name} : clés {sorted(CONFIDENCE_PROFILE_V2_DIMENSION_KEYS)}"
+                                                  " exactement attendues")
+        facts, limitations = dimension["facts"], dimension["limitations"]
+        if not _json_array(facts) or not _json_array(limitations):
+            raise InvalidConfidenceProfilePayload(f"{name} : facts et limitations doivent être des tableaux")
+        if any(type(code) is not str or not code for code in limitations) or \
+                list(dict.fromkeys(limitations)) != list(limitations):
+            raise InvalidConfidenceProfilePayload(f"{name} : limitations = codes str non vides et distincts")
+        codes = []
+        for fact in facts:
+            if not isinstance(fact, Mapping) or set(fact) != set(CONFIDENCE_PROFILE_V2_FACT_KEYS):
+                raise InvalidConfidenceProfilePayload(f"{name} : fait = clés {sorted(CONFIDENCE_PROFILE_V2_FACT_KEYS)}"
+                                                      " exactement")
+            code, ids = fact["code"], fact["capability_definition_ids"]
+            if type(code) is not str or code not in declared:
+                raise InvalidConfidenceProfilePayload(f"{name} : code {code!r} hors du vocabulaire de la dimension")
+            if code in codes:
+                raise InvalidConfidenceProfilePayload(f"{name} : fait {code} en double")
+            codes.append(code)
+            if not _json_array(ids):
+                raise InvalidConfidenceProfilePayload(f"{name}.{code} : capability_definition_ids tableau attendu")
+            unknown = [i for i in ids if type(i) is not str or i not in position]
+            if unknown:
+                raise InvalidConfidenceProfilePayload(f"{name}.{code} : capability_definition_ids {unknown!r} absents"
+                                                      " de la taxonomie courante (aucune correspondance par code)")
+            if list(dict.fromkeys(ids)) != list(ids):
+                raise InvalidConfidenceProfilePayload(f"{name}.{code} : capability_definition_id en double")
+            if sorted(ids, key=position.__getitem__) != list(ids):
+                raise InvalidConfidenceProfilePayload(f"{name}.{code} : capacités hors de l'ordre de la taxonomie")
+        if codes != sorted(codes, key=declared.index):
+            raise InvalidConfidenceProfilePayload(f"{name} : faits hors de l'ordre canonique {declared}")

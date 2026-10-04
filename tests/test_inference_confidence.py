@@ -108,7 +108,9 @@ def test_every_established_claim_has_exactly_five_separate_dimensions():
             assert (prof is not None) == (claim.status == "established"), claim.stage
             if prof is None:
                 continue
-            assert prof.schema_version == "confidence-profile-v1" and prof.stage == claim.stage
+            # Format courant du profil (confidence-profile-v2) : seule
+            # l'étiquette change, les faits T6-C2 restent identiques.
+            assert prof.schema_version == "confidence-profile-v2" and prof.stage == claim.stage
             for name in CONFIDENCE_DIMENSIONS:
                 dimension = getattr(prof, name)
                 assert dimension.dimension == name

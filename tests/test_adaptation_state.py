@@ -74,9 +74,24 @@ def thaw(value):
 
 
 def profile(*definition_ids, facts=("single_representative_episode",)):
-    """confidence-profile-v1 tel que persisté par T6-C3."""
+    """confidence-profile-v1 (format HISTORIQUE) tel que persisté par T6-C3
+    avant confidence-profile-v2 : capacités agrégées par dimension."""
     return {"schema_version": "confidence-profile-v1", **{
         name: {"fact_codes": list(facts), "capability_definition_ids": [str(d) for d in definition_ids],
+               "limitations": []} for name in DIMENSIONS}}
+
+
+V2_DEFAULT_FACTS = {"diagnosticity": "direct_representative_basis", "coverage": "coverage_concentrated_on_claim_scope",
+                    "independence": "single_episode_only", "consistency": "no_observed_current_tension",
+                    "temporal_validation": "single_episode_only"}
+
+
+def profile_v2(**facts):
+    """confidence-profile-v2 tel que persisté par T6-C3 : facts[dimension] =
+    [(code, definition_ids), ...] ; un fait par défaut sans capacité."""
+    return {"schema_version": "confidence-profile-v2", **{
+        name: {"facts": [{"code": code, "capability_definition_ids": [str(d) for d in ids]}
+                         for code, ids in facts.get(name, [(V2_DEFAULT_FACTS[name], ())])],
                "limitations": []} for name in DIMENSIONS}}
 
 
@@ -463,9 +478,87 @@ def test_confidence_profile_format_fails_closed(tamper):
     elif tamper == "score":
         stored["confidence_score"] = 0.8
     elif tamper == "schema":
-        stored["schema_version"] = "confidence-profile-v2"
+        stored["schema_version"] = "confidence-profile-v3"
     else:
         stored["coverage"] = "low"
+    with pytest.raises(InvalidAdaptationState):
+        w.project()
+
+
+def test_historical_v1_profile_stays_readable_without_any_per_fact_attribution():
+    """v1 historique : contrat inchangé, IDs agrégés par dimension copiés
+    tels quels ; 6-1A ne prétend jamais savoir quel fait porte quelle
+    capacité (aucune attribution reconstruite, aucune clé facts)."""
+    w = application_world()
+    stored = profile(w.d("A"), w.d("B"), w.d("C"), w.d("D"),
+                     facts=("localized_representative_scope", "unobserved_capabilities_present"))
+    w.claims["application"][2] = stored
+    coverage = w.claim("application").confidence_profile["coverage"]
+    assert thaw(w.claim("application").confidence_profile) == stored
+    assert coverage["fact_codes"] == ("localized_representative_scope", "unobserved_capabilities_present")
+    assert coverage["capability_definition_ids"] == tuple(str(w.d(x)) for x in "ABCD")
+    assert "facts" not in coverage
+
+
+def _c8_coverage(w, unobserved=("D",)):
+    return [("localized_representative_scope", [w.d(x) for x in "ABC"]),
+            ("coverage_concentrated_on_claim_scope", [w.d(x) for x in "ABC"]),
+            ("unobserved_capabilities_present", [w.d(x) for x in unobserved])]
+
+
+def test_v2_profile_is_accepted_with_the_exact_capabilities_of_each_fact():
+    w = application_world()
+    stored = profile_v2(coverage=_c8_coverage(w))
+    w.claims["application"][2] = stored
+    snapshot = w.project()
+    claim = w.claim("application", snapshot)
+    assert thaw(claim.confidence_profile) == stored
+    coverage = claim.confidence_profile["coverage"]
+    assert set(coverage) == {"facts", "limitations"}
+    (unobserved,) = [f for f in coverage["facts"] if f["code"] == "unobserved_capabilities_present"]
+    assert unobserved["capability_definition_ids"] == (str(w.d("D")),)
+    known = {c.definition_id: c.capability_code for c in snapshot.capabilities}
+    assert [known[uuid.UUID(i)] for i in unobserved["capability_definition_ids"]] == ["C8_D"]
+    with pytest.raises(TypeError):
+        coverage["facts"][0]["code"] = "x"
+    assert isinstance(coverage["facts"], tuple)
+
+
+def test_v2_profile_is_a_defensive_immutable_copy():
+    w = application_world()
+    w.claims["application"][2] = profile_v2(coverage=_c8_coverage(w))
+    acquired = w.acquired()
+    snapshot = w.project(acquired)
+    acquired.claims[2].confidence_profile["coverage"]["facts"][2]["capability_definition_ids"].append("mutated")
+    coverage = w.claim("application", snapshot).confidence_profile["coverage"]
+    assert coverage["facts"][2]["capability_definition_ids"] == (str(w.d("D")),)
+
+
+V2_STATE_TAMPERS = {
+    "id hors compétence": lambda w, p: p["coverage"]["facts"][2].update(capability_definition_ids=[str(uid("d-C9_A"))]),
+    "id inconnu": lambda w, p: p["coverage"]["facts"][2].update(capability_definition_ids=[str(uid("d-C8_D-r2"))]),
+    "id non canonique": lambda w, p: p["coverage"]["facts"][2].update(
+        capability_definition_ids=[str(w.d("D")).upper()]),
+    "ids en double": lambda w, p: p["coverage"]["facts"][2]["capability_definition_ids"].append(str(w.d("D"))),
+    "ids désordonnés": lambda w, p: p["coverage"]["facts"][0]["capability_definition_ids"].reverse(),
+    "code en double": lambda w, p: p["coverage"]["facts"].append(dict(p["coverage"]["facts"][2])),
+    "faits désordonnés": lambda w, p: p["coverage"]["facts"].reverse(),
+    "code hors dimension": lambda w, p: p["coverage"]["facts"][0].update(code="single_episode_only"),
+    "clé inconnue": lambda w, p: p["coverage"]["facts"][0].update(observation_ids=[]),
+    "fact_codes redondant": lambda w, p: p["coverage"].update(fact_codes=[]),
+    "agrégat redondant": lambda w, p: p["coverage"].update(capability_definition_ids=[]),
+    "forme v1 sous étiquette v2": lambda w, p: p.update(profile(w.d("A")), schema_version="confidence-profile-v2"),
+    "schéma inconnu": lambda w, p: p.update(schema_version="confidence-profile-v3"),
+    "schéma non str": lambda w, p: p.update(schema_version=["confidence-profile-v2"]),
+}
+
+
+@pytest.mark.parametrize("label", list(V2_STATE_TAMPERS))
+def test_v2_profile_format_fails_closed(label):
+    w = application_world()
+    stored = profile_v2(coverage=_c8_coverage(w))
+    V2_STATE_TAMPERS[label](w, stored)
+    w.claims["application"][2] = stored
     with pytest.raises(InvalidAdaptationState):
         w.project()
 
@@ -1046,6 +1139,62 @@ def test_pg_end_to_end_first_inference_snapshot(Sessions, engine):  # noqa: F811
     assert c7.validation_needs == tuple(_need(n, d) for n in decision.validation_needs)
     assert c7.validation_needs  # confirmation latente de T6-C3, jamais une question
     assert _load(Sessions) == snapshot  # même état -> même snapshot
+
+
+def _historical_v1(context, decision):
+    """Décision telle que l'écrivait l'ANCIEN sérialiseur T6-C3 (main
+    e9fd90a, confidence-profile-v1 : fact_codes + capacités agrégées par
+    dimension) : simule un run T6 historique déjà persisté."""
+    from core.inference_engine import _limitation_codes
+    from core.inference_positive_basis import evaluate_positive_basis
+    from core.inference_state import evaluate_inference_state
+
+    state = evaluate_inference_state(context, evaluate_positive_basis(context))
+    return dataclasses.replace(decision, claims=tuple(dataclasses.replace(claim, confidence_profile=None if p is None else {
+        "schema_version": "confidence-profile-v1", **{name: {
+            "fact_codes": list(getattr(p, name).fact_codes),
+            "capability_definition_ids": [str(i) for i in getattr(p, name).capability_definition_ids],
+            "limitations": _limitation_codes(getattr(p, name).limitations)} for name in DIMENSIONS}})
+        for claim, p in zip(decision.claims, state.confidence_profiles)))
+
+
+def test_pg_historical_v1_run_stays_readable_and_verifiable_next_to_a_new_v2_run(Sessions, engine):  # noqa: F811
+    """Run T6 historique persisté en v1 : relu par 6-1A tel quel (aucune
+    attribution par fait), jamais réécrit ; son output_fingerprint reste
+    reproductible depuis son JSON v1 stocké (vérifié par start du run
+    suivant) ; le run suivant est écrit en v2, IDs exacts par fait."""
+    p = Pipeline(Sessions)
+    d = _definitions(p)
+    p.t3(p.app("C7_A", "C7_B", "C7_C", evidence_strength="strong"))
+    first, legacy = p.infer(rewrite=_historical_v1)
+    with Sessions() as session:
+        stored = [c.confidence_profile for c in svc.get_stage_claims(session, run_id=first.run_id)]
+        fingerprint = svc.get_competency_inference(session, run_id=first.run_id).output_fingerprint
+    assert stored == [c.confidence_profile for c in legacy.claims]
+    assert stored[2]["schema_version"] == "confidence-profile-v1"
+    assert "unobserved_capabilities_present" in stored[2]["coverage"]["fact_codes"]
+
+    (c7,) = _load(Sessions).competencies
+    coverage = c7.claims[2].confidence_profile["coverage"]
+    assert thaw(c7.claims[2].confidence_profile) == stored[2] and "facts" not in coverage
+    assert str(d["C7_D"]) in coverage["capability_definition_ids"]  # agrégé : aucune attribution par fait
+
+    p.t3(p.app("C7_A", "C7_C", evidence_strength="strong"))
+    second, decision = p.infer()  # start recalcule l'output_fingerprint v1 du predecessor depuis son JSON
+    assert second.predecessor.inference_run_id == first.run_id
+    assert second.predecessor.output_fingerprint == fingerprint
+    assert thaw(second.predecessor_decision_context.claims[2].confidence_profile) == stored[2]
+    with Sessions() as session:
+        assert [c.confidence_profile for c in svc.get_stage_claims(session, run_id=first.run_id)] == stored
+        assert svc.get_competency_inference(session, run_id=first.run_id).output_fingerprint == fingerprint
+
+    (c7,) = _load(Sessions).competencies
+    assert c7.active_inference_run_id == second.run_id
+    assert thaw(c7.claims[2].confidence_profile) == decision.claims[2].confidence_profile
+    facts = c7.claims[2].confidence_profile["coverage"]["facts"]
+    assert c7.claims[2].confidence_profile["schema_version"] == "confidence-profile-v2"
+    (unobserved,) = [f for f in facts if f["code"] == "unobserved_capabilities_present"]
+    assert unobserved["capability_definition_ids"] == (str(d["C7_D"]),)
 
 
 def test_pg_absent_competency_is_never_non_etabli_and_real_non_etabli_is_present(Sessions):  # noqa: F811

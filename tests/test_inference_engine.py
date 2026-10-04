@@ -21,22 +21,28 @@ import uuid
 import pytest
 
 from core import inference_service as svc
+from core.inference_confidence import ConfidenceFact
 from core.inference_engine import (
     _FORBIDDEN_PAYLOAD_KEYS,
     _guard,
     _membership_ids,
+    _profile_payload,
     infer_competency,
 )
 from core.inference_final_policies import (
+    CONFIDENCE_PROFILE_V2_DIMENSION_KEYS,
+    CONFIDENCE_PROFILE_V2_FACT_KEYS,
     FINAL_INFERENCE_POLICIES,
     ConfirmationMotifRule,
     FINAL_INFERENCE_V1_POLICY,
     FinalInferenceError,
     FinalInferencePolicyResolver,
     InvalidAssembledDecision,
+    InvalidConfidenceProfilePayload,
     InvalidFinalInferencePolicy,
     UnresolvableCapabilityMembership,
     UnsupportedFinalInferencePolicy,
+    check_confidence_profile_v2,
     resolve_final_inference_policy,
     validate_final_inference_policy,
 )
@@ -45,7 +51,13 @@ from core.inference_positive_basis import evaluate_positive_basis
 from core.inference_service import BasisRefDecision, CurrentTaxonomyCapability, TensionDecision
 from core.inference_state import evaluate_inference_state
 from core.inference_state_policies import (
+    CONFIDENCE_PROFILE_SCHEMA_V1,
+    CONFIDENCE_PROFILE_SCHEMA_V2,
+    CONFIDENCE_PROFILE_SCHEMA_VERSION,
+    CONFIDENCE_PROFILE_V1,
     DIMENSION_FACT_CODES,
+    READABLE_CONFIDENCE_PROFILE_SCHEMA_VERSIONS,
+    UNOBSERVED_CAPABILITIES_PRESENT,
     UnsupportedConfidenceProfilePolicy,
     UnsupportedStateDecisionPolicy,
 )
@@ -120,7 +132,8 @@ def test_single_public_entry_point():
         "inference_validation.py": {"evaluate_validation_needs", "tension_revision_status"},
         "inference_final_policies.py": {"validate_final_inference_policy", "resolve_final_inference_policy",
                                         "check_inference_assessments", "current_capabilities",
-                                        "current_membership_ids", "check_validation_scope"},
+                                        "current_membership_ids", "check_validation_scope",
+                                        "check_confidence_profile_v2"},
     }
 
 
@@ -335,20 +348,206 @@ def test_transition_and_validation_refs_are_run_level():
 
 
 def test_confidence_json_is_the_qualitative_reading_only():
-    """45."""
+    """45 : confidence-profile-v2, chaque fait T6-C2 tel quel."""
     d, k = _tensioned()
-    decision = infer_competency(d.context())
+    context = d.context()
+    state = evaluate_inference_state(context, evaluate_positive_basis(context))
+    decision = infer_competency(context)
     observation_ids = {str(o.observation_id) for o in d.observations}
-    for claim in decision.claims[:3]:
+    for claim, assessed in zip(decision.claims[:3], state.confidence_profiles[:3]):
         profile = claim.confidence_profile
         assert list(profile) == ["schema_version", *DIMENSIONS]
-        assert profile["schema_version"] == "confidence-profile-v1"
+        assert profile["schema_version"] == "confidence-profile-v2"
         for name in DIMENSIONS:
-            assert list(profile[name]) == ["fact_codes", "capability_definition_ids", "limitations"]
-            assert set(profile[name]["fact_codes"]) <= set(DIMENSION_FACT_CODES[name])
-            assert all(isinstance(v, str) for v in (*profile[name]["fact_codes"], *profile[name]["limitations"]))
+            assert list(profile[name]) == ["facts", "limitations"]
+            facts = getattr(assessed, name).facts
+            assert profile[name]["facts"] == [{"code": f.code, "capability_definition_ids": [
+                str(i) for i in f.capability_definition_ids]} for f in facts]
+            assert all(list(fact) == ["code", "capability_definition_ids"] for fact in profile[name]["facts"])
+            assert {f["code"] for f in profile[name]["facts"]} <= set(DIMENSION_FACT_CODES[name])
+            assert all(isinstance(v, str) for v in profile[name]["limitations"])
         assert not any(i in repr(profile) for i in observation_ids)
     assert decision.claims[3].confidence_profile is None
+
+
+# --------------------------------------------------------------------------
+# confidence-profile-v2 : provenance par fait (format sérialisé, policy et
+# six versions de spécification inchangées)
+# --------------------------------------------------------------------------
+
+C7 = {letter: str(definition_id(f"C7_{letter}")) for letter in "ABCD"}
+
+
+def _c7_spread():
+    """Application C7_A/C7_B, C7_C observée seulement en Comprehension,
+    C7_D jamais observée positivement."""
+    d = Dossier("C7")
+    d.observe("e1", "C7_A", "C7_B", name="a")
+    d.observe("e2", "C7_C", stage="comprehension", name="c")
+    return d
+
+
+def _facts(profile, name):
+    return [(f["code"], f["capability_definition_ids"]) for f in profile[name]["facts"]]
+
+
+def test_profile_v2_constants_and_versions_are_explicit():
+    assert (CONFIDENCE_PROFILE_SCHEMA_V1, CONFIDENCE_PROFILE_SCHEMA_V2) == ("confidence-profile-v1",
+                                                                           "confidence-profile-v2")
+    assert CONFIDENCE_PROFILE_SCHEMA_VERSION == CONFIDENCE_PROFILE_SCHEMA_V2
+    assert READABLE_CONFIDENCE_PROFILE_SCHEMA_VERSIONS == (CONFIDENCE_PROFILE_SCHEMA_V1, CONFIDENCE_PROFILE_SCHEMA_V2)
+    assert (CONFIDENCE_PROFILE_V2_DIMENSION_KEYS, CONFIDENCE_PROFILE_V2_FACT_KEYS) == (
+        ("facts", "limitations"), ("code", "capability_definition_ids"))
+    # Format sérialisé seulement : policy pédagogique et six versions de
+    # spécification T6 inchangées (aucune réinterprétation pédagogique).
+    assert CONFIDENCE_PROFILE_V1 == "confidence_profile-1"
+    assert list(FINAL_INFERENCE_POLICIES) == [("positive_basis-1", "confidence_profile-1", "state_decision-1",
+                                               "validation-1", "inference_schema-1", "evaluator-1")]
+    assert T6_VERSIONS == {"positive_basis_version": "positive_basis-1",
+                           "confidence_profile_version": "confidence_profile-1",
+                           "state_decision_version": "state_decision-1", "validation_version": "validation-1",
+                           "inference_schema_version": "inference_schema-1", "evaluator_version": "evaluator-1"}
+
+
+def test_profile_v2_keeps_each_fact_with_exactly_its_own_capabilities():
+    """A + B : plusieurs faits de coverage aux capacités différentes ;
+    unobserved_capabilities_present porte EXACTEMENT C7_D."""
+    context = _c7_spread().context()
+    state = evaluate_inference_state(context, evaluate_positive_basis(context))
+    decision = infer_competency(context)
+    application = decision.claims[2].confidence_profile
+    assert (decision.current_stage, decision.claims[2].stage) == ("application", "application")
+    assert _facts(application, "coverage") == [
+        ("localized_representative_scope", [C7["A"], C7["B"]]),
+        ("additional_positive_scope_present", [C7["C"]]),
+        (UNOBSERVED_CAPABILITIES_PRESENT, [C7["D"]])]
+    (unobserved,) = [f for f in application["coverage"]["facts"] if f["code"] == UNOBSERVED_CAPABILITIES_PRESENT]
+    assert unobserved["capability_definition_ids"] == [C7["D"]]
+    # Source exacte : ConfidenceFact de T6-C2, fait par fait, aucune union.
+    for claim, assessed in zip(decision.claims, state.confidence_profiles):
+        if assessed is None:
+            continue
+        for name in DIMENSIONS:
+            assert _facts(claim.confidence_profile, name) == [
+                (f.code, [str(i) for i in f.capability_definition_ids]) for f in getattr(assessed, name).facts]
+
+
+def test_profile_v2_has_no_dimension_aggregate_and_no_redundant_fact_codes():
+    """C + D : une seule représentation canonique."""
+    decision = infer_competency(_c7_spread().context())
+    for claim in decision.claims[:3]:
+        for name in DIMENSIONS:
+            dimension = claim.confidence_profile[name]
+            assert set(dimension) == {"facts", "limitations"}
+            assert "fact_codes" not in dimension and "capability_definition_ids" not in dimension
+
+
+def test_profile_v2_serialization_fails_closed_on_inconsistent_facts():
+    context = _c7_spread().context()
+    state = evaluate_inference_state(context, evaluate_positive_basis(context))
+    taxonomy, profile = context.current_taxonomy_context, state.confidence_profiles[2]
+    assert _profile_payload(profile, taxonomy) == infer_competency(context).claims[2].confidence_profile
+    coverage = profile.coverage
+    outside = ConfidenceFact(code=UNOBSERVED_CAPABILITIES_PRESENT, capability_definition_ids=(definition_id("C8_A"),))
+    duplicated = ConfidenceFact(code=UNOBSERVED_CAPABILITIES_PRESENT,
+                                capability_definition_ids=(definition_id("C7_D"), definition_id("C7_D")))
+    reordered = ConfidenceFact(code="localized_representative_scope",
+                               capability_definition_ids=(definition_id("C7_B"), definition_id("C7_A")))
+    serialized = ConfidenceFact(code=UNOBSERVED_CAPABILITIES_PRESENT, capability_definition_ids=(C7["D"],))
+    broken = {
+        "autre schéma": dataclasses.replace(profile, schema_version="confidence-profile-v1"),
+        "fact_codes incohérents": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, fact_codes=coverage.fact_codes[:-1])),
+        "capacité hors taxonomie": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=(*coverage.facts[:-1], outside))),
+        "identifiant déjà sérialisé": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=(*coverage.facts[:-1], serialized))),
+        "capacité en double": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=(*coverage.facts[:-1], duplicated))),
+        "capacités désordonnées": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=(reordered, *coverage.facts[1:]))),
+        "faits désordonnés": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=tuple(reversed(coverage.facts)), fact_codes=tuple(reversed(coverage.fact_codes)))),
+        "code hors dimension": dataclasses.replace(profile, coverage=dataclasses.replace(
+            coverage, facts=(*coverage.facts[:-1], ConfidenceFact(code="single_episode_only")),
+            fact_codes=(*coverage.fact_codes[:-1], "single_episode_only"))),
+        "dimension permutée": dataclasses.replace(profile, coverage=profile.independence),
+    }
+    for label, value in broken.items():
+        with pytest.raises(InvalidAssembledDecision):
+            _profile_payload(value, taxonomy)
+            pytest.fail(label)
+
+
+def _v2_payload():
+    context = _c7_spread().context()
+    ids = tuple(str(c.definition_id) for c in context.current_taxonomy_context.capabilities)
+    return ids, infer_competency(context).claims[2].confidence_profile
+
+
+def _tampered(payload, change):
+    copy = {key: value if key == "schema_version" else {
+        "facts": [dict(fact, capability_definition_ids=list(fact["capability_definition_ids"]))
+                  for fact in value["facts"]], "limitations": list(value["limitations"])}
+        for key, value in payload.items()}
+    change(copy)
+    return copy
+
+
+V2_TAMPERS = {
+    "E code hors de la dimension": lambda p: p["coverage"]["facts"].append(
+        {"code": "single_episode_only", "capability_definition_ids": []}),
+    "E code inconnu": lambda p: p["coverage"]["facts"][0].update(code="unknown_fact"),
+    "F code dupliqué": lambda p: p["coverage"]["facts"].append(dict(p["coverage"]["facts"][-1])),
+    "G IDs dupliqués": lambda p: p["coverage"]["facts"][0]["capability_definition_ids"].append(C7["B"]),
+    "H ID hors taxonomie": lambda p: p["coverage"]["facts"][-1].update(
+        capability_definition_ids=[str(definition_id("C8_A"))]),
+    "H ID non canonique": lambda p: p["coverage"]["facts"][-1].update(capability_definition_ids=[C7["D"].upper()]),
+    "H ID non str": lambda p: p["coverage"]["facts"][-1].update(capability_definition_ids=[definition_id("C7_D")]),
+    "H même code autre révision": lambda p: p["coverage"]["facts"][-1].update(
+        capability_definition_ids=[str(definition_id("C7_D", 2))]),
+    "I faits désordonnés": lambda p: p["coverage"]["facts"].reverse(),
+    "J capacités désordonnées": lambda p: p["coverage"]["facts"][0]["capability_definition_ids"].reverse(),
+    "K clé inconnue (dimension)": lambda p: p["coverage"].update(note="x"),
+    "K clé inconnue (fait)": lambda p: p["coverage"]["facts"][0].update(note="x"),
+    "K clé inconnue (racine)": lambda p: p.update(note="x"),
+    "K dimension manquante": lambda p: p.pop("temporal_validation"),
+    "K fact_codes redondant": lambda p: p["coverage"].update(fact_codes=["localized_representative_scope"]),
+    "K capacités agrégées": lambda p: p["coverage"].update(capability_definition_ids=[C7["A"]]),
+    "L observation_ids injectés": lambda p: p["coverage"]["facts"][0].update(observation_ids=[C7["A"]]),
+    "L structural_refs injectés": lambda p: p["independence"].update(structural_refs=[]),
+    "schéma v1": lambda p: p.update(schema_version="confidence-profile-v1"),
+    "schéma inconnu": lambda p: p.update(schema_version="confidence-profile-v3"),
+    "facts non tableau": lambda p: p["coverage"].update(facts={"code": "x"}),
+    "IDs non tableau": lambda p: p["coverage"]["facts"][0].update(capability_definition_ids=C7["A"]),
+    "limitation en double": lambda p: p["coverage"].update(limitations=["x", "x"]),
+    "limitation vide": lambda p: p["coverage"].update(limitations=[""]),
+}
+
+
+def test_check_confidence_profile_v2_accepts_the_engine_payload():
+    ids, payload = _v2_payload()
+    check_confidence_profile_v2(payload, ids)
+    check_confidence_profile_v2(_tampered(payload, lambda p: None), ids)
+    assert issubclass(InvalidConfidenceProfilePayload, FinalInferenceError)
+
+
+@pytest.mark.parametrize("label", list(V2_TAMPERS))
+def test_check_confidence_profile_v2_fails_closed(label):
+    """E-L : code, unicité, ordre, identité exacte des capacités, clés."""
+    ids, payload = _v2_payload()
+    with pytest.raises(InvalidConfidenceProfilePayload):
+        check_confidence_profile_v2(_tampered(payload, V2_TAMPERS[label]), ids)
+
+
+def test_check_confidence_profile_v2_resolves_only_by_definition_identity():
+    """Même capability_code, autre definition_id : jamais remappé."""
+    ids, payload = _v2_payload()
+    other_release = tuple(str(definition_id(f"C7_{letter}", 2)) for letter in "ABCD")
+    with pytest.raises(InvalidConfidenceProfilePayload):
+        check_confidence_profile_v2(payload, other_release)
+    with pytest.raises(InvalidConfidenceProfilePayload, match="ordre"):
+        check_confidence_profile_v2(payload, tuple(reversed(ids)))
 
 
 def test_revision_context_is_exactly_the_t6c2_payload():
@@ -471,6 +670,20 @@ def _mutations(decision):
         r for r in decision.basis_refs if r.ref_role != "validation"))
     yield "score", dataclasses.replace(decision, claims=(dataclasses.replace(
         claims[0], confidence_profile={**claims[0].confidence_profile, "score": "3"}), *claims[1:]))
+    profile = claims[2].confidence_profile
+    v1 = {"schema_version": "confidence-profile-v1", **{name: {
+        "fact_codes": [f["code"] for f in profile[name]["facts"]],
+        "capability_definition_ids": sorted({i for f in profile[name]["facts"] for i in f["capability_definition_ids"]}),
+        "limitations": profile[name]["limitations"]} for name in DIMENSIONS}}
+    yield "profil v1 écrit", dataclasses.replace(decision, claims=(
+        *claims[:2], dataclasses.replace(claims[2], confidence_profile=v1), claims[3]))
+    yield "fact_codes redondant", dataclasses.replace(decision, claims=(*claims[:2], dataclasses.replace(
+        claims[2], confidence_profile={**profile, "coverage": {**profile["coverage"], "fact_codes": []}}), claims[3]))
+    facts = profile["coverage"]["facts"]
+    moved = [dict(facts[0], capability_definition_ids=[]), *facts[1:]]
+    yield "capacités retirées d'un fait (format valide)", dataclasses.replace(decision, claims=(
+        *claims[:2], dataclasses.replace(claims[2], confidence_profile={
+            **profile, "coverage": {**profile["coverage"], "facts": moved}}), claims[3]))
     yield "localized sans membership", dataclasses.replace(decision, tensions=(
         dataclasses.replace(tension, capability_membership_ids=()),))
     yield "membership inventé", dataclasses.replace(decision, tensions=(
@@ -661,9 +874,12 @@ class Pipeline:
         from tests.test_longitudinal_service import contra
         return contra(*(self.m[c] for c in codes), **overrides)
 
-    def infer(self, relations=None):
+    def infer(self, relations=None, *, rewrite=None):
         """relations(session, t5_run_id) : relations T5 ajoutées au run T5
-        candidat avant sa complétion (même snapshot d'observations)."""
+        candidat avant sa complétion (même snapshot d'observations).
+        rewrite(context, decision) : décision réellement complétée (tests de
+        compatibilité historique seulement, ex. un run persisté en
+        confidence-profile-v1 par l'ancien sérialiseur)."""
         from core import longitudinal_service as t5
         from tests.test_longitudinal_service import _start as start_t5
         parent = start_t5(self.Sessions, self.release_id)
@@ -682,6 +898,8 @@ class Pipeline:
             assert svc.get_inference_context(session, run_id=context.run_id) == context
         decision = infer_competency(context)
         assert decision == infer_competency(context)
+        if rewrite is not None:
+            decision = rewrite(context, decision)
         with self.Sessions() as session:
             run = svc.complete_competency_inference(session, run_id=context.run_id, decision=decision)
             session.commit()

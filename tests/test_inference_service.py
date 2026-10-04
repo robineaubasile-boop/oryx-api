@@ -948,6 +948,55 @@ def test_output_fingerprint_is_order_independent_and_tracks_semantics():
     assert reference not in different and len(different) == 8
 
 
+# Empreinte de sortie calculée par core/inference_service.py sur main e9fd90a
+# (AVANT confidence-profile-v2) pour une décision dont le profil de confiance
+# est persisté au format historique confidence-profile-v1 : elle doit rester
+# reproductible octet pour octet depuis ce JSON v1 stocké, sans conversion
+# en v2 ni changement de OUTPUT_SCHEMA_VERSION.
+GOLDEN_V1_PROFILE_OUTPUT_FINGERPRINT = "8a7a2d6ca58adbfa1047d833c704be546b3d27814bbcc3d3072fdfb8d288cd64"
+
+
+def _historical_v1_profile_decision():
+    ns = uuid.UUID("6f1c2b0e-0000-4000-8000-000000000000")
+
+    def dim(codes, letters):
+        return {"fact_codes": codes, "capability_definition_ids": [str(uuid.uuid5(ns, x)) for x in letters],
+                "limitations": []}
+
+    profile = {"schema_version": "confidence-profile-v1",
+               "diagnosticity": dim(["direct_representative_basis", "single_representative_episode"], ["A", "B"]),
+               "coverage": dim(["localized_representative_scope", "coverage_concentrated_on_claim_scope",
+                                "unobserved_capabilities_present"], ["A", "B", "D"]),
+               "independence": dim(["independence_not_established"], []),
+               "consistency": dim(["no_observed_current_tension"], []),
+               "temporal_validation": dim(["single_episode_only", "exact_demonstration_time_unavailable"], [])}
+    claims = {s: svc._Claim(s, "not_established", "none", "not_established:x", "none", None, None)
+              for s in svc.CLAIM_STAGES}
+    claims["application"] = svc._Claim("application", "established", "direct", "direct:x", "localized:x", profile,
+                                       None)
+    observation = uuid.uuid5(ns, "obs")
+    return profile, svc._Decision("application", None, None, [], "summary", claims, (),
+                                  (svc._Ref("positive_basis", "application", None, None, "observation", observation),))
+
+
+def test_output_fingerprint_of_a_historical_v1_profile_is_reproduced_without_conversion():
+    profile, decision = _historical_v1_profile_decision()
+    kwargs = {"input_fingerprint": "in", "specification": {"confidence_profile_version": "confidence_profile-1"},
+              "previous_stage": None, "transition": None, "tension_state": "none",
+              "relations": svc._Relations({}, {}, {}), "membership_definitions": {}}
+    assert svc.OUTPUT_SCHEMA_VERSION == 1
+    assert svc._output_fingerprint(decision=decision, **kwargs) == GOLDEN_V1_PROFILE_OUTPUT_FINGERPRINT
+    assert profile["schema_version"] == "confidence-profile-v1"  # jamais converti
+    # Le format fait partie de la décision engagée : un même contenu en v2
+    # a naturellement une autre empreinte (aucune équivalence implicite).
+    v2 = {"schema_version": "confidence-profile-v2", **{name: {"facts": [
+        {"code": code, "capability_definition_ids": []} for code in profile[name]["fact_codes"]],
+        "limitations": []} for name in svc.CONFIDENCE_DIMENSIONS}}
+    claims = {**decision.claims, "application": decision.claims["application"]._replace(confidence_profile=v2)}
+    assert svc._output_fingerprint(decision=decision._replace(claims=claims), **kwargs) != \
+        GOLDEN_V1_PROFILE_OUTPUT_FINGERPRINT
+
+
 def test_dedup_violation_detection_is_targeted():
     def error(constraint):
         return sa.exc.IntegrityError("INSERT", {}, SimpleNamespace(diag=SimpleNamespace(constraint_name=constraint)))
