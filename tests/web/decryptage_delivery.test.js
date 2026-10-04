@@ -28,6 +28,12 @@ async function waitFor(fn, tries = 200) {
 
 const settle = () => new Promise(r => setTimeout(r, 50));
 
+// ACK 2xx valide : renvoie le même assistant_turn_id, statut delivered.
+function ackOk(call) {
+	const turn = decodeURIComponent(call.url.split('/')[4]);
+	return response({ success: true, assistant_turn_id: turn, delivery_status: 'delivered' });
+}
+
 function decryptageSuccess(turn, extra = {}) {
 	return {
 		success: true, ticker: 'MC.PA', name: 'LVMH', method_used: 'construction_these', analysis: ANALYSIS,
@@ -48,7 +54,7 @@ function mount({ handlers = {}, storage = {}, migrated = true } = {}) {
 		calls.push(call);
 		const document = dom && dom.window.document;
 		if (url === '/decryptage') return (handlers.decryptage || (() => response(decryptageSuccess('11111111-1111-4111-8111-111111111111'))))(call, document);
-		if (url.startsWith('/api/runtime/assistant-deliveries/')) return (handlers.ack || (() => response({ success: true })))(call, document);
+		if (url.startsWith('/api/runtime/assistant-deliveries/')) return (handlers.ack || ackOk)(call, document);
 		if (url === '/checklist') return (handlers.checklist || (() => response({ success: true, ticker: 'AAPL', analysis: 'Checklist.' })))(call, document);
 		if (url === '/api/user/test-user' && call.method === 'GET') return (handlers.user || (() => response({ level: 'debutant', portfolio: [] })))(call, document);
 		if (url.endsWith('/theses')) return (handlers.theses || (() => response([])))(call, document);
@@ -204,23 +210,23 @@ test('rechargement : l\'ACK en attente est rejoué et retiré après succès', a
 });
 
 test('flush ultérieur : un ACK d\'abord en échec réussit au flush suivant, avant le nouvel envoi', async () => {
-	let ackOk = false;
+	let online = false;
 	let decryptageCount = 0;
 	const successfulAcks = [];
 	const app = mount({
 		handlers: {
 			decryptage: () => response(decryptageSuccess(`77777777-7777-4777-8777-77777777777${++decryptageCount}`)),
 			ack: (call) => {
-				if (!ackOk) return Promise.reject(new TypeError('offline'));
+				if (!online) return Promise.reject(new TypeError('offline'));
 				successfulAcks.push({ url: call.url, decryptageCallsSoFar: decryptageCount });
-				return response({ success: true });
+				return ackOk(call);
 			},
 		},
 	});
 	await app.send('Tour 1');
 	await settle();
 	assert.strictEqual(app.outbox().length, 1);
-	ackOk = true;
+	online = true;
 	await app.send('Tour 2');
 	await waitFor(() => app.outbox().length === 0);
 	assert.strictEqual(app.decryptageCalls().length, 2);
@@ -400,5 +406,109 @@ test('premier chargement (migration) : le portefeuille migré n\'est pas écras�
 	assert.strictEqual(posts.length, 1);
 	assert.ok(posts.every(p => app.calls.indexOf(p) < firstGet), 'migration avant lecture du profil');
 	assert.strictEqual(app.calls.filter(c => c.url === '/api/user/test-user' && c.method === 'GET').length, 1);
+	app.dom.window.close();
+});
+
+
+// --------------------------------------------------------------------------
+// Fail-closed : seul un ACK 2xx valide retire une entrée de l'outbox.
+// --------------------------------------------------------------------------
+
+const THESES = [{ ticker: 'MC.PA', current_step: 'moat', updated_at: '2026-10-04T10:00:00+00:00', theses: [] }];
+
+// Un tour Décrypter rendu dont l'ACK obtient `ackResponse` ; retourne l'app
+// avec l'entrée d'outbox correspondante.
+async function renderedTurnWithAck(ackResponse, { turn = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', handlers = {} } = {}) {
+	const app = mount({ handlers: { decryptage: () => response(decryptageSuccess(turn)), ack: ackResponse, ...handlers } });
+	await app.send('Tour rendu');
+	await waitFor(() => app.ackCalls().length >= 1);
+	await settle();
+	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
+	assert.deepStrictEqual(app.outbox(), [{
+		assistant_turn_id: turn, user_id: 'test-user', conversation_key: app.localStorage.getItem(SESSION_KEY), surface: 'decryptage',
+	}], 'entrée conservée');
+	return app;
+}
+
+async function assertSendBlocked(app) {
+	const acksBefore = app.ackCalls().length;
+	await app.send('Nouvelle question');
+	assert.strictEqual(app.decryptageCalls().length, 1, 'aucun nouvel appel /decryptage');
+	assert.ok(app.ackCalls().length > acksBefore, 'le flush a bien été retenté');
+	assert.match(app.messages('decrypter', 'system').at(-1).textContent, /Synchronisation de la réponse précédente impossible\. Recharge la page ou réessaie\./);
+	assert.strictEqual(app.document.getElementById('input-decrypter').value, 'Nouvelle question');
+	assert.strictEqual(app.outbox().length, 1);
+}
+
+for (const [label, ack] of [
+	['ACK 500', () => response({ detail: { error: 'x', retryable: true } }, { ok: false, status: 500 })],
+	['ACK 403', () => response({ detail: { error: 'AssistantDeliveryOwnershipConflict', retryable: false } }, { ok: false, status: 403 })],
+	['ACK 409', () => response({ detail: { error: 'x', retryable: false } }, { ok: false, status: 409 })],
+	['ACK réseau', () => Promise.reject(new TypeError('Failed to fetch'))],
+	['ACK 2xx invalide (statut pending)', (call) => response({ success: true, assistant_turn_id: decodeURIComponent(call.url.split('/')[4]), delivery_status: 'pending' })],
+	['ACK 2xx invalide (autre assistant_turn_id)', () => response({ success: true, assistant_turn_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', delivery_status: 'delivered' })],
+	['ACK 2xx invalide (corps non JSON)', () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new SyntaxError('bad json')) })],
+]) {
+	test(`${label} : entrée conservée, nouvel envoi bloqué`, async () => {
+		const app = await renderedTurnWithAck(ack);
+		await assertSendBlocked(app);
+		app.dom.window.close();
+	});
+}
+
+test('ACK 404 : entrée conservée, nouvelle conversation bloquée', async () => {
+	const app = await renderedTurnWithAck(() => response({ detail: { error: 'AssistantDeliveryNotFound', retryable: false } }, { ok: false, status: 404 }));
+	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	app.document.getElementById('new-convo-decrypter').click();
+	await waitFor(() => app.messages('decrypter', 'system').length === 1);
+	assert.match(app.messages('decrypter', 'system')[0].textContent, /conversation est conservée\. Recharge la page ou réessaie\./);
+	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), conversationKey);
+	assert.strictEqual(app.messages('decrypter', 'user').length, 1);
+	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
+	assert.strictEqual(app.outbox().length, 1);
+	app.dom.window.close();
+});
+
+test('ACK 422 : entrée conservée, « Reprendre » bloqué', async () => {
+	const app = await renderedTurnWithAck(() => response({ detail: [] }, { ok: false, status: 422 }), { handlers: { theses: () => response(THESES) } });
+	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	const resume = await waitFor(() => app.document.querySelector('.thesis-resume'));
+	assert.ok(resume);
+	resume.click();
+	await settle();
+	await settle();
+	assert.strictEqual(app.decryptageCalls().length, 1, 'aucun envoi « Reprendre »');
+	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), conversationKey);
+	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
+	assert.strictEqual(app.outbox().length, 1);
+	app.dom.window.close();
+});
+
+test('ACK 2xx valide : entrée retirée, envoi puis nouvelle conversation autorisés', async () => {
+	let n = 0;
+	const app = mount({ handlers: { decryptage: () => response(decryptageSuccess(`eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee${++n}`)) } });
+	await app.send('Tour 1');
+	await waitFor(() => app.outbox().length === 0);
+	assert.deepStrictEqual(app.outbox(), []);
+	await app.send('Tour 2');
+	assert.strictEqual(app.decryptageCalls().length, 2);
+	await waitFor(() => app.outbox().length === 0);
+	const before = app.localStorage.getItem(SESSION_KEY);
+	app.document.getElementById('new-convo-decrypter').click();
+	await waitFor(() => app.localStorage.getItem(SESSION_KEY) !== before);
+	assert.notStrictEqual(app.localStorage.getItem(SESSION_KEY), before);
+	assert.strictEqual(app.messages('decrypter').length, 0);
+	assert.strictEqual(app.messages('decrypter', 'system').length, 0);
+	app.dom.window.close();
+});
+
+test('outbox : jamais de texte de réponse, de question ni de donnée financière, quel que soit l\'échec', async () => {
+	const app = await renderedTurnWithAck(() => response({}, { ok: false, status: 403 }));
+	await assertSendBlocked(app);
+	const raw = app.localStorage.getItem(OUTBOX_KEY);
+	for (const forbidden of ['Analyse', 'pédagogique', 'LVMH', 'Tour rendu', 'Nouvelle question', '600', 'EUR', 'disclaimer', 'analysis']) {
+		assert.ok(!raw.includes(forbidden), forbidden);
+	}
+	assert.deepStrictEqual(Object.keys(JSON.parse(raw)[0]).sort(), ['assistant_turn_id', 'conversation_key', 'surface', 'user_id']);
 	app.dom.window.close();
 });

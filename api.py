@@ -488,10 +488,13 @@ def _get_analysis_progress(user_id, ticker):
 # --- R1-C1 : livraison idempotente des réponses Décrypter ------------------
 #
 # /decryptage possède ses transactions ; aucune n'est ouverte pendant les
-# appels externes (données financières, Claude) :
+# appels externes (résolution du ticker, données financières, Claude) :
 #
-#   TX PREFLIGHT (User, registre de conversation, livraison existante)
-#   -> COMMIT -> APPELS EXTERNES (aucune transaction DB ouverte)
+#   EMPREINTE PURE de la requête (aucune I/O)
+#   -> TX PREFLIGHT (User, registre de conversation, livraison existante)
+#   -> COMMIT -> retry canonique : réponse immédiate, ZÉRO appel externe
+#   -> sinon APPELS EXTERNES (normalize_ticker, données, Claude ; aucune
+#      transaction DB ouverte)
 #   -> TX CLAIM/PRODUIT (livraison, progression construction_these,
 #      liaison analysis_session) -> COMMIT -> réponse HTTP.
 #
@@ -543,11 +546,9 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 	raw_ticker = request.ticker
 	question = request.question.strip()
 	context = request.context.strip()
-	ticker = normalize_ticker(raw_ticker)
 	user_id = request.user_id
 	conversation_key = request.conversation_key
 	client_turn_id = request.client_turn_id
-	print(f"[DECRYPTAGE] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
 
 	identity = {
 		"user_id": user_id,
@@ -559,13 +560,15 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 
 	# --- Phase A : preflight, AVANT tout appel externe ----------------------
 	try:
-		# Valeurs réellement consommées par la route (ticker normalisé,
-		# question / context strippés) ; aucune donnée de marché.
+		# Empreinte PURE du payload utilisateur logique, calculée AVANT toute
+		# I/O externe : saisie du ticker (strip().upper() local, jamais
+		# normalize_ticker qui peut interroger EODHD), question / context
+		# strippés ; aucune donnée de marché.
 		request_fingerprint = decryptage_request_fingerprint(
 			user_id=user_id,
 			conversation_key=conversation_key,
 			client_turn_id=client_turn_id,
-			ticker=ticker,
+			ticker_input=raw_ticker,
 			question=question,
 			context=context,
 			last_method_id=request.last_method_id,
@@ -586,6 +589,10 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 		return replay
 
 	# --- Appels externes : aucune transaction DB ouverte --------------------
+	# Seulement pour un tour sans livraison canonique : résolution du ticker
+	# (peut interroger EODHD Search), données financières, Claude.
+	ticker = normalize_ticker(raw_ticker)
+	print(f"[DECRYPTAGE] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
 	try:
 		result = fetch_financial_data(ticker)
 	except Exception as e:

@@ -2239,9 +2239,11 @@ function forgetPendingDeliveryAck(assistantTurnId) {
 	savePendingDeliveryAcks(loadPendingDeliveryAcks().filter(e => e.assistant_turn_id !== assistantTurnId));
 }
 
-// Résultat d'un ACK : 'acked' (retirer), 'refused' (refus définitif du
-// serveur : 403/404/422, ne pourra jamais réussir → retirer), 'failed'
-// (réseau / serveur : conserver pour un prochain flush).
+// Fail-closed : SEUL un ACK HTTP 2xx valide (delivery_status 'delivered'
+// pour ce même assistant_turn_id) vaut synchronisation réussie. Réseau,
+// 5xx, tout 4xx (403/404/409/422...) ou réponse invalide → false : l'entrée
+// reste dans l'outbox et bloque nouvel envoi / nouvelle conversation (jamais
+// de suppression silencieuse d'une entrée impossible à acquitter).
 async function sendDeliveryAck(entry) {
 	try {
 		const res = await fetch(`/api/runtime/assistant-deliveries/${encodeURIComponent(entry.assistant_turn_id)}/ack`, {
@@ -2249,11 +2251,11 @@ async function sendDeliveryAck(entry) {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ user_id: entry.user_id, conversation_key: entry.conversation_key }),
 		});
-		if (res.ok) return 'acked';
-		if (res.status === 403 || res.status === 404 || res.status === 422) return 'refused';
-		return 'failed';
+		if (!res.ok) return false;
+		const data = await res.json();
+		return !!data && data.assistant_turn_id === entry.assistant_turn_id && data.delivery_status === 'delivered';
 	} catch (e) {
-		return 'failed';
+		return false;
 	}
 }
 
@@ -2263,11 +2265,10 @@ function flushPendingDeliveryAcks() {
 	const run = deliveryAckQueue.then(async () => {
 		let allAcked = true;
 		for (const entry of loadPendingDeliveryAcks()) {
-			const outcome = await sendDeliveryAck(entry);
-			if (outcome === 'failed') {
-				allAcked = false;
-			} else {
+			if (await sendDeliveryAck(entry)) {
 				forgetPendingDeliveryAck(entry.assistant_turn_id);
+			} else {
+				allAcked = false;
 			}
 		}
 		return allAcked;
@@ -2350,7 +2351,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			return;
 		}
 		if (!(await flushPendingDeliveryAcks())) {
-			addMessage(containerId, 'Synchronisation de la réponse précédente impossible. Vérifie ta connexion puis réessaie.', 'system');
+			addMessage(containerId, 'Synchronisation de la réponse précédente impossible. Recharge la page ou réessaie.', 'system');
 			btn.disabled = false;
 			return;
 		}
@@ -2467,7 +2468,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			return true;
 		}
 		if (!(await flushPendingDeliveryAcks())) {
-			addMessage(containerId, 'Synchronisation de la réponse précédente impossible : la conversation est conservée. Réessaie dans quelques instants.', 'system');
+			addMessage(containerId, 'Synchronisation de la réponse précédente impossible : la conversation est conservée. Recharge la page ou réessaie.', 'system');
 			return false;
 		}
 		clearConversation();

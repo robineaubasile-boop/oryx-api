@@ -75,7 +75,7 @@ from core import interaction_identity
 from core.models import AnalysisSession, AssistantDelivery, User
 
 ASSISTANT_DELIVERY_SCHEMA_VERSION = "assistant-delivery-v1"
-DECRYPTAGE_REQUEST_FINGERPRINT_SCHEMA_VERSION = "decryptage-request-fingerprint-v1"
+DECRYPTAGE_REQUEST_FINGERPRINT_SCHEMA_VERSION = "decryptage-request-fingerprint-v2"
 
 PENDING = "pending"
 DELIVERED = "delivered"
@@ -262,21 +262,29 @@ def decryptage_request_fingerprint(
     user_id: str,
     conversation_key: str,
     client_turn_id: uuid.UUID,
-    ticker: str,
+    ticker_input: str,
     question: str,
     context: str,
     last_method_id: str | None,
     level: str,
 ) -> str:
     """SHA-256 (hex minuscule) du JSON canonique (sort_keys, séparateurs
-    compacts, ensure_ascii=False, UTF-8) de la requête /decryptage telle
-    qu'elle est réellement consommée : ticker DÉJÀ normalisé
-    (normalize_ticker), question / context DÉJÀ strippés, last_method_id et
-    level effectifs. Aucune donnée de marché, aucun horodatage, aucune
-    réponse générée, aucun identifiant serveur ni aléa (pas de hash()
-    Python) : une variation de marché entre deux retries n'est pas un
-    nouveau tour."""
-    _require_identifier(ticker, "ticker")
+    compacts, ensure_ascii=False, UTF-8) du payload utilisateur logique de
+    /decryptage. Fonction 100 % PURE (aucune I/O) : calculable avant tout
+    appel externe, donc avant le preflight.
+
+    ticker_input est la SAISIE du ticker avec une normalisation locale
+    déterministe uniquement (strip().upper()) ; ce n'est PAS le ticker
+    canonique EODHD : la résolution externe (normalize_ticker, recherche
+    EODHD) ne fait pas partie de l'identité d'un retry. Deux saisies
+    différentes avec le même client_turn_id sont donc une collision, même si
+    elles résoudraient vers le même instrument. question / context sont
+    strippés par l'appelant ; last_method_id et level sont les valeurs
+    effectives. Aucune donnée de marché, aucun horodatage, aucune réponse
+    générée, aucun identifiant serveur ni aléa (pas de hash() Python)."""
+    if type(ticker_input) is not str:
+        raise InvalidAssistantDeliveryInput("ticker_input doit être une chaîne")
+    ticker_input = _require_identifier(ticker_input.strip().upper(), "ticker_input")
     if last_method_id is not None:
         _require_text(last_method_id, "last_method_id")
     payload = {
@@ -284,7 +292,7 @@ def decryptage_request_fingerprint(
         "user_id": _require_identifier(user_id, "user_id"),
         "conversation_key": _require_identifier(conversation_key, "conversation_key"),
         "client_turn_id": str(_require_uuid(client_turn_id, "client_turn_id")),
-        "ticker": ticker,
+        "ticker_input": ticker_input,
         "question": _require_text(question, "question"),
         "context": _require_text(context, "context"),
         "last_method_id": last_method_id,

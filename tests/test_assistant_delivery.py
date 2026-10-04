@@ -109,7 +109,7 @@ def _claim_kwargs(**overrides):
 
 
 def _fingerprint_kwargs(**overrides):
-    kwargs = {"user_id": USER, "conversation_key": CONV, "client_turn_id": TURN, "ticker": "MC.PA",
+    kwargs = {"user_id": USER, "conversation_key": CONV, "client_turn_id": TURN, "ticker_input": "MC.PA",
               "question": "Que fait LVMH ?", "context": "", "last_method_id": None, "level": "debutant"}
     kwargs.update(overrides)
     return kwargs
@@ -121,7 +121,7 @@ def _fingerprint_kwargs(**overrides):
 
 def test_versions_and_constants_are_explicit():
     assert ad.ASSISTANT_DELIVERY_SCHEMA_VERSION == "assistant-delivery-v1"
-    assert ad.DECRYPTAGE_REQUEST_FINGERPRINT_SCHEMA_VERSION == "decryptage-request-fingerprint-v1"
+    assert ad.DECRYPTAGE_REQUEST_FINGERPRINT_SCHEMA_VERSION == "decryptage-request-fingerprint-v2"
     assert ad.DECRYPTAGE_SURFACE == "decryptage"
     assert ad.SUPPORTED_SURFACES == ("decryptage",)
     assert (ad.PENDING, ad.DELIVERED) == ("pending", "delivered")
@@ -276,8 +276,8 @@ def test_decryptage_request_requires_runtime_identities():
 
 def test_request_fingerprint_formula_is_frozen():
     expected_payload = {
-        "schema_version": "decryptage-request-fingerprint-v1", "user_id": USER, "conversation_key": CONV,
-        "client_turn_id": str(TURN), "ticker": "MC.PA", "question": "Que fait LVMH ?", "context": "",
+        "schema_version": "decryptage-request-fingerprint-v2", "user_id": USER, "conversation_key": CONV,
+        "client_turn_id": str(TURN), "ticker_input": "MC.PA", "question": "Que fait LVMH ?", "context": "",
         "last_method_id": None, "level": "debutant",
     }
     canonical = json.dumps(expected_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -289,7 +289,7 @@ def test_request_fingerprint_formula_is_frozen():
 
 
 @pytest.mark.parametrize("field, value", [
-    ("user_id", OTHER_USER), ("conversation_key", "conv-2"), ("client_turn_id", uuid.uuid4()), ("ticker", "AAPL"),
+    ("user_id", OTHER_USER), ("conversation_key", "conv-2"), ("client_turn_id", uuid.uuid4()), ("ticker_input", "AAPL"),
     ("question", "Autre question"), ("context", "[USER] historique"), ("last_method_id", "construction_these"),
     ("level", "intermediaire"),
 ])
@@ -298,20 +298,33 @@ def test_request_fingerprint_changes_with_every_consumed_field(field, value):
             != ad.decryptage_request_fingerprint(**_fingerprint_kwargs()))
 
 
-def test_request_fingerprint_ignores_market_data_and_uses_normalized_ticker():
+def test_request_fingerprint_is_pure_and_hashes_the_ticker_input_not_its_resolution(monkeypatch):
     """Le fingerprint n'a aucun paramètre pour les données de marché, la
-    réponse, le marqueur, la session, l'horodatage ou l'assistant_turn_id ;
-    deux saisies brutes normalisées vers le même ticker donnent la même
-    empreinte (on hashe le ticker normalisé, jamais la saisie brute)."""
+    réponse, le marqueur, la session, l'horodatage ou l'assistant_turn_id.
+    Il hashe la SAISIE du ticker avec une normalisation locale
+    (strip().upper()) et n'appelle jamais le résolveur : « LVMH » et
+    « MC.PA » sont deux payloads différents, même s'ils désignent le même
+    instrument."""
     assert set(inspect.signature(ad.decryptage_request_fingerprint).parameters) == {
-        "user_id", "conversation_key", "client_turn_id", "ticker", "question", "context", "last_method_id", "level"}
-    assert normalize_ticker("LVMH") == normalize_ticker("mc.pa") == "MC.PA"
-    assert (ad.decryptage_request_fingerprint(**_fingerprint_kwargs(ticker=normalize_ticker("LVMH")))
-            == ad.decryptage_request_fingerprint(**_fingerprint_kwargs(ticker=normalize_ticker("mc.pa"))))
+        "user_id", "conversation_key", "client_turn_id", "ticker_input", "question", "context", "last_method_id",
+        "level"}
+    assert "normalize_ticker" not in _code_tokens(SERVICE_PATH.read_text(encoding="utf-8"))
+    import core.ticker_resolver
+
+    def no_io(*args, **kwargs):
+        raise AssertionError("aucune I/O dans le fingerprint")
+
+    monkeypatch.setattr(core.ticker_resolver.requests, "get", no_io)
+    fingerprint = ad.decryptage_request_fingerprint(**_fingerprint_kwargs(ticker_input="MC.PA"))
+    for same in (" mc.pa ", "Mc.Pa", "MC.PA\n"):
+        assert ad.decryptage_request_fingerprint(**_fingerprint_kwargs(ticker_input=same)) == fingerprint
+    assert normalize_ticker("LVMH") == "MC.PA"
+    assert ad.decryptage_request_fingerprint(**_fingerprint_kwargs(ticker_input="LVMH")) != fingerprint
 
 
 @pytest.mark.parametrize("field, value", [
-    ("user_id", ""), ("conversation_key", " "), ("client_turn_id", str(TURN)), ("ticker", ""), ("question", None),
+    ("user_id", ""), ("conversation_key", " "), ("client_turn_id", str(TURN)), ("ticker_input", ""), ("ticker_input", " "), ("ticker_input", None),
+    ("question", None),
     ("context", 3), ("level", None), ("last_method_id", 1), ("question", "a\x00b"),
 ])
 def test_request_fingerprint_rejects_invalid_inputs(field, value):
@@ -791,6 +804,7 @@ class _Externals:
 
     def __init__(self, engine):
         self.engine = engine
+        self.resolver_calls = 0
         self.fetch_calls = 0
         self.claude_calls = 0
         self.texts = []
@@ -807,6 +821,12 @@ class _Externals:
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
                 "AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()")).scalar_one() == 0
             conn.rollback()
+
+    def resolve(self, raw):
+        """normalize_ticker réel (peut interroger EODHD Search), compté."""
+        self.resolver_calls += 1
+        self._assert_no_open_transaction()
+        return normalize_ticker(raw)
 
     def fetch(self, ticker):
         self.fetch_calls += 1
@@ -837,6 +857,7 @@ def ext(engine, Sessions, monkeypatch):
     monkeypatch.setattr(core.db, "SessionLocal", Sessions)
     monkeypatch.setattr(api.anthropic, "Anthropic", fake)
     monkeypatch.setattr(api, "fetch_financial_data", fake.fetch)
+    monkeypatch.setattr(api, "normalize_ticker", fake.resolve)
     return fake
 
 
@@ -904,6 +925,7 @@ def test_pg_route_new_generation_persists_a_pending_delivery_before_responding(e
     assert row["visible_content_fingerprint"] == hashlib.sha256("Réponse pédagogique.".encode()).hexdigest()
     assert row["private_metadata"] == {"decryptage_step_marker": "business"}
     assert row["request_fingerprint"] == ad.decryptage_request_fingerprint(**_fingerprint_kwargs(question=""))
+    assert ext.resolver_calls == 1
     assert (row["surface"], row["source_user_turn_id"], row["delivery_ordinal"]) == ("decryptage", TURN, 1)
     # Progression construction_these appliquée et liée dans la même transaction.
     [session] = _product(engine)["sessions"]
@@ -926,7 +948,7 @@ def test_pg_route_retry_replays_the_canonical_payload_without_external_calls(eng
     finally:
         DATA.update(DATA_BEFORE)
     assert retry == first
-    assert (ext.fetch_calls, ext.claude_calls) == (1, 1)
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (1, 1, 1)
     assert _product(engine) == product
     assert _count(engine, "assistant_deliveries") == 1
 
@@ -940,7 +962,7 @@ def test_pg_route_retry_after_ack_returns_delivered(engine, Sessions, ext):
     assert acked == {"success": True, "assistant_turn_id": first["assistant_turn_id"], "delivery_status": "delivered"}
     retry = _call(Sessions, ext)
     assert retry == {**first, "delivery_status": "delivered"}
-    assert (ext.fetch_calls, ext.claude_calls) == (2, 2)
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (2, 2, 2)
     assert _product(engine) == product
     # Second ACK : idempotent, delivered_at inchangé.
     delivered_at = [r["delivered_at"] for r in _rows(engine) if str(r["id"]) == first["assistant_turn_id"]]
@@ -957,17 +979,64 @@ def test_pg_route_same_turn_with_another_request_is_refused_before_external_call
             _call(Sessions, ext, **overrides)
         assert failure.value.status_code == 409
         assert "Réponse" not in json.dumps(failure.value.detail)
-    assert (ext.fetch_calls, ext.claude_calls) == (1, 1)
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (1, 1, 1)
     assert (_rows(engine), _product(engine)) == before
     assert first["delivery_status"] == "pending"
 
 
-def test_pg_route_normalized_ticker_is_part_of_the_turn_identity(engine, Sessions, ext):
-    """« LVMH » est normalisé en MC.PA : le retry avec l'une ou l'autre
-    saisie est le même tour (aucun appel externe)."""
+def test_pg_route_replay_never_resolves_the_ticker(engine, Sessions, ext):
+    """« LVMH » (résolu en MC.PA au premier passage) + même client_turn_id +
+    même payload : replay canonique sans normalize_ticker, données ni
+    Claude. Une saisie locale équivalente (casse, espaces) est le même
+    payload."""
     first = _call(Sessions, ext, ticker="LVMH")
     assert first["ticker"] == "MC.PA"
-    assert _call(Sessions, ext, ticker="mc.pa") == first
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (1, 1, 1)
+    assert _call(Sessions, ext, ticker="LVMH") == first
+    assert _call(Sessions, ext, ticker=" lvmh ") == first
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (1, 1, 1)
+
+
+def test_pg_route_other_ticker_input_with_same_turn_collides_before_resolution(engine, Sessions, ext):
+    """« LVMH » puis « MC.PA » avec le même client_turn_id : collision 409
+    AVANT normalize_ticker, même si les deux saisies désignent le même
+    instrument (la résolution externe ne fait pas partie de l'identité)."""
+    _call(Sessions, ext, ticker="LVMH")
+    before = (_rows(engine), _product(engine))
+    with pytest.raises(HTTPException) as failure:
+        _call(Sessions, ext, ticker="MC.PA")
+    assert failure.value.status_code == 409
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (1, 1, 1)
+    assert (_rows(engine), _product(engine)) == before
+
+
+def test_pg_route_replay_works_when_the_resolver_is_down(engine, Sessions, ext, monkeypatch):
+    first = _call(Sessions, ext, ticker="LVMH")
+
+    def resolver_down(raw):
+        raise RuntimeError("EODHD Search indisponible")
+
+    monkeypatch.setattr(api, "normalize_ticker", resolver_down)
+    assert _call(Sessions, ext, ticker="LVMH") == first
+    assert (ext.fetch_calls, ext.claude_calls) == (1, 1)
+
+
+def test_pg_route_replay_on_a_cold_worker_makes_no_resolver_call(engine, Sessions, ext, monkeypatch):
+    """Worker A résout un nom libre via EODHD Search et crée la livraison ;
+    retry du même tour sur un worker B au cache vide : aucun appel au
+    résolveur réel (ni cache, ni HTTP)."""
+    import core.ticker_resolver
+    monkeypatch.setattr(api, "normalize_ticker", lambda raw: "RMS.PA")  # résolution de A (EODHD simulé)
+    first = _call(Sessions, ext, ticker="Hermes")
+    assert first["ticker"] == "RMS.PA"
+
+    http_calls = []
+    monkeypatch.setattr(core.ticker_resolver, "_RESOLUTION_CACHE", {})
+    monkeypatch.setattr(core.ticker_resolver.requests, "get", lambda *a, **k: http_calls.append(a) or 1 / 0)
+    monkeypatch.setattr(api, "normalize_ticker", ext.resolve)  # résolveur réel, cache vide
+    assert _call(Sessions, ext, ticker="Hermes") == first
+    assert ext.resolver_calls == 0 and http_calls == []
+    assert core.ticker_resolver._RESOLUTION_CACHE == {}
     assert (ext.fetch_calls, ext.claude_calls) == (1, 1)
 
 
@@ -975,7 +1044,7 @@ def test_pg_route_unknown_user_fails_closed_before_anything(engine, Sessions, ex
     with pytest.raises(HTTPException) as failure:
         _call(Sessions, ext, user_id="ghost")
     assert failure.value.status_code == 404
-    assert (ext.fetch_calls, ext.claude_calls) == (0, 0)
+    assert (ext.resolver_calls, ext.fetch_calls, ext.claude_calls) == (0, 0, 0)
     assert _count(engine, "users") == 2
     assert _count(engine, "conversation_identities") == 0 and _count(engine, "assistant_deliveries") == 0
 
