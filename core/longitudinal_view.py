@@ -262,7 +262,7 @@ class EventProvenance(_View):
     reste None tant qu'aucun horodatage pédagogique canonique n'existe."""
     event_id: uuid.UUID
     event_origin: str
-    task_kind: str
+    task_kind: str | None
     analysis_session_id: uuid.UUID | None
     conversation_key: str | None
     event_started_at_technical: datetime

@@ -69,6 +69,8 @@ from core.longitudinal_service import (
     UserNotFound,
 )
 from core.models import LongitudinalAssessmentRun, ObservationDependency
+from tests.test_cognitive_capture import _contribution as _capture_contribution
+from tests.test_cognitive_capture import _open_kwargs as _capture_open_kwargs
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     REPO_ROOT,
@@ -93,6 +95,7 @@ from tests.test_migration_0008_longitudinal_relations import (
     T5A_MODELS,
 )
 from tests.test_migration_0009_competency_inference_state import T6A
+from tests.test_migration_0010_r1b_event_idempotence import R1B
 from tests.test_observation_service import (
     INVALID_JSON_VALUES,
     _blocked,
@@ -212,13 +215,15 @@ RELATION_CALLS = {
 # --------------------------------------------------------------------------
 
 def test_no_migration_added_by_t5b():
-    """T5-B est service-only : aucune migration ajoutée par T5-B ; la seule
-    ajoutée depuis est 0009 (T6-A, structure de l'inférence de l'état
-    C1-C12), qui est la tête."""
+    """T5-B est service-only : aucune migration ajoutée par T5-B ; les seules
+    ajoutées depuis sont 0009 (T6-A, structure de l'inférence de l'état
+    C1-C12) et 0010 (R1-B, identité idempotente des CognitiveEvents), qui
+    est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
+    assert script.get_heads() == [R1B]
+    assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -827,7 +832,8 @@ CLEANUP = ("revalidation_capabilities", "observation_revalidations", "transfer_c
            "observation_transfers", "dependency_capabilities", "observation_dependencies",
            "longitudinal_assessment_inputs", "longitudinal_assessment_runs", "observation_capabilities",
            "capability_taxonomy_memberships", "core_capability_definitions", "pedagogical_observations",
-           "observation_evaluation_runs", "pedagogical_taxonomy_releases", "support_traces", "cognitive_events")
+           "observation_evaluation_runs", "pedagogical_taxonomy_releases", "support_traces", "cognitive_events",
+           "conversation_identities")
 assert set(CLEANUP[:8]) == T5A_TABLES
 EVIDENCE_TABLES = ("cognitive_events", "support_traces", "observation_evaluation_runs", "pedagogical_observations",
                    "observation_capabilities", "capability_taxonomy_memberships", "core_capability_definitions",
@@ -954,11 +960,12 @@ def _t3(Sessions, release_id, *specs, user_id=USER, end="complete", event_id=Non
 def _event_with_trace(Sessions, user_id=USER):
     """CognitiveEvent finalized avec une aide réellement montrée."""
     with Sessions() as session:
-        event = cc.open_event(session, user_id=user_id, event_origin="education", task_kind="interpret_metric",
-                              stimulus_snapshot={"question": "Que mesure le ROE ?"})
+        event = cc.open_event_idempotent(session, **_capture_open_kwargs(
+            user_id=user_id, task_kind="interpret_metric", stimulus_snapshot={"question": "Que mesure le ROE ?"}))
         trace = cc.add_support_trace(session, event_id=event.id, support_kind="hint",
                                      support_payload={"text": "pense aux capitaux propres"})
-        cc.append_user_work(session, event_id=event.id, work={"text": "rentabilité des capitaux propres"})
+        cc.append_user_contribution(session, event_id=event.id, **_capture_contribution(
+            session_ref=event.conversation_key, text_excerpt="rentabilité des capitaux propres"))
         cc.finalize_event(session, event_id=event.id)
         session.commit()
         return event.id, trace.id

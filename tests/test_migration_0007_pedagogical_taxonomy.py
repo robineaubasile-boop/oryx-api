@@ -63,6 +63,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    R1B_TABLES,
     REMAINING_TABLES,
     T1B1_SHA256,
     T1C2,
@@ -80,6 +81,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _data,
     _seed_remaining_tables,
     _statements,
+    _without_r1b_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     T1C2_SHA256,
@@ -373,7 +375,7 @@ def test_metadata_declares_exactly_the_four_t4a_tables():
     """Les quatre tables T4-A (+ les huit tables T5-A et les six tables T6-A,
     testées à part)."""
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
-                                         | T6A_TABLES)
+                                         | T6A_TABLES | R1B_TABLES)
     for model, name in zip(T4A_MODELS, (RELEASES, DEFS, MEMBERSHIPS, OBS_CAPS)):
         assert model.__tablename__ == name
         assert model.__table__ is Base.metadata.tables[name]
@@ -774,8 +776,9 @@ def conn(pg_url, pg_engine):
 def _assert_metadata_matches_0007(engine) -> None:
     """Au schéma 0007, Base.metadata ne diffère que par les huit tables de
     T5-A et les six tables de T6-A et leurs index, créés seulement en 0008
-    et 0009 ; tout le reste correspond exactement."""
-    diff = _compare_metadata(engine)
+    et 0009, et par les écarts R1-B (0010) ; tout le reste correspond
+    exactement."""
+    diff = _without_r1b_changes(_compare_metadata(engine), events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T5A_TABLES | T6A_TABLES]
         + [("add_index", i) for i in T5A_INDEXES | T6A_INDEXES]

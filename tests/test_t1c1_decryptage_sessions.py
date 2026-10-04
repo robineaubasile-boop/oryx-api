@@ -63,6 +63,7 @@ T3A = "0006_observation_layer"
 T4A = "0007_pedagogical_taxonomy"
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
+R1B = "0010_r1b_event_idempotence"
 USER = "user-t1c1"
 TICKER = "MC.PA"
 DATA = {
@@ -76,14 +77,14 @@ SNAPSHOT = {"operating_margin": 0.26, "roe": 0.24, "net_cash": -1.0e9}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t1c1_head_is_0009():
+def test_no_migration_added_by_t1c1_head_is_0010():
     """(1) T1-C1 n'a ajouté aucune migration ; les seules ajoutées depuis
-    sont 0004 (T1-C2), 0005 (T2-A), 0006 (T3-A), 0007 (T4-A), 0008 (T5-A)
-    et 0009 (T6-A), qui est la tête."""
+    sont 0004 (T1-C2), 0005 (T2-A), 0006 (T3-A), 0007 (T4-A), 0008 (T5-A),
+    0009 (T6-A) et 0010 (R1-B), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
+    assert script.get_heads() == [R1B]
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A}
+                                                                 T6A, R1B}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [
         "0001_current_oryx_baseline.py",
@@ -95,6 +96,7 @@ def test_no_migration_added_by_t1c1_head_is_0009():
         "0007_pedagogical_taxonomy.py",
         "0008_longitudinal_relations.py",
         "0009_competency_inference_state.py",
+        "0010_r1b_event_idempotence.py",
     ]
 
 
