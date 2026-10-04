@@ -540,7 +540,7 @@ def test_other_ticker_and_other_user_are_isolated(db, client, claude):
 
 def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_engine):
     """(18) Après un parcours complet (analyse, GET, DELETE, nouvelle
-    analyse) : schéma = head (0009), Base.metadata identique au schéma migré,
+    analyse) : schéma = head (0010), Base.metadata identique au schéma migré,
     company_analyses absente (supprimée par T1-C2)."""
     _full_attempt(client, claude, "A")
     client.theses()
@@ -549,7 +549,7 @@ def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_eng
     _turn(client, claude, "business")
 
     with pg_engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T6A
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1B
         assert "company_analyses" not in sa.inspect(conn).get_table_names()
 
     from alembic.autogenerate import compare_metadata
