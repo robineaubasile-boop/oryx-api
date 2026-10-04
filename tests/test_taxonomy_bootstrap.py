@@ -82,6 +82,7 @@ from tests.test_taxonomy_v1 import GOLDEN_V1_FINGERPRINT
 # l'état C1-C12), tête depuis T6-A.
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
+R1B = "0010_r1b_event_idempotence"
 
 MODULE_PATH = REPO_ROOT / "core" / "pedagogy" / "taxonomy_bootstrap.py"
 CLI_PATH = REPO_ROOT / "scripts" / "bootstrap_pedagogical_taxonomy_v1.py"
@@ -97,19 +98,21 @@ SPEC_BY_CODE = {c["capability_code"]: c for c in SPEC["capabilities"]}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t4c_head_is_0009():
+def test_no_migration_added_by_t4c_head_is_0010():
     """T4-C est du CONTENU : aucune migration ajoutée par T4-C. Les seules
-    ajoutées depuis sont 0008 (T5-A, structure des relations longitudinales)
-    et 0009 (T6-A, structure de l'inférence de l'état C1-C12), qui ne
-    contiennent aucune donnée de taxonomie : voir
-    tests/test_migration_0008_longitudinal_relations.py et
-    tests/test_migration_0009_competency_inference_state.py."""
+    ajoutées depuis sont 0008 (T5-A, structure des relations longitudinales),
+    0009 (T6-A, structure de l'inférence de l'état C1-C12) et 0010 (R1-B,
+    identité idempotente des CognitiveEvents), qui ne contiennent aucune
+    donnée de taxonomie : voir tests/test_migration_0008_longitudinal_relations.py,
+    tests/test_migration_0009_competency_inference_state.py et
+    tests/test_migration_0010_r1b_event_idempotence.py."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
+    assert script.get_heads() == [R1B]
+    assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     assert script.get_revision(T5A).down_revision == T4A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-3:] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py"] and len(files) == 9
+    assert files[-4:] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py"] and len(files) == 10
 
 
 def test_public_api_is_exactly_bootstrap_verify_activate():

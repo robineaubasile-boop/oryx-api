@@ -137,20 +137,31 @@ class CognitiveEvent(Base):
     vocabulaires extensibles, volontairement sans CHECK. Aucun schéma JSON
     interne n'est imposé en base ; JSONB(none_as_null=True) : un None
     Python n'est jamais stocké comme le JSON null (colonne sans défaut :
-    NULL SQL, refusé par NOT NULL)."""
+    NULL SQL, refusé par NOT NULL).
+
+    R1-B (migration 0010_r1b_event_idempotence) : identité idempotente.
+    event_dedup_key (UNIQUE uq_cognitive_events_event_dedup_key) est un
+    SHA-256 calculé côté serveur à partir de l'identité de segmentation
+    (jamais du contenu) ; event_builder_version, admission_version et
+    event_schema_version versionnent la politique qui a produit l'événement
+    et le format de user_work_snapshot. Les quatre colonnes sont NULL
+    uniquement pour les lignes legacy pré-R1-B (jamais backfillées) ; le
+    service R1-B les renseigne toujours. task_kind est NULL quand la
+    démonstration ne répond à aucune tâche imposée (aucune valeur factice)."""
     __tablename__ = "cognitive_events"
     __table_args__ = (
         CheckConstraint(
             "status IN ('open', 'finalized', 'abandoned')",
             name="ck_cognitive_events_status",
         ),
+        UniqueConstraint("event_dedup_key", name="uq_cognitive_events_event_dedup_key"),
     )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     analysis_session_id = Column(Uuid, ForeignKey("analysis_sessions.id"), nullable=True)
     event_origin = Column(String, nullable=False)
-    task_kind = Column(String, nullable=False)
+    task_kind = Column(String, nullable=True)
     status = Column(String, nullable=False)
     conversation_key = Column(String, nullable=True)
     stimulus_snapshot = Column(JSONB(none_as_null=True), nullable=False, default=dict)
@@ -158,6 +169,29 @@ class CognitiveEvent(Base):
     started_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware, onupdate=_utcnow_aware)
     closed_at = Column(DateTime(timezone=True), nullable=True)
+    event_dedup_key = Column(String, nullable=True)
+    event_builder_version = Column(String, nullable=True)
+    admission_version = Column(String, nullable=True)
+    event_schema_version = Column(String, nullable=True)
+
+
+class ConversationIdentity(Base):
+    """Registre minimal d'appartenance d'une conversation produit (R1-B) :
+    conversation_key -> exactement un user_id, jamais réattribué. La PK est
+    la défense finale sous concurrence (core/interaction_identity.py).
+
+    Ce n'est PAS un système de conversation persistant : ni messages,
+    historique, surface, titre, résumé, route, niveau ni lifecycle. Une
+    nouvelle conversation n'est jamais un reset pédagogique ; l'historique
+    texte conversationnel n'est pas une provenance pédagogique.
+
+    Table créée par la migration 0010_r1b_event_idempotence ; created_at
+    généré par l'application (aucun server_default)."""
+    __tablename__ = "conversation_identities"
+
+    conversation_key = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
 
 
 class SupportTrace(Base):

@@ -44,6 +44,9 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1, _statements
 from tests.test_migration_0004_drop_company_analyses import (
+    R1B_DEDUP_UNIQUE,
+    R1B_EVENT_COLUMNS,
+    R1B_TABLES,
     REMAINING_TABLES,
     SESSION_ID,
     T1B1_SHA256,
@@ -64,6 +67,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _data,
     _indexes,
     _seed_remaining_tables,
+    _without_r1b_changes,
 )
 
 T2A = "0005_cognitive_support_traces"
@@ -204,15 +208,17 @@ def test_metadata_declares_the_two_new_tables():
     """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces
     (+ les tables de T3-A, T4-A, T5-A et T6-A, testées à part)."""
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
-                                         | T6A_TABLES)
+                                         | T6A_TABLES | R1B_TABLES)
     assert CognitiveEvent.__table__ is Base.metadata.tables[EVENTS]
     assert SupportTrace.__table__ is Base.metadata.tables[TRACES]
 
 
 def test_cognitive_event_columns_types_nullability_and_fks():
-    """(5) Types, nullabilité et FK exacts de cognitive_events."""
+    """(5) Types, nullabilité et FK exacts de cognitive_events : colonnes de
+    T2-A, puis les quatre colonnes nullable ajoutées par R1-B (0010, qui rend
+    aussi task_kind nullable ; testée à part)."""
     table = CognitiveEvent.__table__
-    assert [c.name for c in table.columns] == EVENT_COLUMNS
+    assert [c.name for c in table.columns] == EVENT_COLUMNS + list(R1B_EVENT_COLUMNS)
     cols = table.columns
 
     assert [c.name for c in table.primary_key.columns] == ["id"]
@@ -228,7 +234,7 @@ def test_cognitive_event_columns_types_nullability_and_fks():
         "user_id": False,
         "analysis_session_id": True,
         "event_origin": False,
-        "task_kind": False,
+        "task_kind": True,
         "status": False,
         "conversation_key": True,
         "stimulus_snapshot": False,
@@ -236,6 +242,7 @@ def test_cognitive_event_columns_types_nullability_and_fks():
         "started_at": False,
         "updated_at": False,
         "closed_at": True,
+        **{name: True for name in R1B_EVENT_COLUMNS},
     }
 
     fks = sorted((fk.parent.name, fk.target_fullname) for fk in table.foreign_keys)
@@ -286,7 +293,9 @@ def test_support_traces_unique_is_exactly_event_sequence():
     assert len(uniques) == 1
     assert uniques[0].name == "uq_support_traces_event_sequence"
     assert [c.name for c in uniques[0].columns] == ["cognitive_event_id", "sequence_no"]
-    assert not [c for c in CognitiveEvent.__table__.constraints if isinstance(c, sa.UniqueConstraint)]
+    # Seul UNIQUE de cognitive_events : celui de R1-B (0010, testé à part).
+    assert [(c.name, [col.name for col in c.columns]) for c in CognitiveEvent.__table__.constraints
+            if isinstance(c, sa.UniqueConstraint)] == [(R1B_DEDUP_UNIQUE, ["event_dedup_key"])]
     for table in (CognitiveEvent.__table__, SupportTrace.__table__):
         # Aucun index supplémentaire en T2-A.
         assert not table.indexes, table.name
@@ -405,7 +414,10 @@ def test_t2a_tables_are_not_wired_to_the_application():
                # T6-B : service d'inférence, qui LIT et verrouille en FOR
                # SHARE les événements de la chaîne amont (jamais d'écriture
                # T2 ; non branché : tests/test_inference_service.py).
-               "core/inference_service.py"}
+               "core/inference_service.py",
+               # R1-B : migration 0010 (identité idempotente de
+               # cognitive_events ; aucun branchement applicatif).
+               "alembic/versions/0010_r1b_event_idempotence.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
@@ -534,9 +546,9 @@ def _refused(conn, match, statement, params=None):
 
 def _assert_metadata_matches_0005(engine) -> None:
     """Au schéma 0005, Base.metadata ne diffère que par les tables de T3-A,
-    T4-A, T5-A et T6-A, créées seulement en 0006, 0007, 0008 et 0009 ; tout
-    le reste correspond exactement."""
-    diff = _compare_metadata(engine)
+    T4-A, T5-A et T6-A, créées seulement en 0006, 0007, 0008 et 0009, et par
+    les écarts R1-B (0010) ; tout le reste correspond exactement."""
+    diff = _without_r1b_changes(_compare_metadata(engine), events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T3A_TABLES | T4A_TABLES | T5A_TABLES | T6A_TABLES]
         + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES | T6A_INDEXES]
@@ -654,11 +666,14 @@ def test_pg_invalid_status_is_refused(conn):
 
 def test_pg_snapshots_and_required_columns_are_not_null(conn):
     for column, param in (("stimulus_snapshot", "stimulus"), ("user_work_snapshot", "work"),
-                          ("event_origin", "event_origin"), ("task_kind", "task_kind"),
-                          ("user_id", "user_id")):
+                          ("event_origin", "event_origin"), ("user_id", "user_id")):
         with pytest.raises(sa.exc.IntegrityError, match=f"null value in column \"{column}\""):
             with conn.begin_nested():
                 _event(conn, **{param: None})
+    # task_kind NOT NULL en T2-A, nullable depuis R1-B (0010 : démonstration
+    # sans tâche imposée, testée à part).
+    assert conn.execute(sa.text("SELECT task_kind FROM cognitive_events WHERE id = :id"),
+                        {"id": _event(conn, task_kind=None)}).scalar_one() is None
     event_id = _event(conn)
     for column, param in (("support_payload", "payload"), ("support_kind", "kind")):
         with pytest.raises(sa.exc.IntegrityError, match=f"null value in column \"{column}\""):

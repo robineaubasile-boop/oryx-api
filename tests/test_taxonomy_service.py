@@ -106,6 +106,7 @@ from tests.test_observation_service import _event as _finalized_event
 # l'état C1-C12), tête depuis T6-A.
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
+R1B = "0010_r1b_event_idempotence"
 
 SERVICE_PATH = REPO_ROOT / "core" / "taxonomy_service.py"
 PUBLIC_API = {
@@ -156,12 +157,13 @@ def _def_kwargs(code="C7_A", revision=1, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t4b_head_is_0009():
+def test_no_migration_added_by_t4b_head_is_0010():
     """T4-B est service-only : aucune migration ajoutée par T4-B ; les seules
-    ajoutées depuis sont 0008 (T5-A) et 0009 (T6-A), qui est la tête."""
+    ajoutées depuis sont 0008 (T5-A), 0009 (T6-A) et 0010 (R1-B), qui est la
+    tête."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)
+    assert script.get_heads() == [R1B]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -532,7 +534,7 @@ def test_violated_constraint_detection_is_targeted():
 
 T4_CLEANUP = ("observation_capabilities", "capability_taxonomy_memberships", "core_capability_definitions",
               "pedagogical_observations", "observation_evaluation_runs", "pedagogical_taxonomy_releases",
-              "support_traces", "cognitive_events")
+              "support_traces", "cognitive_events", "conversation_identities")
 ON_RUN = "SELECT observation_evaluation_runs.id,"
 ON_RELEASE = "SELECT pedagogical_taxonomy_releases.id,"
 ON_ADVISORY = "SELECT pg_advisory_xact_lock("
@@ -720,13 +722,13 @@ def _pids(*sessions):
 # --- 0. aucune donnée seedée ------------------------------------------------
 
 def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, engine, db):  # noqa: F811
-    """Après upgrade head (0009 depuis T6-A) et import du service T4-B, les
+    """Après upgrade head (0010 depuis R1-B) et import du service T4-B, les
     quatre tables T4 sont vides : ni release V1, ni capacité, ni mapping."""
     _upgrade_head_with_users(pg_url, engine)
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == T6A
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1B
     assert tax.get_active_release(db) is None
 
 

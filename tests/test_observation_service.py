@@ -63,7 +63,7 @@ from core.observation_service import (
     ObservationNotFound,
     ObservationServiceError,
 )
-from tests.test_cognitive_capture import _backend_pid, _wait_until_blocked_by
+from tests.test_cognitive_capture import _backend_pid, _wait_until_blocked_by, capture_event
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     REPO_ROOT,
@@ -79,6 +79,7 @@ from tests.test_migration_0007_pedagogical_taxonomy import RELEASE_FK, T4A, T4A_
 
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
+R1B = "0010_r1b_event_idempotence"
 
 SERVICE_PATH = REPO_ROOT / "core" / "observation_service.py"
 DEDUP_INDEX = "uq_observation_evaluation_runs_dedup_key"
@@ -232,12 +233,12 @@ def _add(db, run_id, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t3b_head_is_0009():
+def test_no_migration_added_by_t3b_head_is_0010():
     """T3-B n'a ajouté aucune migration ; les seules ajoutées depuis sont
-    0007 (T4-A), 0008 (T5-A) et 0009 (T6-A), qui est la tête."""
+    0007 (T4-A), 0008 (T5-A), 0009 (T6-A) et 0010 (R1-B), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A)
+    assert script.get_heads() == [R1B]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -673,6 +674,7 @@ def Sessions(engine):
         conn.execute(sa.text("DELETE FROM pedagogical_taxonomy_releases"))
         conn.execute(sa.text("DELETE FROM support_traces"))
         conn.execute(sa.text("DELETE FROM cognitive_events"))
+        conn.execute(sa.text("DELETE FROM conversation_identities"))
         conn.execute(sa.text("DELETE FROM users WHERE id NOT IN ('u', 'u2')"))
 
 
@@ -699,11 +701,8 @@ def clock(monkeypatch):
 def _event(Sessions, close="finalize_event", user_id=USER) -> uuid.UUID:
     """CognitiveEvent commité via le service T2-B (finalized par défaut)."""
     with Sessions() as session:
-        event = cc.open_event(session, user_id=user_id, event_origin="education",
-                              task_kind="interpret_metric", stimulus_snapshot={"question": "ROE ?"})
-        cc.append_user_work(session, event_id=event.id, work={"text": "rentabilité des capitaux propres"})
-        if close:
-            getattr(cc, close)(session, event_id=event.id)
+        event = capture_event(session, user_id=user_id, task_kind="interpret_metric",
+                              stimulus_snapshot={"question": "ROE ?"}, close=close)
         session.commit()
         return event.id
 
@@ -1769,10 +1768,8 @@ def test_pg_observation_writes_join_a_wider_caller_transaction(engine, Sessions,
     transaction, commitée (ou non) par l'appelant seul."""
     db.add(User(id="wider-user", level="debutant"))
     db.flush()
-    event = cc.open_event(db, user_id="wider-user", event_origin="education", task_kind="interpret_metric",
-                          stimulus_snapshot={"question": "ROE ?"})
-    cc.append_user_work(db, event_id=event.id, work={"text": "réponse"})
-    cc.finalize_event(db, event_id=event.id)
+    event = capture_event(db, user_id="wider-user", task_kind="interpret_metric",
+                          stimulus_snapshot={"question": "ROE ?"}, text="réponse", close="finalize_event")
     run = svc.start_evaluation_run(db, **_start_kwargs(event.id))
     _add(db, run.id)
     svc.complete_evaluation_run(db, run_id=run.id, output_fingerprint="o")

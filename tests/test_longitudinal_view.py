@@ -66,12 +66,14 @@ from tests.test_longitudinal_service import (  # noqa: F401 — fixtures
     only,
     sup,
 )
+from tests.test_cognitive_capture import capture_event
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_directory
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
 from tests.test_migration_0004_drop_company_analyses import _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A
+from tests.test_migration_0010_r1b_event_idempotence import R1B
 from tests.test_observation_service import _NoDB, _reaches_db
 
 VIEW_PATH = REPO_ROOT / "core" / "longitudinal_view.py"
@@ -99,13 +101,14 @@ def _has_word(text: str, word: str) -> bool:
 # --------------------------------------------------------------------------
 
 def test_no_migration_added_by_t5c():
-    """Aucune migration ajoutée par T5-C ; la seule ajoutée depuis est 0009
-    (T6-A), qui est la tête."""
+    """Aucune migration ajoutée par T5-C ; les seules ajoutées depuis sont
+    0009 (T6-A) et 0010 (R1-B), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [T6A]
+    assert script.get_heads() == [R1B]
+    assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-2:] == [f"{T5A}.py", f"{T6A}.py"] and not any(name.startswith("0010") for name in files)
+    assert files[-3:] == [f"{T5A}.py", f"{T6A}.py", f"{R1B}.py"] and not any(name.startswith("0011") for name in files)
 
 
 def test_no_profile_table_or_model_exists():
@@ -380,11 +383,10 @@ def rv(source, target, *, mode="whole_observation", caps=()):
 def _custom_event(Sessions, *, event_origin="education", task_kind="interpret_metric",
                   analysis_session_id=None, conversation_key=None, user_id=USER):
     with Sessions() as session:
-        event = cc.open_event(session, user_id=user_id, event_origin=event_origin, task_kind=task_kind,
+        event = capture_event(session, user_id=user_id, event_origin=event_origin, task_kind=task_kind,
                               stimulus_snapshot={"question": "Que mesure le ROE ?"},
-                              analysis_session_id=analysis_session_id, conversation_key=conversation_key)
-        cc.append_user_work(session, event_id=event.id, work={"text": "rentabilité des capitaux propres"})
-        cc.finalize_event(session, event_id=event.id)
+                              analysis_session_id=analysis_session_id,
+                              conversation_key=conversation_key or f"conv-{user_id}", close="finalize_event")
         session.commit()
         return event.id
 

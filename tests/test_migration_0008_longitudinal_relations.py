@@ -67,6 +67,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    R1B_TABLES,
     REMAINING_TABLES,
     T1B1_SHA256,
     T1C2,
@@ -82,6 +83,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _constraints,
     _data,
     _statements,
+    _without_r1b_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     OTHER_USER,
@@ -506,7 +508,7 @@ def test_offline_sql_of_0008_downgrade_drops_only_t5a():
 def test_metadata_declares_exactly_the_eight_t5a_tables():
     """Les huit tables T5-A (+ les six tables T6-A, testées à part)."""
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
-                                         | T6A_TABLES)
+                                         | T6A_TABLES | R1B_TABLES)
     for model, name in zip(T5A_MODELS, TABLES_IN_ORDER):
         assert model.__tablename__ == name
         assert model.__table__ is Base.metadata.tables[name]
@@ -1008,8 +1010,8 @@ def run(conn, release) -> uuid.UUID:
 def _assert_metadata_matches_0008(engine) -> None:
     """Au schéma 0008, Base.metadata ne diffère que par les six tables de
     T6-A et leurs index, créés seulement en 0009 ; tout le reste correspond
-    exactement."""
-    diff = _compare_metadata(engine)
+    exactement, hormis les écarts R1-B (0010)."""
+    diff = _without_r1b_changes(_compare_metadata(engine), events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T6A_TABLES] + [("add_index", i) for i in T6A_INDEXES]
     )
