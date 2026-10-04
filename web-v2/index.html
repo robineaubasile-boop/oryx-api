@@ -2195,15 +2195,212 @@ const educationChat = makeSessionChat({ key: 'education', emptyHeroId: 'empty-he
 const coachChat = makeSessionChat({ key: 'coach', emptyHeroId: 'empty-hero-coach' });
 
 // ============================================================
+// R1-C1 — livraison des réponses Décrypter (runtime, opt-in)
+// ============================================================
+// /decryptage renvoie un assistant_turn_id (généré par le serveur) et un
+// delivery_status. Une fois la réponse insérée dans l'interface, le
+// frontend l'acquitte (ACK) : pending → delivered. delivered signifie
+// seulement « rendu par le frontend Oryx », jamais lu ni compris.
+//
+// Outbox localStorage : l'ACK est enregistré APRÈS addMessage, puis envoyé ;
+// il n'est retiré qu'en cas de succès. Aucun texte, prompt ni donnée
+// financière n'y est stocké. Un nouvel envoi Décrypter ou une nouvelle
+// conversation exige un flush réussi.
+const PENDING_DELIVERY_ACKS_KEY = 'oryx_pending_delivery_acks_v1';
+const DECRYPTAGE_SURFACE = 'decryptage';
+
+function loadPendingDeliveryAcks() {
+	try {
+		const raw = localStorage.getItem(PENDING_DELIVERY_ACKS_KEY);
+		const parsed = raw ? JSON.parse(raw) : [];
+		return Array.isArray(parsed) ? parsed : [];
+	} catch (e) {
+		return [];
+	}
+}
+
+function savePendingDeliveryAcks(entries) {
+	try {
+		if (entries.length) {
+			localStorage.setItem(PENDING_DELIVERY_ACKS_KEY, JSON.stringify(entries));
+		} else {
+			localStorage.removeItem(PENDING_DELIVERY_ACKS_KEY);
+		}
+	} catch (e) {}
+}
+
+function recordPendingDeliveryAck({ assistant_turn_id, user_id, conversation_key }) {
+	const entries = loadPendingDeliveryAcks().filter(e => e.assistant_turn_id !== assistant_turn_id);
+	entries.push({ assistant_turn_id, user_id, conversation_key, surface: DECRYPTAGE_SURFACE });
+	savePendingDeliveryAcks(entries);
+}
+
+function forgetPendingDeliveryAck(assistantTurnId) {
+	savePendingDeliveryAcks(loadPendingDeliveryAcks().filter(e => e.assistant_turn_id !== assistantTurnId));
+}
+
+// Fail-closed : SEUL un ACK HTTP 2xx valide (delivery_status 'delivered'
+// pour ce même assistant_turn_id) vaut synchronisation réussie. Réseau,
+// 5xx, tout 4xx (403/404/409/422...) ou réponse invalide → false : l'entrée
+// reste dans l'outbox et bloque nouvel envoi / nouvelle conversation (jamais
+// de suppression silencieuse d'une entrée impossible à acquitter).
+async function sendDeliveryAck(entry) {
+	try {
+		const res = await fetch(`/api/runtime/assistant-deliveries/${encodeURIComponent(entry.assistant_turn_id)}/ack`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ user_id: entry.user_id, conversation_key: entry.conversation_key }),
+		});
+		if (!res.ok) return false;
+		const data = await res.json();
+		return !!data && data.assistant_turn_id === entry.assistant_turn_id && data.delivery_status === 'delivered';
+	} catch (e) {
+		return false;
+	}
+}
+
+// Les flushes sont sérialisés : un seul ACK en vol par entrée.
+let deliveryAckQueue = Promise.resolve(true);
+function flushPendingDeliveryAcks() {
+	const run = deliveryAckQueue.then(async () => {
+		let allAcked = true;
+		for (const entry of loadPendingDeliveryAcks()) {
+			if (await sendDeliveryAck(entry)) {
+				forgetPendingDeliveryAck(entry.assistant_turn_id);
+			} else {
+				allAcked = false;
+			}
+		}
+		return allAcked;
+	});
+	deliveryAckQueue = run.catch(() => false);
+	return run;
+}
+
+// Erreur HTTP (hors réseau) de /decryptage : message lisible, jamais de
+// donnée interne.
+function decryptageHttpErrorMessage(res, data) {
+	const detail = data && data.detail;
+	if (res.status === 409) return 'Ce message a déjà été traité différemment. Envoie un nouveau message.';
+	if (detail && detail.retryable === false) return 'Requête refusée (profil ou conversation non reconnus). Recharge la page puis réessaie.';
+	return 'Erreur serveur, réessaie dans quelques instants.';
+}
+
+// ============================================================
 // Ticker-locked chat factory — Décrypter / Checklist
 // ============================================================
-function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null, trackMethodId = false, priceBannerId = null, nextStepWrapId = null }) {
+// runtimeDelivery (Décrypter uniquement) : identités de tour
+// (conversation_key, client_turn_id), userReady, retry réseau idempotent,
+// ACK de livraison. Checklist garde exactement son comportement.
+function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHistoryTurns = null, trackMethodId = false, priceBannerId = null, nextStepWrapId = null, runtimeDelivery = false }) {
 	const containerId = 'msgs-' + key;
 	const input = document.getElementById('input-' + key);
 	const btn = document.getElementById('send-' + key);
 	const tickerInput = document.getElementById('ticker-' + key);
 	const newConvoBtn = document.getElementById('new-convo-' + key);
 	let lastMethodId = null;
+
+	function renderSuccess(data, question, ticker, deliveryOwner = null) {
+		const text = data[resultField];
+		addMessage(containerId, text, 'assistant');
+		// L'ACK n'est enregistré qu'APRÈS un rendu réussi (jamais avant) ; une
+		// réponse déjà delivered (retry) n'est pas ré-acquittée.
+		if (deliveryOwner && data.assistant_turn_id && data.delivery_status === 'pending') {
+			recordPendingDeliveryAck({ assistant_turn_id: data.assistant_turn_id, ...deliveryOwner });
+			flushPendingDeliveryAcks();
+		}
+		histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
+		histories[key].push({ role: 'assistant', text });
+		if (trackMethodId) lastMethodId = data.method_used || null;
+		if (priceBannerId && data.price != null) {
+			const banner = document.getElementById(priceBannerId);
+			if (banner) {
+				banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span>`;
+				banner.classList.add('visible');
+			}
+		}
+		if (nextStepWrapId) {
+			const wrap = document.getElementById(nextStepWrapId);
+			if (wrap) {
+				const assistantCount = histories[key].filter(h => h.role === 'assistant').length;
+				if (assistantCount >= 2) {
+					wrap.innerHTML = `<button type="button" class="next-step-btn">Étape suivante</button>`;
+					const nextBtn = wrap.querySelector('.next-step-btn');
+					if (nextBtn) nextBtn.addEventListener('click', () => {
+						input.value = "Je veux passer directement à l'étape suivante.";
+						send();
+					});
+				} else {
+					wrap.innerHTML = '';
+				}
+			}
+		}
+	}
+
+	async function sendRuntime(ticker, question) {
+		btn.disabled = true;
+		// Préconditions, AVANT de consommer l'input ou de créer un tour :
+		// utilisateur résolu côté backend, réponses déjà rendues acquittées.
+		let userId;
+		try {
+			await ensureUserReady();
+			userId = getOryxUserId();
+		} catch (err) {
+			addMessage(containerId, 'Connexion à ton profil impossible pour le moment. Réessaie dans quelques instants.', 'system');
+			btn.disabled = false;
+			return;
+		}
+		if (!(await flushPendingDeliveryAcks())) {
+			addMessage(containerId, 'Synchronisation de la réponse précédente impossible. Recharge la page ou réessaie.', 'system');
+			btn.disabled = false;
+			return;
+		}
+
+		// Un tour utilisateur logique = un client_turn_id, un message DOM.
+		const conversationKey = getSessionId(key);
+		const clientTurnId = crypto.randomUUID();
+		input.value = '';
+		addMessage(containerId, question || `(analyse de ${ticker})`, 'user');
+		showTyping(containerId);
+
+		const context = buildContext(histories[key], maxHistoryTurns);
+		const body = JSON.stringify({
+			ticker, question, context, last_method_id: lastMethodId, level: getUserLevel(),
+			user_id: userId, conversation_key: conversationKey, client_turn_id: clientTurnId,
+		});
+		// Retry réseau uniquement : même corps, donc même client_turn_id.
+		let res = null;
+		let lastErr = null;
+		for (let attempt = 0; attempt < 2 && !res; attempt++) {
+			try {
+				res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+			} catch (err) {
+				lastErr = err;
+			}
+		}
+		try {
+			if (!res) {
+				hideTyping(containerId);
+				addMessage(containerId, 'Erreur réseau : ' + (lastErr ? lastErr.message : 'inconnue') + '. Réessaie.', 'system');
+			} else {
+				let data = null;
+				try { data = await res.json(); } catch (e) {}
+				hideTyping(containerId);
+				if (!res.ok) {
+					addMessage(containerId, 'Erreur : ' + decryptageHttpErrorMessage(res, data), 'system');
+				} else if (data && data.success) {
+					renderSuccess(data, question, ticker, { user_id: userId, conversation_key: conversationKey });
+				} else {
+					addMessage(containerId, 'Erreur : ' + ((data && data.error) || 'inconnue'), 'system');
+				}
+			}
+		} catch (err) {
+			hideTyping(containerId);
+			addMessage(containerId, 'Erreur : ' + err.message, 'system');
+		}
+		btn.disabled = false;
+		input.focus();
+	}
 
 	async function send() {
 		const ticker = tickerInput.value.trim().toUpperCase();
@@ -2212,6 +2409,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			addMessage(containerId, 'Renseigne un ticker avant d\'envoyer.', 'system');
 			return;
 		}
+		if (runtimeDelivery) return sendRuntime(ticker, question);
 		input.value = '';
 		btn.disabled = true;
 		addMessage(containerId, question || `(analyse de ${ticker})`, 'user');
@@ -2227,34 +2425,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			const data = await res.json();
 			hideTyping(containerId);
 			if (data.success) {
-				const text = data[resultField];
-				addMessage(containerId, text, 'assistant');
-				histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
-				histories[key].push({ role: 'assistant', text });
-				if (trackMethodId) lastMethodId = data.method_used || null;
-				if (priceBannerId && data.price != null) {
-					const banner = document.getElementById(priceBannerId);
-					if (banner) {
-						banner.innerHTML = `<span class="price-pill">${data.price.toFixed(2)} ${data.currency || ''}</span>`;
-						banner.classList.add('visible');
-					}
-				}
-				if (nextStepWrapId) {
-					const wrap = document.getElementById(nextStepWrapId);
-					if (wrap) {
-						const assistantCount = histories[key].filter(h => h.role === 'assistant').length;
-						if (assistantCount >= 2) {
-							wrap.innerHTML = `<button type="button" class="next-step-btn">Étape suivante</button>`;
-							const nextBtn = wrap.querySelector('.next-step-btn');
-							if (nextBtn) nextBtn.addEventListener('click', () => {
-								input.value = "Je veux passer directement à l'étape suivante.";
-								send();
-							});
-						} else {
-							wrap.innerHTML = '';
-						}
-					}
-				}
+				renderSuccess(data, question, ticker);
 			} else {
 				addMessage(containerId, 'Erreur : ' + (data.error || 'inconnue'), 'system');
 			}
@@ -2267,7 +2438,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	}
 	btn.addEventListener('click', send);
 
-	function reset() {
+	function clearConversation() {
 		histories[key] = [];
 		lastMethodId = null;
 		document.getElementById(containerId).innerHTML = '';
@@ -2286,11 +2457,29 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 		}
 		input.focus();
 	}
-	if (newConvoBtn) newConvoBtn.addEventListener('click', reset);
+
+	// Checklist : reset synchrone inchangé. Décrypter runtime : les réponses
+	// déjà rendues doivent être acquittées AVANT de quitter la conversation ;
+	// sinon rien n'est réinitialisé (même conversation_key, même historique).
+	// Nouvelle conversation != nouvel utilisateur != nouvelle AnalysisSession.
+	async function reset() {
+		if (!runtimeDelivery) {
+			clearConversation();
+			return true;
+		}
+		if (!(await flushPendingDeliveryAcks())) {
+			addMessage(containerId, 'Synchronisation de la réponse précédente impossible : la conversation est conservée. Recharge la page ou réessaie.', 'system');
+			return false;
+		}
+		clearConversation();
+		resetSessionId(key);
+		return true;
+	}
+	if (newConvoBtn) newConvoBtn.addEventListener('click', () => { reset(); });
 	return { send, reset };
 }
 
-const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true, priceBannerId: 'price-banner-decrypter', nextStepWrapId: 'next-step-wrap-decrypter' });
+const decrypterChat = makeTickerChat({ key: 'decrypter', endpoint: '/decryptage', resultField: 'analysis', maxHistoryTurns: 20, trackMethodId: true, priceBannerId: 'price-banner-decrypter', nextStepWrapId: 'next-step-wrap-decrypter', runtimeDelivery: true });
 makeTickerChat({ key: 'checklist', endpoint: '/checklist', resultField: 'analysis' });
 
 // ============================================================
@@ -2627,6 +2816,24 @@ function savePortfolio(positions) {
 	localStorage.setItem(PORTFOLIO_STORAGE_KEY, JSON.stringify(positions));
 }
 
+// userReady : Promise stable « le backend a résolu/créé le User » via le
+// mécanisme produit existant (GET /api/user/{id}, qui crée l'utilisateur
+// s'il n'existe pas ; normalement celui d'initOryxUserSync). Aucun second
+// endpoint de bootstrap. En cas d'échec, la Promise est oubliée pour qu'un
+// prochain appel réessaie.
+let userReady = null;
+function ensureUserReady() {
+	if (!userReady) {
+		userReady = (async () => {
+			const res = await fetch(`/api/user/${getOryxUserId()}`);
+			if (!res.ok) throw new Error('bootstrap utilisateur : HTTP ' + res.status);
+			return res.json();
+		})();
+		userReady.catch(() => { userReady = null; });
+	}
+	return userReady;
+}
+
 async function initOryxUserSync() {
 	const userId = getOryxUserId();
 	if (!localStorage.getItem('oryx_migrated_v1')) {
@@ -2657,6 +2864,8 @@ async function initOryxUserSync() {
 	try {
 		const res = await fetch(`/api/user/${userId}`);
 		const data = await res.json();
+		// Ce GET (après la migration éventuelle) résout aussi userReady.
+		if (res.ok && !userReady) userReady = Promise.resolve(data);
 		if (data && data.level) {
 			localStorage.setItem('oryx_level', data.level);
 			document.querySelectorAll('.level-btn').forEach(b => b.classList.toggle('active', b.dataset.level === data.level));
@@ -3080,7 +3289,10 @@ document.querySelectorAll('.level-btn').forEach(b => {
 	b.addEventListener('click', () => setUserLevel(b.dataset.level));
 });
 setUserLevel(getUserLevel());
-initOryxUserSync();
+// Au chargement : rejoue les ACK de livraison en attente une fois
+// l'utilisateur résolu (l'invariant fort reste le flush avant chaque envoi
+// Décrypter et avant chaque nouvelle conversation).
+initOryxUserSync().finally(() => ensureUserReady().then(() => flushPendingDeliveryAcks()).catch(() => {}));
 
 function escapeHtml(s) {
 	const div = document.createElement('div');
@@ -3088,11 +3300,14 @@ function escapeHtml(s) {
 	return div.innerHTML;
 }
 
-function resumeThesis(ticker) {
+// « Reprendre » : nouvelle conversation Décrypter (nouvelle
+// conversation_key), même AnalysisSession produit côté backend. Le reset
+// est attendu avant l'envoi (aucune course reset/send).
+async function resumeThesis(ticker) {
 	showView('decrypter');
-	decrypterChat.reset();
+	if (!(await decrypterChat.reset())) return;
 	document.getElementById('ticker-decrypter').value = ticker;
-	decrypterChat.send();
+	await decrypterChat.send();
 }
 
 async function renderTheses() {

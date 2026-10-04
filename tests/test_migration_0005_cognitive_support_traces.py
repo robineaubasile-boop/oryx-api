@@ -47,6 +47,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     R1B_DEDUP_UNIQUE,
     R1B_EVENT_COLUMNS,
     R1B_TABLES,
+    R1C1_TABLES,
     REMAINING_TABLES,
     SESSION_ID,
     T1B1_SHA256,
@@ -68,6 +69,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _indexes,
     _seed_remaining_tables,
     _without_r1b_changes,
+    _without_r1c1_changes,
 )
 
 T2A = "0005_cognitive_support_traces"
@@ -208,7 +210,7 @@ def test_metadata_declares_the_two_new_tables():
     """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces
     (+ les tables de T3-A, T4-A, T5-A et T6-A, testées à part)."""
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
-                                         | T6A_TABLES | R1B_TABLES)
+                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES)
     assert CognitiveEvent.__table__ is Base.metadata.tables[EVENTS]
     assert SupportTrace.__table__ is Base.metadata.tables[TRACES]
 
@@ -548,7 +550,7 @@ def _assert_metadata_matches_0005(engine) -> None:
     """Au schéma 0005, Base.metadata ne diffère que par les tables de T3-A,
     T4-A, T5-A et T6-A, créées seulement en 0006, 0007, 0008 et 0009, et par
     les écarts R1-B (0010) ; tout le reste correspond exactement."""
-    diff = _without_r1b_changes(_compare_metadata(engine), events_created=True)
+    diff = _without_r1b_changes(_without_r1c1_changes(_compare_metadata(engine)), events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T3A_TABLES | T4A_TABLES | T5A_TABLES | T6A_TABLES]
         + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES | T6A_INDEXES]

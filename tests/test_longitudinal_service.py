@@ -96,6 +96,7 @@ from tests.test_migration_0008_longitudinal_relations import (
 )
 from tests.test_migration_0009_competency_inference_state import T6A
 from tests.test_migration_0010_r1b_event_idempotence import R1B
+from tests.test_migration_0011_assistant_deliveries import R1C1
 from tests.test_observation_service import (
     INVALID_JSON_VALUES,
     _blocked,
@@ -217,13 +218,14 @@ RELATION_CALLS = {
 def test_no_migration_added_by_t5b():
     """T5-B est service-only : aucune migration ajoutée par T5-B ; les seules
     ajoutées depuis sont 0009 (T6-A, structure de l'inférence de l'état
-    C1-C12) et 0010 (R1-B, identité idempotente des CognitiveEvents), qui
-    est la tête."""
+    C1-C12), 0010 (R1-B, identité idempotente des CognitiveEvents) et 0011
+    (R1-C1, livraisons des réponses assistant), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
+    assert script.get_heads() == [R1C1]
+    assert script.get_revision(R1C1).down_revision == R1B
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]

@@ -107,6 +107,7 @@ from tests.test_observation_service import _event as _finalized_event
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
+R1C1 = "0011_assistant_deliveries"
 
 SERVICE_PATH = REPO_ROOT / "core" / "taxonomy_service.py"
 PUBLIC_API = {
@@ -157,13 +158,13 @@ def _def_kwargs(code="C7_A", revision=1, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t4b_head_is_0010():
+def test_no_migration_added_by_t4b_head_is_0011():
     """T4-B est service-only : aucune migration ajoutée par T4-B ; les seules
-    ajoutées depuis sont 0008 (T5-A), 0009 (T6-A) et 0010 (R1-B), qui est la
-    tête."""
+    ajoutées depuis sont 0008 (T5-A), 0009 (T6-A), 0010 (R1-B) et 0011
+    (R1-C1), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)
+    assert script.get_heads() == [R1C1]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]
@@ -722,13 +723,13 @@ def _pids(*sessions):
 # --- 0. aucune donnée seedée ------------------------------------------------
 
 def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, engine, db):  # noqa: F811
-    """Après upgrade head (0010 depuis R1-B) et import du service T4-B, les
+    """Après upgrade head (0011 depuis R1-C1) et import du service T4-B, les
     quatre tables T4 sont vides : ni release V1, ni capacité, ni mapping."""
     _upgrade_head_with_users(pg_url, engine)
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1B
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C1
     assert tax.get_active_release(db) is None
 
 

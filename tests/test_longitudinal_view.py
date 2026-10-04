@@ -74,6 +74,7 @@ from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A
 from tests.test_migration_0010_r1b_event_idempotence import R1B
+from tests.test_migration_0011_assistant_deliveries import R1C1
 from tests.test_observation_service import _NoDB, _reaches_db
 
 VIEW_PATH = REPO_ROOT / "core" / "longitudinal_view.py"
@@ -102,13 +103,14 @@ def _has_word(text: str, word: str) -> bool:
 
 def test_no_migration_added_by_t5c():
     """Aucune migration ajoutée par T5-C ; les seules ajoutées depuis sont
-    0009 (T6-A) et 0010 (R1-B), qui est la tête."""
+    0009 (T6-A), 0010 (R1-B) et 0011 (R1-C1), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
+    assert script.get_heads() == [R1C1]
+    assert script.get_revision(R1C1).down_revision == R1B
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-3:] == [f"{T5A}.py", f"{T6A}.py", f"{R1B}.py"] and not any(name.startswith("0011") for name in files)
+    assert files[-4:] == [f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py"] and len(files) == 11
 
 
 def test_no_profile_table_or_model_exists():

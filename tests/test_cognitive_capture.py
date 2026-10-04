@@ -73,6 +73,7 @@ T4A = "0007_pedagogical_taxonomy"
 T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
+R1C1 = "0011_assistant_deliveries"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
 PUBLIC_API = {
@@ -190,14 +191,15 @@ def capture_event(session, *, text="rentabilité des capitaux propres", close=No
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_head_is_0010_added_by_r1b():
-    """T2-B n'a ajouté aucune migration ; R1-B ajoute 0010, la tête."""
+def test_head_is_0011_after_r1b_and_r1c1():
+    """T2-B n'a ajouté aucune migration ; R1-B ajoute 0010, R1-C1 ajoute
+    0011 (assistant_deliveries, sans lien avec ce service), la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
+    assert script.get_heads() == [R1C1]
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B}
+                                                                 T6A, R1B, R1C1}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)]
 
 
 def test_public_api_is_exactly_the_capture_functions():
@@ -303,8 +305,16 @@ def test_service_introduces_no_evaluation_vocabulary():
 
 
 def test_service_is_not_wired_to_the_application():
-    """Aucune route ni module applicatif n'importe le service ni le registre
-    d'identité ; api.py et web-v2 n'y font aucune référence."""
+    """Aucune route ni module applicatif n'importe le service de capture ;
+    api.py et web-v2 n'y font aucune référence. Seule exception, pour le
+    REGISTRE d'identité uniquement (pas la capture) : R1-C1 résout la
+    conversation_key d'une livraison assistant Décrypter via
+    register_or_resolve_conversation, depuis core/assistant_delivery.py
+    (aucun CognitiveEvent ni SupportTrace créé : voir
+    tests/test_assistant_delivery.py)."""
+    registry_names = ("interaction_identity", "register_or_resolve_conversation")
+    capture_names = ("cognitive_capture", "open_event_idempotent", "append_user_contribution", "add_support_trace",
+                     "finalize_event", "abandon_event")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -316,9 +326,11 @@ def test_service_is_not_wired_to_the_application():
             source = _code_tokens(source)
         checked += 1
         if rel not in ("core/cognitive_capture.py", "core/interaction_identity.py"):
-            for name in ("cognitive_capture", "interaction_identity", "open_event_idempotent",
-                         "append_user_contribution", "register_or_resolve_conversation"):
+            for name in capture_names:
                 assert name not in source, (rel, name)
+            if rel != "core/assistant_delivery.py":
+                for name in registry_names:
+                    assert name not in source, (rel, name)
     assert checked > 0
 
 
@@ -564,7 +576,7 @@ def test_utcnow_is_utc_aware():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0010) + deux utilisateurs et une analysis_session,
+    """Schéma = head (0011 depuis R1-C1) + deux utilisateurs et une analysis_session,
     créé une fois pour le module ; chaque test nettoie ses écritures."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)

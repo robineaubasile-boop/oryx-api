@@ -278,9 +278,9 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
     # Les modèles SQLAlchemy correspondent exactement au schéma migré, à
     # l'exception de company_analyses, encore présente en 0003 mais dont le
     # modèle est supprimé depuis T1-C2 (la table disparaît en 0004), et des
-    # tables de T2-A, T3-A, T4-A, T5-A, T6-A et R1-B (et des index de T3-A,
-    # T4-A, T5-A et T6-A), déclarées dans les modèles mais créées seulement
-    # en 0005, 0006, 0007, 0008, 0009 et 0010.
+    # tables de T2-A, T3-A, T4-A, T5-A, T6-A, R1-B et R1-C1 (et des index de
+    # T3-A, T4-A, T5-A et T6-A), déclarées dans les modèles mais créées
+    # seulement en 0005, 0006, 0007, 0008, 0009, 0010 et 0011.
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with pg_engine.connect() as conn:
@@ -322,6 +322,7 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         ("add_index", "uq_longitudinal_assessment_runs_one_active_user_competency"),
         ("add_index", "uq_observation_evaluation_runs_one_active_event"),
         ("add_index", "uq_pedagogical_taxonomy_releases_one_active"),
+        ("add_table", "assistant_deliveries"),
         ("add_table", "capability_taxonomy_memberships"),
         ("add_table", "cognitive_events"),
         ("add_table", "competency_inference_basis_refs"),

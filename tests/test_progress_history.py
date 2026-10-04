@@ -526,7 +526,7 @@ def test_no_score_count_speed_or_user_facing_text():
 
 def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0010_r1b_event_idempotence.py" and len(versions) == 10
+    assert versions[-1] == "0011_assistant_deliveries.py" and len(versions) == 11
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "ProgressHistory" not in models and "progress_history" not in models
     # Seuls consommateurs, eux-mêmes non branchés : 6-4C2 lit les contrats
