@@ -100,12 +100,30 @@ Invariants :
   application avec une claim application not_established reste tel quel.
   Aucune absence n'est lue comme une faiblesse de l'utilisateur.
 
-- confidence_profile : copie profonde immuable du profil
-  confidence-profile-v1 (schema_version + diagnosticity, coverage,
-  independence, consistency, temporal_validation), sans agrégation ni
-  lecture. mastery_assessment (mastery-assessment-v1) : copie immuable sur
-  la seule claim mastery, ses capability_definition_ids vérifiés contre la
-  taxonomie courante ; aucun x/5, aucun pourcentage.
+- confidence_profile : copie profonde immuable du profil persisté
+  (schema_version + diagnosticity, coverage, independence, consistency,
+  temporal_validation), sans agrégation ni lecture. Deux formats, TOUJOURS
+  choisis par leur schema_version (jamais déduits de la forme) :
+    * confidence-profile-v1 (historique, immuable, plus jamais écrit) :
+      contrat historique inchangé (chaque dimension est un objet) ; ses
+      capability_definition_ids sont AGRÉGÉS par dimension : 6-1A ne prétend
+      jamais savoir quel fait porte quelle capacité et ne reconstruit
+      jamais une attribution par fait ;
+    * confidence-profile-v2 (courant) : validé STRICTEMENT par
+      check_confidence_profile_v2 (définition unique du format, partagée
+      avec l'écriture T6-C3) contre la taxonomie courante du snapshot :
+      chaque fait, au plus une fois et dans l'ordre de DIMENSION_FACT_CODES,
+      avec EXACTEMENT ses propres capability_definition_ids, chacun présent
+      par son identité (definition_id, jamais capability_code) dans la
+      release du run T5 courant, sans doublon, dans l'ordre de la taxonomie.
+      Un consommateur retrouve donc sans ambiguïté, par exemple, coverage ->
+      fait unobserved_capabilities_present -> SES capability_definition_ids
+      (str canoniques, copiés tels quels).
+  Autre schema_version => InvalidAdaptationState.
+
+- mastery_assessment (mastery-assessment-v1) : copie immuable sur la seule
+  claim mastery, ses capability_definition_ids vérifiés contre la taxonomie
+  courante ; aucun x/5, aucun pourcentage.
 
 - Tensions : get_inference_tensions(run_id) ; localized => memberships
   résolus EXACTEMENT dans la release du run T5 courant et la compétence
@@ -149,6 +167,8 @@ from core.inference_final_policies import (
     VALIDATION_NEED_SCHEMA_VERSION,
     VALIDATION_REASON_CODES,
     VALIDATION_SCOPE_MODES,
+    InvalidConfidenceProfilePayload,
+    check_confidence_profile_v2,
 )
 from core.inference_positive_basis import MASTERY_ASSESSMENT_SCHEMA_VERSION, MASTERY_PROPERTIES
 from core.inference_service import (
@@ -186,7 +206,7 @@ from core.inference_service import (
     get_stage_claims,
     get_validated_user_competency_state,
 )
-from core.inference_state_policies import CONFIDENCE_PROFILE_SCHEMA_VERSION
+from core.inference_state_policies import CONFIDENCE_PROFILE_SCHEMA_V1, READABLE_CONFIDENCE_PROFILE_SCHEMA_VERSIONS
 from core.longitudinal_service import LongitudinalServiceError, get_longitudinal_assessment, get_longitudinal_inputs
 from core.observation_service import ObservationServiceError, get_evaluation_run, get_observation
 from core.taxonomy_service import TaxonomyServiceError, get_observation_capabilities, get_release_capabilities
@@ -520,19 +540,29 @@ def _taxonomy(release_id: uuid.UUID, competency_code: str, rows) -> _Taxonomy:
                      MappingProxyType(release_competencies))
 
 
-def _confidence_profile(value, stage: str, status: str):
-    """confidence-profile-v1 copié tel quel (cinq dimensions séparées), jamais
-    agrégé ; None exactement pour une claim not_established."""
+def _confidence_profile(value, stage: str, status: str, taxonomy: _Taxonomy):
+    """Profil persisté copié tel quel (cinq dimensions séparées), jamais
+    agrégé ni converti ; None exactement pour une claim not_established.
+    Format choisi par schema_version : v1 historique (contrat inchangé, IDs
+    agrégés par dimension, aucune attribution par fait), v2 courant (faits
+    validés strictement contre la taxonomie courante, par identité)."""
     if status != ESTABLISHED:
         if value is not None:
             raise _fail(f"{stage} {status} avec un confidence_profile")
         return None
     if not isinstance(value, Mapping) or set(value) != _CONFIDENCE_PROFILE_KEYS:
         raise _fail(f"{stage} : confidence_profile = schema_version + {sorted(CONFIDENCE_DIMENSIONS)} attendu")
-    if value["schema_version"] != CONFIDENCE_PROFILE_SCHEMA_VERSION:
-        raise _fail(f"{stage} : confidence_profile {value['schema_version']!r} non supporté")
-    if not all(isinstance(value[name], Mapping) for name in CONFIDENCE_DIMENSIONS):
-        raise _fail(f"{stage} : dimension de confiance non structurée")
+    version = value["schema_version"]
+    if type(version) is not str or version not in READABLE_CONFIDENCE_PROFILE_SCHEMA_VERSIONS:
+        raise _fail(f"{stage} : confidence_profile {version!r} non supporté")
+    if version == CONFIDENCE_PROFILE_SCHEMA_V1:
+        if not all(isinstance(value[name], Mapping) for name in CONFIDENCE_DIMENSIONS):
+            raise _fail(f"{stage} : dimension de confiance non structurée")
+    else:
+        try:
+            check_confidence_profile_v2(value, tuple(str(c.definition_id) for c in taxonomy.capabilities))
+        except InvalidConfidenceProfilePayload as exc:
+            raise _fail(f"{stage} : confidence_profile {version} invalide ({exc})") from exc
     return _frozen_json(value, f"{stage}.confidence_profile")
 
 
@@ -619,7 +649,7 @@ def _claims(run: _RunRecord, acquired: _Acquired, taxonomy: _Taxonomy, competenc
             raise _fail(f"{stage} : {status} / {mode} incohérents")
         if mode != DIRECT and basis[stage]:
             raise _fail(f"{stage} {mode} avec des refs positive_basis propres")
-        profile = _confidence_profile(row.confidence_profile, stage, status)
+        profile = _confidence_profile(row.confidence_profile, stage, status, taxonomy)
         assessment, mastery_scope = _mastery_assessment(row.mastery_assessment, stage, taxonomy)
         decoded[stage] = (status, mode, profile, assessment)
         if mode == BASIS_MODE_NONE:

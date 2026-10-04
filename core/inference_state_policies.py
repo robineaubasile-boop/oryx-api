@@ -48,7 +48,16 @@ from core.inference_service import CLAIM_STAGES
 
 CONFIDENCE_PROFILE_V1 = "confidence_profile-1"
 STATE_DECISION_V1 = "state_decision-1"
-CONFIDENCE_PROFILE_SCHEMA_VERSION = "confidence-profile-v1"
+# Format SÉRIALISÉ du profil de confiance (jamais une policy : la policy
+# pédagogique reste confidence_profile-1, inchangée). v1 : format historique
+# compact (fact_codes + capacités agrégées par dimension), immuable, lisible,
+# plus jamais écrit. v2 : format courant écrit, chaque fait avec SES propres
+# capacités. La version d'un profil persisté est TOUJOURS lue dans son
+# schema_version, jamais déduite de sa forme.
+CONFIDENCE_PROFILE_SCHEMA_V1 = "confidence-profile-v1"
+CONFIDENCE_PROFILE_SCHEMA_V2 = "confidence-profile-v2"
+CONFIDENCE_PROFILE_SCHEMA_VERSION = CONFIDENCE_PROFILE_SCHEMA_V2
+READABLE_CONFIDENCE_PROFILE_SCHEMA_VERSIONS = (CONFIDENCE_PROFILE_SCHEMA_V1, CONFIDENCE_PROFILE_SCHEMA_V2)
 REVISION_CONTEXT_SCHEMA_VERSION = "revision-context-v1"
 
 
@@ -110,6 +119,10 @@ LOCALIZED_REPRESENTATIVE_SCOPE = "localized_representative_scope"
 COMPETENCY_ONLY_SCOPE = "competency_only_scope"
 ADDITIONAL_POSITIVE_SCOPE_PRESENT = "additional_positive_scope_present"
 COVERAGE_CONCENTRATED_ON_CLAIM_SCOPE = "coverage_concentrated_on_claim_scope"
+# Capacités de la compétence SANS observation POSITIVE située dans le dossier
+# T5 courant (positive_observation_status != observed_positive). Jamais
+# « aucune observation » : une capacité portant seulement des observations
+# contradictoires (ou supportive sans profondeur locale) en fait partie.
 UNOBSERVED_CAPABILITIES_PRESENT = "unobserved_capabilities_present"
 
 SINGLE_EPISODE_ONLY = "single_episode_only"

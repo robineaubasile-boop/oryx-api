@@ -32,10 +32,16 @@ latents, résout les memberships et SÉRIALISE.
 - StageClaimDecision : exactement quatre, discovery -> mastery ;
   basis_summary / scope_summary = gabarits fermés, AUDIT SEULEMENT (aucune
   logique ne les relit) ; confidence_profile = lecture qualitative
-  (confidence-profile-v1 : cinq dimensions, fact_codes, capacités,
-  limitations ; jamais d'observation, de relation ni de score : la
-  provenance passe par les refs) ; mastery_assessment sur la seule claim
-  mastery (cinq propriétés qualitatives, jamais 4/5).
+  (confidence-profile-v2 : cinq dimensions ; par dimension, chaque fait
+  T6-C2 avec SES propres capability_definition_ids, exactement ceux de
+  ConfidenceFact, sans union ni reconstruction ; et les limitations ;
+  jamais d'observation, de relation ni de score : la provenance passe par
+  les refs ; format vérifié par check_confidence_profile_v2 avant tout
+  retour). confidence-profile-v1 (fact_codes + capacités agrégées par
+  dimension) est le format historique, plus jamais écrit ; la policy
+  pédagogique confidence_profile-1 et les six versions de spécification
+  sont inchangées : seul le format sérialisé évolue. mastery_assessment sur
+  la seule claim mastery (cinq propriétés qualitatives, jamais 4/5).
 - TensionDecision : clés locales t0, t1... dans l'ordre T6-C2 (aucune
   sémantique) ; revision_status revalidation_needed seulement si un besoin
   de revalidation la couvre sémantiquement, sinon unresolved.
@@ -56,11 +62,13 @@ génération d'UUID. Même InferenceContext => même InferenceDecision.
 """
 from collections.abc import Mapping
 
+from core.inference_confidence import ConfidenceDimensionAssessment, ConfidenceFact, ConfidenceProfileAssessment
 from core.inference_final_policies import (
     VALIDATION_INTENTS,
     FinalInferenceError,
     InvalidAssembledDecision,
     UnresolvableCapabilityMembership,
+    check_confidence_profile_v2,
     check_validation_scope,
     current_capabilities,
     resolve_final_inference_policy,
@@ -103,6 +111,7 @@ from core.inference_service import (
 )
 from core.inference_state import evaluate_inference_state
 from core.inference_state_policies import CONFIDENCE_DIMENSIONS as DIMENSION_ORDER
+from core.inference_state_policies import CONFIDENCE_PROFILE_SCHEMA_V2
 from core.inference_transition import relation_endpoints, resolve_transition_cause
 from core.inference_validation import evaluate_validation_needs, tension_revision_status
 
@@ -169,14 +178,42 @@ def _limitation_codes(items) -> list:
     return codes
 
 
-def _profile_payload(profile) -> dict:
-    """confidence-profile-v1 persisté : la LECTURE qualitative seulement."""
+def _check_profile(payload, taxonomy, path: str) -> None:
+    """Format confidence-profile-v2 (définition unique, partagée avec 6-1A)
+    contre la taxonomie courante : fail closed."""
+    try:
+        check_confidence_profile_v2(payload, tuple(str(d) for d in current_capabilities(taxonomy)))
+    except FinalInferenceError as exc:
+        raise InvalidAssembledDecision(f"{path} : {exc}") from exc
+
+
+def _profile_payload(profile, taxonomy) -> dict:
+    """confidence-profile-v2 persisté : la LECTURE qualitative seulement.
+    Chaque fait T6-C2 reste distinct, avec EXACTEMENT ses propres
+    capability_definition_ids (ConfidenceFact), dans l'ordre de sa
+    dimension ; aucune union par dimension, aucune observation ni relation
+    (provenance : refs confidence). Fail closed avant tout retour."""
+    _fail(type(profile) is not ConfidenceProfileAssessment or profile.schema_version != CONFIDENCE_PROFILE_SCHEMA_V2,
+          f"profil de confiance {CONFIDENCE_PROFILE_SCHEMA_V2} attendu")
+    known = current_capabilities(taxonomy)
     payload = {"schema_version": profile.schema_version}
     for name in DIMENSION_ORDER:
         dimension = getattr(profile, name)
-        payload[name] = {"fact_codes": list(dimension.fact_codes),
-                         "capability_definition_ids": [str(i) for i in dimension.capability_definition_ids],
+        _fail(type(dimension) is not ConfidenceDimensionAssessment or dimension.dimension != name,
+              f"{profile.stage}.{name} : dimension inattendue")
+        facts = dimension.facts
+        _fail(type(facts) is not tuple or any(type(fact) is not ConfidenceFact for fact in facts),
+              f"{profile.stage}.{name} : ConfidenceFact attendus")
+        _fail(dimension.fact_codes != tuple(fact.code for fact in facts),
+              f"{profile.stage}.{name} : fact_codes incohérents avec les faits")
+        _fail(any(type(fact.capability_definition_ids) is not tuple or
+                  any(i not in known for i in fact.capability_definition_ids) for fact in facts),
+              f"{profile.stage}.{name} : capacité d'un fait hors de la taxonomie courante")
+        payload[name] = {"facts": [{"code": fact.code,
+                                    "capability_definition_ids": [str(i) for i in fact.capability_definition_ids]}
+                                   for fact in facts],
                          "limitations": _limitation_codes(dimension.limitations)}
+    _check_profile(payload, taxonomy, f"{profile.stage}.confidence_profile")
     return payload
 
 
@@ -205,7 +242,7 @@ def _claims_and_refs(positive_basis, state, taxonomy) -> tuple:
         claims.append(StageClaimDecision(
             stage=claim.stage, positive_basis_status=claim.status, basis_mode=claim.basis_mode,
             basis_summary=_basis_summary(claim), scope_summary=_scope_summary(claim, taxonomy),
-            confidence_profile=None if claim.status != ESTABLISHED else _profile_payload(profile),
+            confidence_profile=None if claim.status != ESTABLISHED else _profile_payload(profile, taxonomy),
             mastery_assessment=None if claim.stage != MASTERY or claim.mastery_assessment is None
             else _mastery_payload(claim.mastery_assessment)))
         if claim.status == ESTABLISHED and claim.basis_mode == DIRECT:
@@ -305,7 +342,7 @@ def _highest(claims) -> str:
     return next((c.stage for c in reversed(claims) if c.positive_basis_status == ESTABLISHED), NON_ETABLI)
 
 
-def _guard_claims(decision, refs) -> None:
+def _guard_claims(context, state, decision, refs) -> None:
     claims = decision.claims
     _fail(type(claims) is not tuple or tuple(getattr(c, "stage", None) for c in claims) != CLAIM_STAGES,
           "exactement quatre StageClaimDecision attendues (discovery -> mastery)")
@@ -326,6 +363,7 @@ def _guard_claims(decision, refs) -> None:
             _fail(not isinstance(profile, Mapping) or set(profile) != {"schema_version", *CONFIDENCE_DIMENSIONS},
                   f"{claim.stage} : confidence_profile = schema_version + cinq dimensions exactement")
             _check_payload(profile, f"{claim.stage}.confidence_profile")
+            _check_profile(profile, context.current_taxonomy_context, f"{claim.stage}.confidence_profile")
             _fail(claim.basis_mode == DIRECT and not positive, f"{claim.stage} direct sans ref positive_basis")
             _fail(claim.basis_mode == IMPLIED_BY_HIGHER_CLAIM and bool(positive),
                   f"{claim.stage} implied : aucune ref positive_basis (aucune preuve recopiée)")
@@ -336,6 +374,10 @@ def _guard_claims(decision, refs) -> None:
             _fail(type(text) is not str or not text, f"{claim.stage} : résumés d'audit attendus")
     established = [c.positive_basis_status == ESTABLISHED for c in claims]
     _fail(any(e and not all(established[:i]) for i, e in enumerate(established)), "base positive non monotone")
+    # Fidélité : chaque profil sérialisé est EXACTEMENT celui des faits T6-C2.
+    for claim, profile in zip(claims, state.confidence_profiles):
+        _fail(claim.confidence_profile != (None if profile is None else _profile_payload(
+            profile, context.current_taxonomy_context)), f"{claim.stage} : confidence_profile != faits T6-C2")
 
 
 def _guard_refs(context, decision) -> None:
@@ -449,7 +491,7 @@ def _guard_state(context, state, decision) -> None:
 def _guard(context, state, decision) -> None:
     """DecisionInvariantGuard (pur, propre à T6-C)."""
     _fail(type(decision) is not InferenceDecision, "InferenceDecision attendue")
-    _guard_claims(decision, decision.basis_refs)
+    _guard_claims(context, state, decision, decision.basis_refs)
     _guard_refs(context, decision)
     _guard_tensions(context, decision)
     _guard_state(context, state, decision)
