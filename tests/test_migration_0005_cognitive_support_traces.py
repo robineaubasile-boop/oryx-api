@@ -666,11 +666,14 @@ def test_pg_invalid_status_is_refused(conn):
 
 def test_pg_snapshots_and_required_columns_are_not_null(conn):
     for column, param in (("stimulus_snapshot", "stimulus"), ("user_work_snapshot", "work"),
-                          ("event_origin", "event_origin"), ("task_kind", "task_kind"),
-                          ("user_id", "user_id")):
+                          ("event_origin", "event_origin"), ("user_id", "user_id")):
         with pytest.raises(sa.exc.IntegrityError, match=f"null value in column \"{column}\""):
             with conn.begin_nested():
                 _event(conn, **{param: None})
+    # task_kind NOT NULL en T2-A, nullable depuis R1-B (0010 : démonstration
+    # sans tâche imposée, testée à part).
+    assert conn.execute(sa.text("SELECT task_kind FROM cognitive_events WHERE id = :id"),
+                        {"id": _event(conn, task_kind=None)}).scalar_one() is None
     event_id = _event(conn)
     for column, param in (("support_payload", "payload"), ("support_kind", "kind")):
         with pytest.raises(sa.exc.IntegrityError, match=f"null value in column \"{column}\""):
