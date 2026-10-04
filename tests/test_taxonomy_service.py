@@ -723,13 +723,13 @@ def _pids(*sessions):
 # --- 0. aucune donnée seedée ------------------------------------------------
 
 def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, engine, db):  # noqa: F811
-    """Après upgrade head (0010 depuis R1-B) et import du service T4-B, les
+    """Après upgrade head (0011 depuis R1-C1) et import du service T4-B, les
     quatre tables T4 sont vides : ni release V1, ni capacité, ni mapping."""
     _upgrade_head_with_users(pg_url, engine)
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1B
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C1
     assert tax.get_active_release(db) is None
 
 

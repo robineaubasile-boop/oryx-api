@@ -576,7 +576,7 @@ def test_utcnow_is_utc_aware():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0010) + deux utilisateurs et une analysis_session,
+    """Schéma = head (0011 depuis R1-C1) + deux utilisateurs et une analysis_session,
     créé une fois pour le module ; chaque test nettoie ses écritures."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)
