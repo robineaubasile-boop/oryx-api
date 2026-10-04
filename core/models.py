@@ -82,7 +82,8 @@ class AnalysisSession(Base):
 
     T1-A (EXPAND) : table créée par la migration 0002_analysis_sessions.
     T1-B2 : identité réelle de toute nouvelle tentative construction_these
-    (voir _track_construction_these_progress dans api.py).
+    (voir apply_construction_these_progress dans core/decryptage_progress.py,
+    ex-_track_construction_these_progress de api.py).
     T1-C1 : unique identité d'une tentative ; CompanyAnalysis n'est plus
     utilisé par l'application.
     T1-C2 : modèle CompanyAnalysis et table company_analyses supprimés
@@ -1410,3 +1411,68 @@ class UserCompetencyState(Base):
     tension_state = Column(String, nullable=False)
     state_generation = Column(BigInteger, nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class AssistantDelivery(Base):
+    """Réponse Oryx canonique produite pour UN tour utilisateur sur une
+    surface produit, et son statut de livraison (R1-C1).
+
+    Infrastructure runtime uniquement : AssistantDelivery n'est ni un
+    SupportTrace, ni un CognitiveEvent, ni une observation, ni une preuve
+    utilisateur, ni un mouvement pédagogique. Elle établit seulement
+    l'identité d'un assistant turn (id, exposé sous le nom
+    assistant_turn_id), la réponse canonique rejouée à l'identique sur
+    retry, et le statut :
+
+    - pending : contenu canonique persisté AVANT la réponse HTTP ;
+    - delivered : le frontend first-party Oryx a confirmé avoir inséré ce
+      contenu dans l'interface. delivered != lu, compris, regardé,
+      mémorisé ni utilisé cognitivement.
+
+    Identité logique (UNIQUE uq_assistant_deliveries_turn_ordinal, défense
+    finale sous concurrence) : (user_id, conversation_key, surface,
+    source_user_turn_id, delivery_ordinal). id est aléatoire et ne sert pas
+    à la déduplication.
+
+    response_payload = payload public canonique (jamais assistant_turn_id,
+    delivery_status ni private_metadata) ; private_metadata n'est jamais
+    renvoyé au frontend ; visible_content_fingerprint est une empreinte
+    d'intégrité du texte canonique affiché, pas une preuve de lecture.
+    analysis_session_id NULL = aucun suivi produit applicable (aucune
+    session artificielle).
+
+    Seul point d'écriture : core/assistant_delivery.py. Une fois créée,
+    seuls status / delivered_at (ACK) et analysis_session_id (liaison) sont
+    mutés. Table créée par la migration 0011_assistant_deliveries ; id et
+    timestamps générés par l'application (aucun server_default)."""
+    __tablename__ = "assistant_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'delivered')",
+            name="ck_assistant_deliveries_status",
+        ),
+        CheckConstraint(
+            "delivery_ordinal >= 1",
+            name="ck_assistant_deliveries_delivery_ordinal",
+        ),
+        UniqueConstraint(
+            "user_id", "conversation_key", "surface", "source_user_turn_id", "delivery_ordinal",
+            name="uq_assistant_deliveries_turn_ordinal",
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    conversation_key = Column(String, ForeignKey("conversation_identities.conversation_key"), nullable=False)
+    surface = Column(String, nullable=False)
+    source_user_turn_id = Column(Uuid, nullable=False)
+    delivery_ordinal = Column(Integer, nullable=False)
+    analysis_session_id = Column(Uuid, ForeignKey("analysis_sessions.id"), nullable=True)
+    request_fingerprint = Column(String, nullable=False)
+    visible_content_fingerprint = Column(String, nullable=False)
+    response_payload = Column(JSONB(none_as_null=True), nullable=False)
+    private_metadata = Column(JSONB(none_as_null=True), nullable=False)
+    status = Column(String, nullable=False)
+    delivery_schema_version = Column(String, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)

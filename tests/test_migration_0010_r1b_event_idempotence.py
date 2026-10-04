@@ -49,6 +49,7 @@ from tests.test_migration_0002_analysis_sessions import (
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
     REMAINING_TABLES,
+    R1C1_TABLES,
     T1B1_SHA256,
     T1C2,
     T3A_TABLES,
@@ -59,6 +60,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _compare_metadata,
     _data,
     _statements,
+    _without_r1c1_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     OTHER_USER,
@@ -76,6 +78,7 @@ from tests.test_migration_0008_longitudinal_relations import T4A_SHA256, T5A, _u
 from tests.test_migration_0009_competency_inference_state import T5A_SHA256, T6A, _seed_t5
 
 R1B = "0010_r1b_event_idempotence"
+R1C1 = "0011_assistant_deliveries"
 # sha256 de alembic/versions/0009_competency_inference_state.py tel que mergé
 # sur main (4982474, après Step 6.4D ; 0009 introduite par T6-A, bad616b).
 T6A_SHA256 = "199d04973d4cbc0d62fffe87a25366fca585f390980b8f57235d63db063086d2"
@@ -98,18 +101,20 @@ EXISTING = ALL_TABLES | {"alembic_version"}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0010():
-    """0001 -> ... -> 0009 -> 0010, tête unique = 0010 ; 0010 est la seule
-    migration ajoutée par R1-B."""
+def test_revision_chain_is_exactly_0001_to_0010_then_0011():
+    """0001 -> ... -> 0009 -> 0010 ; 0010 est la seule migration ajoutée par
+    R1-B. Depuis R1-C1, 0011 (assistant_deliveries) la suit et est la tête
+    unique (testée dans tests/test_migration_0011_assistant_deliveries.py)."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
+    assert script.get_heads() == [R1C1]
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1}
+    assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     assert revisions[T6A].down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -177,7 +182,8 @@ def test_offline_sql_of_0010_downgrade_reverts_exactly_r1b():
 
 
 def test_metadata_declares_exactly_the_r1b_registry_in_addition():
-    assert set(Base.metadata.tables) == ALL_TABLES | R1B_TABLES
+    """(+ assistant_deliveries de R1-C1, testée à part.)"""
+    assert set(Base.metadata.tables) == ALL_TABLES | R1B_TABLES | R1C1_TABLES
     assert ConversationIdentity.__table__ is Base.metadata.tables[CONVERSATIONS]
 
 
@@ -262,7 +268,7 @@ def _insert_event(conn, **overrides):
 
 @pytest.fixture
 def conn(pg_url, pg_engine):  # noqa: F811
-    """Schéma = head (0010) + deux utilisateurs et une analysis_session ;
+    """Schéma = head (0011 depuis R1-C1) + deux utilisateurs et une analysis_session ;
     tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -276,8 +282,8 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1B
-    assert _tables(pg_engine) == EXISTING | R1B_TABLES
+    assert _version(pg_engine) == R1C1
+    assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)
@@ -368,7 +374,7 @@ def test_pg_upgrade_0009_to_0010_preserves_everything_then_downgrade(pg_url, pg_
     # Lignes legacy inchangées, colonnes R1-B à NULL ; aucun registre créé.
     assert data_0010[EVENTS] == [row + (None, None, None, None) for row in legacy_events]
     assert data_0010[CONVERSATIONS] == []
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1c1_changes(_compare_metadata(pg_engine)) == []
     schema_r1b = _snapshot(pg_engine, {EVENTS, CONVERSATIONS})
     catalog_r1b = _catalog(pg_engine, {EVENTS, CONVERSATIONS})
 
@@ -397,7 +403,7 @@ def test_pg_upgrade_0009_to_0010_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, {EVENTS, CONVERSATIONS}) == schema_r1b
     assert _catalog(pg_engine, {EVENTS, CONVERSATIONS}) == catalog_r1b
     assert _data(pg_engine, {EVENTS})[EVENTS] == [row + (None, None, None, None) for row in legacy_events]
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1c1_changes(_compare_metadata(pg_engine)) == []
 
 
 def test_pg_known_limit_downgrade_refuses_events_without_task_kind(pg_url, pg_engine):  # noqa: F811
@@ -406,6 +412,9 @@ def test_pg_known_limit_downgrade_refuses_events_without_task_kind(pg_url, pg_en
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.begin() as connection:
         _insert_event(connection, task_kind=None, event_dedup_key="c" * 64)
+    # Depuis R1-C1, la tête est 0011 : on revient d'abord à 0010 (retrait de
+    # assistant_deliveries, sans rapport avec cette limite).
+    _run_alembic(pg_url, "downgrade", R1B)
     with pytest.raises(subprocess.CalledProcessError) as failure:
         _run_alembic(pg_url, "downgrade", T6A)
     assert 'column "task_kind" of relation "cognitive_events" contains null values' in failure.value.stderr

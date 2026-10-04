@@ -106,6 +106,7 @@ from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
 from tests.test_migration_0010_r1b_event_idempotence import R1B
+from tests.test_migration_0011_assistant_deliveries import R1C1
 from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _obs_kwargs, _reaches_db, _recording
 from tests.test_observation_service import _event as _finalized_event
 from tests.test_observation_service import _start_kwargs as t3_kwargs
@@ -225,25 +226,30 @@ def _pure_ok(d):
 # --------------------------------------------------------------------------
 
 def test_no_migration_added_by_t6b():
-    """T6-B est service-only : aucune migration ajoutée par T6-B ; la seule
-    ajoutée depuis est 0010 (R1-B, identité idempotente des
-    CognitiveEvents), qui est la tête."""
+    """T6-B est service-only : aucune migration ajoutée par T6-B ; les seules
+    ajoutées depuis sont 0010 (R1-B, identité idempotente des
+    CognitiveEvents) et 0011 (R1-C1, livraisons des réponses assistant), qui
+    est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1B]
+    assert script.get_heads() == [R1C1]
+    assert script.get_revision(R1C1).down_revision == R1B
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-2:] == [f"{T6A}.py", f"{R1B}.py"] and not any(name.startswith("0011") for name in files)
+    assert files[-3:] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py"] and len(files) == 11
 
 
 def test_t6a_schema_files_are_unchanged_by_t6b():
     """Ni core/models.py ni la migration 0009 ne sont modifiés par T6-B
     (comparaison avec le commit de merge de T6-A quand il est disponible).
     core/models.py est ensuite modifié par R1-B (0010) : il est comparé
-    jusqu'au dernier commit avant R1-B (merge de Step 6.4D)."""
+    jusqu'au dernier commit avant R1-B (merge de Step 6.4D). api.py est
+    ensuite modifié par R1-C1 (branchement runtime de /decryptage) : il est
+    comparé jusqu'au dernier commit avant R1-C1 (merge de R1-B, PR #212)."""
     commits = {}
     for name, sha in (("t6a", "b70bfa8b9fb3c2987f4d73737cbe26705bce232c"),
-                      ("before_r1b", "4982474436cb846d8e61b7e62c6fecc8d5a27745")):
+                      ("before_r1b", "4982474436cb846d8e61b7e62c6fecc8d5a27745"),
+                      ("before_r1c1", "e6d630060234edd42ba919cbbeb170367cdae0cc")):
         found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
                                cwd=REPO_ROOT, capture_output=True, text=True)
         if found.returncode != 0:
@@ -252,9 +258,12 @@ def test_t6a_schema_files_are_unchanged_by_t6b():
     diff = subprocess.run(["git", "diff", "--quiet", commits["t6a"], commits["before_r1b"], "--", "core/models.py"],
                           cwd=REPO_ROOT)
     assert diff.returncode == 0, "core/models.py"
-    for path in (f"alembic/versions/{T6A}.py", "api.py"):
-        diff = subprocess.run(["git", "diff", "--quiet", commits["t6a"], "--", path], cwd=REPO_ROOT)
-        assert diff.returncode == 0, path
+    diff = subprocess.run(["git", "diff", "--quiet", commits["t6a"], "--", f"alembic/versions/{T6A}.py"],
+                          cwd=REPO_ROOT)
+    assert diff.returncode == 0, T6A
+    diff = subprocess.run(["git", "diff", "--quiet", commits["t6a"], commits["before_r1c1"], "--", "api.py"],
+                          cwd=REPO_ROOT)
+    assert diff.returncode == 0, "api.py"
 
 
 def test_public_api_is_exactly_the_twelve_operations():

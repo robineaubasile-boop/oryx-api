@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import uuid
@@ -25,6 +26,28 @@ from core.checklist_engine import build_system_prompt as build_checklist_prompt,
 from core.market_lookup import search_market, get_eur_usd_rate
 from core.db import get_db
 from core.models import User, PortfolioPosition, InvestmentThesis, AnalysisSession
+from core.assistant_delivery import (
+	ASSISTANT_DELIVERY_SCHEMA_VERSION,
+	DECRYPTAGE_SURFACE,
+	AssistantDeliveryError,
+	AssistantDeliveryNotFound,
+	AssistantDeliveryOwnershipConflict,
+	AssistantDeliveryUserNotFound,
+	AssistantTurnIdentityCollision,
+	InvalidAssistantDeliveryInput,
+	UnsupportedAssistantDeliverySchema,
+	acknowledge_delivery,
+	bind_analysis_session,
+	claim_delivery,
+	decryptage_request_fingerprint,
+	preflight_delivery,
+	visible_content_fingerprint,
+)
+from core.decryptage_progress import (
+	apply_construction_these_progress,
+	extract_step_marker,
+	find_active_analysis_session as _find_active_analysis_session,
+)
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
@@ -289,12 +312,18 @@ def analyze_etf(request: StockRequest):
 
 
 class DecryptageRequest(BaseModel):
+	"""R1-C1 : user_id, conversation_key et client_turn_id sont obligatoires.
+	client_turn_id identifie UN tour utilisateur logique (identique sur un
+	retry réseau du même envoi, nouveau à chaque envoi). La surface et
+	l'ordinal de livraison sont imposés par le serveur."""
 	ticker: str
 	question: str = ""
 	context: str = ""
 	last_method_id: Optional[str] = None
 	level: str = "debutant"
-	user_id: Optional[str] = None
+	user_id: str
+	conversation_key: str
+	client_turn_id: uuid.UUID
 
 	@field_validator("ticker")
 	@classmethod
@@ -303,6 +332,19 @@ class DecryptageRequest(BaseModel):
 		if not v:
 			raise ValueError("ticker must not be empty")
 		return v
+
+	@field_validator("user_id", "conversation_key")
+	@classmethod
+	def identifier_must_not_be_empty_decryptage(cls, v):
+		# Validé, jamais transformé : la valeur est persistée et hashée telle quelle.
+		if not v.strip() or "\x00" in v:
+			raise ValueError("identifier must be a non-empty string without NUL")
+		return v
+
+
+class AssistantDeliveryAckRequest(BaseModel):
+	user_id: str
+	conversation_key: str
 
 
 class PedagogieRequest(BaseModel):
@@ -379,11 +421,6 @@ def _force_construction_these_method() -> dict:
 	}
 
 
-import re
-
-_STEP_MARKER_RE = re.compile(r"<!--ORYX_STEP:(\w+)-->")
-
-
 def _get_latest_thesis(user_id, ticker):
 	"""Retourne la dernière thèse enregistrée pour cet utilisateur et
 	ce ticker, ou None. Ne doit jamais faire planter la réponse
@@ -406,33 +443,6 @@ def _get_latest_thesis(user_id, ticker):
 	except Exception as e:
 		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
 		return None
-
-
-def _find_active_analysis_session(session, user_id, ticker):
-	"""Retourne l'AnalysisSession status=in_progress de ce user+ticker, ou
-	None (T1-B2).
-
-	Invariant applicatif : une seule session in_progress par user+ticker
-	(aucune contrainte SQL ne le garantit). Si plusieurs existent par
-	anomalie, on ne crée rien : on choisit déterministement la plus
-	récente (started_at, puis updated_at, puis id) et on journalise."""
-	from core.models import AnalysisSession
-	sessions = session.query(AnalysisSession).filter(
-		AnalysisSession.user_id == user_id,
-		AnalysisSession.ticker == ticker,
-		AnalysisSession.status == "in_progress",
-	).order_by(
-		AnalysisSession.started_at.desc(),
-		AnalysisSession.updated_at.desc(),
-		AnalysisSession.id.desc(),
-	).all()
-	if len(sessions) > 1:
-		print(
-			f"[ANALYSIS-SESSION ANOMALY] {len(sessions)} sessions in_progress pour "
-			f"user={user_id}, ticker={ticker} : {[str(s.id) for s in sessions]} — "
-			f"session retenue (la plus récente) : {sessions[0].id}"
-		)
-	return sessions[0] if sessions else None
 
 
 def _get_analysis_progress(user_id, ticker):
@@ -475,104 +485,107 @@ def _get_analysis_progress(user_id, ticker):
 		return None
 
 
-_FACT_FIELDS = [
-	"operating_margin", "roe", "roic", "gross_margin_latest",
-	"fcf_per_share", "revenue_growth", "net_cash", "eps",
-]
+# --- R1-C1 : livraison idempotente des réponses Décrypter ------------------
+#
+# /decryptage possède ses transactions ; aucune n'est ouverte pendant les
+# appels externes (données financières, Claude) :
+#
+#   TX PREFLIGHT (User, registre de conversation, livraison existante)
+#   -> COMMIT -> APPELS EXTERNES (aucune transaction DB ouverte)
+#   -> TX CLAIM/PRODUIT (livraison, progression construction_these,
+#      liaison analysis_session) -> COMMIT -> réponse HTTP.
+#
+# Une réponse success=True n'est renvoyée qu'après le COMMIT de la
+# livraison pending : une défaillance DB n'est plus avalée (l'ancienne
+# doctrine « ne jamais faire planter la réponse principale » est
+# abandonnée pour ce chemin) ; la transaction est annulée et le client
+# reçoit une erreur retryable.
+
+DECRYPTAGE_DELIVERY_ORDINAL = 1
+DECRYPTAGE_DISCLAIMER = "Analyse éducative uniquement. Ne constitue pas un conseil en investissement."
+_RETRYABLE_ERROR = "Erreur interne, réessaie dans quelques instants."
+
+_DELIVERY_HTTP_STATUS = {
+	AssistantDeliveryUserNotFound: 404,
+	AssistantDeliveryNotFound: 404,
+	AssistantDeliveryOwnershipConflict: 403,
+	AssistantTurnIdentityCollision: 409,
+	UnsupportedAssistantDeliverySchema: 409,
+	InvalidAssistantDeliveryInput: 422,
+}
 
 
-def _track_construction_these_progress(user_id, ticker, step, thesis_text=None, data=None):
-	"""Enregistre la progression dans construction_these. Ne doit jamais
-	faire planter la réponse principale : toute erreur est journalisée
-	et avalée silencieusement.
-
-	AnalysisSession est l'unique identité d'une tentative (T1-C1) :
-	- session in_progress existante pour user+ticker → réutilisée ;
-	- sinon, step != swot_final → nouvelle tentative : nouvelle session ;
-	- sinon (swot_final sans session active) → conversation libre après
-	  une analyse terminée : ignoré, aucune session artificielle.
-	Une session completed/abandoned n'est jamais reprise."""
-	from core.db import SessionLocal
-	if not SessionLocal or not user_id:
-		return
-	try:
-		session = SessionLocal()
-		try:
-			active = _find_active_analysis_session(session, user_id, ticker)
-			if active is None and step == "swot_final":
-				print(f"[DB-TRACKING] Ignoré : user={user_id}, ticker={ticker}, swot_final hors tentative en cours (conversation libre après le bilan)")
-				return
-			_track_session_progress(session, active, user_id, ticker, step, thesis_text, data)
-		finally:
-			session.close()
-	except Exception as e:
-		print(f"[DB-TRACKING ERROR] {type(e).__name__}: {e}")
+def _delivery_http_error(exc: AssistantDeliveryError, *, phase: str) -> HTTPException:
+	"""Erreur métier attendue → HTTP. Le détail ne contient que le type
+	d'erreur (jamais de payload ni de texte utilisateur). Toute autre erreur
+	du service est une incohérence serveur : 500 retryable."""
+	status = _DELIVERY_HTTP_STATUS.get(type(exc), 500)
+	print(f"[ASSISTANT-DELIVERY] {phase} refusé : {type(exc).__name__} → HTTP {status}")
+	if status == 500:
+		return HTTPException(status_code=500, detail={"error": _RETRYABLE_ERROR, "retryable": True})
+	return HTTPException(status_code=status, detail={"error": type(exc).__name__, "retryable": False})
 
 
-def _track_session_progress(session, active, user_id, ticker, step, thesis_text, data):
-	"""Tout ce qui est écrit pour la tentative porte
-	analysis_session_id = active.id."""
-	from core.models import AnalysisSession, InvestmentThesis, AnalysisFact, UserStatement
-	now = datetime.utcnow()
-	now_aware = datetime.now(timezone.utc)
-
-	is_new_session = active is None
-	if is_new_session:
-		active = AnalysisSession(
-			id=uuid.uuid4(), user_id=user_id, ticker=ticker, status="in_progress",
-			current_step=step, started_at=now_aware, updated_at=now_aware,
-		)
-		session.add(active)
-		session.flush()
-	previous_step = None if is_new_session else active.current_step
-	is_new_swot = step == "swot_final"
-
-	active.current_step = step
-	active.updated_at = now_aware
-	if is_new_swot:
-		active.status = "completed"
-		active.completed_at = now_aware
-
-	# Le texte reçu à ce tour (thesis_text=question) répond à l'étape
-	# PRÉCÉDENTE (previous_step), pas à l'étape que ce marqueur (step)
-	# annonce : le marqueur reflète l'étape que la réponse de
-	# l'assistant vient de traiter/entamer, toujours un tour d'avance
-	# sur ce que l'utilisateur vient de dire. Au premier tour d'une
-	# session, c'est le message déclencheur : on ne l'enregistre pas.
-	if thesis_text and previous_step:
-		session.add(UserStatement(
-			user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text,
-			analysis_session_id=active.id,
-		))
-
-	if is_new_swot and thesis_text:
-		session.add(InvestmentThesis(
-			user_id=user_id, ticker=ticker, thesis_text=thesis_text, analysis_session_id=active.id,
-		))
-
-	facts_written = False
-	if is_new_session and data:
-		for field in _FACT_FIELDS:
-			value = data.get(field)
-			if value is not None:
-				session.add(AnalysisFact(
-					user_id=user_id, ticker=ticker, fact_type=field, fact_value=value, fact_date=now,
-					analysis_session_id=active.id,
-				))
-				facts_written = True
-
-	session.commit()
-	print(f"[DB-TRACKING] Écrit : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
+def _delivery_response(delivery) -> dict:
+	"""Réponse HTTP d'une livraison : son payload public canonique persisté
+	(jamais recalculé), assistant_turn_id et delivery_status. Jamais
+	private_metadata. Construite AVANT le commit (objets ORM expirés
+	ensuite)."""
+	return {
+		**copy.deepcopy(delivery.response_payload),
+		"assistant_turn_id": str(delivery.id),
+		"delivery_status": delivery.status,
+	}
 
 
 @app.post("/decryptage")
-def decryptage(request: DecryptageRequest):
+def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 	raw_ticker = request.ticker
 	question = request.question.strip()
 	context = request.context.strip()
 	ticker = normalize_ticker(raw_ticker)
+	user_id = request.user_id
+	conversation_key = request.conversation_key
+	client_turn_id = request.client_turn_id
 	print(f"[DECRYPTAGE] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
 
+	identity = {
+		"user_id": user_id,
+		"conversation_key": conversation_key,
+		"surface": DECRYPTAGE_SURFACE,
+		"source_user_turn_id": client_turn_id,
+		"delivery_ordinal": DECRYPTAGE_DELIVERY_ORDINAL,
+	}
+
+	# --- Phase A : preflight, AVANT tout appel externe ----------------------
+	try:
+		# Valeurs réellement consommées par la route (ticker normalisé,
+		# question / context strippés) ; aucune donnée de marché.
+		request_fingerprint = decryptage_request_fingerprint(
+			user_id=user_id,
+			conversation_key=conversation_key,
+			client_turn_id=client_turn_id,
+			ticker=ticker,
+			question=question,
+			context=context,
+			last_method_id=request.last_method_id,
+			level=request.level,
+		)
+		canonical = preflight_delivery(db, **identity, request_fingerprint=request_fingerprint)
+		replay = _delivery_response(canonical) if canonical is not None else None
+		db.commit()
+	except AssistantDeliveryError as exc:
+		db.rollback()
+		raise _delivery_http_error(exc, phase="preflight")
+	except Exception as exc:
+		db.rollback()
+		print(f"[ASSISTANT-DELIVERY ERROR] preflight : {type(exc).__name__}")
+		raise HTTPException(status_code=500, detail={"error": _RETRYABLE_ERROR, "retryable": True})
+	if replay is not None:
+		print(f"[ASSISTANT-DELIVERY] Retry : assistant_turn={replay['assistant_turn_id']}, statut={replay['delivery_status']} (aucun appel externe)")
+		return replay
+
+	# --- Appels externes : aucune transaction DB ouverte --------------------
 	try:
 		result = fetch_financial_data(ticker)
 	except Exception as e:
@@ -593,12 +606,13 @@ def decryptage(request: DecryptageRequest):
 		method = _force_construction_these_method()
 		# T1-B2 : une tentative en cours prime sur une thèse déjà terminée
 		# (ex. ancienne thèse LVMH + nouvelle session LVMH en cours).
-		in_progress_analysis = _get_analysis_progress(request.user_id, ticker)
+		in_progress_analysis = _get_analysis_progress(user_id, ticker)
 		if not in_progress_analysis:
-			existing_thesis = _get_latest_thesis(request.user_id, ticker)
+			existing_thesis = _get_latest_thesis(user_id, ticker)
 	else:
 		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
-	print(f"[DECRYPTAGE] Méthode: {method['method_id'] if method else 'aucune'}")
+	method_id = method["method_id"] if method else None
+	print(f"[DECRYPTAGE] Méthode: {method_id or 'aucune'}")
 
 	system_prompt = build_system_prompt(data, method, request.level, existing_thesis, in_progress_analysis)
 	user_message = build_user_message(
@@ -637,33 +651,86 @@ def decryptage(request: DecryptageRequest):
 			"error": "Je n'ai pas réussi à générer une réponse, réessaie dans quelques instants.",
 		}
 
+	# --- Payload public canonique + métadonnée privée -----------------------
 	if not analysis_text.strip():
 		print(f"[DECRYPTAGE WARNING] Empty response — ticker={ticker}, question='{question[:80]}'")
-		return {
+		step_marker = None
+		response_payload = {
 			"success": True,
 			"ticker": ticker,
 			"name": company_name,
-			"method_used": method["method_id"] if method else None,
+			"method_used": method_id,
 			"analysis": "Je n'ai pas bien compris, tu peux reformuler ta question ?",
-			"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
+			"disclaimer": DECRYPTAGE_DISCLAIMER,
+		}
+	else:
+		# Le marqueur privé est toujours retiré du texte visible ; seul un
+		# marqueur du vocabulaire fermé est conservé (private_metadata).
+		visible_text, step_marker = extract_step_marker(analysis_text)
+		response_payload = {
+			"success": True,
+			"ticker": ticker,
+			"name": company_name,
+			"method_used": method_id,
+			"analysis": visible_text,
+			"price": data.get("current_price"),
+			"currency": data.get("currency", "USD"),
+			"disclaimer": DECRYPTAGE_DISCLAIMER,
 		}
 
-	if method and method.get("method_id") == "construction_these":
-		marker_match = _STEP_MARKER_RE.search(analysis_text)
-		if marker_match:
-			analysis_text = _STEP_MARKER_RE.sub("", analysis_text).rstrip()
-			_track_construction_these_progress(request.user_id, ticker, marker_match.group(1), thesis_text=question, data=data)
+	# --- Phase B : claim puis progression produit, une transaction ----------
+	try:
+		delivery, created = claim_delivery(
+			db,
+			**identity,
+			request_fingerprint=request_fingerprint,
+			visible_content_fingerprint=visible_content_fingerprint(response_payload["analysis"]),
+			response_payload=response_payload,
+			private_metadata={"decryptage_step_marker": step_marker},
+			delivery_schema_version=ASSISTANT_DELIVERY_SCHEMA_VERSION,
+		)
+		# Seule la livraison gagnante fait avancer le produit : la réponse
+		# d'un worker perdant est jetée et ne mute jamais AnalysisSession.
+		if created and method_id == "construction_these" and step_marker is not None:
+			analysis_session = apply_construction_these_progress(
+				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=question, data=data,
+			)
+			if analysis_session is not None:
+				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=analysis_session.id)
+		final = _delivery_response(delivery)
+		db.commit()
+	except (AssistantTurnIdentityCollision, AssistantDeliveryOwnershipConflict, AssistantDeliveryUserNotFound,
+			UnsupportedAssistantDeliverySchema) as exc:
+		db.rollback()
+		raise _delivery_http_error(exc, phase="claim")
+	except Exception as exc:
+		db.rollback()
+		print(f"[ASSISTANT-DELIVERY ERROR] claim/progression annulés : {type(exc).__name__}")
+		raise HTTPException(status_code=500, detail={"error": _RETRYABLE_ERROR, "retryable": True})
+	print(f"[ASSISTANT-DELIVERY] assistant_turn={final['assistant_turn_id']}, ticker={ticker}, créée={created}, statut={final['delivery_status']}")
+	return final
 
-	return {
-		"success": True,
-		"ticker": ticker,
-		"name": company_name,
-		"method_used": method["method_id"] if method else None,
-		"analysis": analysis_text,
-		"price": data.get("current_price"),
-		"currency": data.get("currency", "USD"),
-		"disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement.",
-	}
+
+@app.post("/api/runtime/assistant-deliveries/{assistant_turn_id}/ack")
+def ack_assistant_delivery(assistant_turn_id: uuid.UUID, request: AssistantDeliveryAckRequest, db: Session = Depends(get_db)):
+	"""Le frontend first-party confirme avoir inséré la réponse canonique
+	dans l'interface : pending → delivered (idempotent). Ne prouve ni
+	lecture ni compréhension ; ne crée aucune trace pédagogique. Ne renvoie
+	ni le texte, ni l'empreinte, ni private_metadata."""
+	try:
+		delivery = acknowledge_delivery(
+			db, assistant_turn_id=assistant_turn_id, user_id=request.user_id, conversation_key=request.conversation_key,
+		)
+		result = {"success": True, "assistant_turn_id": str(delivery.id), "delivery_status": delivery.status}
+		db.commit()
+	except AssistantDeliveryError as exc:
+		db.rollback()
+		raise _delivery_http_error(exc, phase="ack")
+	except Exception as exc:
+		db.rollback()
+		print(f"[ASSISTANT-DELIVERY ERROR] ack : {type(exc).__name__}")
+		raise HTTPException(status_code=500, detail={"error": _RETRYABLE_ERROR, "retryable": True})
+	return result
 
 
 @app.post("/education")
