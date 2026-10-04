@@ -814,7 +814,10 @@ def test_not_wired_to_api_runtime_or_any_module_but_its_renderer():
         if rel != "core/progress_evidence_rendering.py" and "progress_evidence_rendering" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    assert users == ["core/progress_evidence_renderer.py"]
+    # Étape 6.4D : le détail juxtapose le seul contrat de sortie
+    # (ProgressWhyRendering et ses versions), jamais le préflight ni le
+    # validateur ; non branché (tests/test_competency_progress_detail.py).
+    assert sorted(users) == ["core/competency_progress_detail.py", "core/progress_evidence_renderer.py"]
     api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
     for name in ("ProgressWhyRendering", "RenderedProgressEvidenceExample", "prepare_progress_evidence_rendering",
                  "validate_progress_evidence_rendering_proposal", "render_progress_evidence"):

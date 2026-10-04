@@ -1039,7 +1039,18 @@ def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
         # 6-4C1 : lignée de la carte 6-4A, consommatrice des seuls contrats
         # publics du snapshot (jamais load_adaptation_state) ; non branchée :
         # tests/test_progress_history.py.
-        "core/progress_history.py": {"COMPETENCY_ORDER", "AdaptationStateSnapshot", "CompetencyAdaptationSnapshot"}}
+        "core/progress_history.py": {"COMPETENCY_ORDER", "AdaptationStateSnapshot", "CompetencyAdaptationSnapshot"},
+        # 6-4D : limitations actuelles, consommatrices des seuls contrats
+        # publics du snapshot (claim courante, catalogue, tensions ; jamais
+        # load_adaptation_state, validation_needs ni revision context) ; vue
+        # générale et détail : seul le vocabulaire des compétences. Non
+        # branchés : tests/test_progress_limitations.py,
+        # tests/test_progression_view.py, tests/test_competency_progress_detail.py.
+        "core/progress_limitations.py": {
+        "COMPETENCY_ORDER", "AdaptationStageClaim", "AdaptationStateSnapshot", "AdaptationTension",
+        "CompetencyAdaptationSnapshot"},
+        "core/progression_view.py": {"COMPETENCY_ORDER"},
+        "core/competency_progress_detail.py": {"COMPETENCY_ORDER"}}
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
         imported = [(n.module, a.name) for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
