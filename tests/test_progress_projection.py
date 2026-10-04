@@ -1028,6 +1028,20 @@ def test_not_wired_to_api_runtime_or_any_other_module():
             "CompetencyCurrentProgress", "CurrentProgressProjection", "ProgressProjectionError",
             "project_current_progress"},
         "core/progress_history_projection.py": {"CURRENT_PROGRESS_POLICY_VERSION", "VISIBLE_STAGE_LABELS"},
+        # Étape 6.4D : les limitations exigent l'égalité avec
+        # project_current_progress(state) (aucune règle recopiée) ; la vue
+        # générale et le détail réutilisent les cartes telles quelles (voir
+        # tests/test_progress_limitations.py, tests/test_progression_view.py
+        # et tests/test_competency_progress_detail.py). Aucun branchement runtime.
+        "core/progress_limitations.py": {
+            "CURRENT_PROGRESS_POLICY_VERSION", "CURRENT_PROGRESS_SCHEMA_VERSION", "NON_ETABLI",
+            "CompetencyCurrentProgress", "CurrentProgressProjection", "ProgressProjectionError",
+            "project_current_progress"},
+        "core/progression_view.py": {
+            "CURRENT_PROGRESS_POLICY_VERSION", "CURRENT_PROGRESS_SCHEMA_VERSION", "CompetencyCurrentProgress",
+            "CurrentProgressProjection"},
+        "core/competency_progress_detail.py": {
+            "CURRENT_PROGRESS_POLICY_VERSION", "CURRENT_PROGRESS_SCHEMA_VERSION", "CompetencyCurrentProgress"},
     }
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))

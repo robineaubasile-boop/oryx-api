@@ -535,6 +535,9 @@ def test_no_migration_no_db_model_and_not_wired_to_the_runtime():
     step6_consumers = {
         "core/progress_milestones.py": {"HISTORY_TOKEN_PREFIX", "HistoricalInferenceState", "ProgressHistory"},
         "core/progress_history_projection.py": set(),
+        # Étape 6.4D : le détail lit seulement le contrat de sortie de 6-4C3,
+        # rien de 6-4C1 (tests/test_competency_progress_detail.py).
+        "core/competency_progress_detail.py": set(),
     }
     for rel, names in step6_consumers.items():
         tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))

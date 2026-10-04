@@ -378,4 +378,7 @@ def test_not_wired_to_the_runtime():
         if rel != "core/progress_history_projection.py" and "progress_history_projection" in path.read_text(
                 encoding="utf-8", errors="replace"):
             users.append(rel)
-    assert users == []
+    # Étape 6.4D : le détail juxtapose le seul contrat de sortie
+    # (ProgressHistoryProjection et ses versions) ; non branché
+    # (tests/test_competency_progress_detail.py).
+    assert users == ["core/competency_progress_detail.py"]
