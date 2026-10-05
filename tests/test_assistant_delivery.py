@@ -8,9 +8,12 @@ le branchement runtime de /decryptage + POST
 1. Tests sans base (toujours exécutés) : constantes et versions, API
    publique exacte, hiérarchie d'exceptions, aucune transaction possédée
    par les services (un seul SAVEPOINT ciblé), aucun branchement T2+
-   (capture cognitive, SupportTrace, observations, longitudinal,
-   inférence, Step 6), validation structurelle avant tout accès à la base,
-   empreintes (requête, contenu visible), marqueurs d'étape privés.
+   dans les services R1-C1 (capture cognitive, SupportTrace, observations,
+   longitudinal, inférence, Step 6), validation structurelle avant tout
+   accès à la base, empreintes (requête, contenu visible), marqueurs
+   d'étape privés. Depuis R1-C2, les routes passent par l'orchestrateur T2
+   Décrypter (core/decryptage_cognitive_runtime.py, testé dans
+   tests/test_decryptage_cognitive_runtime.py) et toujours par aucun T3+.
 
 2. Tests contre un vrai PostgreSQL : uniquement si ORYX_TEST_DATABASE_URL
    pointe vers une base DÉDIÉE dont le nom contient "test" (schéma public
@@ -72,6 +75,7 @@ PUBLIC_API = {
     "preflight_delivery",
     "claim_delivery",
     "bind_analysis_session",
+    "lock_delivery_for_ack",
     "acknowledge_delivery",
     "decryptage_request_fingerprint",
     "visible_content_fingerprint",
@@ -132,7 +136,8 @@ def test_versions_and_constants_are_explicit():
 
 def test_public_api_is_exact_and_keyword_only():
     """Ni update générique, ni delete, ni listing : seules les opérations
-    du runtime R1-C1."""
+    du runtime R1-C1 (+ lock_delivery_for_ack, verrou sans mutation de
+    l'ACK R1-C2)."""
     tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == PUBLIC_API
@@ -148,6 +153,8 @@ def test_public_api_is_exact_and_keyword_only():
         "request_fingerprint", "visible_content_fingerprint", "response_payload", "private_metadata",
         "delivery_schema_version"]
     assert list(inspect.signature(ad.acknowledge_delivery).parameters) == [
+        "db", "assistant_turn_id", "user_id", "conversation_key"]
+    assert list(inspect.signature(ad.lock_delivery_for_ack).parameters) == [
         "db", "assistant_turn_id", "user_id", "conversation_key"]
     assert list(inspect.signature(ad.bind_analysis_session).parameters) == [
         "db", "delivery_id", "analysis_session_id"]
@@ -225,17 +232,27 @@ def test_r1c1_modules_do_not_touch_t2_and_beyond(path):
 
 
 def _function_source(name) -> str:
+    """Code de la route SANS sa docstring (seuls les noms appelés comptent)."""
     tree = ast.parse(API_PATH.read_text(encoding="utf-8"))
     (node,) = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+    if ast.get_docstring(node) is not None:
+        node.body = node.body[1:]
     return ast.unparse(node)
 
 
+# R1-C2 : chaque route passe par UN point d'entrée de l'orchestrateur T2
+# Décrypter (core/decryptage_cognitive_runtime.py), jamais directement par
+# les primitives de capture, et n'appelle toujours aucun T3+.
+R1C2_ROUTE_ENTRY = {"decryptage": "capture_user_turn", "ack_assistant_delivery": "capture_delivered_response"}
+
+
 @pytest.mark.parametrize("route", ["decryptage", "ack_assistant_delivery"])
-def test_runtime_routes_do_not_call_t2_nor_open_hidden_sessions(route):
+def test_runtime_routes_call_t2_only_through_the_r1c2_runtime_nor_open_hidden_sessions(route):
     source = _function_source(route)
     for name in (*FORBIDDEN_RUNTIME_NAMES, "SessionLocal", "_track_construction_these_progress",
                  "_track_session_progress"):
         assert name not in source, name
+    assert source.count(R1C2_ROUTE_ENTRY[route] + "(") == 1
     params = inspect.signature(getattr(api, route)).parameters
     assert params["db"].default.dependency is core.db.get_db
 
@@ -443,6 +460,9 @@ def Sessions(engine):
     factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)  # = core.db.SessionLocal
     yield factory
     with engine.begin() as conn:
+        # R1-C2 : liens cognitifs et T2 créés par la route avant les livraisons.
+        for table in ("decryptage_cognitive_links", "support_traces", "cognitive_events"):
+            conn.execute(sa.text(f"DELETE FROM {table}"))
         conn.execute(sa.text("DELETE FROM assistant_deliveries"))
         for table in ("user_statements", "analysis_facts", "investment_theses"):
             conn.execute(sa.text(f"DELETE FROM {table}"))
@@ -905,6 +925,12 @@ def _marker(step):
     return f"Réponse pédagogique.\n<!--ORYX_STEP:{step}-->"
 
 
+def _route_metadata(marker):
+    """private_metadata d'une livraison créée par la route depuis R1-C2 :
+    marqueur privé + opt-in explicite de la capture cognitive."""
+    return {"decryptage_step_marker": marker, "cognitive_runtime_version": "decryptage-cognitive-runtime-v1"}
+
+
 def test_pg_route_new_generation_persists_a_pending_delivery_before_responding(engine, Sessions, ext):
     ext.texts = [_marker("business")]
     response = _call(Sessions, ext)
@@ -923,7 +949,7 @@ def test_pg_route_new_generation_persists_a_pending_delivery_before_responding(e
         "analysis": "Réponse pédagogique.", "price": 600.0, "currency": "EUR",
         "disclaimer": "Analyse éducative uniquement. Ne constitue pas un conseil en investissement."}
     assert row["visible_content_fingerprint"] == hashlib.sha256("Réponse pédagogique.".encode()).hexdigest()
-    assert row["private_metadata"] == {"decryptage_step_marker": "business"}
+    assert row["private_metadata"] == _route_metadata("business")
     assert row["request_fingerprint"] == ad.decryptage_request_fingerprint(**_fingerprint_kwargs(question=""))
     assert ext.resolver_calls == 1
     assert (row["surface"], row["source_user_turn_id"], row["delivery_ordinal"]) == ("decryptage", TURN, 1)
@@ -1087,7 +1113,7 @@ def test_pg_route_lost_race_never_mutates_the_product(engine, Sessions, ext):
     assert session[2] == "moat"
     assert [s[:2] for s in product["statements"]] == [("business", "Ils vendent du luxe.")]
     assert len(product["facts"]) == len(SNAPSHOT) and product["theses"] == []
-    assert [r["private_metadata"] for r in _rows(engine)][-1] == {"decryptage_step_marker": "moat"}
+    assert [r["private_metadata"] for r in _rows(engine)][-1] == _route_metadata("moat")
     assert _count(engine, "assistant_deliveries") == 2
 
 
@@ -1132,7 +1158,7 @@ def test_pg_route_unknown_marker_is_stripped_and_never_tracked(engine, Sessions,
     response = _call(Sessions, ext)
     assert response["analysis"] == "Réponse."
     [row] = _rows(engine)
-    assert row["private_metadata"] == {"decryptage_step_marker": None}
+    assert row["private_metadata"] == _route_metadata(None)
     assert row["analysis_session_id"] is None
     assert _product(engine)["sessions"] == []
 
@@ -1143,7 +1169,7 @@ def test_pg_route_marker_outside_construction_these_is_private_but_not_tracked(e
     response = _call(Sessions, ext, question="Et la dette ?", context="h")
     assert response["method_used"] is None and response["analysis"] == "Réponse pédagogique."
     [row] = _rows(engine)
-    assert row["private_metadata"] == {"decryptage_step_marker": "moat"}
+    assert row["private_metadata"] == _route_metadata("moat")
     assert row["analysis_session_id"] is None and _product(engine)["sessions"] == []
 
 
@@ -1151,7 +1177,7 @@ def test_pg_route_swot_final_without_active_session_is_delivered_unbound(engine,
     ext.texts = [_marker("swot_final")]
     _call(Sessions, ext, question="Ma thèse ?", context="h", last_method_id="construction_these")
     [row] = _rows(engine)
-    assert row["private_metadata"] == {"decryptage_step_marker": "swot_final"}
+    assert row["private_metadata"] == _route_metadata("swot_final")
     assert row["analysis_session_id"] is None
     assert _product(engine) == {"sessions": [], "statements": [], "facts": [], "theses": []}
 
@@ -1182,7 +1208,7 @@ def test_pg_route_empty_claude_response_uses_the_fallback_delivery(engine, Sessi
     assert response["analysis"] == "Je n'ai pas bien compris, tu peux reformuler ta question ?"
     assert response["delivery_status"] == "pending"
     [row] = _rows(engine)
-    assert row["private_metadata"] == {"decryptage_step_marker": None}
+    assert row["private_metadata"] == _route_metadata(None)
     assert "price" not in row["response_payload"]  # comportement fallback historique conservé
     assert _product(engine)["sessions"] == []
 
@@ -1222,15 +1248,20 @@ def test_pg_ack_route_ownership_not_found_and_minimal_response(engine, Sessions,
     assert _count(engine, "cognitive_events") == 0 and _count(engine, "support_traces") == 0
 
 
-def test_pg_many_turns_and_acks_never_write_t2(engine, Sessions, ext):
+def test_pg_many_turns_and_acks_never_write_t3_and_beyond(engine, Sessions, ext):
+    """Depuis R1-C2, les tours Décrypter ACKés écrivent T2 (CognitiveEvents,
+    liens ; testé en détail dans tests/test_decryptage_cognitive_runtime.py)
+    mais jamais T3+ (observations, inférence, états de compétence)."""
     for n in range(3):
         ext.texts = [_marker(STEPS[n])]
         response = _call(Sessions, ext, client_turn_id=str(uuid.uuid4()), question=f"q{n}" if n else "",
                          context="h" if n else "", last_method_id="construction_these" if n else None)
         _ack(Sessions, response["assistant_turn_id"])
     assert {r["status"] for r in _rows(engine)} == {"delivered"}
-    for table in ("cognitive_events", "support_traces", "observation_evaluation_runs", "pedagogical_observations",
-                  "competency_inference_runs", "user_competency_states"):
+    assert _count(engine, "decryptage_cognitive_links") == 3
+    assert _count(engine, "cognitive_events") == 3 and _count(engine, "support_traces") == 0
+    for table in ("observation_evaluation_runs", "pedagogical_observations", "competency_inference_runs",
+                  "user_competency_states"):
         assert _count(engine, table) == 0, table
 
 

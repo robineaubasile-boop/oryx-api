@@ -40,8 +40,14 @@ from core.assistant_delivery import (
 	bind_analysis_session,
 	claim_delivery,
 	decryptage_request_fingerprint,
+	lock_delivery_for_ack,
 	preflight_delivery,
 	visible_content_fingerprint,
+)
+from core.decryptage_cognitive_runtime import (
+	capture_delivered_response,
+	capture_user_turn,
+	runtime_private_metadata,
 )
 from core.decryptage_progress import (
 	apply_construction_these_progress,
@@ -495,8 +501,17 @@ def _get_analysis_progress(user_id, ticker):
 #   -> COMMIT -> retry canonique : réponse immédiate, ZÉRO appel externe
 #   -> sinon APPELS EXTERNES (normalize_ticker, données, Claude ; aucune
 #      transaction DB ouverte)
-#   -> TX CLAIM/PRODUIT (livraison, progression construction_these,
-#      liaison analysis_session) -> COMMIT -> réponse HTTP.
+#   -> TX CLAIM/PRODUIT (livraison, rattachement cognitif T2 du tour
+#      utilisateur [R1-C2], progression construction_these, liaison
+#      analysis_session) -> COMMIT -> réponse HTTP.
+#
+# R1-C2 : seul le worker gagnant (livraison créée par CET appel) rattache
+# le tour utilisateur au CognitiveEvent Décrypter compatible et crée le lien
+# decryptage_cognitive_links en awaiting_delivery ; un retry canonique ou un
+# worker perdant ne touche jamais à T2. La réponse est capturée à l'ACK,
+# atomiquement avec pending -> delivered. Aucun T3+ (évaluation,
+# observation, inférence, Step 6). Un échec externe AVANT la livraison
+# canonique (ticker, données, Claude) laisse le tour hors T2 (limite V1).
 #
 # Une réponse success=True n'est renvoyée qu'après le COMMIT de la
 # livraison pending : une défaillance DB n'est plus avalée (l'ancienne
@@ -693,11 +708,15 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 			request_fingerprint=request_fingerprint,
 			visible_content_fingerprint=visible_content_fingerprint(response_payload["analysis"]),
 			response_payload=response_payload,
-			private_metadata={"decryptage_step_marker": step_marker},
+			private_metadata=runtime_private_metadata(step_marker),
 			delivery_schema_version=ASSISTANT_DELIVERY_SCHEMA_VERSION,
 		)
 		# Seule la livraison gagnante fait avancer le produit : la réponse
-		# d'un worker perdant est jetée et ne mute jamais AnalysisSession.
+		# d'un worker perdant est jetée et ne mute jamais AnalysisSession ni
+		# T2. Le rattachement cognitif lit l'AnalysisSession active AVANT la
+		# progression produit (le texte du tour répond à l'étape précédente).
+		if created:
+			capture_user_turn(db, delivery=delivery, ticker=ticker, user_text=question)
 		if created and method_id == "construction_these" and step_marker is not None:
 			analysis_session = apply_construction_these_progress(
 				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=question, data=data,
@@ -722,9 +741,21 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 def ack_assistant_delivery(assistant_turn_id: uuid.UUID, request: AssistantDeliveryAckRequest, db: Session = Depends(get_db)):
 	"""Le frontend first-party confirme avoir inséré la réponse canonique
 	dans l'interface : pending → delivered (idempotent). Ne prouve ni
-	lecture ni compréhension ; ne crée aucune trace pédagogique. Ne renvoie
-	ni le texte, ni l'empreinte, ni private_metadata."""
+	lecture ni compréhension. Ne renvoie ni le texte, ni l'empreinte, ni
+	private_metadata, ni aucune donnée cognitive.
+
+	R1-C2 : pour une livraison R1-C2, la capture T2 de la réponse
+	(lifecycle CognitiveEvent, SupportTrace éventuel, lien -> captured) est
+	faite dans la MÊME transaction, sous l'ordre de verrous livraison ->
+	lien -> AnalysisSession -> CognitiveEvent, AVANT pending → delivered.
+	Tout échec annule l'ensemble : la livraison reste pending (l'outbox
+	frontend reste bloquante). Livraison legacy R1-C1 : ACK inchangé, aucune
+	capture rétroactive. Aucun T3+."""
 	try:
+		delivery = lock_delivery_for_ack(
+			db, assistant_turn_id=assistant_turn_id, user_id=request.user_id, conversation_key=request.conversation_key,
+		)
+		capture_delivered_response(db, delivery=delivery)
 		delivery = acknowledge_delivery(
 			db, assistant_turn_id=assistant_turn_id, user_id=request.user_id, conversation_key=request.conversation_key,
 		)

@@ -48,6 +48,7 @@ from tests.test_migration_0002_analysis_sessions import (
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
     R1C1_TABLES,
+    R1C2_TABLES,
     SESSION_ID,
     T1B1_SHA256,
     T1C2,
@@ -55,6 +56,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _compare_metadata,
     _data,
     _statements,
+    _without_r1c2_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     OTHER_USER,
@@ -80,6 +82,8 @@ from tests.test_migration_0010_r1b_event_idempotence import (
 )
 
 R1C1 = "0011_assistant_deliveries"
+# R1-C2 (testée dans tests/test_migration_0012_decryptage_cognitive_links.py).
+R1C2 = "0012_decryptage_cognitive_links"
 # sha256 de alembic/versions/0010_r1b_event_idempotence.py tel que mergé sur
 # main (e6d6300, PR #212 ; 0010 introduite par R1-B, 3eb10dd).
 R1B_SHA256 = "1166f006421ce19cf66b2401383f57cda001edb68b203ace77dd11045f22f9d7"
@@ -96,7 +100,7 @@ COLUMNS = [
 ]
 NULLABLE = {"analysis_session_id", "delivered_at"}
 UNIQUE_COLUMNS = ["user_id", "conversation_key", "surface", "source_user_turn_id", "delivery_ordinal"]
-HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES
+HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
 PRE_R1C1_TABLES = ALL_TABLES | R1B_TABLES
 
 
@@ -104,20 +108,22 @@ PRE_R1C1_TABLES = ALL_TABLES | R1B_TABLES
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0011():
-    """0001 -> ... -> 0010 -> 0011, tête unique = 0011 ; 0011 est la seule
-    migration ajoutée par R1-C1."""
+def test_revision_chain_is_exactly_0001_to_0011_then_0012():
+    """0001 -> ... -> 0010 -> 0011 ; 0011 est la seule migration ajoutée par
+    R1-C1. Depuis R1-C2, 0012 (decryptage_cognitive_links) la suit et est la
+    tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1C1]
+    assert script.get_heads() == [R1C2]
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)
+    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)
     assert set(revisions) == set(chain)
+    assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in chain]
-    assert len(files) == 11
+    assert len(files) == 12
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -183,7 +189,8 @@ def test_offline_sql_of_0011_downgrade_reverts_exactly_r1c1():
 
 
 def test_metadata_declares_exactly_the_assistant_deliveries_table_in_addition():
-    assert set(Base.metadata.tables) == PRE_R1C1_TABLES | R1C1_TABLES
+    """(+ decryptage_cognitive_links de R1-C2, testée à part.)"""
+    assert set(Base.metadata.tables) == PRE_R1C1_TABLES | R1C1_TABLES | R1C2_TABLES
     assert AssistantDelivery.__table__ is Base.metadata.tables[DELIVERIES]
 
 
@@ -275,7 +282,7 @@ def _insert_delivery(conn, **overrides):
 
 @pytest.fixture
 def conn(pg_url, pg_engine):  # noqa: F811
-    """Schéma = head (0011) + deux utilisateurs, une analysis_session et deux
+    """Schéma = head (0012 depuis R1-C2) + deux utilisateurs, une analysis_session et deux
     conversations enregistrées ; tout ce que fait le test est annulé."""
     _upgrade_head_with_users(pg_url, pg_engine)
     with pg_engine.connect() as connection:
@@ -291,7 +298,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1C1
+    assert _version(pg_engine) == R1C2
     assert _tables(pg_engine) == HEAD_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
@@ -409,13 +416,13 @@ def test_pg_upgrade_0010_to_0011_preserves_everything_then_downgrade(pg_url, pg_
     # --- upgrade 0010 -> 0011 --------------------------------------------
     _run_alembic(pg_url, "upgrade", R1C1)
     assert _version(pg_engine) == R1C1
-    assert _tables(pg_engine) == HEAD_TABLES
+    assert _tables(pg_engine) == HEAD_TABLES - R1C2_TABLES
     assert _snapshot(pg_engine, existing) == schema_0010
     assert _catalog(pg_engine, existing) == catalog_0010
     assert _global_catalog(pg_engine) == global_0010
     assert _data(pg_engine, PRE_R1C1_TABLES) == data_0010
     assert _data(pg_engine, R1C1_TABLES) == {DELIVERIES: []}
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1c2_changes(_compare_metadata(pg_engine)) == []
     schema_r1c1 = _snapshot(pg_engine, R1C1_TABLES)
     catalog_r1c1 = _catalog(pg_engine, R1C1_TABLES)
 
@@ -438,4 +445,4 @@ def test_pg_upgrade_0010_to_0011_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, R1C1_TABLES) == schema_r1c1
     assert _catalog(pg_engine, R1C1_TABLES) == catalog_r1c1
     assert _data(pg_engine, PRE_R1C1_TABLES | R1C1_TABLES) == {**data_0010, DELIVERIES: []}
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1c2_changes(_compare_metadata(pg_engine)) == []
