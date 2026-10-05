@@ -101,10 +101,10 @@ CHECKS = {
     "ck_decryptage_cognitive_links_response_refs",
 }
 COLUMNS = [
-    "assistant_delivery_id", "capture_version", "input_action", "input_event_id", "abandoned_event_id",
+    "assistant_delivery_id", "capture_version", "input_action", "input_event_id", "context_exit_event_id",
     "capture_state", "response_action", "response_event_id", "support_trace_id", "created_at", "captured_at",
 ]
-NULLABLE = {"input_event_id", "abandoned_event_id", "response_action", "response_event_id", "support_trace_id",
+NULLABLE = {"input_event_id", "context_exit_event_id", "response_action", "response_event_id", "support_trace_id",
             "captured_at"}
 INPUT_ACTIONS = ("no_open_event", "no_user_contribution", "contribution_appended", "event_closed_context_change",
                  "event_abandoned_context_change")
@@ -158,8 +158,8 @@ def test_offline_sql_of_0012_upgrade_is_exactly_one_table_and_its_partial_index(
     create, index, version = statements
     assert create.startswith(
         f"CREATE TABLE {LINKS} ( assistant_delivery_id UUID NOT NULL, capture_version VARCHAR NOT NULL, "
-        "input_action VARCHAR NOT NULL, input_event_id UUID, abandoned_event_id UUID, capture_state VARCHAR NOT NULL, "
-        "response_action VARCHAR, response_event_id UUID, support_trace_id UUID, "
+        "input_action VARCHAR NOT NULL, input_event_id UUID, context_exit_event_id UUID, "
+        "capture_state VARCHAR NOT NULL, response_action VARCHAR, response_event_id UUID, support_trace_id UUID, "
         "created_at TIMESTAMP WITH TIME ZONE NOT NULL, captured_at TIMESTAMP WITH TIME ZONE, "
         "PRIMARY KEY (assistant_delivery_id), ")
     for name in CHECKS:
@@ -167,7 +167,7 @@ def test_offline_sql_of_0012_upgrade_is_exactly_one_table_and_its_partial_index(
     assert create.endswith(
         "FOREIGN KEY(assistant_delivery_id) REFERENCES assistant_deliveries (id), "
         "FOREIGN KEY(input_event_id) REFERENCES cognitive_events (id), "
-        "FOREIGN KEY(abandoned_event_id) REFERENCES cognitive_events (id), "
+        "FOREIGN KEY(context_exit_event_id) REFERENCES cognitive_events (id), "
         "FOREIGN KEY(response_event_id) REFERENCES cognitive_events (id), "
         "FOREIGN KEY(support_trace_id) REFERENCES support_traces (id) )")
     assert index == (f"CREATE UNIQUE INDEX {OPENING_INDEX} ON {LINKS} (response_event_id) "
@@ -200,7 +200,7 @@ def test_model_columns_types_and_nullability():
     assert [c.name for c in table.columns] == COLUMNS
     assert {c.name: c.nullable for c in table.columns} == {n: n in NULLABLE for n in COLUMNS}
     assert [c.name for c in table.primary_key.columns] == ["assistant_delivery_id"]
-    for name in ("assistant_delivery_id", "input_event_id", "abandoned_event_id", "response_event_id",
+    for name in ("assistant_delivery_id", "input_event_id", "context_exit_event_id", "response_event_id",
                  "support_trace_id"):
         assert isinstance(table.c[name].type, sa.Uuid) and table.c[name].type.as_uuid, name
     for name in ("capture_version", "input_action", "capture_state", "response_action"):
@@ -215,8 +215,8 @@ def test_model_constraints_are_exactly_those_of_the_migration():
     la livraison, les events et l'aide."""
     table = DecryptageCognitiveLink.__table__
     assert sorted((fk.parent.name, fk.target_fullname, fk.ondelete, fk.onupdate) for fk in table.foreign_keys) == [
-        ("abandoned_event_id", "cognitive_events.id", None, None),
         ("assistant_delivery_id", "assistant_deliveries.id", None, None),
+        ("context_exit_event_id", "cognitive_events.id", None, None),
         ("input_event_id", "cognitive_events.id", None, None),
         ("response_event_id", "cognitive_events.id", None, None),
         ("support_trace_id", "support_traces.id", None, None),
@@ -266,7 +266,7 @@ NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
 def _insert_link(conn, **overrides):
     values = {
         "assistant_delivery_id": None, "capture_version": "decryptage-cognitive-runtime-v1",
-        "input_action": "no_open_event", "input_event_id": None, "abandoned_event_id": None,
+        "input_action": "no_open_event", "input_event_id": None, "context_exit_event_id": None,
         "capture_state": "awaiting_delivery", "response_action": None, "response_event_id": None,
         "support_trace_id": None, "created_at": NOW, "captured_at": None,
     }
@@ -320,7 +320,7 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("capture_version", "character varying", "NO", None),
         ("input_action", "character varying", "NO", None),
         ("input_event_id", "uuid", "YES", None),
-        ("abandoned_event_id", "uuid", "YES", None),
+        ("context_exit_event_id", "uuid", "YES", None),
         ("capture_state", "character varying", "NO", None),
         ("response_action", "character varying", "YES", None),
         ("response_event_id", "uuid", "YES", None),
@@ -329,10 +329,10 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("captured_at", "timestamp with time zone", "YES", None),
     ]
     assert [c for c in catalog["constraints"] if c[1] != "c"] == [
-        ("decryptage_cognitive_links_abandoned_event_id_fkey", "f",
-         "FOREIGN KEY (abandoned_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("decryptage_cognitive_links_assistant_delivery_id_fkey", "f",
          "FOREIGN KEY (assistant_delivery_id) REFERENCES assistant_deliveries(id)", "a", "a"),
+        ("decryptage_cognitive_links_context_exit_event_id_fkey", "f",
+         "FOREIGN KEY (context_exit_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("decryptage_cognitive_links_input_event_id_fkey", "f",
          "FOREIGN KEY (input_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("decryptage_cognitive_links_pkey", "p", "PRIMARY KEY (assistant_delivery_id)", " ", " "),
@@ -383,8 +383,8 @@ def test_pg_input_event_matches_contribution_appended(conn):
     for action in ("no_open_event", "no_user_contribution", "event_closed_context_change",
                    "event_abandoned_context_change"):
         _rejected(conn, "ck_decryptage_cognitive_links_input_event", input_action=action, input_event_id=event_id)
-    # abandoned_event_id (event quitté) est indépendant de input_event_id.
-    _insert_link(conn, input_action="event_closed_context_change", abandoned_event_id=event_id)
+    # context_exit_event_id (event quitté) est indépendant de input_event_id.
+    _insert_link(conn, input_action="event_closed_context_change", context_exit_event_id=event_id)
 
 
 def test_pg_response_refs_match_response_action(conn):
@@ -434,15 +434,15 @@ def test_pg_foreign_keys_are_no_action(conn):
         ({"assistant_delivery_id": uuid.uuid4()}, "decryptage_cognitive_links_assistant_delivery_id_fkey"),
         ({"input_action": "contribution_appended", "input_event_id": uuid.uuid4()},
          "decryptage_cognitive_links_input_event_id_fkey"),
-        ({"abandoned_event_id": uuid.uuid4()}, "decryptage_cognitive_links_abandoned_event_id_fkey"),
+        ({"context_exit_event_id": uuid.uuid4()}, "decryptage_cognitive_links_context_exit_event_id_fkey"),
         ({"capture_state": "captured", "captured_at": NOW, "response_action": "opened_event",
           "response_event_id": uuid.uuid4()}, "decryptage_cognitive_links_response_event_id_fkey"),
     ):
         _rejected(conn, constraint, **overrides)
     event_id = _insert_event(conn)
-    delivery_id = _insert_link(conn, abandoned_event_id=event_id)
+    delivery_id = _insert_link(conn, context_exit_event_id=event_id)
     for statement, constraint in (
-        ("DELETE FROM cognitive_events WHERE id = :e", "decryptage_cognitive_links_abandoned_event_id_fkey"),
+        ("DELETE FROM cognitive_events WHERE id = :e", "decryptage_cognitive_links_context_exit_event_id_fkey"),
         ("DELETE FROM assistant_deliveries WHERE id = :d", "decryptage_cognitive_links_assistant_delivery_id_fkey"),
     ):
         with pytest.raises(sa.exc.IntegrityError, match=constraint):

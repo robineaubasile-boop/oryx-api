@@ -6,18 +6,19 @@ Create Date: 2026-10-05
 
 Crée UNE table runtime spécifique Décrypter, decryptage_cognitive_links :
 au plus une ligne par AssistantDelivery R1-C2, qui relie la production
-utilisateur du tour (input_action / input_event_id / abandoned_event_id) et
-la réponse assistant réellement delivered (response_action /
+utilisateur du tour (input_action / input_event_id / context_exit_event_id)
+et la réponse assistant réellement delivered (response_action /
 response_event_id / support_trace_id) aux CognitiveEvents / SupportTraces
 T2. Ce n'est ni une preuve, ni une observation, ni une évaluation (aucun
 T3+).
 
 Colonnes : assistant_delivery_id UUID (PK, FK assistant_deliveries.id),
 capture_version VARCHAR NOT NULL, input_action VARCHAR NOT NULL,
-input_event_id UUID NULL (FK cognitive_events.id), abandoned_event_id UUID
-NULL (FK cognitive_events.id ; event quitté sur changement de contexte,
-finalized ou abandoned), capture_state VARCHAR NOT NULL, response_action
-VARCHAR NULL, response_event_id UUID NULL (FK cognitive_events.id),
+input_event_id UUID NULL (FK cognitive_events.id), context_exit_event_id
+UUID NULL (FK cognitive_events.id ; event quitté sur rupture de contexte,
+finalized si travail présent, abandoned s'il était vide), capture_state
+VARCHAR NOT NULL, response_action VARCHAR NULL, response_event_id UUID NULL
+(FK cognitive_events.id),
 support_trace_id UUID NULL (FK support_traces.id), created_at TIMESTAMPTZ
 NOT NULL, captured_at TIMESTAMPTZ NULL.
 
@@ -62,7 +63,7 @@ def upgrade() -> None:
         sa.Column("capture_version", sa.String(), nullable=False),
         sa.Column("input_action", sa.String(), nullable=False),
         sa.Column("input_event_id", sa.Uuid(), nullable=True),
-        sa.Column("abandoned_event_id", sa.Uuid(), nullable=True),
+        sa.Column("context_exit_event_id", sa.Uuid(), nullable=True),
         sa.Column("capture_state", sa.String(), nullable=False),
         sa.Column("response_action", sa.String(), nullable=True),
         sa.Column("response_event_id", sa.Uuid(), nullable=True),
@@ -103,7 +104,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["assistant_delivery_id"], ["assistant_deliveries.id"]),
         sa.ForeignKeyConstraint(["input_event_id"], ["cognitive_events.id"]),
-        sa.ForeignKeyConstraint(["abandoned_event_id"], ["cognitive_events.id"]),
+        sa.ForeignKeyConstraint(["context_exit_event_id"], ["cognitive_events.id"]),
         sa.ForeignKeyConstraint(["response_event_id"], ["cognitive_events.id"]),
         sa.ForeignKeyConstraint(["support_trace_id"], ["support_traces.id"]),
         sa.PrimaryKeyConstraint("assistant_delivery_id"),

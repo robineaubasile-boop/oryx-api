@@ -377,7 +377,7 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         capture_version=CAPTURE_VERSION,
         input_action=input_action,
         input_event_id=input_event_id,
-        abandoned_event_id=exited_event_id,
+        context_exit_event_id=exited_event_id,
         capture_state=AWAITING_DELIVERY,
         response_action=None,
         response_event_id=None,

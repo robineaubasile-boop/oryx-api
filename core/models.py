@@ -1496,10 +1496,10 @@ class DecryptageCognitiveLink(Base):
       (idempotence de la capture) ;
     - input_action / input_event_id : sort de la production utilisateur du
       tour, fixé dans la transaction /decryptage du worker gagnant ;
-    - abandoned_event_id : nom figé par la spec R1-C2 ; désigne l'event
-      QUITTÉ (fermé) par ce tour sur changement de contexte, qu'il ait été
-      finalized (travail présent, input_action event_closed_context_change)
-      ou abandoned (event vide, event_abandoned_context_change) ;
+    - context_exit_event_id : event QUITTÉ (fermé) par ce tour sur rupture
+      de contexte, qu'il ait été finalized (travail utilisateur présent,
+      input_action event_closed_context_change) ou abandoned (event vide,
+      event_abandoned_context_change) ;
     - capture_state awaiting_delivery -> captured, atomiquement avec
       l'ACK pending -> delivered ; response_action / response_event_id /
       support_trace_id / captured_at sont remplis à ce moment.
@@ -1554,7 +1554,7 @@ class DecryptageCognitiveLink(Base):
     capture_version = Column(String, nullable=False)
     input_action = Column(String, nullable=False)
     input_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
-    abandoned_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    context_exit_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
     capture_state = Column(String, nullable=False)
     response_action = Column(String, nullable=True)
     response_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)

@@ -225,7 +225,7 @@ def test_web_v2_knows_nothing_about_cognitive_capture_and_has_no_close_endpoint(
 # 2. Contre un vrai PostgreSQL
 # --------------------------------------------------------------------------
 
-LINK_COLUMNS = ("assistant_delivery_id, capture_version, input_action, input_event_id, abandoned_event_id, "
+LINK_COLUMNS = ("assistant_delivery_id, capture_version, input_action, input_event_id, context_exit_event_id, "
                 "capture_state, response_action, response_event_id, support_trace_id, created_at, captured_at")
 
 
@@ -334,7 +334,8 @@ def _no_t3(engine):
 def test_pg_a_first_turn_opens_business_at_ack_without_contribution(engine, Sessions, ext, trigger):
     first = _send(Sessions, ext, _reply("A1", "business"), trigger, context="")
     link = _link(engine, first["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["abandoned_event_id"]) == ("no_open_event", None, None)
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "no_open_event", None, None)
     assert (link["capture_state"], link["response_action"], link["captured_at"]) == ("awaiting_delivery", None, None)
     assert link["capture_version"] == VERSION
     assert _events(engine) == []  # rien n'est ouvert avant le rendu confirmé
@@ -547,10 +548,43 @@ def test_pg_forward_skip_is_a_transition_with_a_diagnostic(engine, Sessions, ext
     _turn(Sessions, ext, _reply("business", "business"))
     with caplog.at_level(logging.INFO, logger="core.decryptage_cognitive_runtime"):
         skip = _turn(Sessions, ext, _reply("chiffres", "chiffres"), "réponse business")
-    business, chiffres = _events(engine)
+    business, chiffres = _events(engine)  # aucun event pour l'étape sautée (moat)
     assert (business["status"], chiffres["status"]) == ("finalized", "open")
-    assert _link(engine, skip["assistant_turn_id"])["response_action"] == "transitioned_event"
+    assert chiffres["stimulus_snapshot"]["visible_content"] == "Réponse chiffres."
+    assert chiffres["user_work_snapshot"] == [] and _traces(engine) == []
+    link = _link(engine, skip["assistant_turn_id"])
+    assert (link["response_action"], link["response_event_id"], link["support_trace_id"]) == (
+        "transitioned_event", chiffres["id"], None)
     assert "anomaly=step_skip from=business to=chiffres" in caplog.text
+
+
+@pytest.mark.parametrize("marker", ["moat", "chiffres"], ids=["adjacent", "skip"])
+def test_pg_transition_from_an_empty_event_abandons_it(engine, Sessions, ext, marker):
+    """Reprise sans texte puis réponse qui avance : l'ancien event, sans
+    aucune contribution, est abandoned (jamais finalized vide) ; la
+    response_action reste celle du mouvement produit."""
+    _turn(Sessions, ext, _reply("A1", "business"))
+    [business] = _events(engine)
+    resume = _turn(Sessions, ext, _reply("R1", marker), "", context="", conv=CONV_2)
+    old, new = _events(engine)
+    assert (old["id"], old["status"], old["user_work_snapshot"]) == (business["id"], "abandoned", [])
+    assert new["status"] == "open" and new["stimulus_snapshot"]["visible_content"] == "Réponse R1."
+    link = _link(engine, resume["assistant_turn_id"])
+    assert (link["input_action"], link["response_action"], link["response_event_id"]) == (
+        "no_user_contribution", "transitioned_event", new["id"])
+
+
+def test_pg_swot_final_on_an_empty_risques_event_abandons_it(engine, Sessions, ext):
+    _turn(Sessions, ext, _reply("business", "business"))
+    for previous, step in zip(STEPS[:4], STEPS[1:5]):
+        _turn(Sessions, ext, _reply(step, step), f"réponse {previous}")
+    final = _turn(Sessions, ext, _reply("bilan", "swot_final"), "", context="", conv=CONV_2)
+    events = _events(engine)
+    assert [e["status"] for e in events] == ["finalized"] * 4 + ["abandoned"]
+    assert events[-1]["user_work_snapshot"] == []
+    link = _link(engine, final["assistant_turn_id"])
+    assert (link["input_action"], link["response_action"], link["response_event_id"]) == (
+        "no_user_contribution", "closed_terminal", None)
 
 
 # --- I / J. changement de ticker ---------------------------------------------
@@ -562,7 +596,7 @@ def test_pg_i_ticker_change_finalizes_an_event_with_work(engine, Sessions, ext):
     lvmh_session = lvmh["analysis_session_id"]
     nvda = _send(Sessions, ext, _reply("N1", "business"), "Analyse NVDA", ticker="NVDA")
     link = _link(engine, nvda["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["abandoned_event_id"]) == (
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
         "event_closed_context_change", None, lvmh["id"])
     after = _event(engine, lvmh["id"])
     assert after["status"] == "finalized"
@@ -582,7 +616,7 @@ def test_pg_j_ticker_change_abandons_an_empty_event(engine, Sessions, ext):
     [lvmh] = _events(engine)
     nvda = _send(Sessions, ext, _reply("N1"), "Analyse NVDA", ticker="NVDA")
     link = _link(engine, nvda["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["abandoned_event_id"]) == (
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
         "event_abandoned_context_change", None, lvmh["id"])
     assert _event(engine, lvmh["id"])["status"] == "abandoned"
     _ack(Sessions, nvda)  # NVDA sans marqueur : aucun nouvel event
@@ -601,7 +635,7 @@ def test_pg_k_resume_in_a_new_conversation_continues_the_same_event(engine, Sess
     # Reprise Web-V2 : nouvelle conversation_key, question vide, contexte vide.
     resume = _send(Sessions, ext, _reply("R1", "business"), "", context="", conv=CONV_2)
     link = _link(engine, resume["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["abandoned_event_id"]) == (
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
         "no_user_contribution", None, None)
     _ack(Sessions, resume, conv=CONV_2)
     [after] = _events(engine)
@@ -639,7 +673,7 @@ def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, 
                      {"s": old["analysis_session_id"]})
     fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=CONV_2)
     link = _link(engine, fresh["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["abandoned_event_id"]) == (
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
         "event_closed_context_change", None, old["id"])
     assert [c["text"] for c in _event(engine, old["id"])["user_work_snapshot"]] == ["Ils vendent du luxe."]
     _ack(Sessions, fresh, conv=CONV_2)
@@ -955,7 +989,7 @@ def test_pg_event_closed_between_read_and_mutation_is_never_appended(engine, Ses
         def turn(session):
             delivery = _claim_runtime(session)
             link = dcr.capture_user_turn(session, delivery=delivery, ticker="MC.PA", user_text="Ils vendent du luxe.")
-            return link.input_action, link.input_event_id, link.abandoned_event_id
+            return link.input_action, link.input_event_id, link.context_exit_event_id
 
         result, error = _run_blocked(engine, holder, waiter, turn)
     assert error is None and result == ("no_open_event", None, None)
