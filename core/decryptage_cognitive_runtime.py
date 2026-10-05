@@ -66,6 +66,9 @@ conversations d'un même utilisateur restent ouvertes en parallèle : un
 event d'une autre AnalysisSession n'est jamais fermé du seul fait de son
 incompatibilité. Plusieurs candidats pour la même conversation : frontière
 ambiguë, fail closed (AmbiguousDecryptageContextExit), rien n'est fermé.
+Un tour qui provoque une sortie de contexte est un message de navigation,
+pas une réponse au problème cible : il n'est jamais ajouté comme
+contribution, même à un event déjà ouvert pour la nouvelle AnalysisSession.
 
 Transactions : ce module ne commit ni ne rollback jamais, n'ouvre aucune
 Session, ne fait aucun appel externe et n'importe pas FastAPI. Il verrouille,
@@ -401,10 +404,17 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
        nouveau contexte n'y est jamais ajouté ; l'AnalysisSession quittée
        n'est pas touchée. Plusieurs candidats pour la même conversation :
        frontière ambiguë, AmbiguousDecryptageContextExit (rien n'est fermé).
-    4. Event compatible + texte : contribution (contribution_id =
-       source_turn_ref = client_turn_id, session_ref = conversation du
-       TOUR, support_refs_before capturé par cognitive_capture). Sans
-       texte (déclencheur / reprise) : aucune contribution.
+       Un tour qui provoque une sortie de contexte est un message de
+       navigation : il n'est JAMAIS ajouté comme contribution, pas même à un
+       event compatible déjà ouvert ailleurs (input_event_id NULL,
+       input_action event_closed_/event_abandoned_context_change). À l'ACK,
+       la réponse peut continuer / faire transiter cet event ; la première
+       contribution vers lui est le tour utilisateur suivant.
+    4. Sans sortie de contexte, event compatible + texte : contribution
+       (contribution_id = source_turn_ref = client_turn_id, session_ref =
+       conversation du TOUR, support_refs_before capturé par
+       cognitive_capture). Sans texte (déclencheur / reprise) : aucune
+       contribution.
     5. Ligne de lien awaiting_delivery.
 
     Mute et flush ; jamais de commit."""
@@ -432,7 +442,15 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         exited_event_id, exit_status = exited.id, _close_event(db, exited)
 
     input_event_id = None
-    if compatible:
+    if exit_status is not None:
+        # Message de navigation / changement de contexte : jamais une
+        # réponse au problème cognitif cible (comme « Analyse LVMH »), même
+        # si un event compatible est déjà ouvert pour la nouvelle
+        # AnalysisSession (ouvert ailleurs). Sa première contribution sera
+        # le tour SUIVANT, une fois la réponse Oryx rendue ici.
+        input_action = (EVENT_CLOSED_CONTEXT_CHANGE if exit_status == cognitive_capture.FINALIZED
+                        else EVENT_ABANDONED_CONTEXT_CHANGE)
+    elif compatible:
         (event,) = compatible
         if user_text:
             cognitive_capture.append_user_contribution(
@@ -443,9 +461,6 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
             input_action, input_event_id = CONTRIBUTION_APPENDED, event.id
         else:
             input_action = NO_USER_CONTRIBUTION
-    elif exit_status is not None:
-        input_action = (EVENT_CLOSED_CONTEXT_CHANGE if exit_status == cognitive_capture.FINALIZED
-                        else EVENT_ABANDONED_CONTEXT_CHANGE)
     else:
         input_action = NO_OPEN_EVENT
 

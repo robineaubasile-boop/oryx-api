@@ -777,18 +777,63 @@ def test_pg_parallel_origin_conversation_alone_makes_the_event_part_of_the_conte
     assert _event(engine, bare)["status"] == "abandoned"
 
 
-def test_pg_parallel_switch_to_a_ticker_open_elsewhere_joins_it_and_exits_the_local_event(engine, Sessions, ext):
-    """Dans A (LVMH), passage à NVDA déjà en cours dans B : E_LVMH (contexte
-    de A) est quitté, la contribution rejoint E_NVDA (même AnalysisSession,
-    session_ref=A) ; un seul event quitté, tracé."""
+def test_pg_parallel_switch_to_a_ticker_open_elsewhere_exits_without_contribution(engine, Sessions, ext):
+    """A/LVMH et B/NVDA ouverts. Dans A : « Je passe à NVIDIA. » est un
+    message de navigation : E_LVMH est quitté, le message n'est PAS ajouté
+    à E_NVDA. L'ACK de la réponse NVDA (même marqueur) continue E_NVDA avec
+    un SupportTrace ; le tour utilisateur SUIVANT dans A est la première
+    contribution de A, qui hérite de la réponse rendue dans A."""
     lvmh, nvda = _parallel_lvmh_and_nvda(Sessions, ext, engine)
     switch = _send(Sessions, ext, _reply("N3", "business"), "Je passe à NVIDIA.", conv=CONV_A, ticker="NVDA")
     link = _link(engine, switch["assistant_turn_id"])
     assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "contribution_appended", nvda["id"], lvmh["id"])
+        "event_closed_context_change", None, lvmh["id"])
     assert _event(engine, lvmh["id"])["status"] == "finalized"
-    assert [(c["session_ref"], c["text"]) for c in _event(engine, nvda["id"])["user_work_snapshot"]][-1] == (
-        CONV_A, "Je passe à NVIDIA.")
+    assert _event(engine, nvda["id"]) == nvda  # user_work_snapshot inchangé
+
+    _ack(Sessions, switch, conv=CONV_A)
+    shown_in_a = _traces(engine, nvda["id"])[-1]
+    assert shown_in_a["support_payload"] == {"visible_content": "Réponse N3."}
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["response_action"], link["response_event_id"], link["support_trace_id"]) == (
+        "continued_event", nvda["id"], shown_in_a["id"])
+    assert _event(engine, nvda["id"])["user_work_snapshot"] == nvda["user_work_snapshot"]
+
+    turn = str(uuid.uuid4())
+    _send(Sessions, ext, _reply("N4", "business"), "Leur avantage, c'est CUDA.", conv=CONV_A, ticker="NVDA",
+          turn=turn)
+    work = _event(engine, nvda["id"])["user_work_snapshot"]
+    assert [c["text"] for c in work] == ["NVIDIA vend des GPU.", "Leur avantage, c'est CUDA."]
+    assert (work[-1]["contribution_id"], work[-1]["session_ref"]) == (turn, CONV_A)
+    assert str(shown_in_a["id"]) in work[-1]["support_refs_before"]
+    assert "Je passe à NVIDIA." not in json.dumps(_events(engine), default=str)
+
+
+@pytest.mark.parametrize("marker, with_work", [("business", True), ("moat", True), ("business", False)],
+                         ids=["meme-marqueur", "transition", "event-quitte-vide"])
+def test_pg_navigation_message_never_contaminates_the_target_event(engine, Sessions, ext, marker, with_work):
+    """Quel que soit le marqueur de la réponse et l'état de l'event quitté,
+    le message de navigation n'entre dans AUCUN user_work_snapshot."""
+    _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
+    if with_work:
+        _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
+    _turn(Sessions, ext, _reply("N1", "business"), "", context="", conv=CONV_B, ticker="NVDA")
+    _turn(Sessions, ext, _reply("N2", "business"), "NVIDIA vend des GPU.", conv=CONV_B, ticker="NVDA")
+    lvmh, nvda = _events(engine)
+    switch = _turn(Sessions, ext, _reply("N3", marker), "Bon, on regarde NVIDIA.", conv=CONV_A, ticker="NVDA")
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "event_closed_context_change" if with_work else "event_abandoned_context_change", None, lvmh["id"])
+    assert _event(engine, lvmh["id"])["status"] == ("finalized" if with_work else "abandoned")
+    for event in _events(engine):
+        assert "Bon, on regarde NVIDIA." not in [c["text"] for c in event["user_work_snapshot"]]
+    assert _event(engine, nvda["id"])["user_work_snapshot"] == nvda["user_work_snapshot"]
+    if marker == "moat":  # la réponse fait transiter E_NVDA (règles existantes)
+        assert link["response_action"] == "transitioned_event"
+        assert _event(engine, nvda["id"])["status"] == "finalized"
+        assert _event(engine, link["response_event_id"])["user_work_snapshot"] == []
+    else:
+        assert (link["response_action"], link["response_event_id"]) == ("continued_event", nvda["id"])
 
 
 # --- K. nouvelle conversation / reprise --------------------------------------
