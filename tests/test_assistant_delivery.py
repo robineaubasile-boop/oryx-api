@@ -1091,7 +1091,11 @@ def test_pg_route_lost_race_never_mutates_the_product(engine, Sessions, ext):
     gagne ; le perdant renvoie la réponse canonique du gagnant et ne fait
     jamais avancer AnalysisSession (ni déclaration, ni fait, ni thèse)."""
     ext.texts = [_marker("business")]
-    _call(Sessions, ext, client_turn_id=str(uuid.uuid4()))  # tour 1 : business
+    first = _call(Sessions, ext, client_turn_id=str(uuid.uuid4()))  # tour 1 : business
+    # R1-C3 : la réponse rendue est acquittée (ouvre l'event business) ; le
+    # tour suivant est alors une vraie contribution, seule source de
+    # UserStatement.
+    _ack(Sessions, first["assistant_turn_id"])
     turn = str(uuid.uuid4())
     results = {}
 
@@ -1186,8 +1190,11 @@ def test_pg_route_full_attempt_binds_every_delivery_to_the_session(engine, Sessi
     turns = [("business", "", "")] + [(s, f"réponse avant {s}", "h") for s in STEPS[1:]]
     for step, question, context in turns:
         ext.texts = [_marker(step)]
-        _call(Sessions, ext, client_turn_id=str(uuid.uuid4()), question=question, context=context,
-              last_method_id="construction_these" if context else None)
+        response = _call(Sessions, ext, client_turn_id=str(uuid.uuid4()), question=question, context=context,
+                         last_method_id="construction_these" if context else None)
+        # R1-C3 : ACK de chaque réponse rendue (comme le frontend) : les
+        # réponses suivantes sont des contributions réelles R1-C2.
+        _ack(Sessions, response["assistant_turn_id"])
     product = _product(engine)
     [session] = product["sessions"]
     assert session[1:3] == ("completed", "swot_final")

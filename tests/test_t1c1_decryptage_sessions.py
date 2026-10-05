@@ -196,10 +196,23 @@ class _Client:
     def decryptage(self, payload):
         # R1-C1 : la route possède ses transactions sur une Session injectée ;
         # chaque tour utilisateur a son propre client_turn_id.
+        # R1-C3 : comme le frontend first-party, la réponse rendue est
+        # acquittée (ACK) : c'est à l'ACK que R1-C2 ouvre / fait transiter le
+        # CognitiveEvent de l'étape, condition pour que le tour utilisateur
+        # SUIVANT soit une vraie contribution (seule source de UserStatement).
         payload = {"conversation_key": f"conv-{payload['user_id']}", "client_turn_id": str(uuid.uuid4()),
                    **payload}
         with self.factory() as s:
-            return api.decryptage(api.DecryptageRequest(**payload), db=s)
+            result = api.decryptage(api.DecryptageRequest(**payload), db=s)
+        if result.get("delivery_status") == "pending":
+            with self.factory() as s:
+                api.ack_assistant_delivery(
+                    uuid.UUID(result["assistant_turn_id"]),
+                    api.AssistantDeliveryAckRequest(user_id=payload["user_id"],
+                                                    conversation_key=payload["conversation_key"]),
+                    db=s,
+                )
+        return result
 
     def theses(self, user_id=USER):
         with self.factory() as s:
@@ -536,6 +549,10 @@ def test_multiple_in_progress_sessions_anomaly_is_deterministic(db, client, clau
     [entry] = client.theses()
     assert entry["current_step"] == "chiffres"
 
+    # Sessions semées sans CognitiveEvent : un premier tour sans texte
+    # (reprise, même étape) laisse R1-C2 ouvrir l'event « chiffres » de la
+    # session retenue à l'ACK ; « suite » est alors une vraie contribution.
+    _turn(client, claude, "chiffres", context="h")
     _turn(client, claude, "valorisation", question="suite", context="h")
     sessions = {s.id: s for s in _sessions(db)}
     assert set(sessions) == {old_id, recent_id}

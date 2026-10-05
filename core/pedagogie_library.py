@@ -740,7 +740,12 @@ Ne jamais passer à l'étape suivante tant que l'utilisateur n'a pas traité l'�
 Si l'utilisateur saute une étape, le ramener dessus poliment avant de continuer.
 Si l'utilisateur pose une question hors séquence, réponds brièvement puis reviens à l'étape en cours.
 
-DÉTECTION DE L'ÉTAPE EN COURS via l'historique :
+PRIORITÉ : si une analyse EN COURS est fournie plus haut (étape
+actuellement ouverte), c'est elle qui fixe l'étape en cours ; la détection
+via l'historique ci-dessous et la règle stricte qui suit ne s'appliquent
+alors PAS.
+
+DÉTECTION DE L'ÉTAPE EN COURS via l'historique (seulement sans analyse en cours) :
 - Aucune réponse sur le business → commencer par COMPOSANTE 1 (Business)
 - Business traité, pas de moat abordé → COMPOSANTE 2 (Moat)
 - Business + moat traités, pas de chiffres → COMPOSANTE 3 (Chiffres)
@@ -748,7 +753,7 @@ DÉTECTION DE L'ÉTAPE EN COURS via l'historique :
 - Les 4 composantes traitées → COMPOSANTE 5 (Risques) puis THÈSE EN 3 PHRASES
 - Thèse en 3 phrases formulée par l'utilisateur → ÉTAPE FINALE (Bilan SWOT), une seule fois, puis laisser la conversation libre
 
-RÈGLE STRICTE : si l'historique est vide ou ne contient pas de réponse sur le business, toujours commencer par COMPOSANTE 1. Ne jamais démarrer par les chiffres ou la valorisation.
+RÈGLE STRICTE (sans analyse en cours) : si l'historique est vide ou ne contient pas de réponse sur le business, toujours commencer par COMPOSANTE 1. Ne jamais démarrer par les chiffres ou la valorisation.
 
 REPÈRE TECHNIQUE INTERNE (ne fait pas partie de ta réponse pédagogique) :
 À la toute fin de chaque réponse dans cette méthode, sur une ligne

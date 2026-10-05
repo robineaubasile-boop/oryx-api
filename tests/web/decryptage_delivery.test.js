@@ -1,6 +1,8 @@
 // R1-C1 — Décrypter : identités de tour, retry réseau idempotent, ACK de
 // livraison après rendu, outbox localStorage, flush obligatoire avant un
 // nouvel envoi / une nouvelle conversation, userReady. Checklist inchangée.
+// R1-C3A : la conversation_key Décrypter est lue en sessionStorage (propre
+// à l'onglet) ; l'outbox d'ACK reste en localStorage (cross-tab).
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -77,10 +79,10 @@ function mount({ handlers = {}, storage = {}, migrated = true } = {}) {
 			for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
 		},
 	});
-	const { document, localStorage } = dom.window;
+	const { document, localStorage, sessionStorage } = dom.window;
 	const of = (prefix) => calls.filter(c => c.url.startsWith(prefix));
 	return {
-		dom, document, localStorage, calls, outboxWrites,
+		dom, document, localStorage, sessionStorage, calls, outboxWrites,
 		decryptageCalls: () => of('/decryptage'),
 		ackCalls: () => of('/api/runtime/assistant-deliveries/'),
 		messages: (key, role) => [...document.querySelectorAll(`#msgs-${key} .msg${role ? '.' + role : ''}`)],
@@ -102,7 +104,7 @@ test('Décrypter envoie user_id, conversation_key stable et un client_turn_id pa
 	await app.send('Premier tour');
 	await app.send('Deuxième tour');
 	const [a, b] = app.decryptageCalls().map(c => c.body);
-	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	const conversationKey = app.sessionStorage.getItem(SESSION_KEY);
 	assert.match(conversationKey, UUID_RE);
 	for (const body of [a, b]) {
 		assert.strictEqual(body.user_id, 'test-user');
@@ -159,7 +161,7 @@ test('ACK envoyé APRÈS le rendu de la réponse, puis retiré de l\'outbox', as
 	const [ack] = app.ackCalls();
 	assert.strictEqual(ack.url, `/api/runtime/assistant-deliveries/${turn}/ack`);
 	assert.strictEqual(ack.method, 'POST');
-	assert.deepStrictEqual(ack.body, { user_id: 'test-user', conversation_key: app.localStorage.getItem(SESSION_KEY) });
+	assert.deepStrictEqual(ack.body, { user_id: 'test-user', conversation_key: app.sessionStorage.getItem(SESSION_KEY) });
 	assert.deepStrictEqual(renderedAtAck, [1], 'la réponse est rendue avant l\'ACK');
 	assert.strictEqual(app.outboxWrites[0].assistantRendered, 1, 'l\'outbox n\'est écrite qu\'après le rendu');
 	assert.deepStrictEqual(outboxAtAck, [1], 'l\'ACK est en outbox avant l\'envoi');
@@ -186,7 +188,7 @@ test('ACK en échec : l\'entrée reste en outbox, sans aucun texte', async () =>
 	await waitFor(() => app.ackCalls().length >= 1);
 	await settle();
 	assert.deepStrictEqual(app.outbox(), [{
-		assistant_turn_id: turn, user_id: 'test-user', conversation_key: app.localStorage.getItem(SESSION_KEY), surface: 'decryptage',
+		assistant_turn_id: turn, user_id: 'test-user', conversation_key: app.sessionStorage.getItem(SESSION_KEY), surface: 'decryptage',
 	}]);
 	const raw = app.localStorage.getItem(OUTBOX_KEY);
 	for (const forbidden of ['Analyse', 'LVMH', 'Que fait', '600', 'disclaimer']) {
@@ -253,12 +255,12 @@ test('nouvel envoi bloqué tant qu\'un ACK précédent ne peut pas être synchro
 test('nouvelle conversation bloquée si l\'ACK en attente échoue : rien n\'est réinitialisé', async () => {
 	const app = mount({ handlers: { ack: () => Promise.reject(new TypeError('offline')) } });
 	await app.send();
-	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	const conversationKey = app.sessionStorage.getItem(SESSION_KEY);
 	assert.strictEqual(app.outbox().length, 1);
 	app.document.getElementById('new-convo-decrypter').click();
 	await settle();
 	await waitFor(() => app.messages('decrypter', 'system').length === 1);
-	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), conversationKey);
+	assert.strictEqual(app.sessionStorage.getItem(SESSION_KEY), conversationKey);
 	assert.strictEqual(app.messages('decrypter', 'user').length, 1);
 	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
 	assert.match(app.messages('decrypter', 'system')[0].textContent, /conservée/);
@@ -270,11 +272,11 @@ test('nouvelle conversation après flush réussi : nouveau conversation_key, mê
 	let n = 0;
 	const app = mount({ handlers: { decryptage: () => response(decryptageSuccess(`99999999-9999-4999-8999-99999999999${++n}`)) } });
 	await app.send('Tour 1');
-	const before = app.localStorage.getItem(SESSION_KEY);
+	const before = app.sessionStorage.getItem(SESSION_KEY);
 	await waitFor(() => app.outbox().length === 0);
 	app.document.getElementById('new-convo-decrypter').click();
-	await waitFor(() => app.localStorage.getItem(SESSION_KEY) !== before);
-	const after = app.localStorage.getItem(SESSION_KEY);
+	await waitFor(() => app.sessionStorage.getItem(SESSION_KEY) !== before);
+	const after = app.sessionStorage.getItem(SESSION_KEY);
 	assert.match(after, UUID_RE);
 	assert.notStrictEqual(after, before);
 	assert.strictEqual(app.localStorage.getItem('oryx_user_id'), 'test-user');
@@ -291,7 +293,7 @@ test('« Reprendre » : reset attendu puis envoi dans une nouvelle conversation'
 	const app = mount({ handlers: { theses: () => response([{ ticker: 'MC.PA', current_step: 'moat', updated_at: '2026-10-04T10:00:00+00:00', theses: [] }]) } });
 	await app.send('Tour 1');
 	await waitFor(() => app.outbox().length === 0);
-	const before = app.localStorage.getItem(SESSION_KEY);
+	const before = app.sessionStorage.getItem(SESSION_KEY);
 	const resume = await waitFor(() => app.document.querySelector('.thesis-resume'));
 	assert.ok(resume);
 	resume.click();
@@ -299,7 +301,7 @@ test('« Reprendre » : reset attendu puis envoi dans une nouvelle conversation'
 	await settle();
 	const body = app.decryptageCalls()[1].body;
 	assert.notStrictEqual(body.conversation_key, before);
-	assert.strictEqual(body.conversation_key, app.localStorage.getItem(SESSION_KEY));
+	assert.strictEqual(body.conversation_key, app.sessionStorage.getItem(SESSION_KEY));
 	assert.strictEqual(body.ticker, 'MC.PA');
 	assert.strictEqual(body.context, '');
 	assert.strictEqual(app.messages('decrypter', 'user').length, 1, 'ancienne conversation vidée avant l\'envoi');
@@ -315,13 +317,13 @@ test('« Reprendre » bloqué si l\'ACK en attente échoue : aucun envoi', async
 			theses: () => response([{ ticker: 'MC.PA', current_step: 'moat', updated_at: '2026-10-04T10:00:00+00:00', theses: [] }]),
 		},
 	});
-	const before = app.localStorage.getItem(SESSION_KEY);
+	const before = app.sessionStorage.getItem(SESSION_KEY);
 	const resume = await waitFor(() => app.document.querySelector('.thesis-resume'));
 	resume.click();
 	await settle();
 	await settle();
 	assert.strictEqual(app.decryptageCalls().length, 0);
-	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), before);
+	assert.strictEqual(app.sessionStorage.getItem(SESSION_KEY), before);
 	app.dom.window.close();
 });
 
@@ -425,7 +427,7 @@ async function renderedTurnWithAck(ackResponse, { turn = 'cccccccc-cccc-4ccc-8cc
 	await settle();
 	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
 	assert.deepStrictEqual(app.outbox(), [{
-		assistant_turn_id: turn, user_id: 'test-user', conversation_key: app.localStorage.getItem(SESSION_KEY), surface: 'decryptage',
+		assistant_turn_id: turn, user_id: 'test-user', conversation_key: app.sessionStorage.getItem(SESSION_KEY), surface: 'decryptage',
 	}], 'entrée conservée');
 	return app;
 }
@@ -458,11 +460,11 @@ for (const [label, ack] of [
 
 test('ACK 404 : entrée conservée, nouvelle conversation bloquée', async () => {
 	const app = await renderedTurnWithAck(() => response({ detail: { error: 'AssistantDeliveryNotFound', retryable: false } }, { ok: false, status: 404 }));
-	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	const conversationKey = app.sessionStorage.getItem(SESSION_KEY);
 	app.document.getElementById('new-convo-decrypter').click();
 	await waitFor(() => app.messages('decrypter', 'system').length === 1);
 	assert.match(app.messages('decrypter', 'system')[0].textContent, /conversation est conservée\. Recharge la page ou réessaie\./);
-	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), conversationKey);
+	assert.strictEqual(app.sessionStorage.getItem(SESSION_KEY), conversationKey);
 	assert.strictEqual(app.messages('decrypter', 'user').length, 1);
 	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
 	assert.strictEqual(app.outbox().length, 1);
@@ -471,14 +473,14 @@ test('ACK 404 : entrée conservée, nouvelle conversation bloquée', async () =>
 
 test('ACK 422 : entrée conservée, « Reprendre » bloqué', async () => {
 	const app = await renderedTurnWithAck(() => response({ detail: [] }, { ok: false, status: 422 }), { handlers: { theses: () => response(THESES) } });
-	const conversationKey = app.localStorage.getItem(SESSION_KEY);
+	const conversationKey = app.sessionStorage.getItem(SESSION_KEY);
 	const resume = await waitFor(() => app.document.querySelector('.thesis-resume'));
 	assert.ok(resume);
 	resume.click();
 	await settle();
 	await settle();
 	assert.strictEqual(app.decryptageCalls().length, 1, 'aucun envoi « Reprendre »');
-	assert.strictEqual(app.localStorage.getItem(SESSION_KEY), conversationKey);
+	assert.strictEqual(app.sessionStorage.getItem(SESSION_KEY), conversationKey);
 	assert.strictEqual(app.messages('decrypter', 'assistant').length, 1);
 	assert.strictEqual(app.outbox().length, 1);
 	app.dom.window.close();
@@ -493,10 +495,10 @@ test('ACK 2xx valide : entrée retirée, envoi puis nouvelle conversation autori
 	await app.send('Tour 2');
 	assert.strictEqual(app.decryptageCalls().length, 2);
 	await waitFor(() => app.outbox().length === 0);
-	const before = app.localStorage.getItem(SESSION_KEY);
+	const before = app.sessionStorage.getItem(SESSION_KEY);
 	app.document.getElementById('new-convo-decrypter').click();
-	await waitFor(() => app.localStorage.getItem(SESSION_KEY) !== before);
-	assert.notStrictEqual(app.localStorage.getItem(SESSION_KEY), before);
+	await waitFor(() => app.sessionStorage.getItem(SESSION_KEY) !== before);
+	assert.notStrictEqual(app.sessionStorage.getItem(SESSION_KEY), before);
 	assert.strictEqual(app.messages('decrypter').length, 0);
 	assert.strictEqual(app.messages('decrypter', 'system').length, 0);
 	app.dom.window.close();
