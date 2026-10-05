@@ -113,7 +113,8 @@ def test_public_api_is_exact_and_keyword_only():
     for name in ("capture_user_turn", "capture_delivered_response"):
         params = list(inspect.signature(getattr(dcr, name)).parameters.values())[1:]
         assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params), name
-    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents):
+    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents,
+                dcr.AmbiguousDecryptageContextExit):
         assert issubclass(exc, dcr.DecryptageCognitiveRuntimeError)
         assert not issubclass(exc, (sa.exc.SQLAlchemyError, cc.CognitiveCaptureError, ad.AssistantDeliveryError))
 
@@ -167,7 +168,7 @@ def test_runtime_writes_t2_only_through_cognitive_capture_primitives():
     constructed = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                    and n.func.id[:1].isupper()}
     assert constructed == {"DecryptageCognitiveLink", "CognitiveLinkInvariantError", "AmbiguousOpenDecryptageEvents",
-                           "DecryptageCognitiveRuntimeError"}
+                           "AmbiguousDecryptageContextExit", "DecryptageCognitiveRuntimeError"}
     # task_kind est toujours NULL et support_refs_before n'est jamais fourni.
     [opening] = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "open_event_idempotent"]
@@ -624,6 +625,172 @@ def test_pg_j_ticker_change_abandons_an_empty_event(engine, Sessions, ext):
     assert _link(engine, nvda["assistant_turn_id"])["response_action"] == "no_cognitive_action"
 
 
+# --- analyses parallèles : conversation != AnalysisSession --------------------
+#
+# Plusieurs analyses / conversations d'un même utilisateur restent ouvertes
+# en parallèle ; seul un event du contexte de la conversation COURANTE peut
+# être quitté par un changement de ticker.
+
+CONV_A, CONV_B, CONV_C = "conv-a", "conv-b", "conv-c"
+
+
+def _parallel_lvmh_and_nvda(Sessions, ext, engine):  # noqa: F811
+    """Conversation A : E_LVMH business (avec travail). Conversation B :
+    E_NVDA business (avec travail). Retourne (E_LVMH, E_NVDA)."""
+    _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
+    _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
+    _turn(Sessions, ext, _reply("N1", "business"), "", context="", conv=CONV_B, ticker="NVDA")
+    _turn(Sessions, ext, _reply("N2", "business"), "NVIDIA vend des GPU.", conv=CONV_B, ticker="NVDA")
+    lvmh, nvda = _events(engine)
+    assert (lvmh["status"], nvda["status"]) == ("open", "open")
+    assert lvmh["analysis_session_id"] == _session_id(engine, "MC.PA")
+    assert nvda["analysis_session_id"] == _session_id(engine, "NVDA")
+    return lvmh, nvda
+
+
+def test_pg_parallel_a_next_lvmh_turn_in_a_leaves_nvda_untouched(engine, Sessions, ext):
+    lvmh, nvda = _parallel_lvmh_and_nvda(Sessions, ext, engine)
+    nvda_traces = _traces(engine, nvda["id"])
+    turn = _turn(Sessions, ext, _reply("L3", "business"), "Et une marque forte.", conv=CONV_A)
+    link = _link(engine, turn["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "contribution_appended", lvmh["id"], None)
+    assert [c["text"] for c in _event(engine, lvmh["id"])["user_work_snapshot"]] == [
+        "LVMH vend du luxe.", "Et une marque forte."]
+    assert _event(engine, lvmh["id"])["status"] == "open"
+    assert _event(engine, nvda["id"]) == nvda  # ni fermé, ni enrichi
+    assert _traces(engine, nvda["id"]) == nvda_traces
+
+
+def test_pg_parallel_b_next_nvda_turn_in_b_leaves_lvmh_untouched(engine, Sessions, ext):
+    lvmh, nvda = _parallel_lvmh_and_nvda(Sessions, ext, engine)
+    lvmh_traces = _traces(engine, lvmh["id"])
+    turn = _turn(Sessions, ext, _reply("N3", "business"), "Et CUDA.", conv=CONV_B, ticker="NVDA")
+    link = _link(engine, turn["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "contribution_appended", nvda["id"], None)
+    assert _event(engine, nvda["id"])["status"] == "open"
+    assert _event(engine, lvmh["id"]) == lvmh
+    assert _traces(engine, lvmh["id"]) == lvmh_traces
+
+
+@pytest.mark.parametrize("with_work", [True, False], ids=["travail", "vide"])
+def test_pg_parallel_c_ticker_change_in_the_same_conversation_exits_only_its_event(engine, Sessions, ext,
+                                                                                   with_work):
+    """Conversation A LVMH ; conversation C indépendante sur AAPL. Dans A,
+    passage à NVDA : seul E_LVMH (contexte de A) est quitté ; E_AAPL reste
+    open et inchangé ; l'ACK NVDA ouvre le nouvel event."""
+    _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
+    if with_work:
+        _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
+    _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
+    lvmh, aapl = _events(engine)
+    switch = _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "event_closed_context_change" if with_work else "event_abandoned_context_change", None, lvmh["id"])
+    after = _event(engine, lvmh["id"])
+    assert after["status"] == ("finalized" if with_work else "abandoned")
+    assert "Et NVIDIA ?" not in [c["text"] for c in after["user_work_snapshot"]]
+    assert _event(engine, aapl["id"]) == aapl
+    _ack(Sessions, switch, conv=CONV_A)
+    new = _events(engine)[-1]
+    assert new["analysis_session_id"] == _session_id(engine, "NVDA") and new["status"] == "open"
+    assert _link(engine, switch["assistant_turn_id"])["response_action"] == "opened_event"
+
+
+@pytest.mark.parametrize("resume_text", ["Je reprends : ils vendent du luxe.", ""],
+                         ids=["contribution", "reprise-vide"])
+def test_pg_parallel_d_event_resumed_in_b_is_the_context_exited_from_b(engine, Sessions, ext, resume_text):
+    """E_LVMH ouvert en A puis repris en B (contribution session_ref=B, ou
+    reprise sans texte dont la réponse est rattachée en B par un lien).
+    Changement de ticker dans B : E_LVMH est le contexte quitté de B ;
+    l'event indépendant de la conversation C n'est pas touché."""
+    _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
+    _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
+    _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
+    lvmh, aapl = _events(engine)
+    _turn(Sessions, ext, _reply("R1", "business"), resume_text, context="", conv=CONV_B)
+    resumed = _event(engine, lvmh["id"])
+    assert resumed["conversation_key"] == CONV_A  # origine conservée
+    assert [c["session_ref"] for c in resumed["user_work_snapshot"]] == (
+        [CONV_A, CONV_B] if resume_text else [CONV_A])
+    switch = _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_B, ticker="NVDA")
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["input_action"], link["context_exit_event_id"]) == ("event_closed_context_change", lvmh["id"])
+    assert _event(engine, lvmh["id"])["status"] == "finalized"
+    assert _event(engine, aapl["id"]) == aapl
+
+
+def test_pg_parallel_e_two_events_claiming_the_conversation_fail_closed(engine, Sessions, ext):
+    """Deux events incompatibles appartiennent au contexte de la
+    conversation A : frontière ambiguë -> fail closed + rollback, aucun
+    event fermé arbitrairement, aucune provenance perdue."""
+    _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
+    _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
+    lvmh, aapl = _events(engine)
+    # E_AAPL a aussi reçu une contribution depuis A (provenance explicite).
+    with Sessions() as session:
+        cc.append_user_contribution(session, event_id=aapl["id"], contribution_id=uuid.uuid4(),
+                                    source_turn_ref=uuid.uuid4(), surface="decryptage", session_ref=CONV_A,
+                                    text_excerpt="Et Apple ?")
+        session.commit()
+    state, product = _t2_state(engine), _product(engine)
+    with pytest.raises(HTTPException) as failure:
+        _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
+    assert failure.value.status_code == 500 and failure.value.detail["retryable"] is True
+    assert (_t2_state(engine), _product(engine)) == (state, product)
+    assert {e["status"] for e in _events(engine)} == {"open"}
+    with Sessions() as session:
+        delivery, _ = ad.claim_delivery(
+            session, user_id=USER, conversation_key=CONV_A, surface="decryptage", source_user_turn_id=uuid.uuid4(),
+            delivery_ordinal=1, request_fingerprint=FP_A, visible_content_fingerprint=FP_A,
+            response_payload=PAYLOAD_A, private_metadata=dcr.runtime_private_metadata(None),
+            delivery_schema_version=ad.ASSISTANT_DELIVERY_SCHEMA_VERSION)
+        with pytest.raises(dcr.AmbiguousDecryptageContextExit):
+            dcr.capture_user_turn(session, delivery=delivery, ticker="NVDA", user_text="Et NVIDIA ?")
+    # Une nouvelle conversation n'hérite d'aucun des deux : elle n'est pas bloquée.
+    fresh = _send(Sessions, ext, _reply("N1", "business"), "Analyse NVDA", context="", conv="conv-d",
+                  ticker="NVDA")
+    assert _link(engine, fresh["assistant_turn_id"])["input_action"] == "no_open_event"
+    assert {e["status"] for e in _events(engine)} == {"open"}
+
+
+def test_pg_parallel_origin_conversation_alone_makes_the_event_part_of_the_context(engine, Sessions, ext):
+    """Provenance minimale : conversation_key d'origine seule (aucun lien,
+    aucune contribution) suffit à rattacher l'event au contexte de cette
+    conversation ; ailleurs, il n'est pas touché."""
+    _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
+    with Sessions() as session:
+        bare = cc.open_event_idempotent(
+            session, user_id=USER, conversation_key=CONV_A, source_turn_refs=(uuid.uuid4(),), segmentation_ordinal=1,
+            event_origin="decryptage", stimulus_snapshot={"visible_content": "x"},
+            event_builder_version=dcr.EVENT_BUILDER_VERSION, admission_version=dcr.ADMISSION_VERSION,
+            analysis_session_id=_session_id(engine, "AAPL")).id
+        session.commit()
+    elsewhere = _send(Sessions, ext, _reply("N1"), "Et NVIDIA ?", conv=CONV_B, ticker="NVDA")
+    assert _link(engine, elsewhere["assistant_turn_id"])["context_exit_event_id"] is None
+    assert _event(engine, bare)["status"] == "open"
+    here = _send(Sessions, ext, _reply("N2"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
+    link = _link(engine, here["assistant_turn_id"])
+    assert (link["input_action"], link["context_exit_event_id"]) == ("event_abandoned_context_change", bare)
+    assert _event(engine, bare)["status"] == "abandoned"
+
+
+def test_pg_parallel_switch_to_a_ticker_open_elsewhere_joins_it_and_exits_the_local_event(engine, Sessions, ext):
+    """Dans A (LVMH), passage à NVDA déjà en cours dans B : E_LVMH (contexte
+    de A) est quitté, la contribution rejoint E_NVDA (même AnalysisSession,
+    session_ref=A) ; un seul event quitté, tracé."""
+    lvmh, nvda = _parallel_lvmh_and_nvda(Sessions, ext, engine)
+    switch = _send(Sessions, ext, _reply("N3", "business"), "Je passe à NVIDIA.", conv=CONV_A, ticker="NVDA")
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
+        "contribution_appended", nvda["id"], lvmh["id"])
+    assert _event(engine, lvmh["id"])["status"] == "finalized"
+    assert [(c["session_ref"], c["text"]) for c in _event(engine, nvda["id"])["user_work_snapshot"]][-1] == (
+        CONV_A, "Je passe à NVIDIA.")
+
+
 # --- K. nouvelle conversation / reprise --------------------------------------
 
 def test_pg_k_resume_in_a_new_conversation_continues_the_same_event(engine, Sessions, ext):
@@ -663,7 +830,12 @@ def test_pg_k_text_typed_in_a_new_conversation_is_appended_to_the_open_event(eng
 
 # --- L. nouvelle AnalysisSession ---------------------------------------------
 
-def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext):
+@pytest.mark.parametrize("conv, exited", [(CONV, True), (CONV_2, False)], ids=["meme-conversation",
+                                                                                   "autre-conversation"])
+def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext, conv, exited):
+    """Nouvelle AnalysisSession : l'ancien event n'est jamais repris. Il
+    n'est quitté (fermé) que si la nouvelle tentative a lieu dans SA
+    conversation ; depuis une autre conversation, il reste intact."""
     _turn(Sessions, ext, _reply("A1", "business"))
     _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
     [old] = _events(engine)
@@ -671,12 +843,13 @@ def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, 
     with engine.begin() as conn:
         conn.execute(sa.text("UPDATE analysis_sessions SET status = 'abandoned' WHERE id = :s"),
                      {"s": old["analysis_session_id"]})
-    fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=CONV_2)
+    fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=conv)
     link = _link(engine, fresh["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_closed_context_change", None, old["id"])
+    expected = ("event_closed_context_change", None, old["id"]) if exited else ("no_open_event", None, None)
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == expected
+    assert _event(engine, old["id"])["status"] == ("finalized" if exited else "open")
     assert [c["text"] for c in _event(engine, old["id"])["user_work_snapshot"]] == ["Ils vendent du luxe."]
-    _ack(Sessions, fresh, conv=CONV_2)
+    _ack(Sessions, fresh, conv=conv)
     new = _events(engine)[-1]
     assert new["analysis_session_id"] == _session_id(engine) != old["analysis_session_id"]
     assert new["id"] != old["id"] and new["status"] == "open"

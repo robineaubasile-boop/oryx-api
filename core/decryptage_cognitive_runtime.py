@@ -57,6 +57,16 @@ tour. Jamais une recherche par conversation_key. Plusieurs events open
 compatibles : fail closed (AmbiguousOpenDecryptageEvents), jamais de choix
 « le plus récent » ni « le premier ».
 
+Sortie de contexte : seul un event qui appartient au contexte de la
+conversation COURANTE (ouvert dans cette conversation, ou y ayant reçu une
+contribution, ou y ayant une réponse rattachée par un lien R1-C2) et qui
+est incompatible avec l'AnalysisSession active est quitté (finalized si
+travail présent, abandoned s'il est vide). Plusieurs analyses /
+conversations d'un même utilisateur restent ouvertes en parallèle : un
+event d'une autre AnalysisSession n'est jamais fermé du seul fait de son
+incompatibilité. Plusieurs candidats pour la même conversation : frontière
+ambiguë, fail closed (AmbiguousDecryptageContextExit), rien n'est fermé.
+
 Transactions : ce module ne commit ni ne rollback jamais, n'ouvre aucune
 Session, ne fait aucun appel externe et n'importe pas FastAPI. Il verrouille,
 mute et flush ; la transaction appartient à api.py.
@@ -85,7 +95,7 @@ Limites V1 documentées :
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from core import cognitive_capture
 from core.decryptage_progress import DECRYPTAGE_STEP_MARKERS, FINAL_STEP
@@ -145,6 +155,12 @@ class CognitiveLinkInvariantError(DecryptageCognitiveRuntimeError):
 class AmbiguousOpenDecryptageEvents(DecryptageCognitiveRuntimeError):
     """Plusieurs CognitiveEvents Décrypter open compatibles : aucun choix
     heuristique, fail closed."""
+
+
+class AmbiguousDecryptageContextExit(DecryptageCognitiveRuntimeError):
+    """Plusieurs events incompatibles appartiennent au contexte de la
+    conversation courante : la frontière quittée est ambiguë. Aucun event
+    n'est fermé arbitrairement, fail closed."""
 
 
 def _utcnow() -> datetime:
@@ -219,24 +235,75 @@ def _lock_analysis_session(db, analysis_session_id) -> AnalysisSession:
     return session
 
 
-def _lock_open_events(db, *, user_id: str, analysis_session_id=None) -> list[CognitiveEvent]:
-    """Events Décrypter open de ce runtime pour user_id (éventuellement
-    restreints à une AnalysisSession), verrouillés dans l'ordre des id. En
-    READ COMMITTED, un event fermé par une transaction concurrente pendant
-    l'attente du verrou est réévalué et exclu : jamais d'état obsolète."""
-    query = (
+def _lock_open_events(db, *, user_id: str, analysis_session_id) -> list[CognitiveEvent]:
+    """Events Décrypter open de ce runtime pour user_id dans UNE
+    AnalysisSession, verrouillés dans l'ordre des id. En READ COMMITTED, un
+    event fermé par une transaction concurrente pendant l'attente du verrou
+    est réévalué et exclu : jamais d'état obsolète."""
+    return list(db.execute(
         select(CognitiveEvent)
         .where(CognitiveEvent.user_id == user_id,
                CognitiveEvent.event_origin == EVENT_ORIGIN,
                CognitiveEvent.event_builder_version == EVENT_BUILDER_VERSION,
-               CognitiveEvent.status == cognitive_capture.OPEN)
+               CognitiveEvent.status == cognitive_capture.OPEN,
+               CognitiveEvent.analysis_session_id == analysis_session_id)
         .order_by(CognitiveEvent.id.asc())
         .with_for_update()
         .execution_options(populate_existing=True)
+    ).scalars())
+
+
+def _lock_turn_context_events(db, *, delivery: AssistantDelivery, active) -> list[CognitiveEvent]:
+    """Events Décrypter open de ce runtime pertinents pour le tour,
+    verrouillés dans l'ordre des id :
+
+    - compatibles : analysis_session_id = AnalysisSession active ;
+    - appartenant au contexte de la conversation COURANTE, par provenance
+      explicite uniquement : ouverts dans cette conversation
+      (conversation_key d'origine), OU portant une contribution
+      session_ref = cette conversation, OU rattachés par un lien R1-C2
+      d'une livraison de cette conversation (réponse continuée ou
+      contribution ; ex. reprise sans texte dont la réponse a été rendue
+      dans cette conversation).
+
+    La conversation d'origine n'est qu'une provenance parmi d'autres (un
+    event repris ailleurs appartient aussi à la conversation de reprise),
+    jamais une frontière absolue. Un event d'une autre AnalysisSession sans
+    aucun lien avec cette conversation est une analyse parallèle : il n'est
+    pas sélectionné. READ COMMITTED : un event fermé pendant l'attente du
+    verrou est réévalué et exclu."""
+    conversation_key = delivery.conversation_key
+    linked = (
+        select(DecryptageCognitiveLink.response_event_id.label("event_id"))
+        .join(AssistantDelivery, AssistantDelivery.id == DecryptageCognitiveLink.assistant_delivery_id)
+        .where(AssistantDelivery.user_id == delivery.user_id, AssistantDelivery.conversation_key == conversation_key,
+               DecryptageCognitiveLink.response_event_id.is_not(None))
+        .union(
+            select(DecryptageCognitiveLink.input_event_id)
+            .join(AssistantDelivery, AssistantDelivery.id == DecryptageCognitiveLink.assistant_delivery_id)
+            .where(AssistantDelivery.user_id == delivery.user_id,
+                   AssistantDelivery.conversation_key == conversation_key,
+                   DecryptageCognitiveLink.input_event_id.is_not(None))
+        )
     )
-    if analysis_session_id is not None:
-        query = query.where(CognitiveEvent.analysis_session_id == analysis_session_id)
-    return list(db.execute(query).scalars())
+    relevance = [
+        CognitiveEvent.conversation_key == conversation_key,
+        CognitiveEvent.user_work_snapshot.contains([{"session_ref": conversation_key}]),
+        CognitiveEvent.id.in_(select(linked.subquery().c.event_id)),
+    ]
+    if active is not None:
+        relevance.append(CognitiveEvent.analysis_session_id == active.id)
+    return list(db.execute(
+        select(CognitiveEvent)
+        .where(CognitiveEvent.user_id == delivery.user_id,
+               CognitiveEvent.event_origin == EVENT_ORIGIN,
+               CognitiveEvent.event_builder_version == EVENT_BUILDER_VERSION,
+               CognitiveEvent.status == cognitive_capture.OPEN,
+               or_(*relevance))
+        .order_by(CognitiveEvent.id.asc())
+        .with_for_update(of=CognitiveEvent)
+        .execution_options(populate_existing=True)
+    ).scalars())
 
 
 def _event_step(db, event: CognitiveEvent) -> str:
@@ -319,13 +386,21 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     (livraison créée par CET appel, avant la progression produit).
 
     1. AnalysisSession active du ticker canonique (avant mutation),
-       verrouillée ; events Décrypter open de l'utilisateur, verrouillés.
+       verrouillée ; puis, verrouillés, les seuls events Décrypter open
+       pertinents pour ce tour : ceux de l'AnalysisSession active
+       (compatibles) et ceux qui appartiennent au contexte de la
+       conversation COURANTE (_lock_turn_context_events). Les events
+       d'autres conversations / analyses menées en parallèle ne sont ni
+       verrouillés, ni lus, ni fermés.
     2. Plus d'un event open compatible (même AnalysisSession active) :
        AmbiguousOpenDecryptageEvents.
-    3. Events open d'un autre contexte (autre AnalysisSession, ou aucune
-       session active pour ce ticker) : quittés, finalized si travail
-       présent, abandoned si vides. Le message du nouveau contexte n'y est
-       jamais ajouté. L'AnalysisSession quittée n'est pas touchée.
+    3. Candidat de sortie de contexte = event de la conversation courante
+       incompatible avec l'AnalysisSession active (changement de ticker,
+       autre tentative) : quitté, finalized si travail présent, abandoned
+       s'il est vide, tracé dans context_exit_event_id. Le message du
+       nouveau contexte n'y est jamais ajouté ; l'AnalysisSession quittée
+       n'est pas touchée. Plusieurs candidats pour la même conversation :
+       frontière ambiguë, AmbiguousDecryptageContextExit (rien n'est fermé).
     4. Event compatible + texte : contribution (contribution_id =
        source_turn_ref = client_turn_id, session_ref = conversation du
        TOUR, support_refs_before capturé par cognitive_capture). Sans
@@ -341,18 +416,20 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : lien déjà présent")
 
     active = _lock_active_analysis_session(db, user_id=delivery.user_id, ticker=ticker)
-    open_events = _lock_open_events(db, user_id=delivery.user_id)
-    compatible = [e for e in open_events if active is not None and e.analysis_session_id == active.id]
-    exited = [e for e in open_events if e not in compatible]
+    events = _lock_turn_context_events(db, delivery=delivery, active=active)
+    compatible = [e for e in events if active is not None and e.analysis_session_id == active.id]
+    exit_candidates = [e for e in events if e not in compatible]
     if len(compatible) > 1:
         raise AmbiguousOpenDecryptageEvents(
             f"assistant turn {delivery.id} : {len(compatible)} events open compatibles")
+    if len(exit_candidates) > 1:
+        raise AmbiguousDecryptageContextExit(
+            f"assistant turn {delivery.id} : {len(exit_candidates)} events quittables dans la conversation")
 
-    closures = [(event.id, _close_event(db, event)) for event in exited]
-    if len(closures) > 1:
-        logger.warning("[R1-C2] assistant_turn=%s anomaly=multiple_context_exits events=%s",
-                       delivery.id, [str(event_id) for event_id, _ in closures])
-    exited_event_id = closures[0][0] if len(closures) == 1 else None
+    exited_event_id = exit_status = None
+    if exit_candidates:
+        (exited,) = exit_candidates
+        exited_event_id, exit_status = exited.id, _close_event(db, exited)
 
     input_event_id = None
     if compatible:
@@ -366,9 +443,9 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
             input_action, input_event_id = CONTRIBUTION_APPENDED, event.id
         else:
             input_action = NO_USER_CONTRIBUTION
-    elif closures:
-        any_finalized = any(status == cognitive_capture.FINALIZED for _, status in closures)
-        input_action = EVENT_CLOSED_CONTEXT_CHANGE if any_finalized else EVENT_ABANDONED_CONTEXT_CHANGE
+    elif exit_status is not None:
+        input_action = (EVENT_CLOSED_CONTEXT_CHANGE if exit_status == cognitive_capture.FINALIZED
+                        else EVENT_ABANDONED_CONTEXT_CHANGE)
     else:
         input_action = NO_OPEN_EVENT
 
@@ -387,8 +464,9 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     )
     db.add(link)
     db.flush()
-    for event_id, status in closures:
-        logger.info("[R1-C2] assistant_turn=%s context_exit event=%s status=%s", delivery.id, event_id, status)
+    if exited_event_id is not None:
+        logger.info("[R1-C2] assistant_turn=%s context_exit event=%s status=%s", delivery.id, exited_event_id,
+                    exit_status)
     logger.info("[R1-C2] assistant_turn=%s input_action=%s event=%s", delivery.id, input_action, input_event_id)
     return link
 
