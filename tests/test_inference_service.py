@@ -107,6 +107,7 @@ from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
 from tests.test_migration_0010_r1b_event_idempotence import R1B
 from tests.test_migration_0011_assistant_deliveries import R1C1
+from tests.test_migration_0012_decryptage_cognitive_links import R1C2
 from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _obs_kwargs, _reaches_db, _recording
 from tests.test_observation_service import _event as _finalized_event
 from tests.test_observation_service import _start_kwargs as t3_kwargs
@@ -228,15 +229,16 @@ def _pure_ok(d):
 def test_no_migration_added_by_t6b():
     """T6-B est service-only : aucune migration ajoutée par T6-B ; les seules
     ajoutées depuis sont 0010 (R1-B, identité idempotente des
-    CognitiveEvents) et 0011 (R1-C1, livraisons des réponses assistant), qui
-    est la tête."""
+    CognitiveEvents), 0011 (R1-C1, livraisons des réponses assistant) et
+    0012 (R1-C2, liens cognitifs Décrypter), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C1]
+    assert script.get_heads() == [R1C2]
+    assert script.get_revision(R1C2).down_revision == R1C1
     assert script.get_revision(R1C1).down_revision == R1B
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-3:] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py"] and len(files) == 11
+    assert files[-4:] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py"] and len(files) == 12
 
 
 def test_t6a_schema_files_are_unchanged_by_t6b():

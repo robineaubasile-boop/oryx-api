@@ -1476,3 +1476,88 @@ class AssistantDelivery(Base):
     delivery_schema_version = Column(String, nullable=False)
     generated_at = Column(DateTime(timezone=True), nullable=False)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class DecryptageCognitiveLink(Base):
+    """Rattachement cognitif T2 d'UN tour Décrypter (R1-C2) : relie, pour
+    une AssistantDelivery R1-C2, ce que la production utilisateur du tour
+    est devenue (côté entrée) et ce que la réponse assistant réellement
+    delivered est devenue (côté réponse).
+
+    Ce n'est PAS une preuve, ni une observation, ni une évaluation : une
+    ligne de provenance runtime spécifique Décrypter. Un tour peut relier la
+    production utilisateur à un ancien CognitiveEvent (input_event_id) ET la
+    réponse assistant à un nouveau (response_event_id) : jamais un seul
+    cognitive_event_id par livraison. CognitiveEvent != message ; le
+    marqueur d'étape produit n'est ni task_kind ni compétence ; delivered
+    != lu / compris.
+
+    - assistant_delivery_id (PK) : au plus une ligne par AssistantDelivery
+      (idempotence de la capture) ;
+    - input_action / input_event_id : sort de la production utilisateur du
+      tour, fixé dans la transaction /decryptage du worker gagnant ;
+    - abandoned_event_id : nom figé par la spec R1-C2 ; désigne l'event
+      QUITTÉ (fermé) par ce tour sur changement de contexte, qu'il ait été
+      finalized (travail présent, input_action event_closed_context_change)
+      ou abandoned (event vide, event_abandoned_context_change) ;
+    - capture_state awaiting_delivery -> captured, atomiquement avec
+      l'ACK pending -> delivered ; response_action / response_event_id /
+      support_trace_id / captured_at sont remplis à ce moment.
+
+    Aucune duplication de user_id, conversation_key, surface, tour source,
+    analysis_session_id, ticker ni marqueur : ils viennent de
+    AssistantDelivery. Seul point d'écriture :
+    core/decryptage_cognitive_runtime.py. Table créée par la migration
+    0012_decryptage_cognitive_links ; timestamps générés par l'application
+    (aucun server_default), CHECK plutôt qu'ENUM, FK sans cascade."""
+    __tablename__ = "decryptage_cognitive_links"
+    __table_args__ = (
+        CheckConstraint(
+            "capture_state IN ('awaiting_delivery', 'captured')",
+            name="ck_decryptage_cognitive_links_capture_state",
+        ),
+        CheckConstraint(
+            "input_action IN ('no_open_event', 'no_user_contribution', 'contribution_appended', "
+            "'event_closed_context_change', 'event_abandoned_context_change')",
+            name="ck_decryptage_cognitive_links_input_action",
+        ),
+        CheckConstraint(
+            "response_action IS NULL OR response_action IN ('opened_event', 'continued_event', "
+            "'continued_without_boundary_signal', 'transitioned_event', 'closed_terminal', "
+            "'no_cognitive_action')",
+            name="ck_decryptage_cognitive_links_response_action",
+        ),
+        CheckConstraint(
+            "(capture_state = 'awaiting_delivery' AND response_action IS NULL AND response_event_id IS NULL "
+            "AND support_trace_id IS NULL AND captured_at IS NULL) OR (capture_state = 'captured' "
+            "AND response_action IS NOT NULL AND captured_at IS NOT NULL)",
+            name="ck_decryptage_cognitive_links_capture_state_fields",
+        ),
+        CheckConstraint(
+            "(input_action = 'contribution_appended') = (input_event_id IS NOT NULL)",
+            name="ck_decryptage_cognitive_links_input_event",
+        ),
+        CheckConstraint(
+            "response_action IS NULL OR ((response_action IN ('opened_event', 'continued_event', "
+            "'continued_without_boundary_signal', 'transitioned_event')) = (response_event_id IS NOT NULL) "
+            "AND (response_action IN ('continued_event', 'continued_without_boundary_signal')) "
+            "= (support_trace_id IS NOT NULL))",
+            name="ck_decryptage_cognitive_links_response_refs",
+        ),
+        Index(
+            "uq_decryptage_cognitive_links_opening_event", "response_event_id", unique=True,
+            postgresql_where=text("response_action IN ('opened_event', 'transitioned_event')"),
+        ),
+    )
+
+    assistant_delivery_id = Column(Uuid, ForeignKey("assistant_deliveries.id"), primary_key=True)
+    capture_version = Column(String, nullable=False)
+    input_action = Column(String, nullable=False)
+    input_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    abandoned_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    capture_state = Column(String, nullable=False)
+    response_action = Column(String, nullable=True)
+    response_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    support_trace_id = Column(Uuid, ForeignKey("support_traces.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    captured_at = Column(DateTime(timezone=True), nullable=True)

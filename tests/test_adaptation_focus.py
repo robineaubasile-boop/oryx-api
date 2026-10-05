@@ -1060,7 +1060,7 @@ def test_48_no_sqlalchemy_model_built_nor_imported():
 
 def test_49_no_migration_and_no_step6_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0011_assistant_deliveries.py" and len(versions) == 11
+    assert versions[-1] == "0012_decryptage_cognitive_links.py" and len(versions) == 12
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Focus" not in models and "Adaptation" not in models
 

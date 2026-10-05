@@ -81,6 +81,7 @@ T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
 R1C1 = "0011_assistant_deliveries"
+R1C2 = "0012_decryptage_cognitive_links"
 
 SERVICE_PATH = REPO_ROOT / "core" / "observation_service.py"
 DEDUP_INDEX = "uq_observation_evaluation_runs_dedup_key"
@@ -234,13 +235,13 @@ def _add(db, run_id, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t3b_head_is_0011():
+def test_no_migration_added_by_t3b_head_is_0012():
     """T3-B n'a ajouté aucune migration ; les seules ajoutées depuis sont
-    0007 (T4-A), 0008 (T5-A), 0009 (T6-A), 0010 (R1-B) et 0011 (R1-C1), qui
-    est la tête."""
+    0007 (T4-A), 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1) et 0012
+    (R1-C2), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C1]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)
+    assert script.get_heads() == [R1C2]
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in revisions]

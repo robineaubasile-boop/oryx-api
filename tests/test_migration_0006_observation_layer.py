@@ -54,6 +54,7 @@ from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1, _
 from tests.test_migration_0004_drop_company_analyses import (
     R1B_TABLES,
     R1C1_TABLES,
+    R1C2_TABLES,
     REMAINING_TABLES,
     T1B1_SHA256,
     T1C2,
@@ -74,6 +75,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     _seed_remaining_tables,
     _without_r1b_changes,
     _without_r1c1_changes,
+    _without_r1c2_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     T1C2_SHA256,
@@ -343,7 +345,7 @@ def test_metadata_declares_the_two_new_tables():
     T5-A et les six tables T6-A, testées à part) ; aucune autre table de
     taxonomie ou de capacités."""
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES | T5A_TABLES
-                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES)
+                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert ObservationEvaluationRun.__table__ is Base.metadata.tables[RUNS]
     assert PedagogicalObservation.__table__ is Base.metadata.tables[OBS]
     # T6-A : competency_inference_tension_capabilities = périmètre d'une
@@ -713,7 +715,8 @@ def _assert_metadata_matches_0006(engine) -> None:
     index ; et par T6-A (0009) : les six tables d'inférence de l'état et
     leurs index ; et par les écarts R1-B (0010) ; tout le reste correspond
     exactement."""
-    diff = _without_r1b_changes(_without_r1c1_changes(_compare_metadata(engine)), events_created=True)
+    diff = _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(engine))),
+                                events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T4A_TABLES | T5A_TABLES | T6A_TABLES]
         + [("add_index", i) for i in T4A_INDEXES | T5A_INDEXES | T6A_INDEXES]

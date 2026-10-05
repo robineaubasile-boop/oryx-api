@@ -13,9 +13,14 @@ frontend Oryx affirme avoir inséré le contenu canonique dans l'interface » ;
 jamais lu, compris, regardé, mémorisé ni utilisé cognitivement.
 
 API publique : preflight_delivery, claim_delivery, bind_analysis_session,
-acknowledge_delivery, decryptage_request_fingerprint,
+lock_delivery_for_ack, acknowledge_delivery, decryptage_request_fingerprint,
 visible_content_fingerprint. Aucune fonction générique de mise à jour, de
 suppression ni de listing.
+
+R1-C2 : ce module reste la seule vérité de livraison et n'appelle toujours
+aucun service T2+. La capture cognitive d'une livraison R1-C2 est orchestrée
+par core/decryptage_cognitive_runtime.py, dans la même transaction que
+l'ACK, sous le verrou pris par lock_delivery_for_ack.
 
 Invariants :
 
@@ -527,6 +532,30 @@ def bind_analysis_session(
     return delivery
 
 
+def lock_delivery_for_ack(
+    db,
+    *,
+    assistant_turn_id: uuid.UUID,
+    user_id: str,
+    conversation_key: str,
+) -> AssistantDelivery:
+    """Verrouille la livraison (SELECT ... FOR UPDATE) et vérifie son
+    propriétaire, SANS rien muter : premier verrou de la transaction ACK
+    (ordre R1-C2 : AssistantDelivery -> DecryptageCognitiveLink ->
+    AnalysisSession -> CognitiveEvent -> SupportTrace).
+
+    - inconnue : AssistantDeliveryNotFound ;
+    - version de schéma inconnue : UnsupportedAssistantDeliverySchema ;
+    - user_id ou conversation_key différent : AssistantDeliveryOwnershipConflict."""
+    _require_uuid(assistant_turn_id, "assistant_turn_id")
+    _require_identifier(user_id, "user_id")
+    _require_identifier(conversation_key, "conversation_key")
+    delivery = _lock_delivery(db, assistant_turn_id)
+    if delivery.user_id != user_id or delivery.conversation_key != conversation_key:
+        raise AssistantDeliveryOwnershipConflict(f"assistant turn {assistant_turn_id} : propriétaire différent")
+    return delivery
+
+
 def acknowledge_delivery(
     db,
     *,
@@ -545,12 +574,8 @@ def acknowledge_delivery(
     Ne prouve ni lecture, ni attention, ni compréhension. Ne crée aucune
     livraison, aucune trace pédagogique ; seuls status / delivered_at sont
     mutés. Flush sans commit."""
-    _require_uuid(assistant_turn_id, "assistant_turn_id")
-    _require_identifier(user_id, "user_id")
-    _require_identifier(conversation_key, "conversation_key")
-    delivery = _lock_delivery(db, assistant_turn_id)
-    if delivery.user_id != user_id or delivery.conversation_key != conversation_key:
-        raise AssistantDeliveryOwnershipConflict(f"assistant turn {assistant_turn_id} : propriétaire différent")
+    delivery = lock_delivery_for_ack(db, assistant_turn_id=assistant_turn_id, user_id=user_id,
+                                     conversation_key=conversation_key)
     if delivery.status == DELIVERED:
         return delivery
     delivery.status = DELIVERED

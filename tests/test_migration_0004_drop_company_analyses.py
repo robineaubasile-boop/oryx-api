@@ -103,6 +103,10 @@ R1B_DEDUP_UNIQUE = "uq_cognitive_events_event_dedup_key"
 # R1-C1 (0011, testé à part) : livraisons idempotentes des réponses
 # assistant (une table runtime, ni SupportTrace ni CognitiveEvent).
 R1C1_TABLES = {"assistant_deliveries"}
+# R1-C2 (0012, testé à part) : liens cognitifs T2 des tours Décrypter (une
+# table runtime et son index unique partiel).
+R1C2_TABLES = {"decryptage_cognitive_links"}
+R1C2_INDEXES = {"uq_decryptage_cognitive_links_opening_event"}
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -208,7 +212,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
     assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
-                                        | T6A_TABLES | R1B_TABLES | R1C1_TABLES)
+                                        | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
         assert all(fk.column.table.name != DROPPED for fk in table.foreign_keys), table.name
@@ -377,11 +381,24 @@ def _without_r1c1_changes(diff) -> list:
     return [d for d in diff if not any(d is f for f in found)]
 
 
+def _without_r1c2_changes(diff) -> list:
+    """Retire du diff compare_metadata d'un schéma antérieur à 0012
+    EXACTEMENT l'écart introduit par R1-C2 (la table
+    decryptage_cognitive_links et son index unique partiel), et échoue s'il
+    manque. Retourne le reste."""
+    found = [d for d in diff if isinstance(d, tuple) and (
+        (d[0] == "add_table" and d[1].name in R1C2_TABLES) or (d[0] == "add_index" and d[1].name in R1C2_INDEXES))]
+    assert sorted((d[0], d[1].name) for d in found) == sorted(
+        [("add_table", t) for t in R1C2_TABLES] + [("add_index", i) for i in R1C2_INDEXES])
+    return [d for d in diff if not any(d is f for f in found)]
+
+
 def _assert_metadata_matches_0004(engine) -> None:
     """Au schéma 0004, Base.metadata ne diffère que par les tables de T2-A,
     T3-A, T4-A, T5-A, T6-A et R1-B, créées seulement en 0005, 0006, 0007,
     0008, 0009 et 0010 ; tout le reste correspond exactement."""
-    diff = _without_r1b_changes(_without_r1c1_changes(_compare_metadata(engine)), events_created=False)
+    diff = _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(engine))),
+                                events_created=False)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES | T6A_TABLES]
         + [("add_index", i) for i in T3A_INDEXES | T4A_INDEXES | T5A_INDEXES | T6A_INDEXES]

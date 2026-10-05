@@ -278,9 +278,10 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
     # Les modèles SQLAlchemy correspondent exactement au schéma migré, à
     # l'exception de company_analyses, encore présente en 0003 mais dont le
     # modèle est supprimé depuis T1-C2 (la table disparaît en 0004), et des
-    # tables de T2-A, T3-A, T4-A, T5-A, T6-A, R1-B et R1-C1 (et des index de
-    # T3-A, T4-A, T5-A et T6-A), déclarées dans les modèles mais créées
-    # seulement en 0005, 0006, 0007, 0008, 0009, 0010 et 0011.
+    # tables de T2-A, T3-A, T4-A, T5-A, T6-A, R1-B, R1-C1 et R1-C2 (et des
+    # index de T3-A, T4-A, T5-A, T6-A et R1-C2), déclarées dans les modèles
+    # mais créées seulement en 0005, 0006, 0007, 0008, 0009, 0010, 0011 et
+    # 0012.
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with pg_engine.connect() as conn:
@@ -319,6 +320,7 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         ("add_index", "ix_revalidation_capabilities_capability_membership_id"),
         ("add_index", "ix_transfer_capabilities_capability_membership_id"),
         ("add_index", "uq_competency_inference_runs_one_active_user_competency"),
+        ("add_index", "uq_decryptage_cognitive_links_opening_event"),
         ("add_index", "uq_longitudinal_assessment_runs_one_active_user_competency"),
         ("add_index", "uq_observation_evaluation_runs_one_active_event"),
         ("add_index", "uq_pedagogical_taxonomy_releases_one_active"),
@@ -332,6 +334,7 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
         ("add_table", "competency_stage_claims"),
         ("add_table", "conversation_identities"),
         ("add_table", "core_capability_definitions"),
+        ("add_table", "decryptage_cognitive_links"),
         ("add_table", "dependency_capabilities"),
         ("add_table", "longitudinal_assessment_inputs"),
         ("add_table", "longitudinal_assessment_runs"),

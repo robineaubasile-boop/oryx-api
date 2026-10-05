@@ -209,7 +209,8 @@ def test_model_does_not_touch_historical_tables():
     # longitudinales ; T6-A (0009, testé à part) les six tables d'inférence
     # de l'état C1-C12 ; R1-B (0010, testé à part) le registre
     # conversation_identities ; R1-C1 (0011, testé à part) la table runtime
-    # assistant_deliveries.
+    # assistant_deliveries ; R1-C2 (0012, testé à part) la table runtime
+    # decryptage_cognitive_links.
     assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
         "analysis_sessions", "cognitive_events", "support_traces",
         "observation_evaluation_runs", "pedagogical_observations",
@@ -222,7 +223,7 @@ def test_model_does_not_touch_historical_tables():
         "competency_inference_runs", "competency_stage_claims",
         "competency_inference_tensions", "competency_inference_tension_capabilities",
         "competency_inference_basis_refs", "user_competency_states",
-        "conversation_identities", "assistant_deliveries",
+        "conversation_identities", "assistant_deliveries", "decryptage_cognitive_links",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables

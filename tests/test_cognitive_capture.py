@@ -74,6 +74,7 @@ T5A = "0008_longitudinal_relations"
 T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
 R1C1 = "0011_assistant_deliveries"
+R1C2 = "0012_decryptage_cognitive_links"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
 PUBLIC_API = {
@@ -191,15 +192,17 @@ def capture_event(session, *, text="rentabilité des capitaux propres", close=No
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_head_is_0011_after_r1b_and_r1c1():
+def test_head_is_0012_after_r1b_r1c1_and_r1c2():
     """T2-B n'a ajouté aucune migration ; R1-B ajoute 0010, R1-C1 ajoute
-    0011 (assistant_deliveries, sans lien avec ce service), la tête."""
+    0011 (assistant_deliveries, sans lien avec ce service), R1-C2 ajoute
+    0012 (decryptage_cognitive_links, liens runtime vers les events), la
+    tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C1]
+    assert script.get_heads() == [R1C2]
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B, R1C1}
+                                                                 T6A, R1B, R1C1, R1C2}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)]
 
 
 def test_public_api_is_exactly_the_capture_functions():
@@ -304,14 +307,15 @@ def test_service_introduces_no_evaluation_vocabulary():
         assert word not in tokens, word
 
 
-def test_service_is_not_wired_to_the_application():
-    """Aucune route ni module applicatif n'importe le service de capture ;
-    api.py et web-v2 n'y font aucune référence. Seule exception, pour le
-    REGISTRE d'identité uniquement (pas la capture) : R1-C1 résout la
-    conversation_key d'une livraison assistant Décrypter via
-    register_or_resolve_conversation, depuis core/assistant_delivery.py
-    (aucun CognitiveEvent ni SupportTrace créé : voir
-    tests/test_assistant_delivery.py)."""
+def test_service_is_wired_only_through_the_r1c2_decryptage_runtime():
+    """R1-C2 branche la capture sur UNE surface : seul l'orchestrateur
+    core/decryptage_cognitive_runtime.py importe et appelle le service de
+    capture ; aucune route (api.py) ni web-v2 n'y fait référence
+    directement, aucun autre module applicatif non plus (pas de
+    généralisation à d'autres surfaces). Pour le REGISTRE d'identité
+    (pas la capture) : R1-C1 résout la conversation_key d'une livraison
+    assistant Décrypter via register_or_resolve_conversation, depuis
+    core/assistant_delivery.py."""
     registry_names = ("interaction_identity", "register_or_resolve_conversation")
     capture_names = ("cognitive_capture", "open_event_idempotent", "append_user_contribution", "add_support_trace",
                      "finalize_event", "abandon_event")
@@ -325,7 +329,8 @@ def test_service_is_not_wired_to_the_application():
         if path.suffix == ".py":
             source = _code_tokens(source)
         checked += 1
-        if rel not in ("core/cognitive_capture.py", "core/interaction_identity.py"):
+        if rel not in ("core/cognitive_capture.py", "core/interaction_identity.py",
+                       "core/decryptage_cognitive_runtime.py"):
             for name in capture_names:
                 assert name not in source, (rel, name)
             if rel != "core/assistant_delivery.py":
@@ -576,7 +581,7 @@ def test_utcnow_is_utc_aware():
 
 @pytest.fixture(scope="module")
 def engine(pg_url):  # noqa: F811
-    """Schéma = head (0011 depuis R1-C1) + deux utilisateurs et une analysis_session,
+    """Schéma = head (0012 depuis R1-C2) + deux utilisateurs et une analysis_session,
     créé une fois pour le module ; chaque test nettoie ses écritures."""
     eng = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
     _upgrade_head_with_users(pg_url, eng)
