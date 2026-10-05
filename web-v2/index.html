@@ -2004,18 +2004,33 @@ h1, h2, h3, .serif { font-family: 'Fraunces', Georgia, serif; }
 // ============================================================
 // Session / state
 // ============================================================
+// R1-C3A : la conversation_key Décrypter est propre à l'ONGLET
+// (sessionStorage) : deux onglets ouverts normalement ont deux conversations
+// distinctes, et « Nouvelle conversation » / « Reprendre » dans un onglet ne
+// change jamais la conversation d'un autre onglet. Un rechargement du même
+// onglet conserve la même clé. Les autres vues (Éducation, Coach...) gardent
+// leur session_id partagé en localStorage (comportement inchangé). L'outbox
+// d'ACK (oryx_pending_delivery_acks_v1) reste en localStorage, cross-tab.
+// Limite V1 assumée : la duplication native d'un onglet peut, selon le
+// navigateur, copier le sessionStorage initial (même clé dans les deux
+// onglets dupliqués) ; non traitée ici.
+const TAB_SCOPED_SESSION_VIEWS = ['decrypter'];
+function sessionIdStorage(viewKey) {
+	return TAB_SCOPED_SESSION_VIEWS.includes(viewKey) ? sessionStorage : localStorage;
+}
 function getSessionId(viewKey) {
+	const storage = sessionIdStorage(viewKey);
 	const storageKey = 'oryx_v2_session_' + viewKey;
-	let sid = localStorage.getItem(storageKey);
+	let sid = storage.getItem(storageKey);
 	if (!sid) {
 		sid = crypto.randomUUID();
-		localStorage.setItem(storageKey, sid);
+		storage.setItem(storageKey, sid);
 	}
 	return sid;
 }
 function resetSessionId(viewKey) {
 	const sid = crypto.randomUUID();
-	localStorage.setItem('oryx_v2_session_' + viewKey, sid);
+	sessionIdStorage(viewKey).setItem('oryx_v2_session_' + viewKey, sid);
 	return sid;
 }
 
@@ -2028,6 +2043,11 @@ const BOTTOM_NAV_VIEWS = ['accueil', 'decrypter', 'education', 'coach'];
 
 // Per-tab in-memory history, used only to build the "context" string
 // for endpoints that don't keep server-side session state.
+// R1-C3B : chaque entrée porte le ticker canonique du tour (celui renvoyé
+// par le backend pour le rendu) ; le contexte Décrypter est filtré par
+// ticker (aucun mélange LVMH / NVDA dans un même onglet). Ce contexte texte
+// reste secondaire : la progression d'une analyse en cours est portée par
+// l'AnalysisSession côté serveur.
 const histories = { decrypter: [], checklist: [] };
 
 // ============================================================
@@ -2127,9 +2147,13 @@ function hideTyping(containerId) {
 }
 
 // Mirrors the backend's own context format: most recent turn first.
-function buildContext(history, maxTurns = null) {
-	if (!history.length) return '';
-	const slice = maxTurns ? history.slice(-maxTurns) : history.slice();
+// tickerScope (Décrypter) : seules les entrées de ce ticker sont gardées,
+// AVANT d'appliquer maxTurns (les N derniers tours de CE ticker). Ordre
+// des tours préservé. Sans tickerScope (Checklist) : inchangé.
+function buildContext(history, maxTurns = null, tickerScope = null) {
+	const scoped = tickerScope ? history.filter(t => t.ticker === tickerScope) : history;
+	if (!scoped.length) return '';
+	const slice = maxTurns ? scoped.slice(-maxTurns) : scoped.slice();
 	return slice.reverse().map(t => `[${t.role.toUpperCase()}] ${t.text}`).join('\n');
 }
 
@@ -2299,9 +2323,19 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	const tickerInput = document.getElementById('ticker-' + key);
 	const newConvoBtn = document.getElementById('new-convo-' + key);
 	let lastMethodId = null;
+	// R1-C3B (Décrypter) : ticker saisi -> ticker canonique renvoyé par le
+	// backend (ex. LVMH -> MC.PA), appris au rendu. Sert uniquement à
+	// retrouver l'historique du ticker courant avant l'envoi ; un ticker
+	// jamais rendu dans cet onglet n'a simplement pas d'historique.
+	const canonicalTickers = {};
+	const contextTicker = (ticker) => canonicalTickers[ticker] || ticker;
 
 	function renderSuccess(data, question, ticker, deliveryOwner = null) {
 		const text = data[resultField];
+		// Ticker réellement utilisé pour le rendu de ce tour (canonique
+		// backend) ; à défaut, le ticker saisi.
+		const turnTicker = data.ticker || ticker;
+		canonicalTickers[ticker] = turnTicker;
 		addMessage(containerId, text, 'assistant');
 		// L'ACK n'est enregistré qu'APRÈS un rendu réussi (jamais avant) ; une
 		// réponse déjà delivered (retry) n'est pas ré-acquittée.
@@ -2309,8 +2343,8 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			recordPendingDeliveryAck({ assistant_turn_id: data.assistant_turn_id, ...deliveryOwner });
 			flushPendingDeliveryAcks();
 		}
-		histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})` });
-		histories[key].push({ role: 'assistant', text });
+		histories[key].push({ role: 'user', text: question || `(analyse de ${ticker})`, ticker: turnTicker });
+		histories[key].push({ role: 'assistant', text, ticker: turnTicker });
 		if (trackMethodId) lastMethodId = data.method_used || null;
 		if (priceBannerId && data.price != null) {
 			const banner = document.getElementById(priceBannerId);
@@ -2363,7 +2397,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 		addMessage(containerId, question || `(analyse de ${ticker})`, 'user');
 		showTyping(containerId);
 
-		const context = buildContext(histories[key], maxHistoryTurns);
+		const context = buildContext(histories[key], maxHistoryTurns, contextTicker(ticker));
 		const body = JSON.stringify({
 			ticker, question, context, last_method_id: lastMethodId, level: getUserLevel(),
 			user_id: userId, conversation_key: conversationKey, client_turn_id: clientTurnId,
@@ -2441,6 +2475,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 	function clearConversation() {
 		histories[key] = [];
 		lastMethodId = null;
+		for (const k of Object.keys(canonicalTickers)) delete canonicalTickers[k];
 		document.getElementById(containerId).innerHTML = '';
 		const chipRow = document.getElementById('chips-' + key);
 		if (chipRow) chipRow.style.display = '';
@@ -2472,6 +2507,7 @@ function makeTickerChat({ key, endpoint, resultField, placeholderQuestion, maxHi
 			return false;
 		}
 		clearConversation();
+		// R1-C3A : nouvelle clé dans CET onglet uniquement (sessionStorage).
 		resetSessionId(key);
 		return true;
 	}
@@ -3301,8 +3337,10 @@ function escapeHtml(s) {
 }
 
 // « Reprendre » : nouvelle conversation Décrypter (nouvelle
-// conversation_key), même AnalysisSession produit côté backend. Le reset
-// est attendu avant l'envoi (aucune course reset/send).
+// conversation_key dans CET onglet uniquement, R1-C3A), même AnalysisSession
+// produit côté backend : son current_step (étape ouverte) fait autorité, le
+// contexte texte vide ne renvoie jamais au Business. Le reset est attendu
+// avant l'envoi (aucune course reset/send).
 async function resumeThesis(ticker) {
 	showView('decrypter');
 	if (!(await decrypterChat.reset())) return;

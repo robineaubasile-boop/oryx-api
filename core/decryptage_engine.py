@@ -2,6 +2,16 @@
 Moteur pédagogique pour la route /decryptage.
 Claude est appelé directement depuis Python.
 Aucun score, aucune fair value, aucun verdict.
+
+R1-C3B : quand une AnalysisSession in_progress est fournie
+(in_progress_analysis), elle est AUTORITAIRE sur l'historique de
+conversation : son current_step est l'étape ACTUELLEMENT OUVERTE (posée par
+la dernière réponse assistant, en attente de la réponse utilisateur), pas
+la dernière étape terminée. La reprise se fait sur CETTE étape ; l'étape
+suivante n'est abordée qu'après une vraie réponse de l'utilisateur à
+celle-ci. Aucune « étape suivante » n'est jamais calculée comme cible de
+reprise, et la règle « commencer par le Business » ne s'applique que sans
+analyse en cours.
 """
 
 
@@ -50,16 +60,8 @@ ce qu'il en pense au vu des nouveaux chiffres.
             "valorisation": "Composante 4 (Valorisation)",
             "risques": "Composante 5 (Risques)",
         }
-        next_step_labels = {
-            "business": "Composante 2 (Moat)",
-            "moat": "Composante 3 (Chiffres clés)",
-            "chiffres": "Composante 4 (Valorisation)",
-            "valorisation": "Composante 5 (Risques)",
-            "risques": "la Thèse en 3 phrases (clôture)",
-        }
         current_step = in_progress_analysis["current_step"]
         current_label = step_labels.get(current_step, current_step)
-        next_label = next_step_labels.get(current_step, "la suite")
 
         recap_lines = []
         for s in in_progress_analysis.get("statements", []):
@@ -85,8 +87,10 @@ ce qu'il en pense au vu des nouveaux chiffres.
 
         prompt += f"""
 RAPPEL IMPORTANT — analyse déjà EN COURS sur {name} (thèse pas encore terminée) :
-L'utilisateur avait déjà commencé la construction de sa thèse sur {name}.
-Dernière étape atteinte : {current_label}.
+L'utilisateur a déjà commencé la construction de sa thèse sur {name}.
+Étape ACTUELLEMENT OUVERTE : {current_label}.
+Cette étape a déjà été posée à l'utilisateur et attend encore SA réponse :
+ce n'est PAS une étape terminée.
 
 Ce qu'il avait déjà dit aux étapes précédentes (dans l'ordre) :
 {recap_block}
@@ -94,15 +98,40 @@ Ce qu'il avait déjà dit aux étapes précédentes (dans l'ordre) :
 Chiffres déjà vus lors de cette analyse (instantané pris au démarrage) :
 {facts_block}
 
-Ta toute première réponse doit :
-1. Résumer en 2-3 phrases où en était l'utilisateur (reste factuel sur
-   le contenu, n'expose jamais une limite technique de mémoire).
-2. Reprendre DIRECTEMENT à {next_label} — ne repars jamais à la
-   Composante 1 (Business) si l'historique ci-dessus montre qu'elle a
-   déjà été traitée.
+Cet état d'avancement fait AUTORITÉ sur l'historique de conversation
+(qui peut être vide, partiel ou porter sur un autre échange) :
+- Si le NOUVEAU MESSAGE UTILISATEUR est une vraie réponse à {current_label},
+  traite cette réponse selon les règles habituelles ci-dessous (validation
+  socratique, aiguillage par type d'étape) ; seulement ensuite, passe à
+  l'étape suivante.
+- Sinon (reprise, message vide, navigation, retour sur {name}, question
+  hors séquence), reprends CETTE étape : {current_label}. Ne passe pas à
+  l'étape suivante sans une vraie réponse de l'utilisateur à celle-ci.
+- Ne repars jamais à la Composante 1 (Business) ni à une étape antérieure
+  au seul motif que l'historique de conversation ne la montre pas.
+- Si l'historique de conversation ne contient pas encore cette analyse
+  (reprise), commence par résumer en 2-3 phrases où en était
+  l'utilisateur (reste factuel sur le contenu, n'expose jamais une limite
+  technique de mémoire), puis reprends {current_label}.
 Si un des chiffres ci-dessus a changé depuis (prix, marge...), signale
 la mise à jour, mais ne redémarre pas la séquence pour autant.
 """
+    # Règle de démarrage : « commencer par le Business » ne vaut QUE sans
+    # analyse en cours ; avec une AnalysisSession in_progress, son étape
+    # ouverte est autoritaire (AnalysisSession active > historique).
+    if in_progress_analysis:
+        start_rule = (
+            "- Une analyse EN COURS est fournie ci-dessus : son étape actuellement ouverte est AUTORITAIRE.\n"
+            "  Ne reviens jamais à l'Étape 1 (Business) au seul motif que l'historique de conversation\n"
+            "  ne contient pas de réponse sur le business. Cette règle prime sur toute détection d'étape\n"
+            "  par l'historique, y compris celle décrite dans la méthode ci-dessous."
+        )
+    else:
+        start_rule = (
+            "- Aucune analyse en cours n'est fournie : commence par l'Étape 1 (Business) si l'historique\n"
+            "  ne contient pas de réponse pertinente sur le business."
+        )
+
     prompt += f"""
 RÈGLES ABSOLUES — NE JAMAIS VIOLER :
 - Jamais de recommandation d'achat ou de vente
@@ -136,7 +165,7 @@ RÈGLES STRICTES :
 - Ne poser qu'UNE question à la fois.
 - Attendre la réponse de l'utilisateur avant de passer à l'étape suivante.
 - Ne jamais dévoiler toutes les étapes d'un coup.
-- Toujours commencer par l'Étape 1 si l'historique ne contient pas de réponse sur le business.
+{start_rule}
 - Si l'utilisateur saute une étape, le ramener poliment à l'étape en cours.
 
 APPROCHE SOCRATIQUE OBLIGATOIRE :
@@ -259,7 +288,17 @@ chiffres est "le bon" — explique juste l'écart possible et renvoie
 la vérification à l'utilisateur.
 """
 
-    prompt += """
+    if in_progress_analysis:
+        # Analyse en cours : l'utilisateur construit déjà sa thèse, même si
+        # le contexte texte est vide (reprise).
+        prompt += """
+CLÔTURE CONVERSATIONNELLE :
+L'utilisateur est déjà en train de construire sa thèse (analyse en cours
+ci-dessus) : ne propose pas de formuler une thèse, termine sur la question
+de l'étape en cours de la séquence.
+"""
+    else:
+        prompt += """
 CLÔTURE CONVERSATIONNELLE :
 Si c'est le premier échange sur cette entreprise (pas de contexte historique),
 termine ta réponse par cette phrase (adapte le nom de l'entreprise) :

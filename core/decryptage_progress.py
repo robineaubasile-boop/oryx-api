@@ -15,6 +15,25 @@ Il contient aussi le vocabulaire FERMÉ des marqueurs d'étape privés
 visible. Le marqueur est une métadonnée privée : jamais affiché, jamais
 renvoyé au frontend, jamais une preuve ni un SupportTrace.
 
+R1-C3 (hardening avant T3) :
+
+- AnalysisSession est la source de vérité de la progression produit ; le
+  contexte texte de la conversation est secondaire ;
+- current_step = étape ACTUELLEMENT OUVERTE (celle que la dernière réponse
+  assistant a posée et à laquelle l'utilisateur doit encore répondre), pas
+  la dernière étape terminée ;
+- progression MONOTONE dans l'ordre fermé DECRYPTAGE_STEP_MARKERS : un
+  marqueur rétrograde n'abîme jamais la session (current_step et status
+  inchangés, session retournée normalement pour le rattachement de la
+  livraison) ; un saut d'étape avance sans créer d'étape intermédiaire ;
+- la mutation relit l'AnalysisSession active SOUS VERROU (FOR UPDATE) :
+  même si le prompt a été construit sur un snapshot stale (deux onglets,
+  même ticker, en concurrence), la BDD ne régresse jamais ;
+- thesis_text n'est fourni par l'orchestrateur que pour une vraie
+  contribution R1-C2 (input_action contribution_appended) : un message de
+  navigation ou une reprise vide ne devient jamais UserStatement ni
+  InvestmentThesis.
+
 Aucun appel à un service pédagogique T2+ (capture cognitive, observations,
 longitudinal, inférence).
 """
@@ -36,6 +55,15 @@ DECRYPTAGE_STEP_MARKERS = (
     "swot_final",
 )
 FINAL_STEP = "swot_final"
+# Ordre fermé de la séquence : business=0 ... swot_final=5.
+STEP_ORDER = {step: index for index, step in enumerate(DECRYPTAGE_STEP_MARKERS)}
+
+# Actions de progression (journal technique [DECRYPTAGE-PROGRESS]).
+PROGRESS_NEW = "new"
+PROGRESS_SAME = "same"
+PROGRESS_FORWARD = "forward"
+PROGRESS_STEP_SKIP = "step_skip"
+PROGRESS_RETROGRADE = "retrograde_marker"
 
 # Tout marqueur <!--ORYX_STEP:...-->, reconnu ou non, est retiré du texte
 # visible ; seul un marqueur du vocabulaire fermé est retenu.
@@ -70,15 +98,21 @@ def extract_step_marker(text: str) -> tuple[str, str | None]:
     return visible, None
 
 
-def find_active_analysis_session(db, user_id, ticker):
+def find_active_analysis_session(db, user_id, ticker, *, for_update: bool = False):
     """Retourne l'AnalysisSession status=in_progress de ce user+ticker, ou
     None (T1-B2).
 
     Invariant applicatif : une seule session in_progress par user+ticker
     (aucune contrainte SQL ne le garantit). Si plusieurs existent par
     anomalie, on ne crée rien : on choisit déterministement la plus
-    récente (started_at, puis updated_at, puis id) et on journalise."""
-    sessions = db.query(AnalysisSession).filter(
+    récente (started_at, puis updated_at, puis id) et on journalise.
+
+    for_update (R1-C3C, chemin de mutation uniquement) : lecture verrouillée
+    et rafraîchie (FOR UPDATE, populate_existing), même ordre déterministe
+    que le verrou pris par la capture R1-C2 du tour (déjà détenu dans
+    /decryptage : aucun nouvel ordre de verrous). Les lectures (prompt,
+    listing des thèses) restent non verrouillées."""
+    query = db.query(AnalysisSession).filter(
         AnalysisSession.user_id == user_id,
         AnalysisSession.ticker == ticker,
         AnalysisSession.status == "in_progress",
@@ -86,7 +120,10 @@ def find_active_analysis_session(db, user_id, ticker):
         AnalysisSession.started_at.desc(),
         AnalysisSession.updated_at.desc(),
         AnalysisSession.id.desc(),
-    ).all()
+    )
+    if for_update:
+        query = query.with_for_update().populate_existing()
+    sessions = query.all()
     if len(sessions) > 1:
         print(
             f"[ANALYSIS-SESSION ANOMALY] {len(sessions)} sessions in_progress pour "
@@ -94,6 +131,21 @@ def find_active_analysis_session(db, user_id, ticker):
             f"session retenue (la plus récente) : {sessions[0].id}"
         )
     return sessions[0] if sessions else None
+
+
+def _progress_action(current_step: str | None, incoming_step: str) -> str:
+    """Classe le marqueur entrant par rapport à l'étape ouverte d'une session
+    existante (ordre fermé STEP_ORDER). Une étape courante absente ou hors
+    vocabulaire (donnée historique anormale) n'offre aucun ordre fiable : le
+    marqueur est appliqué comme une avancée."""
+    if current_step not in STEP_ORDER:
+        return PROGRESS_FORWARD
+    distance = STEP_ORDER[incoming_step] - STEP_ORDER[current_step]
+    if distance == 0:
+        return PROGRESS_SAME
+    if distance < 0:
+        return PROGRESS_RETROGRADE
+    return PROGRESS_FORWARD if distance == 1 else PROGRESS_STEP_SKIP
 
 
 def apply_construction_these_progress(
@@ -117,11 +169,29 @@ def apply_construction_these_progress(
       une analyse terminée : ignoré, aucune session artificielle (None).
     Une session completed/abandoned n'est jamais reprise.
 
+    Progression monotone (R1-C3C) d'une session existante, relue sous
+    verrou ; current_step = étape actuellement ouverte :
+    - même étape → current_step inchangé (updated_at rafraîchi) ;
+    - étape suivante → current_step avance ;
+    - saut d'étapes → current_step avance directement, aucune étape
+      intermédiaire inventée, anomalie step_skip journalisée ;
+    - étape rétrograde → current_step et status INCHANGÉS, aucune nouvelle
+      session, anomalie retrograde_marker journalisée ; la session est
+      retournée normalement (la livraison y reste rattachée ; R1-C2 traite
+      ce marqueur comme continued_without_boundary_signal) ;
+    - swot_final (toujours en avant) → completed + completed_at.
+
+    thesis_text : fourni par l'orchestrateur UNIQUEMENT pour une vraie
+    contribution R1-C2 (contribution_appended), sinon None. Il répond à
+    l'étape qui était ouverte AVANT ce tour (UserStatement sur cette
+    étape) et, sur swot_final, devient l'InvestmentThesis. Sans
+    contribution réelle : ni UserStatement, ni InvestmentThesis.
+
     Tout ce qui est écrit pour la tentative porte
     analysis_session_id = session.id."""
     if step not in DECRYPTAGE_STEP_MARKERS:
         raise InvalidDecryptageStep("étape hors vocabulaire construction_these")
-    active = find_active_analysis_session(db, user_id, ticker)
+    active = find_active_analysis_session(db, user_id, ticker, for_update=True)
     if active is None and step == FINAL_STEP:
         print(f"[DB-TRACKING] Ignoré : user={user_id}, ticker={ticker}, swot_final hors tentative en cours (conversation libre après le bilan)")
         return None
@@ -137,21 +207,42 @@ def apply_construction_these_progress(
         )
         db.add(active)
         db.flush()
+        action = PROGRESS_NEW
+        logger.info("[DECRYPTAGE-PROGRESS] session=%s action=new step=%s", active.id, step)
+    else:
+        action = _progress_action(active.current_step, step)
+    # Étape ouverte AVANT ce tour : celle à laquelle le texte de ce tour
+    # répond (None au premier tour d'une session : message déclencheur).
     previous_step = None if is_new_session else active.current_step
-    is_new_swot = step == FINAL_STEP
 
-    active.current_step = step
+    if action == PROGRESS_RETROGRADE:
+        # Le marqueur rétrograde reste attaché à la session active sans muter
+        # sa progression : current_step, status, completed_at intacts.
+        logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=retrograde_marker current=%s received=%s",
+                       active.id, active.current_step, step)
+    else:
+        if action == PROGRESS_SAME:
+            logger.info("[DECRYPTAGE-PROGRESS] session=%s action=same step=%s", active.id, step)
+        elif action == PROGRESS_FORWARD:
+            logger.info("[DECRYPTAGE-PROGRESS] session=%s action=forward from=%s to=%s",
+                        active.id, previous_step, step)
+        elif action == PROGRESS_STEP_SKIP:
+            logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=step_skip from=%s to=%s",
+                           active.id, previous_step, step)
+        active.current_step = step
     active.updated_at = now_aware
+    is_new_swot = step == FINAL_STEP and action != PROGRESS_RETROGRADE
     if is_new_swot:
         active.status = "completed"
         active.completed_at = now_aware
 
-    # Le texte reçu à ce tour (thesis_text=question) répond à l'étape
-    # PRÉCÉDENTE (previous_step), pas à l'étape que ce marqueur (step)
-    # annonce : le marqueur reflète l'étape que la réponse de
-    # l'assistant vient de traiter/entamer, toujours un tour d'avance
-    # sur ce que l'utilisateur vient de dire. Au premier tour d'une
-    # session, c'est le message déclencheur : on ne l'enregistre pas.
+    # Le texte reçu à ce tour répond à l'étape qui était OUVERTE avant lui
+    # (previous_step), pas à l'étape que ce marqueur annonce : le marqueur
+    # reflète l'étape que la réponse de l'assistant vient d'ouvrir,
+    # toujours un tour d'avance sur ce que l'utilisateur vient de dire. Au
+    # premier tour d'une session, c'est le message déclencheur : on ne
+    # l'enregistre pas. thesis_text n'est non vide que pour une vraie
+    # contribution R1-C2 (voir api.py).
     if thesis_text and previous_step:
         db.add(UserStatement(
             user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text,
@@ -175,5 +266,5 @@ def apply_construction_these_progress(
                 facts_written = True
 
     db.flush()
-    print(f"[DB-TRACKING] Écrit (non commité) : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={step}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
+    print(f"[DB-TRACKING] Écrit (non commité) : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={active.current_step}, marqueur={step}, progression={action}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
     return active

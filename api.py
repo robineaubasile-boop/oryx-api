@@ -45,6 +45,7 @@ from core.assistant_delivery import (
 	visible_content_fingerprint,
 )
 from core.decryptage_cognitive_runtime import (
+	CONTRIBUTION_APPENDED,
 	capture_delivered_response,
 	capture_user_turn,
 	runtime_private_metadata,
@@ -416,7 +417,9 @@ def _force_construction_these_method() -> dict:
 	"""Retourne directement la méthode construction_these (Méthode 8), sans
 	passer par le matching par mot-clé de lookup_method(). Utilisé pour
 	garantir cette méthode sur le message déclencheur initial d'une analyse
-	decryptage (context vide = pas d'historique de conversation)."""
+	decryptage (context vide = pas d'historique de conversation) et, depuis
+	R1-C3B, sur TOUT tour où une AnalysisSession in_progress existe pour le
+	ticker (quel que soit le context)."""
 	m = METHODES["construction_these"]
 	return {
 		"method_id": "construction_these",
@@ -457,7 +460,11 @@ def _get_analysis_progress(user_id, ticker):
 	(_get_latest_thesis prend alors le relai).
 
 	Source unique (T1-C1) : l'AnalysisSession in_progress retenue par
-	_find_active_analysis_session. current_step vient de la session ; on
+	_find_active_analysis_session. current_step vient de la session : c'est
+	l'étape ACTUELLEMENT OUVERTE (posée par la dernière réponse assistant,
+	en attente de la réponse utilisateur), pas la dernière étape terminée
+	(R1-C3B). Appelée sur chaque tour /decryptage, context vide ou non : elle
+	prime sur l'historique texte. On
 	ne lit QUE les AnalysisFact/UserStatement rattachés à son id. Aucun
 	filtre temporel.
 
@@ -623,14 +630,24 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 
 	lookup_text = question if question else f"analyser bilan états financiers {company_name}"
 	existing_thesis = None
-	in_progress_analysis = None
-	if not context:
+	# R1-C3B : historique texte != état produit. L'AnalysisSession in_progress
+	# du ticker canonique est TOUJOURS recherchée, que le context soit vide ou
+	# non, quel que soit last_method_id. Si elle existe, elle est la source
+	# autoritaire de progression : construction_these est forcée et son
+	# current_step (étape actuellement ouverte) est transmis au prompt ;
+	# lookup_method, le context et last_method_id ne peuvent jamais renvoyer
+	# le parcours ailleurs (ni au Business). Lecture hors transaction : en
+	# concurrence extrême (2 onglets, même ticker) le snapshot peut être
+	# légèrement stale ; l'état BDD reste protégé par la progression
+	# monotone de apply_construction_these_progress.
+	in_progress_analysis = _get_analysis_progress(user_id, ticker)
+	if in_progress_analysis:
 		method = _force_construction_these_method()
-		# T1-B2 : une tentative en cours prime sur une thèse déjà terminée
-		# (ex. ancienne thèse LVMH + nouvelle session LVMH en cours).
-		in_progress_analysis = _get_analysis_progress(user_id, ticker)
-		if not in_progress_analysis:
-			existing_thesis = _get_latest_thesis(user_id, ticker)
+	elif not context:
+		method = _force_construction_these_method()
+		# T1-B2 : sans tentative en cours, une thèse déjà terminée est
+		# rappelée (nouveau tour de la séquence).
+		existing_thesis = _get_latest_thesis(user_id, ticker)
 	else:
 		method = lookup_method(lookup_text, context=context, last_method_id=request.last_method_id)
 	method_id = method["method_id"] if method else None
@@ -715,11 +732,20 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 		# d'un worker perdant est jetée et ne mute jamais AnalysisSession ni
 		# T2. Le rattachement cognitif lit l'AnalysisSession active AVANT la
 		# progression produit (le texte du tour répond à l'étape précédente).
+		cognitive_link = None
 		if created:
-			capture_user_turn(db, delivery=delivery, ticker=ticker, user_text=question)
+			cognitive_link = capture_user_turn(db, delivery=delivery, ticker=ticker, user_text=question)
+		# R1-C3C : R1-C2 est la source factuelle de classification du tour.
+		# Seule une vraie contribution (contribution_appended) devient
+		# UserStatement / InvestmentThesis ; navigation, reprise vide,
+		# déclencheur, sortie de contexte, no_open_event : aucun texte.
+		progress_thesis_text = (
+			question if cognitive_link is not None and cognitive_link.input_action == CONTRIBUTION_APPENDED
+			else None
+		)
 		if created and method_id == "construction_these" and step_marker is not None:
 			analysis_session = apply_construction_these_progress(
-				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=question, data=data,
+				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=progress_thesis_text, data=data,
 			)
 			if analysis_session is not None:
 				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=analysis_session.id)
