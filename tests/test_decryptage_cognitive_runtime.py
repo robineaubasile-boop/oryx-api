@@ -24,6 +24,14 @@ Décrypter (core/decryptage_cognitive_runtime.py, /decryptage et ACK).
 
 Scénarios fonctionnels A à R de la spec R1-C2, plus concurrence et
 idempotence.
+
+R1-C4 : les nouveaux tours sont au runtime V2 (affinité conversationnelle,
+tests dédiés dans tests/test_r1c4_conversation_affinity.py). Les scénarios
+R1-C2 qui encodaient la sémantique V1 (fermeture / abandon d'un event sur
+changement de contexte, rattachement d'une contribution à « l'event open
+compatible » sans ancre, avancée produit sans contribution) affirment
+désormais le comportement V2 ; la sémantique V1 reste couverte pour les
+livraisons V1 encore pending (ACK).
 """
 import ast
 import inspect
@@ -59,10 +67,12 @@ from tests.test_migration_0005_cognitive_support_traces import USER
 
 RUNTIME_PATH = REPO_ROOT / "core" / "decryptage_cognitive_runtime.py"
 MIGRATION_PATH = REPO_ROOT / "alembic" / "versions" / "0012_decryptage_cognitive_links.py"
+MIGRATION_0013_PATH = REPO_ROOT / "alembic" / "versions" / "0013_decryptage_conversation_affinity.py"
 API_PATH = REPO_ROOT / "api.py"
 CONV = "conv-u"
 CONV_2 = "conv-u-reprise"
-VERSION = "decryptage-cognitive-runtime-v1"
+VERSION = "decryptage-cognitive-runtime-v2"
+VERSION_V1 = "decryptage-cognitive-runtime-v1"
 # Tout ce que R1-C2 ne doit JAMAIS appeler ni importer (T3+, Step 6).
 T3_AND_BEYOND = (
     "observation_service", "PedagogicalObservation", "ObservationEvaluationRun", "start_evaluation_run",
@@ -80,6 +90,7 @@ EVALUATION_WORDS = ("competenc", "capabilit", "evidence", "polarity", "correct",
 
 def test_versions_and_constants_are_explicit():
     assert dcr.COGNITIVE_RUNTIME_VERSION == dcr.CAPTURE_VERSION == VERSION
+    assert dcr.SUPPORTED_RUNTIME_VERSIONS == (VERSION_V1, VERSION)
     assert dcr.EVENT_BUILDER_VERSION == "decryptage-event-builder-v1"
     assert dcr.ADMISSION_VERSION == "decryptage-event-admission-v1"
     assert dcr.EVENT_BUILDER_VERSION != cc.EVENT_BUILDER_VERSION
@@ -93,11 +104,11 @@ def test_versions_and_constants_are_explicit():
 
 def test_vocabularies_are_closed_and_identical_to_the_migration_checks():
     assert dcr.INPUT_ACTIONS == ("no_open_event", "no_user_contribution", "contribution_appended",
-                                 "event_closed_context_change", "event_abandoned_context_change")
+                                 "event_closed_context_change", "event_abandoned_context_change", "context_switched")
     assert dcr.RESPONSE_ACTIONS == ("opened_event", "continued_event", "continued_without_boundary_signal",
-                                    "transitioned_event", "closed_terminal", "no_cognitive_action")
+                                    "transitioned_event", "closed_terminal", "no_cognitive_action", "stale_delivery")
     assert "closed_without_next_task" not in dcr.RESPONSE_ACTIONS
-    source = MIGRATION_PATH.read_text(encoding="utf-8")
+    source = MIGRATION_PATH.read_text(encoding="utf-8") + MIGRATION_0013_PATH.read_text(encoding="utf-8")
     for value in (*dcr.INPUT_ACTIONS, *dcr.RESPONSE_ACTIONS, dcr.AWAITING_DELIVERY, dcr.CAPTURED):
         assert f"'{value}'" in source, value
     assert "closed_without_next_task" not in source
@@ -107,14 +118,18 @@ def test_public_api_is_exact_and_keyword_only():
     tree = ast.parse(RUNTIME_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == {
-        "runtime_private_metadata", "capture_user_turn", "capture_delivered_response"}
+        "runtime_private_metadata", "capture_user_turn", "capture_delivered_response", "precheck_conversation_context"}
     assert list(inspect.signature(dcr.capture_user_turn).parameters) == ["db", "delivery", "ticker", "user_text"]
     assert list(inspect.signature(dcr.capture_delivered_response).parameters) == ["db", "delivery"]
     for name in ("capture_user_turn", "capture_delivered_response"):
         params = list(inspect.signature(getattr(dcr, name)).parameters.values())[1:]
         assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params), name
-    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents,
-                dcr.AmbiguousDecryptageContextExit):
+    assert list(inspect.signature(dcr.precheck_conversation_context).parameters) == [
+        "db", "user_id", "conversation_key", "ticker"]
+    # R1-C4 : plus de sortie de contexte (V1) ; une conversation stale est
+    # une erreur métier dédiée.
+    assert not hasattr(dcr, "AmbiguousDecryptageContextExit")
+    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents, dcr.StaleConversationContext):
         assert issubclass(exc, dcr.DecryptageCognitiveRuntimeError)
         assert not issubclass(exc, (sa.exc.SQLAlchemyError, cc.CognitiveCaptureError, ad.AssistantDeliveryError))
 
@@ -146,7 +161,9 @@ def test_runtime_never_calls_t3_and_beyond_nor_evaluates():
     tokens = _code_tokens(source)
     for name in T3_AND_BEYOND:
         assert name not in tokens, name
-    lowered = set(tokens.lower().split("\n"))
+    # « expected » (format des journaux R1-C4 : expected_event=...) n'est pas
+    # le « xp » d'une gamification.
+    lowered = set(tokens.lower().replace("expect", "").split("\n"))
     for word in EVALUATION_WORDS:
         assert not [t for t in lowered if word in t], word
     for module in _imports(ast.parse(source)):
@@ -168,14 +185,18 @@ def test_runtime_writes_t2_only_through_cognitive_capture_primitives():
     constructed = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                    and n.func.id[:1].isupper()}
     assert constructed == {"DecryptageCognitiveLink", "CognitiveLinkInvariantError", "AmbiguousOpenDecryptageEvents",
-                           "AmbiguousDecryptageContextExit", "DecryptageCognitiveRuntimeError"}
-    # task_kind est toujours NULL et support_refs_before n'est jamais fourni.
+                           "StaleConversationContext", "DecryptageCognitiveRuntimeError"}
+    # task_kind est toujours NULL.
     [opening] = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "open_event_idempotent"]
     kwargs = {k.arg: k.value for k in opening.keywords}
     assert isinstance(kwargs["task_kind"], ast.Constant) and kwargs["task_kind"].value is None
     assert ast.unparse(kwargs["source_turn_refs"]) == "(delivery.id,)"
-    assert "support_refs_before" not in _code_tokens(RUNTIME_PATH.read_text(encoding="utf-8"))
+    # R1-C4 : support_refs_before est TOUJOURS fourni, et uniquement les aides
+    # rendues dans la conversation du tour (décision du runtime).
+    [append] = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "append_user_contribution"]
+    assert ast.unparse({k.arg: k.value for k in append.keywords}["support_refs_before"]) == "support_refs"
 
 
 def test_runtime_private_metadata_marks_the_opt_in_and_keeps_the_marker():
@@ -227,7 +248,8 @@ def test_web_v2_knows_nothing_about_cognitive_capture_and_has_no_close_endpoint(
 # --------------------------------------------------------------------------
 
 LINK_COLUMNS = ("assistant_delivery_id, capture_version, input_action, input_event_id, context_exit_event_id, "
-                "capture_state, response_action, response_event_id, support_trace_id, created_at, captured_at")
+                "capture_state, response_action, response_event_id, support_trace_id, created_at, captured_at, "
+                "input_context_event_id")
 
 
 def _links(engine):
@@ -337,6 +359,7 @@ def test_pg_a_first_turn_opens_business_at_ack_without_contribution(engine, Sess
     link = _link(engine, first["assistant_turn_id"])
     assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
         "no_open_event", None, None)
+    assert link["input_context_event_id"] is None  # aucune ancre : conversation neuve
     assert (link["capture_state"], link["response_action"], link["captured_at"]) == ("awaiting_delivery", None, None)
     assert link["capture_version"] == VERSION
     assert _events(engine) == []  # rien n'est ouvert avant le rendu confirmé
@@ -448,21 +471,26 @@ def test_pg_d_swot_final_closes_risques_without_a_swot_event(engine, Sessions, e
     _no_t3(engine)
 
 
-def test_pg_d_swot_final_without_open_event_never_opens_a_swot_event(engine, Sessions, ext):
-    """Retour sur LVMH après un détour NVDA (event risques quitté) : la
-    réponse swot_final complète l'AnalysisSession mais n'ouvre rien."""
+def test_pg_d_swot_final_without_anchor_never_terminalizes_nor_opens_a_swot_event(engine, Sessions, ext):
+    """Retour sur LVMH après un détour NVDA (R1-C4 : le détour ne ferme plus
+    l'event risques). La conversation n'a plus d'ancre (dernière réponse
+    NVDA sans action cognitive) : « Ma conclusion. » n'est pas une
+    contribution, swot_final n'est donc ni appliqué au produit ni une
+    frontière cognitive ; aucun event swot_final."""
     _turn(Sessions, ext, _reply("business", "business"))
     for previous, step in zip(STEPS[:4], STEPS[1:5]):
         _turn(Sessions, ext, _reply(step, step), f"réponse {previous}")
-    _turn(Sessions, ext, _reply("N1"), "Analyse NVDA", ticker="NVDA")
-    closed = [e["status"] for e in _events(engine)]
-    assert closed == ["finalized"] * 4 + ["abandoned"]  # risques quitté sans travail
+    detour = _turn(Sessions, ext, _reply("N1"), "Analyse NVDA", ticker="NVDA")
+    assert _link(engine, detour["assistant_turn_id"])["input_action"] == "context_switched"
+    statuses = [e["status"] for e in _events(engine)]
+    assert statuses == ["finalized"] * 4 + ["open"]  # risques n'est plus quitté
     final = _turn(Sessions, ext, _reply("bilan", "swot_final"), "Ma conclusion.")
     link = _link(engine, final["assistant_turn_id"])
-    assert (link["input_action"], link["response_action"], link["response_event_id"]) == (
-        "no_open_event", "no_cognitive_action", None)
-    assert [e["status"] for e in _events(engine)] == closed
-    assert _delivery(engine, final["assistant_turn_id"])["analysis_session_id"] is not None
+    assert (link["input_action"], link["input_context_event_id"]) == ("no_open_event", None)
+    assert link["response_action"] == "continued_without_boundary_signal"  # swot_final non appliqué
+    assert [e["status"] for e in _events(engine)] == statuses
+    [session] = _product(engine)["sessions"]
+    assert session[1:3] == ("in_progress", "risques") and _product(engine)["theses"] == []
 
 
 # --- E / F. marqueur absent ou inconnu avec event open ------------------------
@@ -560,68 +588,75 @@ def test_pg_forward_skip_is_a_transition_with_a_diagnostic(engine, Sessions, ext
 
 
 @pytest.mark.parametrize("marker", ["moat", "chiffres"], ids=["adjacent", "skip"])
-def test_pg_transition_from_an_empty_event_abandons_it(engine, Sessions, ext, marker):
-    """Reprise sans texte puis réponse qui avance : l'ancien event, sans
-    aucune contribution, est abandoned (jamais finalized vide) ; la
-    response_action reste celle du mouvement produit."""
+def test_pg_forward_marker_without_contribution_is_never_a_transition(engine, Sessions, ext, marker):
+    """R1-C4 : reprise sans texte dans une nouvelle conversation, réponse qui
+    « avance » : la progression produit la refuse (aucune contribution), donc
+    l'ACK ne crée aucune frontière ; l'event reste open et la réponse rendue
+    devient un SupportTrace (continued_without_boundary_signal)."""
     _turn(Sessions, ext, _reply("A1", "business"))
     [business] = _events(engine)
     resume = _turn(Sessions, ext, _reply("R1", marker), "", context="", conv=CONV_2)
-    old, new = _events(engine)
-    assert (old["id"], old["status"], old["user_work_snapshot"]) == (business["id"], "abandoned", [])
-    assert new["status"] == "open" and new["stimulus_snapshot"]["visible_content"] == "Réponse R1."
+    [after] = _events(engine)
+    assert (after["id"], after["status"], after["user_work_snapshot"]) == (business["id"], "open", [])
+    [trace] = _traces(engine, business["id"])
     link = _link(engine, resume["assistant_turn_id"])
-    assert (link["input_action"], link["response_action"], link["response_event_id"]) == (
-        "no_user_contribution", "transitioned_event", new["id"])
+    assert (link["input_action"], link["response_action"], link["response_event_id"], link["support_trace_id"]) == (
+        "no_open_event", "continued_without_boundary_signal", business["id"], trace["id"])
+    [session] = _product(engine)["sessions"]
+    assert session[1:3] == ("in_progress", "business")
 
 
-def test_pg_swot_final_on_an_empty_risques_event_abandons_it(engine, Sessions, ext):
+def test_pg_swot_final_without_contribution_never_closes_risques(engine, Sessions, ext):
+    """R1-C4 : swot_final sur une reprise sans texte n'est appliqué ni au
+    produit (session non complétée, aucune thèse) ni au cognitif (risques
+    reste open)."""
     _turn(Sessions, ext, _reply("business", "business"))
     for previous, step in zip(STEPS[:4], STEPS[1:5]):
         _turn(Sessions, ext, _reply(step, step), f"réponse {previous}")
     final = _turn(Sessions, ext, _reply("bilan", "swot_final"), "", context="", conv=CONV_2)
     events = _events(engine)
-    assert [e["status"] for e in events] == ["finalized"] * 4 + ["abandoned"]
-    assert events[-1]["user_work_snapshot"] == []
+    assert [e["status"] for e in events] == ["finalized"] * 4 + ["open"]
     link = _link(engine, final["assistant_turn_id"])
     assert (link["input_action"], link["response_action"], link["response_event_id"]) == (
-        "no_user_contribution", "closed_terminal", None)
+        "no_open_event", "continued_without_boundary_signal", events[-1]["id"])
+    [session] = _product(engine)["sessions"]
+    assert session[1:3] == ("in_progress", "risques") and _product(engine)["theses"] == []
 
 
 # --- I / J. changement de ticker ---------------------------------------------
 
-def test_pg_i_ticker_change_finalizes_an_event_with_work(engine, Sessions, ext):
+@pytest.mark.parametrize("with_work", [True, False], ids=["travail", "vide"])
+def test_pg_i_j_ticker_change_detaches_without_closing(engine, Sessions, ext, with_work):
+    """R1-C4 : changement de ticker = navigation. La conversation se détache
+    (context_switched, input_context_event_id = l'event quitté), l'event
+    LVMH reste OPEN et inchangé (avec ou sans travail), l'AnalysisSession
+    LVMH n'est pas touchée ; l'ACK NVDA ouvre l'event NVDA."""
     _turn(Sessions, ext, _reply("A1", "business"))
-    _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
+    if with_work:
+        _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
     [lvmh] = _events(engine)
-    lvmh_session = lvmh["analysis_session_id"]
+    product = _product(engine)
     nvda = _send(Sessions, ext, _reply("N1", "business"), "Analyse NVDA", ticker="NVDA")
     link = _link(engine, nvda["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_closed_context_change", None, lvmh["id"])
-    after = _event(engine, lvmh["id"])
-    assert after["status"] == "finalized"
-    assert [c["text"] for c in after["user_work_snapshot"]] == ["Ils vendent du luxe."]  # NVDA jamais ajouté
-    with engine.connect() as conn:  # l'AnalysisSession LVMH n'est pas abandonnée
-        assert conn.execute(sa.text("SELECT status FROM analysis_sessions WHERE id = :s"),
-                            {"s": lvmh_session}).scalar_one() == "in_progress"
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"],
+            link["input_context_event_id"]) == ("context_switched", None, None, lvmh["id"])
+    assert _event(engine, lvmh["id"]) == lvmh  # ni fermé, ni enrichi
+    assert [s for s in _product(engine)["sessions"] if s[0] == lvmh["analysis_session_id"]] == product["sessions"]
     _ack(Sessions, nvda)
     new = _events(engine)[-1]
-    assert new["analysis_session_id"] == _session_id(engine, "NVDA") != lvmh_session
+    assert new["analysis_session_id"] == _session_id(engine, "NVDA") != lvmh["analysis_session_id"]
     assert (new["status"], new["user_work_snapshot"]) == ("open", [])
     assert _link(engine, nvda["assistant_turn_id"])["response_action"] == "opened_event"
+    assert _event(engine, lvmh["id"]) == lvmh
 
 
-def test_pg_j_ticker_change_abandons_an_empty_event(engine, Sessions, ext):
+def test_pg_j_ticker_change_without_marker_opens_nothing(engine, Sessions, ext):
     _turn(Sessions, ext, _reply("A1", "business"))
     [lvmh] = _events(engine)
     nvda = _send(Sessions, ext, _reply("N1"), "Analyse NVDA", ticker="NVDA")
-    link = _link(engine, nvda["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_abandoned_context_change", None, lvmh["id"])
-    assert _event(engine, lvmh["id"])["status"] == "abandoned"
+    assert _link(engine, nvda["assistant_turn_id"])["input_action"] == "context_switched"
     _ack(Sessions, nvda)  # NVDA sans marqueur : aucun nouvel event
-    assert len(_events(engine)) == 1
+    assert _events(engine) == [lvmh]
     assert _link(engine, nvda["assistant_turn_id"])["response_action"] == "no_cognitive_action"
 
 
@@ -675,11 +710,10 @@ def test_pg_parallel_b_next_nvda_turn_in_b_leaves_lvmh_untouched(engine, Session
 
 
 @pytest.mark.parametrize("with_work", [True, False], ids=["travail", "vide"])
-def test_pg_parallel_c_ticker_change_in_the_same_conversation_exits_only_its_event(engine, Sessions, ext,
-                                                                                   with_work):
+def test_pg_parallel_c_ticker_change_in_a_conversation_closes_nothing(engine, Sessions, ext, with_work):
     """Conversation A LVMH ; conversation C indépendante sur AAPL. Dans A,
-    passage à NVDA : seul E_LVMH (contexte de A) est quitté ; E_AAPL reste
-    open et inchangé ; l'ACK NVDA ouvre le nouvel event."""
+    passage à NVDA : A se détache de E_LVMH, qui reste open ; E_AAPL est
+    intact ; l'ACK NVDA ouvre le nouvel event."""
     _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
     if with_work:
         _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
@@ -687,11 +721,9 @@ def test_pg_parallel_c_ticker_change_in_the_same_conversation_exits_only_its_eve
     lvmh, aapl = _events(engine)
     switch = _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
     link = _link(engine, switch["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_closed_context_change" if with_work else "event_abandoned_context_change", None, lvmh["id"])
-    after = _event(engine, lvmh["id"])
-    assert after["status"] == ("finalized" if with_work else "abandoned")
-    assert "Et NVIDIA ?" not in [c["text"] for c in after["user_work_snapshot"]]
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"],
+            link["input_context_event_id"]) == ("context_switched", None, None, lvmh["id"])
+    assert _event(engine, lvmh["id"]) == lvmh
     assert _event(engine, aapl["id"]) == aapl
     _ack(Sessions, switch, conv=CONV_A)
     new = _events(engine)[-1]
@@ -699,67 +731,53 @@ def test_pg_parallel_c_ticker_change_in_the_same_conversation_exits_only_its_eve
     assert _link(engine, switch["assistant_turn_id"])["response_action"] == "opened_event"
 
 
-@pytest.mark.parametrize("resume_text", ["Je reprends : ils vendent du luxe.", ""],
-                         ids=["contribution", "reprise-vide"])
-def test_pg_parallel_d_event_resumed_in_b_is_the_context_exited_from_b(engine, Sessions, ext, resume_text):
-    """E_LVMH ouvert en A puis repris en B (contribution session_ref=B, ou
-    reprise sans texte dont la réponse est rattachée en B par un lien).
-    Changement de ticker dans B : E_LVMH est le contexte quitté de B ;
+def test_pg_parallel_d_event_resumed_in_b_stays_open_when_b_switches(engine, Sessions, ext):
+    """E_LVMH ouvert en A puis repris en B (réponse rendue dans B : B ancrée à
+    E_LVMH). Changement de ticker dans B : B se détache (context_switched
+    depuis E_LVMH), E_LVMH reste open et A peut y contribuer normalement ;
     l'event indépendant de la conversation C n'est pas touché."""
     _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
     _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
     _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
     lvmh, aapl = _events(engine)
-    _turn(Sessions, ext, _reply("R1", "business"), resume_text, context="", conv=CONV_B)
-    resumed = _event(engine, lvmh["id"])
-    assert resumed["conversation_key"] == CONV_A  # origine conservée
-    assert [c["session_ref"] for c in resumed["user_work_snapshot"]] == (
-        [CONV_A, CONV_B] if resume_text else [CONV_A])
+    resume = _turn(Sessions, ext, _reply("R1", "business"), "", context="", conv=CONV_B)
+    assert _link(engine, resume["assistant_turn_id"])["response_event_id"] == lvmh["id"]
     switch = _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_B, ticker="NVDA")
     link = _link(engine, switch["assistant_turn_id"])
-    assert (link["input_action"], link["context_exit_event_id"]) == ("event_closed_context_change", lvmh["id"])
-    assert _event(engine, lvmh["id"])["status"] == "finalized"
+    assert (link["input_action"], link["input_context_event_id"], link["context_exit_event_id"]) == (
+        "context_switched", lvmh["id"], None)
+    assert _event(engine, lvmh["id"])["status"] == "open"
     assert _event(engine, aapl["id"]) == aapl
+    more = _send(Sessions, ext, _reply("L3", "business"), "Et une marque forte.", conv=CONV_A)
+    assert _link(engine, more["assistant_turn_id"])["input_event_id"] == lvmh["id"]
+    assert [c["session_ref"] for c in _event(engine, lvmh["id"])["user_work_snapshot"]] == [CONV_A, CONV_A]
 
 
-def test_pg_parallel_e_two_events_claiming_the_conversation_fail_closed(engine, Sessions, ext):
-    """Deux events incompatibles appartiennent au contexte de la
-    conversation A : frontière ambiguë -> fail closed + rollback, aucun
-    event fermé arbitrairement, aucune provenance perdue."""
+def test_pg_parallel_e_only_the_anchor_defines_the_conversation_context(engine, Sessions, ext):
+    """R1-C4 : seule l'ancre (dernière livraison captured) définit le
+    contexte de A, jamais une provenance plus ancienne (contribution,
+    conversation d'origine) : un event qui a reçu une contribution depuis A
+    n'est ni quitté ni fermé, et le changement de ticker n'est plus ambigu."""
     _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
     _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
     lvmh, aapl = _events(engine)
-    # E_AAPL a aussi reçu une contribution depuis A (provenance explicite).
-    with Sessions() as session:
+    with Sessions() as session:  # E_AAPL a aussi reçu une contribution depuis A
         cc.append_user_contribution(session, event_id=aapl["id"], contribution_id=uuid.uuid4(),
                                     source_turn_ref=uuid.uuid4(), surface="decryptage", session_ref=CONV_A,
                                     text_excerpt="Et Apple ?")
         session.commit()
-    state, product = _t2_state(engine), _product(engine)
-    with pytest.raises(HTTPException) as failure:
-        _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
-    assert failure.value.status_code == 500 and failure.value.detail["retryable"] is True
-    assert (_t2_state(engine), _product(engine)) == (state, product)
+    aapl = _event(engine, aapl["id"])
+    switch = _send(Sessions, ext, _reply("N1", "business"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
+    link = _link(engine, switch["assistant_turn_id"])
+    assert (link["input_action"], link["input_context_event_id"]) == ("context_switched", lvmh["id"])
     assert {e["status"] for e in _events(engine)} == {"open"}
-    with Sessions() as session:
-        delivery, _ = ad.claim_delivery(
-            session, user_id=USER, conversation_key=CONV_A, surface="decryptage", source_user_turn_id=uuid.uuid4(),
-            delivery_ordinal=1, request_fingerprint=FP_A, visible_content_fingerprint=FP_A,
-            response_payload=PAYLOAD_A, private_metadata=dcr.runtime_private_metadata(None),
-            delivery_schema_version=ad.ASSISTANT_DELIVERY_SCHEMA_VERSION)
-        with pytest.raises(dcr.AmbiguousDecryptageContextExit):
-            dcr.capture_user_turn(session, delivery=delivery, ticker="NVDA", user_text="Et NVIDIA ?")
-    # Une nouvelle conversation n'hérite d'aucun des deux : elle n'est pas bloquée.
-    fresh = _send(Sessions, ext, _reply("N1", "business"), "Analyse NVDA", context="", conv="conv-d",
-                  ticker="NVDA")
-    assert _link(engine, fresh["assistant_turn_id"])["input_action"] == "no_open_event"
-    assert {e["status"] for e in _events(engine)} == {"open"}
+    assert (_event(engine, lvmh["id"]), _event(engine, aapl["id"])) == (lvmh, aapl)
 
 
-def test_pg_parallel_origin_conversation_alone_makes_the_event_part_of_the_context(engine, Sessions, ext):
-    """Provenance minimale : conversation_key d'origine seule (aucun lien,
-    aucune contribution) suffit à rattacher l'event au contexte de cette
-    conversation ; ailleurs, il n'est pas touché."""
+def test_pg_parallel_origin_conversation_alone_is_never_an_anchor(engine, Sessions, ext):
+    """R1-C4 : un event dont la conversation d'origine est A, mais qui n'a
+    jamais été rendu dans A (aucune livraison captured), n'est pas l'ancre de
+    A : le tour de A est no_open_event et l'event n'est jamais touché."""
     _turn(Sessions, ext, _reply("P1", "business"), "", context="", conv=CONV_C, ticker="AAPL")
     with Sessions() as session:
         bare = cc.open_event_idempotent(
@@ -768,27 +786,30 @@ def test_pg_parallel_origin_conversation_alone_makes_the_event_part_of_the_conte
             event_builder_version=dcr.EVENT_BUILDER_VERSION, admission_version=dcr.ADMISSION_VERSION,
             analysis_session_id=_session_id(engine, "AAPL")).id
         session.commit()
-    elsewhere = _send(Sessions, ext, _reply("N1"), "Et NVIDIA ?", conv=CONV_B, ticker="NVDA")
-    assert _link(engine, elsewhere["assistant_turn_id"])["context_exit_event_id"] is None
-    assert _event(engine, bare)["status"] == "open"
+    before = _event(engine, bare)
     here = _send(Sessions, ext, _reply("N2"), "Et NVIDIA ?", conv=CONV_A, ticker="NVDA")
     link = _link(engine, here["assistant_turn_id"])
-    assert (link["input_action"], link["context_exit_event_id"]) == ("event_abandoned_context_change", bare)
-    assert _event(engine, bare)["status"] == "abandoned"
+    assert (link["input_action"], link["input_context_event_id"], link["context_exit_event_id"]) == (
+        "no_open_event", None, None)
+    assert _event(engine, bare) == before
 
 
-def test_pg_parallel_switch_to_a_ticker_open_elsewhere_exits_without_contribution(engine, Sessions, ext):
+def test_pg_parallel_switch_to_a_ticker_open_elsewhere_detaches_without_contribution(engine, Sessions, ext):
     """A/LVMH et B/NVDA ouverts. Dans A : « Je passe à NVIDIA. » est un
-    message de navigation : E_LVMH est quitté, le message n'est PAS ajouté
-    à E_NVDA. L'ACK de la réponse NVDA (même marqueur) continue E_NVDA avec
-    un SupportTrace ; le tour utilisateur SUIVANT dans A est la première
-    contribution de A, qui hérite de la réponse rendue dans A."""
+    message de navigation : A se détache de E_LVMH (qui reste open), le
+    message n'est PAS ajouté à E_NVDA. L'ACK de la réponse NVDA (même
+    marqueur, aucune ancre NVDA dans A) continue E_NVDA avec un SupportTrace
+    et ancre A à E_NVDA ; le tour utilisateur SUIVANT dans A est la première
+    contribution de A, qui n'hérite QUE de la réponse rendue dans A (jamais
+    des aides rendues dans B)."""
     lvmh, nvda = _parallel_lvmh_and_nvda(Sessions, ext, engine)
+    shown_in_b = [t["id"] for t in _traces(engine, nvda["id"])]
+    assert shown_in_b  # N2 rendue dans B
     switch = _send(Sessions, ext, _reply("N3", "business"), "Je passe à NVIDIA.", conv=CONV_A, ticker="NVDA")
     link = _link(engine, switch["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_closed_context_change", None, lvmh["id"])
-    assert _event(engine, lvmh["id"])["status"] == "finalized"
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"],
+            link["input_context_event_id"]) == ("context_switched", None, None, lvmh["id"])
+    assert _event(engine, lvmh["id"]) == lvmh
     assert _event(engine, nvda["id"]) == nvda  # user_work_snapshot inchangé
 
     _ack(Sessions, switch, conv=CONV_A)
@@ -805,15 +826,18 @@ def test_pg_parallel_switch_to_a_ticker_open_elsewhere_exits_without_contributio
     work = _event(engine, nvda["id"])["user_work_snapshot"]
     assert [c["text"] for c in work] == ["NVIDIA vend des GPU.", "Leur avantage, c'est CUDA."]
     assert (work[-1]["contribution_id"], work[-1]["session_ref"]) == (turn, CONV_A)
-    assert str(shown_in_a["id"]) in work[-1]["support_refs_before"]
+    assert work[-1]["support_refs_before"] == [str(shown_in_a["id"])]
+    assert not {str(t) for t in shown_in_b} & set(work[-1]["support_refs_before"])
     assert "Je passe à NVIDIA." not in json.dumps(_events(engine), default=str)
 
 
 @pytest.mark.parametrize("marker, with_work", [("business", True), ("moat", True), ("business", False)],
-                         ids=["meme-marqueur", "transition", "event-quitte-vide"])
+                         ids=["meme-marqueur", "marqueur-suivant", "event-quitte-vide"])
 def test_pg_navigation_message_never_contaminates_the_target_event(engine, Sessions, ext, marker, with_work):
     """Quel que soit le marqueur de la réponse et l'état de l'event quitté,
-    le message de navigation n'entre dans AUCUN user_work_snapshot."""
+    le message de navigation n'entre dans AUCUN user_work_snapshot ; l'event
+    quitté reste open ; un marqueur suivant n'est ni appliqué au produit ni
+    une frontière (aucune contribution, R1-C4)."""
     _turn(Sessions, ext, _reply("L1", "business"), "", context="", conv=CONV_A)
     if with_work:
         _turn(Sessions, ext, _reply("L2", "business"), "LVMH vend du luxe.", conv=CONV_A)
@@ -823,17 +847,15 @@ def test_pg_navigation_message_never_contaminates_the_target_event(engine, Sessi
     switch = _turn(Sessions, ext, _reply("N3", marker), "Bon, on regarde NVIDIA.", conv=CONV_A, ticker="NVDA")
     link = _link(engine, switch["assistant_turn_id"])
     assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "event_closed_context_change" if with_work else "event_abandoned_context_change", None, lvmh["id"])
-    assert _event(engine, lvmh["id"])["status"] == ("finalized" if with_work else "abandoned")
+        "context_switched", None, None)
+    assert _event(engine, lvmh["id"]) == lvmh
     for event in _events(engine):
         assert "Bon, on regarde NVIDIA." not in [c["text"] for c in event["user_work_snapshot"]]
     assert _event(engine, nvda["id"])["user_work_snapshot"] == nvda["user_work_snapshot"]
-    if marker == "moat":  # la réponse fait transiter E_NVDA (règles existantes)
-        assert link["response_action"] == "transitioned_event"
-        assert _event(engine, nvda["id"])["status"] == "finalized"
-        assert _event(engine, link["response_event_id"])["user_work_snapshot"] == []
-    else:
-        assert (link["response_action"], link["response_event_id"]) == ("continued_event", nvda["id"])
+    assert _event(engine, nvda["id"])["status"] == "open" and len(_events(engine)) == 2
+    expected = "continued_event" if marker == "business" else "continued_without_boundary_signal"
+    assert (link["response_action"], link["response_event_id"]) == (expected, nvda["id"])
+    assert [s[2] for s in _product(engine)["sessions"] if s[0] == nvda["analysis_session_id"]] == ["business"]
 
 
 # --- K. nouvelle conversation / reprise --------------------------------------
@@ -842,45 +864,54 @@ def test_pg_k_resume_in_a_new_conversation_continues_the_same_event(engine, Sess
     _turn(Sessions, ext, _reply("A1", "business"))
     _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
     [event] = _events(engine)
+    [shown_in_conv] = _traces(engine, event["id"])
     # « Nouvelle conversation » seule : aucune requête, rien n'est fermé.
     assert _event(engine, event["id"])["status"] == "open"
-    # Reprise Web-V2 : nouvelle conversation_key, question vide, contexte vide.
+    # Reprise Web-V2 : nouvelle conversation_key (aucune ancre), question et
+    # contexte vides.
     resume = _send(Sessions, ext, _reply("R1", "business"), "", context="", conv=CONV_2)
     link = _link(engine, resume["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (
-        "no_user_contribution", None, None)
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"],
+            link["input_context_event_id"]) == ("no_open_event", None, None, None)
     _ack(Sessions, resume, conv=CONV_2)
     [after] = _events(engine)
     assert after["status"] == "open" and after["conversation_key"] == CONV  # origine conservée
     resume_trace = _traces(engine, event["id"])[-1]
     assert resume_trace["support_payload"] == {"visible_content": "Réponse R1."}
     assert _link(engine, resume["assistant_turn_id"])["response_action"] == "continued_event"
-    # La contribution suivante va dans le même event, session_ref = nouvelle conversation.
+    # La contribution suivante va dans le même event, session_ref = nouvelle
+    # conversation ; elle n'hérite que de l'aide rendue dans CETTE conversation.
     _send(Sessions, ext, _reply("R2", "business"), "Une marque très forte.", conv=CONV_2)
     work = _event(engine, event["id"])["user_work_snapshot"]
     assert [(c["session_ref"], c["text"]) for c in work] == [(CONV, "Ils vendent du luxe."),
                                                             (CONV_2, "Une marque très forte.")]
-    assert str(resume_trace["id"]) in work[-1]["support_refs_before"]
+    assert work[-1]["support_refs_before"] == [str(resume_trace["id"])]
+    assert str(shown_in_conv["id"]) not in work[-1]["support_refs_before"]
 
 
-def test_pg_k_text_typed_in_a_new_conversation_is_appended_to_the_open_event(engine, Sessions, ext):
+def test_pg_k_text_typed_in_a_new_conversation_is_never_a_contribution(engine, Sessions, ext):
+    """R1-C4 : sans ancre, rien n'a été rendu dans cette conversation à quoi
+    répondre : le texte n'est pas une contribution (ni UserStatement) ; la
+    réponse rendue ancre ensuite la conversation à l'event open."""
     _turn(Sessions, ext, _reply("A1", "business"))
     [event] = _events(engine)
-    typed = _send(Sessions, ext, _reply("A2", "business"), "Je reprends : ils vendent du luxe.", context="",
+    typed = _turn(Sessions, ext, _reply("A2", "business"), "Je reprends : ils vendent du luxe.", context="",
                   conv=CONV_2)
-    assert _link(engine, typed["assistant_turn_id"])["input_event_id"] == event["id"]
-    [contribution] = _event(engine, event["id"])["user_work_snapshot"]
-    assert contribution["session_ref"] == CONV_2
+    link = _link(engine, typed["assistant_turn_id"])
+    assert (link["input_action"], link["input_event_id"]) == ("no_open_event", None)
+    assert _event(engine, event["id"])["user_work_snapshot"] == []
+    assert _product(engine)["statements"] == []
+    assert (link["response_action"], link["response_event_id"]) == ("continued_event", event["id"])
 
 
 # --- L. nouvelle AnalysisSession ---------------------------------------------
 
-@pytest.mark.parametrize("conv, exited", [(CONV, True), (CONV_2, False)], ids=["meme-conversation",
-                                                                                   "autre-conversation"])
-def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext, conv, exited):
-    """Nouvelle AnalysisSession : l'ancien event n'est jamais repris. Il
-    n'est quitté (fermé) que si la nouvelle tentative a lieu dans SA
-    conversation ; depuis une autre conversation, il reste intact."""
+@pytest.mark.parametrize("conv, action", [(CONV, "context_switched"), (CONV_2, "no_open_event")],
+                         ids=["meme-conversation", "autre-conversation"])
+def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext, conv, action):
+    """Nouvelle AnalysisSession : l'ancien event n'est jamais repris, et
+    (R1-C4) jamais fermé par cette navigation, quelle que soit la
+    conversation."""
     _turn(Sessions, ext, _reply("A1", "business"))
     _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
     [old] = _events(engine)
@@ -890,10 +921,8 @@ def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, 
                      {"s": old["analysis_session_id"]})
     fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=conv)
     link = _link(engine, fresh["assistant_turn_id"])
-    expected = ("event_closed_context_change", None, old["id"]) if exited else ("no_open_event", None, None)
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == expected
-    assert _event(engine, old["id"])["status"] == ("finalized" if exited else "open")
-    assert [c["text"] for c in _event(engine, old["id"])["user_work_snapshot"]] == ["Ils vendent du luxe."]
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (action, None, None)
+    assert _event(engine, old["id"]) == old
     _ack(Sessions, fresh, conv=conv)
     new = _events(engine)[-1]
     assert new["analysis_session_id"] == _session_id(engine) != old["analysis_session_id"]
@@ -996,10 +1025,11 @@ def test_pg_n_two_workers_same_client_turn_capture_once(engine, Sessions, ext):
 
 
 def test_pg_n_contribution_collision_fails_closed(engine, Sessions, ext):
-    """Le même client_turn_id réutilisé dans une autre conversation (bug
-    client) : même contribution_id, session_ref différente -> collision R1-B,
-    rollback complet du tour."""
+    """Le même client_turn_id réutilisé dans une autre conversation ancrée
+    au même event (bug client) : même contribution_id, session_ref
+    différente -> collision R1-B, rollback complet du tour."""
     _turn(Sessions, ext, _reply("A1", "business"))
+    _turn(Sessions, ext, _reply("R1", "business"), "", context="", conv=CONV_2)  # ancre CONV_2
     turn = str(uuid.uuid4())
     _send(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.", turn=turn)
     state, product = _t2_state(engine), _product(engine)
@@ -1156,10 +1186,11 @@ def test_pg_r_r1c2_delivery_without_link_fails_closed(engine, Sessions, ext):
     "UPDATE decryptage_cognitive_links SET capture_state = 'captured', response_action = 'no_cognitive_action', "
     "captured_at = now() WHERE assistant_delivery_id = :d",
     "UPDATE assistant_deliveries SET status = 'delivered', delivered_at = now() WHERE id = :d",
-    "UPDATE decryptage_cognitive_links SET capture_version = 'decryptage-cognitive-runtime-v2' "
-    "WHERE assistant_delivery_id = :d",
+    # Lien V2 sur une livraison déclarée V1 (aucune conversion silencieuse).
     "UPDATE assistant_deliveries SET private_metadata = jsonb_set(private_metadata, '{cognitive_runtime_version}', "
-    "'\"decryptage-cognitive-runtime-v2\"') WHERE id = :d",
+    "'\"decryptage-cognitive-runtime-v1\"') WHERE id = :d",
+    "UPDATE assistant_deliveries SET private_metadata = jsonb_set(private_metadata, '{cognitive_runtime_version}', "
+    "'\"decryptage-cognitive-runtime-v3\"') WHERE id = :d",
 ], ids=["pending+captured", "delivered+awaiting", "capture_version", "runtime_version"])
 def test_pg_r_forbidden_state_pairs_and_versions_fail_closed(engine, Sessions, ext, corruption):
     first = _send(Sessions, ext, _reply("A1", "business"))
@@ -1196,9 +1227,10 @@ def _claim_runtime(session, turn=None):
 
 
 def test_pg_event_closed_between_read_and_mutation_is_never_appended(engine, Sessions, ext):
-    """Une transaction ferme l'event pendant que le tour suivant attend son
-    verrou : le tour voit l'état commité (event fermé) et ne l'enrichit
-    pas (SELECT ... FOR UPDATE réévalué en READ COMMITTED)."""
+    """Une transaction ferme l'event d'ancrage pendant que le tour suivant
+    attend son verrou : le tour voit l'état commité (event fermé, SELECT ...
+    FOR UPDATE réévalué en READ COMMITTED), ne l'enrichit pas et, R1-C4,
+    échoue en StaleConversationContext (jamais de contribution ailleurs)."""
     _turn(Sessions, ext, _reply("A1", "business"))
     [event] = _events(engine)
     with Sessions() as holder, Sessions() as waiter:
@@ -1206,11 +1238,11 @@ def test_pg_event_closed_between_read_and_mutation_is_never_appended(engine, Ses
 
         def turn(session):
             delivery = _claim_runtime(session)
-            link = dcr.capture_user_turn(session, delivery=delivery, ticker="MC.PA", user_text="Ils vendent du luxe.")
-            return link.input_action, link.input_event_id, link.context_exit_event_id
+            dcr.capture_user_turn(session, delivery=delivery, ticker="MC.PA", user_text="Ils vendent du luxe.")
 
         result, error = _run_blocked(engine, holder, waiter, turn)
-    assert error is None and result == ("no_open_event", None, None)
+    assert result is None and isinstance(error, dcr.StaleConversationContext)
+    assert error.expected_event_id == event["id"]
     after = _event(engine, event["id"])
     assert after["status"] == "finalized" and after["user_work_snapshot"] == []
 
@@ -1280,11 +1312,12 @@ def test_pg_logs_carry_ids_and_actions_but_no_text(engine, Sessions, ext, caplog
         _turn(Sessions, ext, _reply("texte assistant secret", "business"))
         second = _turn(Sessions, ext, _reply("autre texte assistant", "moat"), "phrase utilisateur privée")
     records = [r for r in caplog.records if r.name == "core.decryptage_cognitive_runtime"]
-    assert records and all(r.getMessage().startswith("[R1-C2] ") for r in records)
+    assert records and all(r.getMessage().startswith(("[R1-C2] ", "[R1-C4] ")) for r in records)
     text = caplog.text
     for secret in ("texte assistant secret", "autre texte assistant", "phrase utilisateur privée", "ORYX_STEP"):
         assert secret not in text, secret
     assert f"assistant_turn={second['assistant_turn_id']} action=transitioned_event marker=moat from=business" in text
+    assert "support_refs conversation=conv-u count=0" in text
 
 
 def test_pg_full_attempt_writes_t2_but_never_t3(engine, Sessions, ext):

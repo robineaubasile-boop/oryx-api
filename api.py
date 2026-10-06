@@ -46,8 +46,10 @@ from core.assistant_delivery import (
 )
 from core.decryptage_cognitive_runtime import (
 	CONTRIBUTION_APPENDED,
+	StaleConversationContext,
 	capture_delivered_response,
 	capture_user_turn,
+	precheck_conversation_context,
 	runtime_private_metadata,
 )
 from core.decryptage_progress import (
@@ -520,6 +522,16 @@ def _get_analysis_progress(user_id, ticker):
 # observation, inférence, Step 6). Un échec externe AVANT la livraison
 # canonique (ticker, données, Claude) laisse le tour hors T2 (limite V1).
 #
+# R1-C4 : une conversation ancrée à un CognitiveEvent fermé par une autre
+# conversation (l'analyse a avancé ailleurs) est STALE : HTTP 409
+# stale_conversation_context, aucune écriture (ni livraison, ni lien, ni
+# contribution, ni progression). Une pré-vérification en lecture seule,
+# dans une transaction courte AVANT les données financières et Claude, évite
+# un appel inutile ; la vérification qui fait foi est refaite sous verrou par
+# capture_user_turn dans la transaction gagnante (la course précheck ->
+# retour de Claude reste fail closed). Jamais de rattachement automatique au
+# nouvel event, jamais de rejeu.
+#
 # Une réponse success=True n'est renvoyée qu'après le COMMIT de la
 # livraison pending : une défaillance DB n'est plus avalée (l'ancienne
 # doctrine « ne jamais faire planter la réponse principale » est
@@ -538,6 +550,17 @@ _DELIVERY_HTTP_STATUS = {
 	UnsupportedAssistantDeliverySchema: 409,
 	InvalidAssistantDeliveryInput: 422,
 }
+
+
+STALE_CONVERSATION_CONTEXT = "stale_conversation_context"
+
+
+def _stale_conversation_http_error(exc: StaleConversationContext, *, phase: str) -> HTTPException:
+	"""R1-C4 : 409 non retryable tel quel (le même tour reste stale). Le
+	détail ne contient que le code, jamais d'identifiant d'event ni de
+	texte ; l'identifiant technique n'est que journalisé."""
+	print(f"[R1-C4] {phase} refusé : stale_conversation_context expected_event={exc.expected_event_id} → HTTP 409")
+	return HTTPException(status_code=409, detail={"error": STALE_CONVERSATION_CONTEXT, "retryable": False})
 
 
 def _delivery_http_error(exc: AssistantDeliveryError, *, phase: str) -> HTTPException:
@@ -615,6 +638,19 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 	# (peut interroger EODHD Search), données financières, Claude.
 	ticker = normalize_ticker(raw_ticker)
 	print(f"[DECRYPTAGE] '{raw_ticker}' → '{ticker}' | question: '{question or '(none)'}'")
+
+	# --- R1-C4 : pré-vérification stale (optimisation, lecture seule) ------
+	try:
+		precheck_conversation_context(db, user_id=user_id, conversation_key=conversation_key, ticker=ticker)
+		db.commit()
+	except StaleConversationContext as exc:
+		db.rollback()
+		raise _stale_conversation_http_error(exc, phase="precheck")
+	except Exception as exc:
+		db.rollback()
+		print(f"[ASSISTANT-DELIVERY ERROR] precheck : {type(exc).__name__}")
+		raise HTTPException(status_code=500, detail={"error": _RETRYABLE_ERROR, "retryable": True})
+
 	try:
 		result = fetch_financial_data(ticker)
 	except Exception as e:
@@ -738,19 +774,25 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 		# R1-C3C : R1-C2 est la source factuelle de classification du tour.
 		# Seule une vraie contribution (contribution_appended) devient
 		# UserStatement / InvestmentThesis ; navigation, reprise vide,
-		# déclencheur, sortie de contexte, no_open_event : aucun texte.
-		progress_thesis_text = (
-			question if cognitive_link is not None and cognitive_link.input_action == CONTRIBUTION_APPENDED
-			else None
-		)
+		# déclencheur, context_switched, no_open_event : aucun texte.
+		# R1-C4 : elle seule peut aussi faire avancer / terminer une
+		# AnalysisSession existante (Claude seul, jamais).
+		user_contribution = cognitive_link is not None and cognitive_link.input_action == CONTRIBUTION_APPENDED
+		progress_thesis_text = question if user_contribution else None
 		if created and method_id == "construction_these" and step_marker is not None:
 			analysis_session = apply_construction_these_progress(
 				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=progress_thesis_text, data=data,
+				user_contribution=user_contribution,
 			)
 			if analysis_session is not None:
 				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=analysis_session.id)
 		final = _delivery_response(delivery)
 		db.commit()
+	except StaleConversationContext as exc:
+		# Vérification finale sous verrou : rien n'est commité (ni la
+		# livraison revendiquée, ni lien, ni contribution, ni progression).
+		db.rollback()
+		raise _stale_conversation_http_error(exc, phase="claim")
 	except (AssistantTurnIdentityCollision, AssistantDeliveryOwnershipConflict, AssistantDeliveryUserNotFound,
 			UnsupportedAssistantDeliverySchema) as exc:
 		db.rollback()
@@ -776,7 +818,11 @@ def ack_assistant_delivery(assistant_turn_id: uuid.UUID, request: AssistantDeliv
 	lien -> AnalysisSession -> CognitiveEvent, AVANT pending → delivered.
 	Tout échec annule l'ensemble : la livraison reste pending (l'outbox
 	frontend reste bloquante). Livraison legacy R1-C1 : ACK inchangé, aucune
-	capture rétroactive. Aucun T3+."""
+	capture rétroactive. Aucun T3+.
+
+	R1-C4 : une réponse réellement rendue dont l'event de contexte a été
+	fermé entre-temps (late ACK) devient quand même delivered, mais son lien
+	est stale_delivery : jamais rattachée à l'event courant."""
 	try:
 		delivery = lock_delivery_for_ack(
 			db, assistant_turn_id=assistant_turn_id, user_id=request.user_id, conversation_key=request.conversation_key,

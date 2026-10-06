@@ -49,12 +49,15 @@ from tests.test_migration_0004_drop_company_analyses import (
     R1C1_TABLES,
     R1C2_INDEXES,
     R1C2_TABLES,
+    R1C4,
+    R1C4_FILE,
     T1B1_SHA256,
     T1C2,
     _code_tokens,
     _compare_metadata,
     _data,
     _statements,
+    _without_r1c4_changes,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     T1C2_SHA256,
@@ -110,6 +113,15 @@ INPUT_ACTIONS = ("no_open_event", "no_user_contribution", "contribution_appended
                  "event_abandoned_context_change")
 RESPONSE_ACTIONS = ("opened_event", "continued_event", "continued_without_boundary_signal", "transitioned_event",
                     "closed_terminal", "no_cognitive_action")
+# R1-C4 (0013, testée dans tests/test_migration_0013_decryptage_conversation_affinity.py) :
+# une colonne + sa FK + des CHECK sur la même table ; le modèle (tête) les
+# porte en plus de 0012.
+R1C4_CHECKS = {
+    "ck_decryptage_cognitive_links_context_switched",
+    "ck_decryptage_cognitive_links_stale_delivery",
+    "ck_decryptage_cognitive_links_runtime_version",
+}
+HEAD_COLUMNS = COLUMNS + ["input_context_event_id"]
 HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
 PRE_R1C2_TABLES = PRE_R1C1_TABLES | R1C1_TABLES
 
@@ -118,20 +130,22 @@ PRE_R1C2_TABLES = PRE_R1C1_TABLES | R1C1_TABLES
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_chain_is_exactly_0001_to_0012():
-    """0001 -> ... -> 0011 -> 0012, tête unique = 0012 ; 0012 est la seule
-    migration ajoutée par R1-C2."""
+def test_revision_chain_is_exactly_0001_to_0012_then_0013():
+    """0001 -> ... -> 0011 -> 0012 ; 0012 est la seule migration ajoutée par
+    R1-C2. Depuis R1-C4, 0013 (affinité conversationnelle) la suit et est la
+    tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
+    assert script.get_heads() == [R1C4]
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)
+    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
     assert set(revisions) == set(chain)
+    assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain]
-    assert len(files) == 12
+    assert files == [f"{rev}.py" for rev in chain[:-1]] + [R1C4_FILE]
+    assert len(files) == 13
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -196,12 +210,15 @@ def test_metadata_declares_exactly_the_links_table_in_addition():
 
 
 def test_model_columns_types_and_nullability():
+    """Colonnes de 0012, puis input_context_event_id (R1-C4, 0013, nullable,
+    ajoutée en fin de table)."""
     table = DecryptageCognitiveLink.__table__
-    assert [c.name for c in table.columns] == COLUMNS
-    assert {c.name: c.nullable for c in table.columns} == {n: n in NULLABLE for n in COLUMNS}
+    assert [c.name for c in table.columns] == HEAD_COLUMNS
+    assert {c.name: c.nullable for c in table.columns} == {
+        n: n in NULLABLE | {"input_context_event_id"} for n in HEAD_COLUMNS}
     assert [c.name for c in table.primary_key.columns] == ["assistant_delivery_id"]
     for name in ("assistant_delivery_id", "input_event_id", "context_exit_event_id", "response_event_id",
-                 "support_trace_id"):
+                 "support_trace_id", "input_context_event_id"):
         assert isinstance(table.c[name].type, sa.Uuid) and table.c[name].type.as_uuid, name
     for name in ("capture_version", "input_action", "capture_state", "response_action"):
         assert type(table.c[name].type) is sa.String and table.c[name].type.length is None, name
@@ -217,11 +234,12 @@ def test_model_constraints_are_exactly_those_of_the_migration():
     assert sorted((fk.parent.name, fk.target_fullname, fk.ondelete, fk.onupdate) for fk in table.foreign_keys) == [
         ("assistant_delivery_id", "assistant_deliveries.id", None, None),
         ("context_exit_event_id", "cognitive_events.id", None, None),
+        ("input_context_event_id", "cognitive_events.id", None, None),
         ("input_event_id", "cognitive_events.id", None, None),
         ("response_event_id", "cognitive_events.id", None, None),
         ("support_trace_id", "support_traces.id", None, None),
     ]
-    assert {c.name for c in table.constraints if isinstance(c, sa.CheckConstraint)} == CHECKS
+    assert {c.name for c in table.constraints if isinstance(c, sa.CheckConstraint)} == CHECKS | R1C4_CHECKS
     assert not [c for c in table.constraints if isinstance(c, sa.UniqueConstraint)]
     [index] = table.indexes
     assert (index.name, index.unique, [c.name for c in index.columns]) == (OPENING_INDEX, True, ["response_event_id"])
@@ -303,7 +321,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1C2
+    assert _version(pg_engine) == R1C4
     assert _tables(pg_engine) == HEAD_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
@@ -313,6 +331,8 @@ def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F81
 
 
 def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F811
+    """Catalogue à la tête : celui de 0012 + la colonne, la FK et les CHECK
+    de R1-C4 (0013)."""
     _upgrade_head_with_users(pg_url, pg_engine)
     catalog = _catalog(pg_engine, {LINKS})[LINKS]
     assert catalog["columns"] == [
@@ -327,12 +347,15 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("support_trace_id", "uuid", "YES", None),
         ("created_at", "timestamp with time zone", "NO", None),
         ("captured_at", "timestamp with time zone", "YES", None),
+        ("input_context_event_id", "uuid", "YES", None),
     ]
     assert [c for c in catalog["constraints"] if c[1] != "c"] == [
         ("decryptage_cognitive_links_assistant_delivery_id_fkey", "f",
          "FOREIGN KEY (assistant_delivery_id) REFERENCES assistant_deliveries(id)", "a", "a"),
         ("decryptage_cognitive_links_context_exit_event_id_fkey", "f",
          "FOREIGN KEY (context_exit_event_id) REFERENCES cognitive_events(id)", "a", "a"),
+        ("decryptage_cognitive_links_input_context_event_id_fkey", "f",
+         "FOREIGN KEY (input_context_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("decryptage_cognitive_links_input_event_id_fkey", "f",
          "FOREIGN KEY (input_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("decryptage_cognitive_links_pkey", "p", "PRIMARY KEY (assistant_delivery_id)", " ", " "),
@@ -341,7 +364,7 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("decryptage_cognitive_links_support_trace_id_fkey", "f",
          "FOREIGN KEY (support_trace_id) REFERENCES support_traces(id)", "a", "a"),
     ]
-    assert {c[0] for c in catalog["constraints"] if c[1] == "c"} == CHECKS
+    assert {c[0] for c in catalog["constraints"] if c[1] == "c"} == CHECKS | R1C4_CHECKS
     assert catalog["indexes"] == ["decryptage_cognitive_links_pkey", OPENING_INDEX]
 
 
@@ -480,7 +503,8 @@ def test_pg_upgrade_0011_to_0012_preserves_everything_then_downgrade(pg_url, pg_
     assert _global_catalog(pg_engine) == global_0011
     assert _data(pg_engine, PRE_R1C2_TABLES) == data_0011
     assert _data(pg_engine, R1C2_TABLES) == {LINKS: []}
-    assert _compare_metadata(pg_engine) == []
+    # Le modèle (tête) porte en plus exactement les ajouts R1-C4 (0013).
+    assert _without_r1c4_changes(_compare_metadata(pg_engine)) == []
     schema_r1c2 = _snapshot(pg_engine, R1C2_TABLES)
     catalog_r1c2 = _catalog(pg_engine, R1C2_TABLES)
 
@@ -507,4 +531,4 @@ def test_pg_upgrade_0011_to_0012_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, R1C2_TABLES) == schema_r1c2
     assert _catalog(pg_engine, R1C2_TABLES) == catalog_r1c2
     assert _data(pg_engine, R1C2_TABLES) == {LINKS: []}
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1c4_changes(_compare_metadata(pg_engine)) == []

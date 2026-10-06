@@ -1496,10 +1496,17 @@ class DecryptageCognitiveLink(Base):
       (idempotence de la capture) ;
     - input_action / input_event_id : sort de la production utilisateur du
       tour, fixé dans la transaction /decryptage du worker gagnant ;
-    - context_exit_event_id : event QUITTÉ (fermé) par ce tour sur rupture
-      de contexte, qu'il ait été finalized (travail utilisateur présent,
-      input_action event_closed_context_change) ou abandoned (event vide,
-      event_abandoned_context_change) ;
+    - context_exit_event_id : (historique V1 uniquement) event QUITTÉ
+      (fermé) par ce tour sur rupture de contexte, qu'il ait été finalized
+      (travail utilisateur présent, input_action event_closed_context_change)
+      ou abandoned (event vide, event_abandoned_context_change). Toujours
+      NULL en V2 (R1-C4) : une navigation ne ferme jamais un event ;
+    - input_context_event_id (R1-C4, V2 uniquement) : event auquel la
+      conversation du tour était ANCRÉE quand le tour est arrivé (dernière
+      livraison V2 delivered + captured de cette conversation_key). Référence
+      de contexte de la livraison du tour à l'ACK (stale_delivery si cet
+      event a été fermé entre-temps). NULL si aucune ancre (no_open_event) ;
+      context_switched : l'ancre quittée, laissée intacte ;
     - capture_state awaiting_delivery -> captured, atomiquement avec
       l'ACK pending -> delivered ; response_action / response_event_id /
       support_trace_id / captured_at sont remplis à ce moment.
@@ -1509,7 +1516,10 @@ class DecryptageCognitiveLink(Base):
     AssistantDelivery. Seul point d'écriture :
     core/decryptage_cognitive_runtime.py. Table créée par la migration
     0012_decryptage_cognitive_links ; timestamps générés par l'application
-    (aucun server_default), CHECK plutôt qu'ENUM, FK sans cascade."""
+    (aucun server_default), CHECK plutôt qu'ENUM, FK sans cascade.
+    Étendue (sans backfill) par 0013_decryptage_conv_affinity (R1-C4) :
+    input_context_event_id, context_switched, stale_delivery, CHECK de
+    cohérence par version de runtime."""
     __tablename__ = "decryptage_cognitive_links"
     __table_args__ = (
         CheckConstraint(
@@ -1518,13 +1528,13 @@ class DecryptageCognitiveLink(Base):
         ),
         CheckConstraint(
             "input_action IN ('no_open_event', 'no_user_contribution', 'contribution_appended', "
-            "'event_closed_context_change', 'event_abandoned_context_change')",
+            "'event_closed_context_change', 'event_abandoned_context_change', 'context_switched')",
             name="ck_decryptage_cognitive_links_input_action",
         ),
         CheckConstraint(
             "response_action IS NULL OR response_action IN ('opened_event', 'continued_event', "
             "'continued_without_boundary_signal', 'transitioned_event', 'closed_terminal', "
-            "'no_cognitive_action')",
+            "'no_cognitive_action', 'stale_delivery')",
             name="ck_decryptage_cognitive_links_response_action",
         ),
         CheckConstraint(
@@ -1544,6 +1554,26 @@ class DecryptageCognitiveLink(Base):
             "= (support_trace_id IS NOT NULL))",
             name="ck_decryptage_cognitive_links_response_refs",
         ),
+        CheckConstraint(
+            "input_action <> 'context_switched' OR (input_event_id IS NULL AND input_context_event_id IS NOT NULL "
+            "AND context_exit_event_id IS NULL)",
+            name="ck_decryptage_cognitive_links_context_switched",
+        ),
+        CheckConstraint(
+            "response_action IS NULL OR response_action <> 'stale_delivery' OR (response_event_id IS NULL "
+            "AND support_trace_id IS NULL)",
+            name="ck_decryptage_cognitive_links_stale_delivery",
+        ),
+        CheckConstraint(
+            "(capture_version = 'decryptage-cognitive-runtime-v1' AND input_context_event_id IS NULL "
+            "AND input_action <> 'context_switched' "
+            "AND (response_action IS NULL OR response_action <> 'stale_delivery')) "
+            "OR (capture_version = 'decryptage-cognitive-runtime-v2' AND context_exit_event_id IS NULL "
+            "AND input_action NOT IN ('event_closed_context_change', 'event_abandoned_context_change') "
+            "AND (input_action = 'no_open_event') = (input_context_event_id IS NULL) "
+            "AND (input_action <> 'contribution_appended' OR input_event_id = input_context_event_id))",
+            name="ck_decryptage_cognitive_links_runtime_version",
+        ),
         Index(
             "uq_decryptage_cognitive_links_opening_event", "response_event_id", unique=True,
             postgresql_where=text("response_action IN ('opened_event', 'transitioned_event')"),
@@ -1561,3 +1591,5 @@ class DecryptageCognitiveLink(Base):
     support_trace_id = Column(Uuid, ForeignKey("support_traces.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     captured_at = Column(DateTime(timezone=True), nullable=True)
+    # R1-C4 (0013) : ajoutée en fin de table par ALTER TABLE.
+    input_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)

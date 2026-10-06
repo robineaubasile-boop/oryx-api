@@ -2303,8 +2303,15 @@ function flushPendingDeliveryAcks() {
 
 // Erreur HTTP (hors réseau) de /decryptage : message lisible, jamais de
 // donnée interne.
+// R1-C4 : 409 stale_conversation_context = l'analyse a avancé dans une autre
+// conversation (autre onglet). Rien n'a été enregistré pour ce message ; il
+// n'est jamais rejoué ni rattaché automatiquement à l'étape actuelle (pas de
+// nouveau client_turn_id silencieux) : l'utilisateur décide de reprendre.
+const STALE_CONVERSATION_CONTEXT = 'stale_conversation_context';
+const STALE_CONVERSATION_MESSAGE = 'Cette analyse a avancé dans une autre conversation. Reprends l\'étape actuelle pour continuer (bouton « Reprendre » dans tes analyses, ou nouvelle conversation).';
 function decryptageHttpErrorMessage(res, data) {
 	const detail = data && data.detail;
+	if (res.status === 409 && detail && detail.error === STALE_CONVERSATION_CONTEXT) return STALE_CONVERSATION_MESSAGE;
 	if (res.status === 409) return 'Ce message a déjà été traité différemment. Envoie un nouveau message.';
 	if (detail && detail.retryable === false) return 'Requête refusée (profil ou conversation non reconnus). Recharge la page puis réessaie.';
 	return 'Erreur serveur, réessaie dans quelques instants.';

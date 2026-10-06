@@ -392,6 +392,47 @@ test('erreur HTTP de /decryptage (500) : message retryable, aucun ACK', async ()
 	app.dom.window.close();
 });
 
+// R1-C4 — conversation stale : l'analyse a avancé dans une autre conversation.
+const STALE_409 = () => response({ detail: { error: 'stale_conversation_context', retryable: false } }, { ok: false, status: 409 });
+
+test('409 stale_conversation_context : message clair, aucun rejeu, aucun ACK, aucun rattachement', async () => {
+	const app = mount({ handlers: { decryptage: STALE_409 } });
+	await app.send('Pour le moat, je pense que la marque compte.');
+	await settle();
+	assert.strictEqual(app.decryptageCalls().length, 1, 'jamais rejoué automatiquement');
+	assert.strictEqual(app.messages('decrypter', 'assistant').length, 0);
+	assert.strictEqual(app.ackCalls().length, 0);
+	assert.deepStrictEqual(app.outbox(), []);
+	const [message] = app.messages('decrypter', 'system');
+	assert.match(message.textContent, /Cette analyse a avancé dans une autre conversation\. Reprends l'étape actuelle pour continuer/);
+	// Message non technique : ni code d'erreur, ni identifiant interne.
+	assert.doesNotMatch(message.textContent, /stale|conversation_context|409|event|uuid/i);
+	assert.doesNotMatch(message.textContent, /déjà été traité différemment/);
+	// Aucun nouvel envoi silencieux (nouveau client_turn_id) : l'utilisateur décide.
+	await settle();
+	assert.strictEqual(app.decryptageCalls().length, 1);
+	app.dom.window.close();
+});
+
+test('409 stale puis nouvel envoi décidé par l\'utilisateur : nouveau client_turn_id, même conversation', async () => {
+	let calls = 0;
+	const app = mount({ handlers: { decryptage: () => (++calls === 1 ? STALE_409() : response(decryptageSuccess('22222222-2222-4222-8222-222222222222'))) } });
+	await app.send('Réponse moat.');
+	await app.send('Et maintenant ?');
+	const [first, second] = app.decryptageCalls();
+	assert.notStrictEqual(first.body.client_turn_id, second.body.client_turn_id);
+	assert.strictEqual(first.body.conversation_key, second.body.conversation_key);
+	assert.strictEqual(second.body.question, 'Et maintenant ?');
+	app.dom.window.close();
+});
+
+test('autre 409 (collision d\'identité) : message historique inchangé', async () => {
+	const app = mount({ handlers: { decryptage: () => response({ detail: { error: 'AssistantTurnIdentityCollision', retryable: false } }, { ok: false, status: 409 }) } });
+	await app.send();
+	assert.match(app.messages('decrypter', 'system')[0].textContent, /déjà été traité différemment/);
+	app.dom.window.close();
+});
+
 test('premier chargement (migration) : le portefeuille migré n\'est pas écrasé par un bootstrap anticipé', async () => {
 	// Sans oryx_migrated_v1, initOryxUserSync migre d'abord (PUT niveau, POST
 	// positions) puis lit /api/user ; userReady ne doit pas avancer ce GET.

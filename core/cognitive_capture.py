@@ -71,7 +71,8 @@ Invariants :
   prompt système ni diagnostic non montré) ; c'est un contrat des
   appelants, que le service n'inspecte pas. support_refs_before ne
   certifie pas l'affichage : ce sont les traces persistées avant la
-  contribution.
+  contribution (toutes par défaut, ou le sous-ensemble explicitement fourni
+  par l'orchestrateur, R1-C4).
 
 - Payloads : dicts JSON-compatibles, sans schéma métier imposé ({} est
   valide). Ils sont validés puis copiés en profondeur à la capture : une
@@ -492,6 +493,7 @@ def append_user_contribution(
     surface: str,
     session_ref: str,
     text_excerpt: str,
+    support_refs_before: tuple | None = None,
 ) -> CognitiveEvent:
     """Ajoute une contribution utilisateur identifiée par contribution_id à
     la fin de user_work_snapshot (append-only), sous le verrou de
@@ -500,11 +502,21 @@ def append_user_contribution(
         {"contribution_id", "source_turn_ref", "phase", "surface",
          "session_ref", "occurred_at", "text", "support_refs_before"}
 
-    phase (1, 2, ...), occurred_at (UTC, = updated_at) et
-    support_refs_before (ids des SupportTrace déjà persistés, ORDER BY
-    sequence_no) sont capturés ici, jamais fournis par l'appelant.
-    text_excerpt est l'extrait minimal choisi par l'orchestrateur, persisté
-    tel quel (aucune normalisation).
+    phase (1, 2, ...) et occurred_at (UTC, = updated_at) sont capturés ici,
+    jamais fournis par l'appelant. text_excerpt est l'extrait minimal choisi
+    par l'orchestrateur, persisté tel quel (aucune normalisation).
+
+    support_refs_before :
+    - None (défaut, comportement historique) : ids de TOUS les SupportTrace
+      déjà persistés de l'événement, ORDER BY sequence_no ;
+    - tuple d'uuid.UUID (R1-C4) : l'orchestrateur restreint explicitement
+      les aides réellement disponibles pour CETTE production (ex. Décrypter :
+      celles rendues dans la conversation du tour). Ce service ne décide pas
+      de cette disponibilité ; il vérifie sous le verrou que chaque id est
+      un SupportTrace déjà persisté de CET événement (sinon
+      InvalidCognitivePayload, jamais de référence étrangère ni future) et
+      les enregistre dans l'ordre chronologique (sequence_no), sans doublon.
+      () = aucune aide disponible.
 
     - contribution_id déjà présent, champs appelant identiques : no-op
       (aucune mutation, updated_at inchangé, rien de recalculé), même si
@@ -523,6 +535,13 @@ def append_user_contribution(
     _require_identifier(surface, "surface")
     _require_identifier(session_ref, "session_ref")
     _require_identifier(text_excerpt, "text_excerpt")
+    if support_refs_before is not None:
+        if type(support_refs_before) is not tuple:
+            raise InvalidCognitivePayload("support_refs_before doit être un tuple ou None")
+        for index, ref in enumerate(support_refs_before):
+            _require_exact_uuid(ref, f"support_refs_before[{index}]")
+        if len(set(support_refs_before)) != len(support_refs_before):
+            raise InvalidCognitivePayload("support_refs_before : doublon refusé")
     requested = {
         "contribution_id": str(contribution_id),
         "source_turn_ref": str(source_turn_ref),
@@ -552,6 +571,13 @@ def append_user_contribution(
         .where(SupportTrace.cognitive_event_id == event.id)
         .order_by(SupportTrace.sequence_no.asc())
     ).scalars().all()
+    if support_refs_before is not None:
+        foreign = set(support_refs_before) - set(support_refs)
+        if foreign:
+            raise InvalidCognitivePayload(
+                f"support_refs_before : {len(foreign)} référence(s) hors des aides persistées de {event_id}")
+        available = set(support_refs_before)
+        support_refs = [ref for ref in support_refs if ref in available]
     now = _utcnow()
     snapshot = list(event.user_work_snapshot)
     snapshot.append({

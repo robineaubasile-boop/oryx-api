@@ -427,7 +427,9 @@ def test_t2a_tables_are_not_wired_to_the_application():
                # migration 0012 (FK de decryptage_cognitive_links vers
                # cognitive_events / support_traces). api.py ne les nomme pas.
                "core/decryptage_cognitive_runtime.py",
-               "alembic/versions/0012_decryptage_cognitive_links.py"}
+               "alembic/versions/0012_decryptage_cognitive_links.py",
+               # R1-C4 : FK input_context_event_id -> cognitive_events.
+               "alembic/versions/0013_decryptage_conversation_affinity.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):

@@ -109,6 +109,8 @@ T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
 R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
+R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
+R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "taxonomy_service.py"
 PUBLIC_API = {
@@ -159,16 +161,17 @@ def _def_kwargs(code="C7_A", revision=1, **overrides):
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t4b_head_is_0012():
+def test_no_migration_added_by_t4b_head_is_0013():
     """T4-B est service-only : aucune migration ajoutée par T4-B ; les seules
-    ajoutées depuis sont 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1)
-    et 0012 (R1-C2), qui est la tête."""
+    ajoutées depuis sont 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1),
+    0012 (R1-C2) et 0013 (R1-C4), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)
+    assert script.get_heads() == [R1C4]
+    assert script.get_revision(R1C4).down_revision == R1C2
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in revisions]
+    assert files == [f"{rev}.py" for rev in revisions[:-1]] + [R1C4_FILE]
 
 
 def test_public_api_is_exactly_the_eight_operations():
@@ -730,7 +733,7 @@ def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, e
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C2
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C4
     assert tax.get_active_release(db) is None
 
 
