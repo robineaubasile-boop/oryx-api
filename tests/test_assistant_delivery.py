@@ -216,7 +216,8 @@ def test_progress_module_owns_no_transaction_and_swallows_nothing():
         assert forbidden not in tokens, forbidden
     tree = ast.parse(source)
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Try)], "aucune capture d'erreur DB"
-    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "core.models"}
+    # typing : ProgressOutcome (NamedTuple, R1-C4), aucune I/O.
+    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "typing", "core.models"}
 
 
 @pytest.mark.parametrize("path", [SERVICE_PATH, PROGRESS_PATH], ids=lambda p: p.name)

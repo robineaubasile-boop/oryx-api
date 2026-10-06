@@ -60,6 +60,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from core.models import AnalysisFact, AnalysisSession, InvestmentThesis, UserStatement
 
@@ -94,6 +95,26 @@ LAST_TASK_STEP = "risques"
 # Étapes auxquelles une contribution peut répondre (swot_final n'est pas une
 # tâche : aucun event, aucune contribution).
 ANSWERABLE_STEPS = tuple(step for step in DECRYPTAGE_STEP_MARKERS if step != FINAL_STEP)
+# Vocabulaire fermé de la décision de progression d'UN tour (ProgressOutcome
+# .action), persistée par le runtime cognitif comme provenance du tour
+# (decryptage_cognitive_links.product_progress_action, R1-C4).
+PROGRESS_ACTIONS = (
+    PROGRESS_NEW, PROGRESS_SAME, PROGRESS_FORWARD, PROGRESS_STEP_SKIP, PROGRESS_RETROGRADE,
+    ANOMALY_FORWARD_WITHOUT_CONTRIBUTION, ANOMALY_TERMINAL_WITHOUT_CONTRIBUTION, ANOMALY_STALE_CONTRIBUTION_STEP,
+    ANOMALY_TERMINAL_BEFORE_RISQUES,
+)
+# Décisions par lesquelles CE tour a réellement fait avancer (ou terminé,
+# marqueur swot_final) la session jusqu'à son marqueur.
+ADVANCING_PROGRESS_ACTIONS = (PROGRESS_FORWARD, PROGRESS_STEP_SKIP)
+
+
+class ProgressOutcome(NamedTuple):
+    """Résultat de la progression d'UN tour : l'AnalysisSession (à lier à la
+    livraison) et la décision réellement prise par CE tour, sous verrou
+    (PROGRESS_ACTIONS). Seule une action de ADVANCING_PROGRESS_ACTIONS
+    signifie que ce tour a lui-même appliqué son marqueur comme avancée."""
+    analysis_session: AnalysisSession
+    action: str
 
 # Tout marqueur <!--ORYX_STEP:...-->, reconnu ou non, est retiré du texte
 # visible ; seul un marqueur du vocabulaire fermé est retenu.
@@ -188,11 +209,14 @@ def apply_construction_these_progress(
     data: dict | None,
     user_contribution: bool,
     answered_step: str | None,
-) -> AnalysisSession | None:
+) -> ProgressOutcome | None:
     """Enregistre la progression construction_these de ce tour dans la
     transaction de l'appelant (mutation + flush ; jamais de commit,
-    rollback ni capture d'erreur DB). Retourne l'AnalysisSession mise à
-    jour, ou None si aucun suivi ne s'applique.
+    rollback ni capture d'erreur DB). Retourne ProgressOutcome
+    (AnalysisSession mise à jour, décision de CE tour), ou None si aucun
+    suivi ne s'applique. La décision (PROGRESS_ACTIONS) est la seule preuve
+    que CE tour a appliqué son marqueur (R1-C4) : l'état courant de la
+    session, qu'un autre tour peut avoir produit, n'en est jamais une.
 
     AnalysisSession est l'unique identité d'une tentative (T1-C1) :
     - session in_progress existante pour user+ticker → réutilisée ;
@@ -354,4 +378,4 @@ def apply_construction_these_progress(
 
     db.flush()
     print(f"[DB-TRACKING] Écrit (non commité) : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={active.current_step}, marqueur={step}, progression={action}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
-    return active
+    return ProgressOutcome(active, action)

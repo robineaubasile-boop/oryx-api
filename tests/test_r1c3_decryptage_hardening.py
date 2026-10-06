@@ -357,7 +357,7 @@ def _apply(Sessions, step, thesis_text=None, ticker="NVDA", user_contribution=Tr
                                                       thesis_text=thesis_text, data=None,
                                                       user_contribution=user_contribution,
                                                       answered_step=answered_step)
-        result_id = result.id if result is not None else None
+        result_id = result.analysis_session.id if result is not None else None
         s.commit()
         return result_id
 
@@ -446,10 +446,10 @@ def test_pg_concurrent_mutation_never_regresses_under_a_stale_snapshot(engine, S
     with Sessions() as holder, Sessions() as waiter:
         assert dp.apply_construction_these_progress(holder, user_id=USER, ticker="NVDA", step="valorisation",
                                                     thesis_text=None, data=None, user_contribution=True,
-                                                    answered_step="moat").id == sid
+                                                    answered_step="moat").analysis_session.id == sid
         result, error = _run_blocked(engine, holder, waiter, lambda s: dp.apply_construction_these_progress(
             s, user_id=USER, ticker="NVDA", step="chiffres", thesis_text=None, data=None,
-            user_contribution=True, answered_step="moat").current_step)
+            user_contribution=True, answered_step="moat").analysis_session.current_step)
     assert error is None
     assert result == "valorisation"
     assert _state(Sessions) == [(sid, "in_progress", "valorisation", False)]

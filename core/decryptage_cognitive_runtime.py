@@ -98,9 +98,11 @@ nouveaux tours :
   conversation), la provenance est dérivée via AssistantDelivery +
   DecryptageCognitiveLink.
 - Frontière cognitive : un event n'est fermé que par une vraie frontière de
-  son AnalysisSession (marqueur suivant / swot_final que la progression
-  produit a effectivement appliqué, c.-à-d. égal au current_step de la
-  session à l'ACK) ; jamais par une navigation. Plus d'un event open
+  son AnalysisSession, et seulement si la progression produit DE CE TOUR a
+  appliqué le marqueur comme avancée (product_progress_action forward /
+  step_skip, persistée dans la transaction /decryptage via
+  record_turn_progress) ; jamais par une navigation, ni parce que la
+  session a atteint ce marqueur via un autre tour. Plus d'un event open
   compatible : fail closed (AmbiguousOpenDecryptageEvents).
 
 Les liens / livraisons V1 (decryptage-cognitive-runtime-v1) restent lisibles
@@ -140,7 +142,15 @@ from datetime import datetime, timezone
 from sqlalchemy import or_, select
 
 from core import cognitive_capture
-from core.decryptage_progress import DECRYPTAGE_STEP_MARKERS, FINAL_STEP, find_active_analysis_session
+from core.decryptage_progress import (
+    ADVANCING_PROGRESS_ACTIONS,
+    DECRYPTAGE_STEP_MARKERS,
+    FINAL_STEP,
+    PROGRESS_ACTIONS,
+    PROGRESS_NEW,
+    PROGRESS_SAME,
+    find_active_analysis_session,
+)
 from core.models import AnalysisSession, AssistantDelivery, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
 
 logger = logging.getLogger(__name__)
@@ -193,6 +203,12 @@ OPENING_ACTIONS = (OPENED_EVENT, TRANSITIONED_EVENT)
 # Ancre conversationnelle après une livraison captured (R1-C4).
 ANCHORING_RESPONSE_ACTIONS = (OPENED_EVENT, CONTINUED_EVENT, CONTINUED_WITHOUT_BOUNDARY_SIGNAL, TRANSITIONED_EVENT)
 NON_ANCHORING_RESPONSE_ACTIONS = (CLOSED_TERMINAL, NO_COGNITIVE_ACTION, STALE_DELIVERY)
+
+# Décisions de progression de CE tour (product_progress_action) qui
+# autorisent, à l'ACK, une frontière (transition / fermeture terminale) ou
+# l'ouverture d'un event. Jamais déduit de l'état courant de la session.
+BOUNDARY_PROGRESS_ACTIONS = ADVANCING_PROGRESS_ACTIONS
+OPENING_PROGRESS_ACTIONS = (PROGRESS_NEW, PROGRESS_SAME)
 
 # Étapes qui ouvrent une tâche cognitive utilisateur. swot_final complète
 # l'AnalysisSession mais n'est pas une nouvelle tâche : jamais d'event.
@@ -684,6 +700,26 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     return link
 
 
+def record_turn_progress(db, *, link: DecryptageCognitiveLink, progress_action: str | None) -> None:
+    """Persiste sur le lien du tour (V2, awaiting_delivery, créé par
+    capture_user_turn dans la MÊME transaction /decryptage) la décision de
+    progression produit prise par CE tour sous verrou
+    (decryptage_progress.ProgressOutcome.action ; None si aucune progression
+    évaluée). C'est la provenance de causalité lue à l'ACK : seule une
+    avancée appliquée par CE tour (forward / step_skip) autorise une
+    frontière cognitive, jamais l'état courant de l'AnalysisSession. Écrite
+    une seule fois ; ligne neuve de la transaction (aucun nouveau verrou)."""
+    if link.capture_version != COGNITIVE_RUNTIME_VERSION or link.capture_state != AWAITING_DELIVERY:
+        raise CognitiveLinkInvariantError(f"assistant turn {link.assistant_delivery_id} : lien non enregistrable")
+    if link.product_progress_action is not None:
+        raise CognitiveLinkInvariantError(f"assistant turn {link.assistant_delivery_id} : progression déjà tracée")
+    if progress_action is not None and progress_action not in PROGRESS_ACTIONS:
+        raise CognitiveLinkInvariantError(f"assistant turn {link.assistant_delivery_id} : progression inconnue")
+    link.product_progress_action = progress_action
+    db.flush()
+    logger.info("[R1-C4] assistant_turn=%s product_progress_action=%s", link.assistant_delivery_id, progress_action)
+
+
 def answered_step(db, *, link: DecryptageCognitiveLink) -> str | None:
     """Étape cognitive à laquelle la contribution du tour répond réellement
     (R1-C4) : étape de l'event d'ancrage (input_context_event_id), dérivée de
@@ -764,18 +800,21 @@ def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCog
       stale_delivery également (jamais de continuation opportuniste, jamais
       un second event open dans l'AnalysisSession) ;
     - aucune cible figée et aucun event open : marqueur de tâche que la
-      progression produit a effectivement appliqué (= current_step de la
-      session) -> opened_event ; sinon no_cognitive_action ;
+      progression produit DE CE TOUR a créé (new) ou confirmé sous verrou
+      (same), et qui est encore le current_step -> opened_event ; sinon
+      no_cognitive_action ;
     - marqueur absent / inconnu / non appliqué -> SupportTrace,
       continued_without_boundary_signal ;
     - même marqueur -> SupportTrace, continued_event ;
     - rétrograde -> SupportTrace, continued_without_boundary_signal ;
     - marqueur suivant / saut / swot_final : frontière cognitive SEULEMENT si
-      la progression produit l'a appliqué (marqueur = current_step de la
-      session, ce qui exige une vraie contribution, R1-C4) : transition
-      (ancien event finalized / abandoned, nouvel event dont la réponse est
-      le stimulus) ou fermeture terminale (aucun event swot_final) ; sinon
-      continuation sans frontière (anomalie boundary_not_applied)."""
+      la progression produit DE CE TOUR l'a appliqué comme avancée
+      (product_progress_action forward / step_skip, persistée à la capture ;
+      et marqueur encore = current_step) : transition (ancien event
+      finalized / abandoned, nouvel event dont la réponse est le stimulus) ou
+      fermeture terminale (aucun event swot_final). Une progression appliquée
+      par un AUTRE tour n'autorise jamais cette frontière : continuation sans
+      frontière (anomalie boundary_not_applied)."""
     marker = _step_marker(delivery)
     boundary = marker if delivery.analysis_session_id is not None else None
     if marker is not None and boundary is None:
@@ -811,16 +850,24 @@ def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCog
         return _record_response(db, delivery=delivery, link=link, action=STALE_DELIVERY, response_event=None,
                                 trace=None, marker=marker, from_step=None)
 
-    applied = boundary is not None and session is not None and session.current_step == boundary
+    # Causalité (R1-C4) : la frontière n'est appliquée que si la progression
+    # produit DE CE TOUR a appliqué le marqueur (product_progress_action,
+    # persistée dans la transaction /decryptage). L'état courant de la
+    # session, qu'un autre tour peut avoir produit, n'est qu'une garde de
+    # cohérence supplémentaire, jamais une preuve.
+    progress_action = link.product_progress_action
+    consistent = boundary is not None and session is not None and session.current_step == boundary
+    advanced = consistent and progress_action in BOUNDARY_PROGRESS_ACTIONS
+    confirmed = consistent and progress_action in OPENING_PROGRESS_ACTIONS
     response_event = trace = from_step = None
     if reference is None:
-        if boundary in TASK_STEPS and applied:
+        if boundary in TASK_STEPS and confirmed:
             response_event = _open_event(db, delivery)
             action = OPENED_EVENT
         else:
             if boundary in TASK_STEPS:
-                logger.warning("[R1-C4] assistant_turn=%s anomaly=boundary_not_applied marker=%s current_step=%s",
-                               delivery.id, boundary, session.current_step)
+                logger.warning("[R1-C4] assistant_turn=%s anomaly=boundary_not_applied marker=%s current_step=%s "
+                               "progress_action=%s", delivery.id, boundary, session.current_step, progress_action)
             action = NO_COGNITIVE_ACTION
     else:
         from_step = _event_step(db, reference)
@@ -832,11 +879,14 @@ def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCog
             logger.warning("[R1-C2] assistant_turn=%s anomaly=retrograde_marker from=%s to=%s event=%s",
                            delivery.id, from_step, boundary, reference.id)
             action = CONTINUED_WITHOUT_BOUNDARY_SIGNAL
-        elif not applied:
-            # Claude seul ne crée jamais de frontière : la progression produit
-            # a refusé ce marqueur (aucune contribution réelle).
+        elif not advanced:
+            # Claude seul ne crée jamais de frontière, ni la progression d'un
+            # AUTRE tour : celle de CE tour n'a pas avancé jusqu'à ce marqueur
+            # (refusée, contribution périmée, même étape...), même si la
+            # session y est arrivée par ailleurs.
             logger.warning("[R1-C4] assistant_turn=%s anomaly=boundary_not_applied marker=%s current_step=%s "
-                           "event=%s", delivery.id, boundary, session.current_step, reference.id)
+                           "progress_action=%s event=%s", delivery.id, boundary, session.current_step,
+                           progress_action, reference.id)
             action = CONTINUED_WITHOUT_BOUNDARY_SIGNAL
         elif boundary == FINAL_STEP:
             _close_event(db, reference)

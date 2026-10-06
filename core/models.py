@@ -1512,6 +1512,11 @@ class DecryptageCognitiveLink(Base):
       la capture côté entrée (l'event open de l'AnalysisSession cible, ou
       NULL). Seul candidat de continuation à l'ACK ; jamais remplacé par un
       event apparu après la capture (stale_delivery s'il a été fermé) ;
+    - product_progress_action (R1-C4, V2 uniquement) : décision de
+      progression produit prise par CE tour sous verrou (vocabulaire
+      core.decryptage_progress.PROGRESS_ACTIONS, NULL si aucune). Seule
+      preuve à l'ACK que CE tour a appliqué son marqueur : transition /
+      fermeture terminale => forward / step_skip ; ouverture => new / same ;
     - capture_state awaiting_delivery -> captured, atomiquement avec
       l'ACK pending -> delivered ; response_action / response_event_id /
       support_trace_id / captured_at sont remplis à ce moment.
@@ -1523,8 +1528,9 @@ class DecryptageCognitiveLink(Base):
     0012_decryptage_cognitive_links ; timestamps générés par l'application
     (aucun server_default), CHECK plutôt qu'ENUM, FK sans cascade.
     Étendue (sans backfill) par 0013_decryptage_conv_affinity (R1-C4) :
-    input_context_event_id, response_context_event_id, context_switched,
-    stale_delivery, CHECK de cohérence par version de runtime."""
+    input_context_event_id, response_context_event_id,
+    product_progress_action, context_switched, stale_delivery, CHECK de
+    cohérence par version de runtime et de causalité des frontières."""
     __tablename__ = "decryptage_cognitive_links"
     __table_args__ = (
         CheckConstraint(
@@ -1571,7 +1577,8 @@ class DecryptageCognitiveLink(Base):
         ),
         CheckConstraint(
             "(capture_version = 'decryptage-cognitive-runtime-v1' AND input_context_event_id IS NULL "
-            "AND response_context_event_id IS NULL AND input_action <> 'context_switched' "
+            "AND response_context_event_id IS NULL AND product_progress_action IS NULL "
+            "AND input_action <> 'context_switched' "
             "AND (response_action IS NULL OR response_action <> 'stale_delivery')) "
             "OR (capture_version = 'decryptage-cognitive-runtime-v2' AND context_exit_event_id IS NULL "
             "AND input_action NOT IN ('event_closed_context_change', 'event_abandoned_context_change') "
@@ -1594,6 +1601,21 @@ class DecryptageCognitiveLink(Base):
             "OR (response_action IN ('opened_event', 'no_cognitive_action') AND response_context_event_id IS NULL)",
             name="ck_decryptage_cognitive_links_response_attachment",
         ),
+        CheckConstraint(
+            "product_progress_action IS NULL OR product_progress_action IN ("
+            "'new', 'same', 'forward', 'step_skip', 'retrograde_marker', 'forward_without_contribution', "
+            "'terminal_without_contribution', 'stale_contribution_step', 'terminal_before_risques')",
+            name="ck_decryptage_cognitive_links_product_progress_action",
+        ),
+        CheckConstraint(
+            "capture_version <> 'decryptage-cognitive-runtime-v2' OR response_action IS NULL "
+            "OR response_action NOT IN ('transitioned_event', 'closed_terminal', 'opened_event') "
+            "OR (response_action IN ('transitioned_event', 'closed_terminal') AND product_progress_action IS NOT NULL "
+            "AND product_progress_action IN ('forward', 'step_skip')) "
+            "OR (response_action = 'opened_event' AND product_progress_action IS NOT NULL "
+            "AND product_progress_action IN ('new', 'same'))",
+            name="ck_decryptage_cognitive_links_boundary_causality",
+        ),
         Index(
             "uq_decryptage_cognitive_links_opening_event", "response_event_id", unique=True,
             postgresql_where=text("response_action IN ('opened_event', 'transitioned_event')"),
@@ -1614,3 +1636,4 @@ class DecryptageCognitiveLink(Base):
     # R1-C4 (0013) : ajoutées en fin de table par ALTER TABLE.
     input_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
     response_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    product_progress_action = Column(String, nullable=True)

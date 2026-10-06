@@ -48,7 +48,7 @@ from tests.test_assistant_delivery import (  # noqa: F401 — fixtures
     engine,
     ext,
 )
-from tests.test_cognitive_capture import _backend_pid, _run_blocked
+from tests.test_cognitive_capture import _backend_pid, _run_blocked, _Statements, _writes
 from tests.test_decryptage_cognitive_runtime import (
     T3_AND_BEYOND,
     _ack,
@@ -340,12 +340,16 @@ def test_pg_b_stale_conversation_can_navigate_or_be_resumed(engine, Sessions, ex
 # C. ACK tardif
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("question, marker", [("", "moat"), ("A : ma réponse moat.", "chiffres")],
+@pytest.mark.parametrize("question, marker", [("", "moat"), ("A : ma réponse moat.", "moat")],
                          ids=["reprise-vide", "contribution"])
 def test_pg_c_late_ack_is_delivered_but_stale(engine, Sessions, ext, caplog, question, marker):
-    """A (ancrée E_MOAT) produit une livraison pending ; avant son ACK, B fait
-    avancer E_MOAT -> E_CHIFFRES. L'ACK de A : delivered, lien captured
-    stale_delivery, aucun SupportTrace, aucun event, E_CHIFFRES intact."""
+    """A (ancrée E_MOAT) produit une livraison pending qui ne fait pas avancer
+    la session (reprise, ou contribution dont la réponse reste sur moat) ;
+    avant son ACK, B répond et fait réellement avancer E_MOAT -> E_CHIFFRES.
+    L'ACK de A : delivered, lien captured stale_delivery, aucun SupportTrace,
+    aucun event, E_CHIFFRES intact. (Si A avait elle-même avancé, la
+    contribution de B serait périmée et ne pourrait plus créer de frontière :
+    voir test_pg_boundary_*.)"""
     moat = _moat_shared_by_a_and_b(Sessions, ext, engine)
     pending_a = _send(Sessions, ext, _reply("A-pending", marker), question, conv=CONV_A)
     assert _link(engine, pending_a["assistant_turn_id"])["input_context_event_id"] == moat["id"]
@@ -450,6 +454,13 @@ def _captured_delivery(session, conv, action, event_id, *, at, version=V2, deliv
         trace_id = cc.add_support_trace(session, event_id=event_id, support_kind="assistant_response",
                                         support_payload={"visible_content": "x"}).id
     response_event = event_id if action in dcr.ANCHORING_RESPONSE_ACTIONS else None
+    # Décision de progression cohérente avec l'action (CHECK
+    # boundary_causality, V2).
+    progress_action = None
+    if version == V2 and action in ("transitioned_event", "closed_terminal"):
+        progress_action = "forward"
+    elif version == V2 and action == "opened_event":
+        progress_action = "new"
     # Cible figée cohérente avec l'action (CHECK response_context, V2).
     if version != V2 or action in ("opened_event", "no_cognitive_action", "stale_delivery"):
         response_context = None
@@ -460,7 +471,7 @@ def _captured_delivery(session, conv, action, event_id, *, at, version=V2, deliv
     session.add(dcr.DecryptageCognitiveLink(
         assistant_delivery_id=delivery.id, capture_version=version, input_action="no_open_event",
         input_event_id=None, input_context_event_id=None, response_context_event_id=response_context,
-        context_exit_event_id=None,
+        product_progress_action=progress_action, context_exit_event_id=None,
         capture_state="captured" if captured else "awaiting_delivery",
         response_action=action if captured else None, response_event_id=response_event if captured else None,
         support_trace_id=trace_id if captured else None, created_at=at, captured_at=at if captured else None))
@@ -543,7 +554,8 @@ def test_pg_f_empty_resume_with_a_forward_marker_never_advances(engine, Sessions
     # Cognitif cohérent avec le produit : aucune frontière.
     assert (link["response_action"], link["response_event_id"]) == ("continued_without_boundary_signal", moat["id"])
     assert _event(engine, moat["id"])["status"] == "open" and _events(engine)[-1]["id"] == moat["id"]
-    assert f"anomaly=boundary_not_applied marker=chiffres current_step=moat event={moat['id']}" in caplog.text
+    assert (f"anomaly=boundary_not_applied marker=chiffres current_step=moat "
+            f"progress_action=forward_without_contribution event={moat['id']}") in caplog.text
 
 
 def test_pg_f_context_switch_with_a_forward_marker_never_advances_the_target(engine, Sessions, ext, caplog):
@@ -747,9 +759,11 @@ def test_pg_two_tabs_answering_the_same_event_both_contribute_to_it(engine, Sess
         a = _claim_v2(holder, conv=CONV_A, marker="chiffres")
         dcr.capture_user_turn(holder, delivery=a, ticker="MC.PA", user_text="A : moat.")
         assert dcr.answered_step(holder, link=dcr._lock_link(holder, a.id)) == "moat"
-        dp.apply_construction_these_progress(holder, user_id=USER, ticker="MC.PA", step="chiffres",
-                                             thesis_text="A : moat.", data=None, user_contribution=True,
-                                             answered_step="moat")
+        progress = dp.apply_construction_these_progress(holder, user_id=USER, ticker="MC.PA", step="chiffres",
+                                                        thesis_text="A : moat.", data=None, user_contribution=True,
+                                                        answered_step="moat")
+        assert progress.action == "forward"
+        dcr.record_turn_progress(holder, link=dcr._lock_link(holder, a.id), progress_action=progress.action)
 
         def b_turn(session):
             b = _claim_v2(session, conv=CONV_B, marker="chiffres")
@@ -1045,7 +1059,7 @@ def _apply_nvda(Sessions, step, *, answered, thesis="Ma thèse."):  # noqa: F811
     with Sessions() as s:
         result = dp.apply_construction_these_progress(s, user_id=USER, ticker="NVDA", step=step, thesis_text=thesis,
                                                       data=None, user_contribution=True, answered_step=answered)
-        result_id = result.id if result is not None else None
+        result_id = result.analysis_session.id if result is not None else None
         s.commit()
         return result_id
 
@@ -1167,3 +1181,178 @@ def test_pg_blocker3_t9_other_ticker_is_a_context_switch(engine, Sessions, ext):
     assert (link["input_action"], link["input_context_event_id"], link["input_event_id"]) == (
         "context_switched", nvda["id"], None)
     assert _event(engine, nvda["id"]) == nvda
+
+
+# --------------------------------------------------------------------------
+# Audit PR #216 — causalité des frontières : seule la progression DE CE TOUR
+# (product_progress_action) autorise transition / fermeture terminale
+# --------------------------------------------------------------------------
+
+def _full_turn_tx(session, *, conv, marker, text, ticker="MC.PA"):
+    """Un tour /decryptage complet dans la transaction `session` (comme la
+    route, sans les appels externes) : claim, capture cognitive, progression
+    produit, liaison de session, traçage de la décision de CE tour."""
+    delivery = _claim_v2(session, conv=conv, marker=marker,
+                         payload={**PAYLOAD_A, "analysis": f"Réponse {conv} {marker}."})
+    link = dcr.capture_user_turn(session, delivery=delivery, ticker=ticker, user_text=text)
+    contribution = link.input_action == "contribution_appended"
+    progress = dp.apply_construction_these_progress(
+        session, user_id=USER, ticker=ticker, step=marker, thesis_text=text if contribution else None, data=None,
+        user_contribution=contribution, answered_step=dcr.answered_step(session, link=link))
+    ad.bind_analysis_session(session, delivery_id=delivery.id, analysis_session_id=progress.analysis_session.id)
+    dcr.record_turn_progress(session, link=link, progress_action=progress.action)
+    return {"assistant_turn_id": str(delivery.id), "action": progress.action}
+
+
+def test_pg_boundary_race_stale_contribution_never_transitions_even_if_session_matches(engine, Sessions, ext,
+                                                                                      caplog):
+    """Course réelle (deux connexions) : A et B ancrées à E_MOAT. La
+    transaction de A (contribution moat, marqueur chiffres : moat -> chiffres)
+    détient l'AnalysisSession ; celle de B (contribution moat, marqueur
+    chiffres) attend, puis voit current_step = chiffres : contribution
+    stale_contribution_step, AUCUNE progression. À l'ACK de B, la session est
+    bien à chiffres et la réponse de B porte chiffres : B ne ferme PAS E_MOAT
+    et ne crée aucune transition (continuation sans frontière). Miroir : l'ACK
+    de A, qui a réellement appliqué moat -> chiffres, produit la transition.
+    Retries d'ACK : no-op strict."""
+    moat = _moat_shared_by_a_and_b(Sessions, ext, engine)
+    with Sessions() as holder, Sessions() as waiter:
+        turn_a = _full_turn_tx(holder, conv=CONV_A, marker="chiffres", text="A : un moat de marque.")
+        assert turn_a["action"] == "forward"
+        result, error = _run_blocked(engine, holder, waiter, lambda s: _full_turn_tx(
+            s, conv=CONV_B, marker="chiffres", text="B : un moat de réseau."))
+    assert error is None and result["action"] == "stale_contribution_step"
+    turn_b = result
+    assert _session_row(engine)[0][1:3] == ("in_progress", "chiffres")
+    assert _link(engine, turn_a["assistant_turn_id"])["product_progress_action"] == "forward"
+    assert _link(engine, turn_b["assistant_turn_id"])["product_progress_action"] == "stale_contribution_step"
+    assert [c["session_ref"] for c in _event(engine, moat["id"])["user_work_snapshot"]] == [CONV_A, CONV_B]
+
+    # ACK de B d'abord : état global compatible (chiffres == chiffres), mais
+    # CE tour n'a rien appliqué.
+    events_before = _events(engine)
+    with caplog.at_level(logging.INFO, logger=RUNTIME_LOGGER):
+        assert _ack(Sessions, turn_b, conv=CONV_B)["delivery_status"] == "delivered"
+    link_b = _link(engine, turn_b["assistant_turn_id"])
+    [trace_b] = [t for t in _traces(engine, moat["id"]) if t["id"] == link_b["support_trace_id"]]
+    assert (link_b["response_action"], link_b["response_event_id"]) == (
+        "continued_without_boundary_signal", moat["id"])
+    assert trace_b["support_payload"] == {"visible_content": "Réponse conv-b chiffres."}
+    assert _event(engine, moat["id"])["status"] == "open"
+    assert [e["id"] for e in _events(engine)] == [e["id"] for e in events_before]  # aucun nouvel event
+    assert ("anomaly=boundary_not_applied marker=chiffres current_step=chiffres "
+            "progress_action=stale_contribution_step") in caplog.text
+
+    # Miroir positif : l'ACK de A (progression réellement appliquée par CE tour).
+    assert _ack(Sessions, turn_a, conv=CONV_A)["delivery_status"] == "delivered"
+    link_a = _link(engine, turn_a["assistant_turn_id"])
+    old, new = _events(engine)[-2:]
+    assert (old["id"], old["status"], new["status"]) == (moat["id"], "finalized", "open")
+    assert (link_a["response_action"], link_a["response_event_id"]) == ("transitioned_event", new["id"])
+    assert new["stimulus_snapshot"]["visible_content"] == "Réponse conv-a chiffres."
+
+    # Idempotence : retries d'ACK sans aucune écriture.
+    state = _t2_state(engine)
+    with _Statements(engine) as statements:
+        for turn, conv in ((turn_b, CONV_B), (turn_a, CONV_A)):
+            assert _ack(Sessions, turn, conv=conv)["delivery_status"] == "delivered"
+    assert _writes(statements) == [] and _t2_state(engine) == state
+
+
+@pytest.mark.parametrize("order", ["stale-first", "advancing-first"])
+def test_pg_boundary_api_flow_only_the_advancing_turn_transitions(engine, Sessions, ext, order):
+    """Même course via la route /decryptage : quel que soit l'ordre des ACK,
+    seul le tour qui a fait avancer la session crée la frontière ; la réponse
+    du tour périmé ne transite jamais (continuation si E_MOAT est encore
+    open, stale_delivery s'il a déjà été fermé par l'ACK légitime)."""
+    moat = _moat_shared_by_a_and_b(Sessions, ext, engine)
+    turn_a = _send(Sessions, ext, _reply("A-chiffres", "chiffres"), "A : un moat de marque.", conv=CONV_A)
+    turn_b = _send(Sessions, ext, _reply("B-chiffres", "chiffres"), "B : un moat de réseau.", conv=CONV_B)
+    assert (_link(engine, turn_a["assistant_turn_id"])["product_progress_action"],
+            _link(engine, turn_b["assistant_turn_id"])["product_progress_action"]) == (
+        "forward", "stale_contribution_step")
+    acks = [(turn_b, CONV_B), (turn_a, CONV_A)] if order == "stale-first" else [(turn_a, CONV_A), (turn_b, CONV_B)]
+    for turn, conv in acks:
+        _ack(Sessions, turn, conv=conv)
+    link_a = _link(engine, turn_a["assistant_turn_id"])
+    link_b = _link(engine, turn_b["assistant_turn_id"])
+    assert link_a["response_action"] == "transitioned_event"
+    expected_b = "continued_without_boundary_signal" if order == "stale-first" else "stale_delivery"
+    assert link_b["response_action"] == expected_b
+    assert [e["status"] for e in _events(engine)][-2:] == ["finalized", "open"]
+    assert len([e for e in _events(engine) if e["status"] == "open"]) == 1
+    assert _event(engine, moat["id"])["status"] == "finalized"
+
+
+def test_pg_boundary_terminal_requires_this_turn_to_complete_the_session(engine, Sessions, ext, caplog):
+    """A et B ancrées à E_RISQUES. B (reprise sans texte) reçoit une réponse
+    swot_final : progression refusée (terminal_without_contribution). A
+    contribue et termine réellement la session (swot_final). À l'ACK de B, la
+    session est completed / current_step = swot_final : B ne peut JAMAIS
+    provoquer closed_terminal (continuation sans frontière). L'ACK de A, qui
+    a réellement terminé la session, ferme E_RISQUES (aucun event
+    swot_final)."""
+    _nvda_to_risques(Sessions, ext, CONV_A)
+    risques = _events(engine)[-1]
+    _turn(Sessions, ext, _reply("B-risques", "risques"), "", context="", conv=CONV_B, ticker="NVDA")
+    turn_b = _send(Sessions, ext, _reply("B-bilan", "swot_final"), "", context="h", conv=CONV_B, ticker="NVDA")
+    turn_a = _send(Sessions, ext, _reply("A-bilan", "swot_final"), "A : ma thèse.", conv=CONV_A, ticker="NVDA")
+    assert (_link(engine, turn_b["assistant_turn_id"])["product_progress_action"],
+            _link(engine, turn_a["assistant_turn_id"])["product_progress_action"]) == (
+        "terminal_without_contribution", "forward")
+    assert _nvda_state(engine)[-1][:2] == ("completed", "swot_final")
+
+    with caplog.at_level(logging.INFO, logger=RUNTIME_LOGGER):
+        _ack(Sessions, turn_b, conv=CONV_B)
+    link_b = _link(engine, turn_b["assistant_turn_id"])
+    assert (link_b["response_action"], link_b["response_event_id"]) == (
+        "continued_without_boundary_signal", risques["id"])
+    assert _event(engine, risques["id"])["status"] == "open"
+    assert "progress_action=terminal_without_contribution" in caplog.text
+
+    _ack(Sessions, turn_a, conv=CONV_A)
+    link_a = _link(engine, turn_a["assistant_turn_id"])
+    assert (link_a["response_action"], link_a["response_event_id"]) == ("closed_terminal", None)
+    assert _event(engine, risques["id"])["status"] == "finalized"
+    assert not [e for e in _events(engine) if e["status"] == "open"]
+    assert [t[0] for t in _product(engine)["theses"]] == ["A : ma thèse."]
+
+
+def test_pg_boundary_opening_never_from_a_refused_progression(engine, Sessions, ext, caplog):
+    """Aucun event ouvert, aucune cible figée : un tour dont la progression a
+    été REFUSÉE (forward_without_contribution) n'ouvre jamais d'event, même
+    si l'état global de la session a été amené sur son marqueur entre-temps
+    (simulé ici) ; seule une création / confirmation de CE tour (new / same)
+    le peut."""
+    first = _send(Sessions, ext, _reply("A1", "business"), "", context="", conv=CONV_A)  # new (pending)
+    refused = _send(Sessions, ext, _reply("B1", "moat"), "", context="", conv=CONV_B)
+    assert _link(engine, refused["assistant_turn_id"])["product_progress_action"] == "forward_without_contribution"
+    with engine.begin() as conn:  # un autre tour aurait amené la session sur « moat »
+        conn.execute(sa.text("UPDATE analysis_sessions SET current_step = 'moat' WHERE ticker = 'MC.PA' "
+                             "AND status = 'in_progress'"))
+    with caplog.at_level(logging.INFO, logger=RUNTIME_LOGGER):
+        _ack(Sessions, refused, conv=CONV_B)
+    assert _link(engine, refused["assistant_turn_id"])["response_action"] == "no_cognitive_action"
+    assert _events(engine) == []
+    assert "progress_action=forward_without_contribution" in caplog.text
+    assert _link(engine, first["assistant_turn_id"])["product_progress_action"] == "new"
+
+
+def test_pg_record_turn_progress_invariants(engine, Sessions, ext):
+    with Sessions() as session:
+        delivery = _claim_v2(session, conv=CONV_A, marker="business")
+        link = dcr.capture_user_turn(session, delivery=delivery, ticker="MC.PA", user_text="")
+        with pytest.raises(dcr.CognitiveLinkInvariantError):
+            dcr.record_turn_progress(session, link=link, progress_action="applied")  # hors vocabulaire
+        dcr.record_turn_progress(session, link=link, progress_action="new")
+        with pytest.raises(dcr.CognitiveLinkInvariantError):  # une seule fois
+            dcr.record_turn_progress(session, link=link, progress_action="forward")
+        session.rollback()
+
+
+def test_pg_positive_mirror_simple_flow_records_forward_and_transitions(engine, Sessions, ext):
+    moat = _lvmh_at_moat(Sessions, ext, engine)
+    answer = _turn(Sessions, ext, _reply("chiffres", "chiffres"), "Un moat de marque.", conv=CONV_A)
+    link = _link(engine, answer["assistant_turn_id"])
+    assert (link["product_progress_action"], link["response_action"]) == ("forward", "transitioned_event")
+    assert _event(engine, moat["id"])["status"] == "finalized"

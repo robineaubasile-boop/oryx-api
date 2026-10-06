@@ -51,6 +51,7 @@ from core.decryptage_cognitive_runtime import (
 	capture_delivered_response,
 	capture_user_turn,
 	precheck_conversation_context,
+	record_turn_progress,
 	runtime_private_metadata,
 )
 from core.decryptage_progress import (
@@ -786,12 +787,18 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 		progress_thesis_text = question if user_contribution else None
 		progress_answered_step = cognitive_answered_step(db, link=cognitive_link) if user_contribution else None
 		if created and method_id == "construction_these" and step_marker is not None:
-			analysis_session = apply_construction_these_progress(
+			progress = apply_construction_these_progress(
 				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=progress_thesis_text, data=data,
 				user_contribution=user_contribution, answered_step=progress_answered_step,
 			)
-			if analysis_session is not None:
-				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=analysis_session.id)
+			if progress is not None:
+				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=progress.analysis_session.id)
+				# R1-C4 : la décision de progression de CE tour est persistée
+				# sur son lien (même transaction) : seule preuve, à l'ACK, que
+				# ce tour a appliqué son marqueur (jamais l'état courant de
+				# la session, qu'un autre tour peut avoir produit).
+				if cognitive_link is not None:
+					record_turn_progress(db, link=cognitive_link, progress_action=progress.action)
 		final = _delivery_response(delivery)
 		db.commit()
 	except StaleConversationContext as exc:

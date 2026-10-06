@@ -23,6 +23,14 @@ complet en fait 37.
   Seul candidat de continuation à l'ACK (stale_delivery s'il a été fermé) :
   aucun event apparu après la capture ne peut devenir rétroactivement la
   cible de la réponse ;
+- colonne product_progress_action VARCHAR NULL : décision de progression
+  produit prise par CE tour, sous verrou, dans la transaction /decryptage
+  (vocabulaire fermé de core/decryptage_progress.PROGRESS_ACTIONS ; NULL si
+  aucune progression n'a été évaluée). Seule preuve, à l'ACK, que CE tour a
+  appliqué son marqueur : une frontière cognitive (transition, fermeture
+  terminale) exige forward / step_skip ; une ouverture exige new / same.
+  L'état courant de l'AnalysisSession (qu'un autre tour a pu produire)
+  n'en est jamais une preuve ;
 - vocabulaires fermés étendus (anciennes valeurs V1 toujours valides) :
   input_action + 'context_switched' (la conversation se détache de son
   ancre, qui reste inchangée) ; response_action + 'stale_delivery' (réponse
@@ -47,7 +55,13 @@ complet en fait 37.
   => response_event_id = response_context_event_id ; transition / fermeture
   terminale => response_context_event_id présent (et distinct du nouvel
   event) ; ouverture / no_cognitive_action => response_context_event_id
-  NULL ; stale_delivery : quelconque.
+  NULL ; stale_delivery : quelconque ;
+- CHECK ck_decryptage_cognitive_links_product_progress_action : vocabulaire
+  fermé (ou NULL) ;
+- CHECK ck_decryptage_cognitive_links_boundary_causality (V2) :
+  transitioned_event / closed_terminal => product_progress_action IN
+  (forward, step_skip) ; opened_event => product_progress_action IN (new,
+  same).
 
 Les CHECK de vocabulaire sont remplacés (DROP + ADD du même nom) ; les
 autres CHECK de 0012 (capture_state, capture_state_fields, input_event,
@@ -83,6 +97,9 @@ FK = "decryptage_cognitive_links_input_context_event_id_fkey"
 RESPONSE_COLUMN = "response_context_event_id"
 RESPONSE_FK = "decryptage_cognitive_links_response_context_event_id_fkey"
 RESPONSE_ATTACHMENT_CHECK = "ck_decryptage_cognitive_links_response_attachment"
+PROGRESS_COLUMN = "product_progress_action"
+PROGRESS_ACTION_CHECK = "ck_decryptage_cognitive_links_product_progress_action"
+BOUNDARY_CAUSALITY_CHECK = "ck_decryptage_cognitive_links_boundary_causality"
 INPUT_ACTION_CHECK = "ck_decryptage_cognitive_links_input_action"
 RESPONSE_ACTION_CHECK = "ck_decryptage_cognitive_links_response_action"
 CONTEXT_SWITCHED_CHECK = "ck_decryptage_cognitive_links_context_switched"
@@ -117,7 +134,8 @@ STALE_DELIVERY = (
 )
 RUNTIME_VERSION = (
     "(capture_version = 'decryptage-cognitive-runtime-v1' AND input_context_event_id IS NULL "
-    "AND response_context_event_id IS NULL AND input_action <> 'context_switched' "
+    "AND response_context_event_id IS NULL AND product_progress_action IS NULL "
+    "AND input_action <> 'context_switched' "
     "AND (response_action IS NULL OR response_action <> 'stale_delivery')) "
     "OR (capture_version = 'decryptage-cognitive-runtime-v2' AND context_exit_event_id IS NULL "
     "AND input_action NOT IN ('event_closed_context_change', 'event_abandoned_context_change') "
@@ -138,13 +156,27 @@ RESPONSE_ATTACHMENT = (
     "AND (response_event_id IS NULL OR response_event_id <> response_context_event_id)) "
     "OR (response_action IN ('opened_event', 'no_cognitive_action') AND response_context_event_id IS NULL)"
 )
+PRODUCT_PROGRESS_ACTION = (
+    "product_progress_action IS NULL OR product_progress_action IN ("
+    "'new', 'same', 'forward', 'step_skip', 'retrograde_marker', 'forward_without_contribution', "
+    "'terminal_without_contribution', 'stale_contribution_step', 'terminal_before_risques')"
+)
+BOUNDARY_CAUSALITY = (
+    "capture_version <> 'decryptage-cognitive-runtime-v2' OR response_action IS NULL "
+    "OR response_action NOT IN ('transitioned_event', 'closed_terminal', 'opened_event') "
+    "OR (response_action IN ('transitioned_event', 'closed_terminal') AND product_progress_action IS NOT NULL "
+    "AND product_progress_action IN ('forward', 'step_skip')) "
+    "OR (response_action = 'opened_event' AND product_progress_action IS NOT NULL "
+    "AND product_progress_action IN ('new', 'same'))"
+)
 
 
 def upgrade() -> None:
-    """Ajoute input_context_event_id et response_context_event_id (+ FK) et étend
-    les CHECK (rien d'autre)."""
+    """Ajoute input_context_event_id, response_context_event_id (+ FK) et
+    product_progress_action, et étend les CHECK (rien d'autre)."""
     op.add_column(LINKS, sa.Column(COLUMN, sa.Uuid(), nullable=True))
     op.add_column(LINKS, sa.Column(RESPONSE_COLUMN, sa.Uuid(), nullable=True))
+    op.add_column(LINKS, sa.Column(PROGRESS_COLUMN, sa.String(), nullable=True))
     op.create_foreign_key(FK, LINKS, "cognitive_events", [COLUMN], ["id"])
     op.create_foreign_key(RESPONSE_FK, LINKS, "cognitive_events", [RESPONSE_COLUMN], ["id"])
     op.drop_constraint(INPUT_ACTION_CHECK, LINKS, type_="check")
@@ -155,10 +187,14 @@ def upgrade() -> None:
     op.create_check_constraint(STALE_DELIVERY_CHECK, LINKS, STALE_DELIVERY)
     op.create_check_constraint(RUNTIME_VERSION_CHECK, LINKS, RUNTIME_VERSION)
     op.create_check_constraint(RESPONSE_ATTACHMENT_CHECK, LINKS, RESPONSE_ATTACHMENT)
+    op.create_check_constraint(PROGRESS_ACTION_CHECK, LINKS, PRODUCT_PROGRESS_ACTION)
+    op.create_check_constraint(BOUNDARY_CAUSALITY_CHECK, LINKS, BOUNDARY_CAUSALITY)
 
 
 def downgrade() -> None:
     """Retour exact à 0012 (échoue sans perte si des valeurs V2 existent)."""
+    op.drop_constraint(BOUNDARY_CAUSALITY_CHECK, LINKS, type_="check")
+    op.drop_constraint(PROGRESS_ACTION_CHECK, LINKS, type_="check")
     op.drop_constraint(RESPONSE_ATTACHMENT_CHECK, LINKS, type_="check")
     op.drop_constraint(RUNTIME_VERSION_CHECK, LINKS, type_="check")
     op.drop_constraint(STALE_DELIVERY_CHECK, LINKS, type_="check")
@@ -169,5 +205,6 @@ def downgrade() -> None:
     op.create_check_constraint(INPUT_ACTION_CHECK, LINKS, INPUT_ACTIONS_0012)
     op.drop_constraint(RESPONSE_FK, LINKS, type_="foreignkey")
     op.drop_constraint(FK, LINKS, type_="foreignkey")
+    op.drop_column(LINKS, PROGRESS_COLUMN)
     op.drop_column(LINKS, RESPONSE_COLUMN)
     op.drop_column(LINKS, COLUMN)

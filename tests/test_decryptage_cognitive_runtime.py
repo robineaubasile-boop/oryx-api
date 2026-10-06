@@ -119,7 +119,8 @@ def test_public_api_is_exact_and_keyword_only():
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == {
         "runtime_private_metadata", "capture_user_turn", "capture_delivered_response", "precheck_conversation_context",
-        "answered_step"}
+        "answered_step", "record_turn_progress"}
+    assert list(inspect.signature(dcr.record_turn_progress).parameters) == ["db", "link", "progress_action"]
     assert list(inspect.signature(dcr.answered_step).parameters) == ["db", "link"]
     assert list(inspect.signature(dcr.capture_user_turn).parameters) == ["db", "delivery", "ticker", "user_text"]
     assert list(inspect.signature(dcr.capture_delivered_response).parameters) == ["db", "delivery"]
@@ -251,7 +252,7 @@ def test_web_v2_knows_nothing_about_cognitive_capture_and_has_no_close_endpoint(
 
 LINK_COLUMNS = ("assistant_delivery_id, capture_version, input_action, input_event_id, context_exit_event_id, "
                 "capture_state, response_action, response_event_id, support_trace_id, created_at, captured_at, "
-                "input_context_event_id, response_context_event_id")
+                "input_context_event_id, response_context_event_id, product_progress_action")
 
 
 def _links(engine):

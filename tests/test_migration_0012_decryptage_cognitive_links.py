@@ -121,8 +121,10 @@ R1C4_CHECKS = {
     "ck_decryptage_cognitive_links_stale_delivery",
     "ck_decryptage_cognitive_links_runtime_version",
     "ck_decryptage_cognitive_links_response_attachment",
+    "ck_decryptage_cognitive_links_product_progress_action",
+    "ck_decryptage_cognitive_links_boundary_causality",
 }
-HEAD_COLUMNS = COLUMNS + ["input_context_event_id", "response_context_event_id"]
+HEAD_COLUMNS = COLUMNS + ["input_context_event_id", "response_context_event_id", "product_progress_action"]
 HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
 PRE_R1C2_TABLES = PRE_R1C1_TABLES | R1C1_TABLES
 
@@ -211,18 +213,19 @@ def test_metadata_declares_exactly_the_links_table_in_addition():
 
 
 def test_model_columns_types_and_nullability():
-    """Colonnes de 0012, puis input_context_event_id et
-    response_context_event_id (R1-C4, 0013, nullables, ajoutées en fin de
-    table)."""
+    """Colonnes de 0012, puis input_context_event_id,
+    response_context_event_id et product_progress_action (R1-C4, 0013,
+    nullables, ajoutées en fin de table)."""
     table = DecryptageCognitiveLink.__table__
     assert [c.name for c in table.columns] == HEAD_COLUMNS
     assert {c.name: c.nullable for c in table.columns} == {
-        n: n in NULLABLE | {"input_context_event_id", "response_context_event_id"} for n in HEAD_COLUMNS}
+        n: n in NULLABLE | {"input_context_event_id", "response_context_event_id", "product_progress_action"}
+        for n in HEAD_COLUMNS}
     assert [c.name for c in table.primary_key.columns] == ["assistant_delivery_id"]
     for name in ("assistant_delivery_id", "input_event_id", "context_exit_event_id", "response_event_id",
                  "support_trace_id", "input_context_event_id", "response_context_event_id"):
         assert isinstance(table.c[name].type, sa.Uuid) and table.c[name].type.as_uuid, name
-    for name in ("capture_version", "input_action", "capture_state", "response_action"):
+    for name in ("capture_version", "input_action", "capture_state", "response_action", "product_progress_action"):
         assert type(table.c[name].type) is sa.String and table.c[name].type.length is None, name
     for name in ("created_at", "captured_at"):
         assert isinstance(table.c[name].type, sa.DateTime) and table.c[name].type.timezone, name
@@ -352,6 +355,7 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("captured_at", "timestamp with time zone", "YES", None),
         ("input_context_event_id", "uuid", "YES", None),
         ("response_context_event_id", "uuid", "YES", None),
+        ("product_progress_action", "character varying", "YES", None),
     ]
     assert [c for c in catalog["constraints"] if c[1] != "c"] == [
         ("decryptage_cognitive_links_assistant_delivery_id_fkey", "f",

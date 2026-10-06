@@ -84,14 +84,16 @@ COLUMN = "input_context_event_id"
 FK = "decryptage_cognitive_links_input_context_event_id_fkey"
 RCOLUMN = "response_context_event_id"
 RFK = "decryptage_cognitive_links_response_context_event_id_fkey"
-NEW_CHECKS = {
-    "ck_decryptage_cognitive_links_context_switched",
-    "ck_decryptage_cognitive_links_stale_delivery",
-    "ck_decryptage_cognitive_links_runtime_version",
-    "ck_decryptage_cognitive_links_response_attachment",
-}
+PCOLUMN = "product_progress_action"
+PROGRESS_ACTIONS = ("new", "same", "forward", "step_skip", "retrograde_marker", "forward_without_contribution",
+                    "terminal_without_contribution", "stale_contribution_step", "terminal_before_risques")
+ADDED_CHECKS = ("ck_decryptage_cognitive_links_context_switched", "ck_decryptage_cognitive_links_stale_delivery",
+                "ck_decryptage_cognitive_links_runtime_version", "ck_decryptage_cognitive_links_response_attachment",
+                "ck_decryptage_cognitive_links_product_progress_action",
+                "ck_decryptage_cognitive_links_boundary_causality")
+NEW_CHECKS = set(ADDED_CHECKS)
 HEAD_CHECKS = CHECKS_0012 | NEW_CHECKS
-HEAD_COLUMNS = COLUMNS_0012 + [COLUMN, RCOLUMN]
+HEAD_COLUMNS = COLUMNS_0012 + [COLUMN, RCOLUMN, PCOLUMN]
 V1 = "decryptage-cognitive-runtime-v1"
 V2 = "decryptage-cognitive-runtime-v2"
 INPUT_ACTIONS = ("no_open_event", "no_user_contribution", "contribution_appended", "event_closed_context_change",
@@ -137,28 +139,26 @@ def test_0011_and_0012_files_are_unchanged():
 def test_offline_sql_of_0013_upgrade_only_extends_the_links_table():
     sql = _run_alembic("postgresql://offline@localhost/offline", "upgrade", f"{R1C2}:{R1C4}", "--sql").stdout
     statements = _statements(sql)
-    assert statements[:4] == [
+    assert statements[:5] == [
         f"ALTER TABLE {LINKS} ADD COLUMN {COLUMN} UUID",
         f"ALTER TABLE {LINKS} ADD COLUMN {RCOLUMN} UUID",
+        f"ALTER TABLE {LINKS} ADD COLUMN {PCOLUMN} VARCHAR",
         f"ALTER TABLE {LINKS} ADD CONSTRAINT {FK} FOREIGN KEY({COLUMN}) REFERENCES cognitive_events (id)",
         f"ALTER TABLE {LINKS} ADD CONSTRAINT {RFK} FOREIGN KEY({RCOLUMN}) REFERENCES cognitive_events (id)",
     ]
-    assert statements[4] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action"
-    assert statements[5].startswith(
+    assert statements[5] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action"
+    assert statements[6].startswith(
         f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_input_action CHECK")
-    assert "'context_switched'" in statements[5] and "'event_closed_context_change'" in statements[5]
-    assert statements[6] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_action"
-    assert statements[7].startswith(
+    assert "'context_switched'" in statements[6] and "'event_closed_context_change'" in statements[6]
+    assert statements[7] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_action"
+    assert statements[8].startswith(
         f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_response_action CHECK")
-    assert "'stale_delivery'" in statements[7] and "'no_cognitive_action'" in statements[7]
-    added = ("ck_decryptage_cognitive_links_context_switched", "ck_decryptage_cognitive_links_stale_delivery",
-             "ck_decryptage_cognitive_links_runtime_version", "ck_decryptage_cognitive_links_response_attachment")
-    assert set(added) == NEW_CHECKS
-    for statement, name in zip(statements[8:12], added):
+    assert "'stale_delivery'" in statements[8] and "'no_cognitive_action'" in statements[8]
+    for statement, name in zip(statements[9:15], ADDED_CHECKS):
         assert statement.startswith(f"ALTER TABLE {LINKS} ADD CONSTRAINT {name} CHECK"), statement
-    assert statements[12] == (f"UPDATE alembic_version SET version_num='{R1C4}' "
+    assert statements[15] == (f"UPDATE alembic_version SET version_num='{R1C4}' "
                               f"WHERE alembic_version.version_num = '{R1C2}'")
-    assert len(statements) == 13
+    assert len(statements) == 16
     upper = sql.upper()
     # Aucune donnée écrite (aucun backfill), aucune suppression de colonne,
     # aucun objet de schéma hors de la table.
@@ -166,13 +166,15 @@ def test_offline_sql_of_0013_upgrade_only_extends_the_links_table():
                       "CREATE TYPE", "CREATE TRIGGER", "CREATE FUNCTION", "DEFAULT", "ON DELETE", "ON UPDATE",
                       "CASCADE", "NOT VALID", "SET NOT NULL"):
         assert forbidden not in upper, forbidden
-    assert [s for s in statements if s.upper().startswith("UPDATE")] == [statements[12]]
+    assert [s for s in statements if s.upper().startswith("UPDATE")] == [statements[15]]
 
 
 def test_offline_sql_of_0013_downgrade_reverts_exactly_r1c4():
     sql = _run_alembic("postgresql://offline@localhost/offline", "downgrade", f"{R1C4}:{R1C2}", "--sql").stdout
     statements = _statements(sql)
-    assert statements[:6] == [
+    assert statements[:8] == [
+        f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_boundary_causality",
+        f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_product_progress_action",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_attachment",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_runtime_version",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_stale_delivery",
@@ -182,19 +184,20 @@ def test_offline_sql_of_0013_downgrade_reverts_exactly_r1c4():
         "IS NULL OR response_action IN ('opened_event', 'continued_event', 'continued_without_boundary_signal', "
         "'transitioned_event', 'closed_terminal', 'no_cognitive_action'))",
     ]
-    assert statements[6:12] == [
+    assert statements[8:15] == [
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action",
         f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_input_action CHECK (input_action IN "
         "('no_open_event', 'no_user_contribution', 'contribution_appended', 'event_closed_context_change', "
         "'event_abandoned_context_change'))",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT {RFK}",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT {FK}",
+        f"ALTER TABLE {LINKS} DROP COLUMN {PCOLUMN}",
         f"ALTER TABLE {LINKS} DROP COLUMN {RCOLUMN}",
         f"ALTER TABLE {LINKS} DROP COLUMN {COLUMN}",
     ]
-    assert statements[12] == (f"UPDATE alembic_version SET version_num='{R1C2}' "
+    assert statements[15] == (f"UPDATE alembic_version SET version_num='{R1C2}' "
                               f"WHERE alembic_version.version_num = '{R1C4}'")
-    assert len(statements) == 13 and "CASCADE" not in sql.upper()
+    assert len(statements) == 16 and "CASCADE" not in sql.upper()
 
 
 def test_upgrade_writes_no_data_and_backfills_nothing():
@@ -207,8 +210,9 @@ def test_upgrade_writes_no_data_and_backfills_nothing():
 
 
 def test_model_matches_the_migration_exactly():
-    """Le modèle porte les deux colonnes (fin de table, nullables, FK sans
-    cascade) et les CHECK avec le MÊME texte SQL que la migration."""
+    """Le modèle porte les trois colonnes (fin de table, nullables ; FK sans
+    cascade pour les deux références d'event) et les CHECK avec le MÊME texte
+    SQL que la migration."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("migration_0013", MIGRATION_PATH)
     migration = importlib.util.module_from_spec(spec)
@@ -220,6 +224,9 @@ def test_model_matches_the_migration_exactly():
         assert column.nullable and isinstance(column.type, sa.Uuid) and column.server_default is None
         [fk] = column.foreign_keys
         assert (fk.target_fullname, fk.ondelete, fk.onupdate) == ("cognitive_events.id", None, None)
+    progress = table.c[PCOLUMN]
+    assert progress.nullable and type(progress.type) is sa.String and progress.type.length is None
+    assert not progress.foreign_keys and progress.server_default is None
     checks = {c.name: str(c.sqltext) for c in table.constraints if isinstance(c, sa.CheckConstraint)}
     assert set(checks) == HEAD_CHECKS
     assert checks["ck_decryptage_cognitive_links_input_action"] == migration.INPUT_ACTIONS_0013
@@ -228,6 +235,8 @@ def test_model_matches_the_migration_exactly():
     assert checks["ck_decryptage_cognitive_links_stale_delivery"] == migration.STALE_DELIVERY
     assert checks["ck_decryptage_cognitive_links_runtime_version"] == migration.RUNTIME_VERSION
     assert checks["ck_decryptage_cognitive_links_response_attachment"] == migration.RESPONSE_ATTACHMENT
+    assert checks["ck_decryptage_cognitive_links_product_progress_action"] == migration.PRODUCT_PROGRESS_ACTION
+    assert checks["ck_decryptage_cognitive_links_boundary_causality"] == migration.BOUNDARY_CAUSALITY
 
 
 def test_runtime_vocabularies_are_exactly_the_checks():
@@ -237,6 +246,12 @@ def test_runtime_vocabularies_are_exactly_the_checks():
     for value in (*INPUT_ACTIONS, *RESPONSE_ACTIONS, V1, V2):
         assert f"'{value}'" in source, value
     assert dcr.SUPPORTED_RUNTIME_VERSIONS == (V1, V2) and dcr.CAPTURE_VERSION == V2
+    from core import decryptage_progress as dp
+    assert dp.PROGRESS_ACTIONS == PROGRESS_ACTIONS
+    for value in PROGRESS_ACTIONS:
+        assert f"'{value}'" in source, value
+    assert dcr.BOUNDARY_PROGRESS_ACTIONS == ("forward", "step_skip")
+    assert dcr.OPENING_PROGRESS_ACTIONS == ("new", "same")
 
 
 # --------------------------------------------------------------------------
@@ -251,7 +266,7 @@ def _insert_link(conn, **overrides):
         "assistant_delivery_id": None, "capture_version": V1, "input_action": "no_open_event",
         "input_event_id": None, "context_exit_event_id": None, "capture_state": "awaiting_delivery",
         "response_action": None, "response_event_id": None, "support_trace_id": None, "created_at": NOW,
-        "captured_at": None, COLUMN: None, RCOLUMN: None,
+        "captured_at": None, COLUMN: None, RCOLUMN: None, PCOLUMN: None,
     }
     values.update(overrides)
     if values["assistant_delivery_id"] is None:
@@ -344,11 +359,12 @@ def test_pg_upgrade_0012_to_0013_keeps_v1_rows_untouched_then_downgrade(pg_url, 
     assert {t: rows for t, rows in data_0013.items() if t != LINKS} == {
         t: rows for t, rows in data_0012.items() if t != LINKS}
     # Lignes V1 : mêmes valeurs, nouvelles colonnes NULL (aucun backfill).
-    assert data_0013[LINKS] == [row + (None, None) for row in data_0012[LINKS]]
+    assert data_0013[LINKS] == [row + (None, None, None) for row in data_0012[LINKS]]
     assert _compare_metadata(pg_engine) == []
     catalog = _catalog(pg_engine, {LINKS})[LINKS]
-    assert catalog["columns"][-2:] == [(COLUMN, "uuid", "YES", None), (RCOLUMN, "uuid", "YES", None)]
-    assert [c[0] for c in catalog["columns"][:-2]] == COLUMNS_0012  # aucune colonne supprimée / renommée
+    assert catalog["columns"][-3:] == [(COLUMN, "uuid", "YES", None), (RCOLUMN, "uuid", "YES", None),
+                                       (PCOLUMN, "character varying", "YES", None)]
+    assert [c[0] for c in catalog["columns"][:-3]] == COLUMNS_0012  # aucune colonne supprimée / renommée
     assert {c[0] for c in catalog["constraints"] if c[1] == "c"} == HEAD_CHECKS
     for column, fk in ((COLUMN, FK), (RCOLUMN, RFK)):
         assert (fk, "f", f"FOREIGN KEY ({column}) REFERENCES cognitive_events(id)", "a", "a") in catalog["constraints"]
@@ -492,8 +508,9 @@ def test_pg_response_context_check(conn):
     for action in ("continued_event", "continued_without_boundary_signal"):
         _insert_link(conn, **v2, response_action=action, response_event_id=target, support_trace_id=trace,
                      **{RCOLUMN: target})
-    _insert_link(conn, **v2, response_action="transitioned_event", response_event_id=other, **{RCOLUMN: target})
-    _insert_link(conn, **v2, response_action="closed_terminal", **{RCOLUMN: target})
+    _insert_link(conn, **v2, response_action="transitioned_event", response_event_id=other,
+                 **{RCOLUMN: target, PCOLUMN: "forward"})
+    _insert_link(conn, **v2, response_action="closed_terminal", **{RCOLUMN: target, PCOLUMN: "forward"})
     _insert_link(conn, **v2, response_action="no_cognitive_action")
     _insert_link(conn, **v2, response_action="stale_delivery", **{RCOLUMN: target})
     _insert_link(conn, **v2, response_action="stale_delivery")
@@ -504,20 +521,66 @@ def test_pg_response_context_check(conn):
         _rejected(conn, check, **v2, response_action=action, response_event_id=other, support_trace_id=other_trace,
                   **{RCOLUMN: target})
         _rejected(conn, check, **v2, response_action=action, response_event_id=other, support_trace_id=other_trace)
-    _rejected(conn, check, **v2, response_action="transitioned_event", response_event_id=other)
-    _rejected(conn, check, **v2, response_action="closed_terminal")
+    _rejected(conn, check, **v2, response_action="transitioned_event", response_event_id=other,
+              **{PCOLUMN: "forward"})
+    _rejected(conn, check, **v2, response_action="closed_terminal", **{PCOLUMN: "forward"})
     _rejected(conn, check, **v2, response_action="no_cognitive_action", **{RCOLUMN: target})
     # (opened_event avec cible : transition/ouverture déguisée)
     fresh = _insert_event(conn, event_dedup_key="c" * 64)
-    _rejected(conn, check, **v2, response_action="opened_event", response_event_id=fresh, **{RCOLUMN: target})
+    _rejected(conn, check, **v2, response_action="opened_event", response_event_id=fresh,
+              **{RCOLUMN: target, PCOLUMN: "new"})
 
 
 def test_pg_opening_index_is_unchanged(conn):
     event_id = _insert_event(conn, event_dedup_key="a" * 64)
     previous = _insert_event(conn, event_dedup_key="b" * 64)
     captured = {"capture_version": V2, "capture_state": "captured", "captured_at": NOW}
-    _insert_link(conn, response_action="opened_event", response_event_id=event_id, **captured)
+    _insert_link(conn, response_action="opened_event", response_event_id=event_id, **captured, **{PCOLUMN: "new"})
     with pytest.raises(sa.exc.IntegrityError, match=OPENING_INDEX):
         with conn.begin_nested():
             _insert_link(conn, response_action="transitioned_event", response_event_id=event_id,
-                         **captured, **{RCOLUMN: previous})
+                         **captured, **{RCOLUMN: previous, PCOLUMN: "forward"})
+
+
+def test_pg_product_progress_action_vocabulary_and_v1(conn):
+    """Vocabulaire fermé de la décision de progression du tour ; V1 : toujours
+    NULL (aucune conversion)."""
+    for action in PROGRESS_ACTIONS:
+        _insert_link(conn, capture_version=V2, **{PCOLUMN: action})
+    _insert_link(conn, capture_version=V2)
+    for action in ("completed", "FORWARD", "", "applied"):
+        _rejected(conn, "ck_decryptage_cognitive_links_product_progress_action", capture_version=V2,
+                  **{PCOLUMN: action})
+    _rejected(conn, "ck_decryptage_cognitive_links_runtime_version", capture_version=V1, **{PCOLUMN: "forward"})
+
+
+def test_pg_boundary_causality_check(conn):
+    """Une frontière cognitive (transition / fermeture terminale) n'est
+    persistable que si la progression DE CE TOUR a avancé (forward /
+    step_skip) ; une ouverture que si elle a créé / confirmé l'étape (new /
+    same). Aucune décision (NULL) ou décision refusée : refusé."""
+    previous = _insert_event(conn, event_dedup_key="a" * 64)
+    v2 = {"capture_version": V2, "input_action": "no_open_event", "capture_state": "captured", "captured_at": NOW}
+    check = "ck_decryptage_cognitive_links_boundary_causality"
+    refused = ("same", "new", "retrograde_marker", "forward_without_contribution", "terminal_without_contribution",
+               "stale_contribution_step", "terminal_before_risques", None)
+    for action in ("forward", "step_skip"):
+        target = _insert_event(conn, event_dedup_key=uuid.uuid4().hex * 2)
+        _insert_link(conn, **v2, response_action="transitioned_event", response_event_id=target,
+                     **{RCOLUMN: previous, PCOLUMN: action})
+        _insert_link(conn, **v2, response_action="closed_terminal", **{RCOLUMN: previous, PCOLUMN: action})
+    for action in refused:
+        target = _insert_event(conn, event_dedup_key=uuid.uuid4().hex * 2)
+        _rejected(conn, check, **v2, response_action="transitioned_event", response_event_id=target,
+                  **{RCOLUMN: previous, PCOLUMN: action})
+        _rejected(conn, check, **v2, response_action="closed_terminal", **{RCOLUMN: previous, PCOLUMN: action})
+    for action in ("new", "same"):
+        opened = _insert_event(conn, event_dedup_key=uuid.uuid4().hex * 2)
+        _insert_link(conn, **v2, response_action="opened_event", response_event_id=opened, **{PCOLUMN: action})
+    for action in ("forward", "step_skip", "forward_without_contribution", "stale_contribution_step", None):
+        opened = _insert_event(conn, event_dedup_key=uuid.uuid4().hex * 2)
+        _rejected(conn, check, **v2, response_action="opened_event", response_event_id=opened, **{PCOLUMN: action})
+    # Continuations / no-action / stale : quelle que soit la décision.
+    for action in refused:
+        _insert_link(conn, **v2, response_action="no_cognitive_action", **{PCOLUMN: action})
+        _insert_link(conn, **v2, response_action="stale_delivery", **{PCOLUMN: action})
