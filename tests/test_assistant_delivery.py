@@ -159,7 +159,7 @@ def test_public_api_is_exact_and_keyword_only():
     assert list(inspect.signature(ad.bind_analysis_session).parameters) == [
         "db", "delivery_id", "analysis_session_id"]
     assert list(inspect.signature(dp.apply_construction_these_progress).parameters) == [
-        "db", "user_id", "ticker", "step", "thesis_text", "data", "user_contribution"]
+        "db", "user_id", "ticker", "step", "thesis_text", "data", "user_contribution", "answered_step"]
 
 
 def test_exceptions_are_a_small_business_hierarchy():
@@ -386,7 +386,8 @@ def test_progress_refuses_steps_outside_the_closed_vocabulary_before_db():
     for step in ("inconnu", None, "Moat"):
         with pytest.raises(dp.InvalidDecryptageStep):
             dp.apply_construction_these_progress(_NoDB(), user_id=USER, ticker="MC.PA", step=step,
-                                                 thesis_text=None, data=None, user_contribution=False)
+                                                 thesis_text=None, data=None, user_contribution=False,
+                                                 answered_step=None)
 
 
 # --- validation structurelle avant tout accès à la base ---------------------

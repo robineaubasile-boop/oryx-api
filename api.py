@@ -47,6 +47,7 @@ from core.assistant_delivery import (
 from core.decryptage_cognitive_runtime import (
 	CONTRIBUTION_APPENDED,
 	StaleConversationContext,
+	answered_step as cognitive_answered_step,
 	capture_delivered_response,
 	capture_user_turn,
 	precheck_conversation_context,
@@ -522,8 +523,9 @@ def _get_analysis_progress(user_id, ticker):
 # observation, inférence, Step 6). Un échec externe AVANT la livraison
 # canonique (ticker, données, Claude) laisse le tour hors T2 (limite V1).
 #
-# R1-C4 : une conversation ancrée à un CognitiveEvent fermé par une autre
-# conversation (l'analyse a avancé ailleurs) est STALE : HTTP 409
+# R1-C4 : une conversation qui redemande le MÊME ticker que son ancre alors
+# que cet état cognitif est obsolète (event fermé par une autre
+# conversation, tentative terminée / abandonnée / remplacée) est STALE : HTTP 409
 # stale_conversation_context, aucune écriture (ni livraison, ni lien, ni
 # contribution, ni progression). Une pré-vérification en lecture seule,
 # dans une transaction courte AVANT les données financières et Claude, évite
@@ -776,13 +778,17 @@ def decryptage(request: DecryptageRequest, db: Session = Depends(get_db)):
 		# UserStatement / InvestmentThesis ; navigation, reprise vide,
 		# déclencheur, context_switched, no_open_event : aucun texte.
 		# R1-C4 : elle seule peut aussi faire avancer / terminer une
-		# AnalysisSession existante (Claude seul, jamais).
+		# AnalysisSession existante (Claude seul, jamais), et seulement si
+		# elle répond à l'étape encore ouverte : answered_step = étape de
+		# l'event d'ancrage, dérivée de sa provenance par le runtime cognitif
+		# (jamais du texte, du marqueur ni de current_step).
 		user_contribution = cognitive_link is not None and cognitive_link.input_action == CONTRIBUTION_APPENDED
 		progress_thesis_text = question if user_contribution else None
+		progress_answered_step = cognitive_answered_step(db, link=cognitive_link) if user_contribution else None
 		if created and method_id == "construction_these" and step_marker is not None:
 			analysis_session = apply_construction_these_progress(
 				db, user_id=user_id, ticker=ticker, step=step_marker, thesis_text=progress_thesis_text, data=data,
-				user_contribution=user_contribution,
+				user_contribution=user_contribution, answered_step=progress_answered_step,
 			)
 			if analysis_session is not None:
 				bind_analysis_session(db, delivery_id=delivery.id, analysis_session_id=analysis_session.id)

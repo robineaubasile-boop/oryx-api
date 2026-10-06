@@ -1507,6 +1507,11 @@ class DecryptageCognitiveLink(Base):
       de contexte de la livraison du tour à l'ACK (stale_delivery si cet
       event a été fermé entre-temps). NULL si aucune ancre (no_open_event) ;
       context_switched : l'ancre quittée, laissée intacte ;
+    - response_context_event_id (R1-C4, V2 uniquement) : event EXISTANT
+      auquel la réponse assistant du tour est destinée, figé sous verrou à
+      la capture côté entrée (l'event open de l'AnalysisSession cible, ou
+      NULL). Seul candidat de continuation à l'ACK ; jamais remplacé par un
+      event apparu après la capture (stale_delivery s'il a été fermé) ;
     - capture_state awaiting_delivery -> captured, atomiquement avec
       l'ACK pending -> delivered ; response_action / response_event_id /
       support_trace_id / captured_at sont remplis à ce moment.
@@ -1518,8 +1523,8 @@ class DecryptageCognitiveLink(Base):
     0012_decryptage_cognitive_links ; timestamps générés par l'application
     (aucun server_default), CHECK plutôt qu'ENUM, FK sans cascade.
     Étendue (sans backfill) par 0013_decryptage_conv_affinity (R1-C4) :
-    input_context_event_id, context_switched, stale_delivery, CHECK de
-    cohérence par version de runtime."""
+    input_context_event_id, response_context_event_id, context_switched,
+    stale_delivery, CHECK de cohérence par version de runtime."""
     __tablename__ = "decryptage_cognitive_links"
     __table_args__ = (
         CheckConstraint(
@@ -1566,13 +1571,28 @@ class DecryptageCognitiveLink(Base):
         ),
         CheckConstraint(
             "(capture_version = 'decryptage-cognitive-runtime-v1' AND input_context_event_id IS NULL "
-            "AND input_action <> 'context_switched' "
+            "AND response_context_event_id IS NULL AND input_action <> 'context_switched' "
             "AND (response_action IS NULL OR response_action <> 'stale_delivery')) "
             "OR (capture_version = 'decryptage-cognitive-runtime-v2' AND context_exit_event_id IS NULL "
             "AND input_action NOT IN ('event_closed_context_change', 'event_abandoned_context_change') "
             "AND (input_action = 'no_open_event') = (input_context_event_id IS NULL) "
-            "AND (input_action <> 'contribution_appended' OR input_event_id = input_context_event_id))",
+            "AND (input_action <> 'contribution_appended' OR input_event_id = input_context_event_id) "
+            "AND (input_action NOT IN ('contribution_appended', 'no_user_contribution') "
+            "OR (response_context_event_id IS NOT NULL AND response_context_event_id = input_context_event_id)) "
+            "AND (input_action <> 'context_switched' OR response_context_event_id IS NULL "
+            "OR response_context_event_id <> input_context_event_id))",
             name="ck_decryptage_cognitive_links_runtime_version",
+        ),
+        CheckConstraint(
+            "capture_version <> 'decryptage-cognitive-runtime-v2' OR response_action IS NULL "
+            "OR response_action = 'stale_delivery' "
+            "OR (response_action IN ('continued_event', 'continued_without_boundary_signal') "
+            "AND response_context_event_id IS NOT NULL AND response_event_id = response_context_event_id) "
+            "OR (response_action IN ('transitioned_event', 'closed_terminal') "
+            "AND response_context_event_id IS NOT NULL "
+            "AND (response_event_id IS NULL OR response_event_id <> response_context_event_id)) "
+            "OR (response_action IN ('opened_event', 'no_cognitive_action') AND response_context_event_id IS NULL)",
+            name="ck_decryptage_cognitive_links_response_attachment",
         ),
         Index(
             "uq_decryptage_cognitive_links_opening_event", "response_event_id", unique=True,
@@ -1591,5 +1611,6 @@ class DecryptageCognitiveLink(Base):
     support_trace_id = Column(Uuid, ForeignKey("support_traces.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     captured_at = Column(DateTime(timezone=True), nullable=True)
-    # R1-C4 (0013) : ajoutée en fin de table par ALTER TABLE.
+    # R1-C4 (0013) : ajoutées en fin de table par ALTER TABLE.
     input_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
+    response_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)

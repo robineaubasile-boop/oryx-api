@@ -65,25 +65,33 @@ nouveaux tours :
   stale_delivery => aucune ancre. On ne remonte JAMAIS plus loin : une ancre
   est un état courant, pas « le dernier response_event_id non NULL ».
 - input_context_event_id fige, à l'arrivée du tour, l'ancre de la
-  conversation : c'est la référence de contexte de la livraison du tour.
+  conversation AVANT le tour ; response_context_event_id fige, sous le même
+  verrou, l'event EXISTANT auquel la réponse assistant du tour est destinée
+  (l'ancre pour un tour ancré ; sinon l'event open de l'AnalysisSession
+  cible, ou NULL). C'est le seul candidat de continuation à l'ACK.
+- answered_step (non persisté) : étape de l'event d'ancrage d'une
+  contribution, dérivée de sa provenance (_event_step). La progression
+  produit l'utilise pour le UserStatement et n'avance que si
+  answered_step == current_step (core/decryptage_progress.py).
 - Contribution : uniquement à l'event EXACT d'ancrage, jamais à « l'event
   open compatible » de l'AnalysisSession.
-- Context switch (ancre dans une autre AnalysisSession que celle du tour) :
-  DETACH uniquement (context_switched). L'ancien event n'est ni fermé, ni
+- Context switch (ticker demandé différent du ticker de l'AnalysisSession
+  de l'ancre) : DETACH uniquement (context_switched). L'ancien event n'est ni fermé, ni
   enrichi : une navigation UI n'est pas une frontière cognitive. Le tour
   ENTIER est navigation, même s'il contient du contenu (« Revenons à LVMH.
   Pour le moat, je pense que… ») : aucun parsing, aucun découpage.
-- Conversation stale : ancre dans l'AnalysisSession du tour mais event
-  fermé (une autre conversation a fait avancer l'analyse) =>
+- Conversation stale : MÊME ticker que l'ancre mais état cognitif obsolète
+  (ancre fermée, ou sa tentative n'est plus l'AnalysisSession active du
+  ticker : terminée, abandonnée, remplacée par une autre tentative) =>
   StaleConversationContext (HTTP 409 stale_conversation_context), fail
   closed : aucune écriture, jamais de rattachement au nouvel event. Pré-
   vérification optionnelle avant Claude (precheck_conversation_context) ;
   la vérification qui fait foi est refaite sous verrou dans
   capture_user_turn.
-- Late ACK : si l'event de contexte (input_context_event_id) d'une
-  contribution / reprise a été fermé avant l'ACK, la réponse réellement
-  rendue est delivered mais stale_delivery : aucun SupportTrace, aucun
-  event, aucune mutation de l'event courant.
+- Late ACK : si la cible figée (response_context_event_id) a été fermée
+  avant l'ACK, ou si, sans cible figée, un event est apparu depuis la
+  capture, la réponse réellement rendue est delivered mais stale_delivery :
+  aucun SupportTrace, aucun event, aucune mutation de l'event courant.
 - support_refs_before conversation-scoped : seules les aides de CET event
   rendues (delivered + captured) dans la conversation du tour, en ordre
   chronologique ; SupportTrace reste unique (jamais dupliqué par
@@ -122,9 +130,9 @@ Limites documentées :
 - un tour dont la résolution du ticker, les données financières ou Claude
   échouent AVANT la livraison canonique n'est pas capturé en T2 ;
 - un tour sans texte (déclencheur, reprise) n'est jamais une contribution ;
-- un tour sans ancre (nouvelle conversation, après context switch) garde la
-  logique R1-C2 de rattachement de sa réponse à l'event open de
-  l'AnalysisSession à l'ACK.
+- un tour sans cible figée dont l'AnalysisSession voit apparaître un event
+  avant son ACK devient stale_delivery (aucun rattachement), même si la
+  réponse aurait pu y être pertinente.
 """
 import logging
 from datetime import datetime, timezone
@@ -425,6 +433,17 @@ def _event_session_id(db, event_id):
     return session_id
 
 
+def _session_ticker(db, analysis_session_id) -> str:
+    """Ticker (immuable) d'une AnalysisSession, lecture simple sans verrou :
+    une transaction ne verrouille jamais qu'UNE AnalysisSession (la cible)."""
+    ticker = db.execute(
+        select(AnalysisSession.ticker).where(AnalysisSession.id == analysis_session_id)
+    ).scalar_one_or_none()
+    if ticker is None:
+        raise CognitiveLinkInvariantError(f"analysis_session {analysis_session_id} introuvable")
+    return ticker
+
+
 def _event_step(db, event: CognitiveEvent) -> str:
     """Étape produit d'un event ouvert par ce runtime : marqueur privé de la
     livraison qui l'a ouvert (via son lien opened/transitioned). Jamais
@@ -520,19 +539,23 @@ def _append_contribution(db, *, event: CognitiveEvent, delivery: AssistantDelive
 def precheck_conversation_context(db, *, user_id: str, conversation_key: str, ticker: str) -> None:
     """Pré-vérification R1-C4, AVANT les appels externes (Claude) : simple
     optimisation pour éviter un appel inutile, lecture seule et sans verrou.
-    Lève StaleConversationContext si la conversation est ancrée à un event
-    de l'AnalysisSession active du ticker qui n'est plus open. Ne fait
+    Même sémantique que capture_user_turn : ticker demandé différent de
+    celui de l'ancre => navigation possible (jamais stale) ; MÊME ticker et
+    état cognitif obsolète (ancre fermée, ou sa tentative n'est plus
+    l'AnalysisSession active du ticker) => StaleConversationContext. Ne fait
     jamais foi : capture_user_turn refait la vérification sous verrou dans
     la transaction gagnante (une course entre ce contrôle et le retour de
     Claude reste fail closed). Aucune écriture."""
     anchor_id = _conversation_anchor_event_id(db, user_id=user_id, conversation_key=conversation_key)
     if anchor_id is None:
         return
-    active = find_active_analysis_session(db, user_id, ticker)
     anchor = db.execute(
         select(CognitiveEvent.analysis_session_id, CognitiveEvent.status).where(CognitiveEvent.id == anchor_id)
     ).one()
-    if active is not None and anchor.analysis_session_id == active.id and anchor.status != cognitive_capture.OPEN:
+    if anchor.analysis_session_id is None or _session_ticker(db, anchor.analysis_session_id) != ticker:
+        return
+    active = find_active_analysis_session(db, user_id, ticker)
+    if (anchor.status != cognitive_capture.OPEN or active is None or active.id != anchor.analysis_session_id):
         logger.warning("[R1-C4] assistant_turn=none stale_conversation_context expected_event=%s phase=precheck",
                        anchor_id)
         raise StaleConversationContext(anchor_id)
@@ -555,22 +578,31 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
        events, évite tout ordre inverse (deux conversations qui changent de
        ticker « en croix »). Plus d'un event open compatible =>
        AmbiguousOpenDecryptageEvents.
-    4. Classement (input_context_event_id = ancre figée pour l'ACK) :
+    4. Classement (input_context_event_id = ancre AVANT le tour) :
        - aucune ancre : no_open_event (même avec du texte : rien n'a été
          rendu dans cette conversation à quoi répondre) ;
-       - ancre dans une AUTRE AnalysisSession (ou aucune session active) :
-         context_switched ; l'ancre n'est ni fermée ni enrichie (seulement
-         verrouillée le temps de cette courte transaction) ; le tour entier
-         est navigation (aucun parsing) ;
-       - ancre dans l'AnalysisSession active mais plus open (constaté sous
-         verrou) : StaleConversationContext, rien n'est écrit (l'appelant
-         annule toute la transaction, livraison comprise) ;
+       - ticker demandé DIFFÉRENT du ticker de l'AnalysisSession de l'ancre :
+         context_switched (vrai changement de contexte produit) ; l'ancre
+         n'est ni fermée ni enrichie (seulement verrouillée le temps de
+         cette courte transaction) ; le tour entier est navigation (aucun
+         parsing) ;
+       - MÊME ticker mais état cognitif obsolète, constaté sous verrou :
+         ancre fermée, ou sa tentative n'est plus l'AnalysisSession active
+         du ticker (terminée, abandonnée, ou une autre tentative est active)
+         : StaleConversationContext, rien n'est écrit (l'appelant annule
+         toute la transaction, livraison comprise) ;
        - ancre open + texte : contribution à CET event exact
          (contribution_id = source_turn_ref = client_turn_id, session_ref =
          conversation du tour, support_refs_before = aides rendues dans
          cette conversation) ;
        - ancre open sans texte (déclencheur / reprise) : no_user_contribution.
-    5. Ligne de lien awaiting_delivery (context_exit_event_id toujours NULL
+    5. response_context_event_id, figé ICI sous verrou : event existant
+       auquel la réponse assistant du tour est destinée. Tour ancré
+       (contribution / reprise) : l'ancre ; context_switched / no_open_event
+       : l'event open de l'AnalysisSession cible s'il existe, sinon NULL.
+       À l'ACK, c'est le SEUL candidat de continuation : aucun event apparu
+       après cette capture ne peut devenir rétroactivement la cible.
+    6. Ligne de lien awaiting_delivery (context_exit_event_id toujours NULL
        en V2 : aucune fermeture sur navigation).
 
     Mute et flush ; jamais de commit."""
@@ -604,15 +636,17 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     input_event_id = None
     if anchor is None:
         input_action = NO_OPEN_EVENT
-    elif active is None or anchor.analysis_session_id != active.id:
-        # Navigation : détachement seulement, l'ancre reste telle quelle
-        # (elle peut rester le contexte d'autres conversations).
+    elif _session_ticker(db, anchor.analysis_session_id) != ticker:
+        # Vrai changement de contexte produit (ticker) : détachement
+        # seulement, l'ancre reste telle quelle (elle peut rester le
+        # contexte d'autres conversations).
         input_action = CONTEXT_SWITCHED
         logger.info("[R1-C4] assistant_turn=%s input_action=context_switched from_event=%s", delivery.id,
                     anchor_id)
-    elif anchor.status != cognitive_capture.OPEN:
-        # Constaté sous verrou : une autre conversation a fait avancer
-        # l'analyse. Jamais de rattachement à l'event désormais open.
+    elif anchor.status != cognitive_capture.OPEN or active is None or anchor.analysis_session_id != active.id:
+        # Même ticker, état cognitif obsolète (constaté sous verrou) : une
+        # autre conversation a fait avancer / terminé l'analyse, ou une autre
+        # tentative du ticker est active. Jamais de rattachement ailleurs.
         logger.warning("[R1-C4] assistant_turn=%s stale_conversation_context expected_event=%s", delivery.id,
                        anchor_id)
         raise StaleConversationContext(anchor_id)
@@ -621,6 +655,12 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         input_action, input_event_id = CONTRIBUTION_APPENDED, anchor.id
     else:
         input_action = NO_USER_CONTRIBUTION
+    # Cible figée de la réponse : verrouillée ci-dessus (compatible), FK prise
+    # sur une ligne déjà détenue (aucun verrou hors ordre).
+    if input_action in ANCHORED_INPUT_ACTIONS:
+        response_context_id = anchor.id
+    else:
+        response_context_id = compatible[0].id if compatible else None
 
     link = DecryptageCognitiveLink(
         assistant_delivery_id=delivery.id,
@@ -628,6 +668,7 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         input_action=input_action,
         input_event_id=input_event_id,
         input_context_event_id=anchor_id,
+        response_context_event_id=response_context_id,
         context_exit_event_id=None,
         capture_state=AWAITING_DELIVERY,
         response_action=None,
@@ -638,9 +679,25 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     )
     db.add(link)
     db.flush()
-    logger.info("[R1-C2] assistant_turn=%s input_action=%s event=%s context_event=%s", delivery.id, input_action,
-                input_event_id, anchor_id)
+    logger.info("[R1-C2] assistant_turn=%s input_action=%s event=%s context_event=%s response_context=%s",
+                delivery.id, input_action, input_event_id, anchor_id, response_context_id)
     return link
+
+
+def answered_step(db, *, link: DecryptageCognitiveLink) -> str | None:
+    """Étape cognitive à laquelle la contribution du tour répond réellement
+    (R1-C4) : étape de l'event d'ancrage (input_context_event_id), dérivée de
+    la provenance de l'event (marqueur de la livraison qui l'a ouvert,
+    _event_step). Jamais déduite du current_step produit, du marqueur
+    entrant ni du texte. None si le tour n'est pas une contribution."""
+    if link.input_action != CONTRIBUTION_APPENDED:
+        return None
+    if link.input_event_id is None or link.input_event_id != link.input_context_event_id:
+        raise CognitiveLinkInvariantError(f"assistant turn {link.assistant_delivery_id} : contribution sans ancre")
+    event = db.get(CognitiveEvent, link.input_event_id)
+    if event is None:
+        raise CognitiveLinkInvariantError(f"event {link.input_event_id} introuvable")
+    return _event_step(db, event)
 
 
 def capture_delivered_response(db, *, delivery: AssistantDelivery) -> DecryptageCognitiveLink | None:
@@ -695,19 +752,20 @@ def _record_response(db, *, delivery, link, action, response_event, trace, marke
 def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCognitiveLink):
     """Capture R1-C4 de la réponse réellement delivered.
 
-    Event de contexte attendu : input_context_event_id, uniquement pour un
-    tour ANCRÉ dans l'AnalysisSession du tour (contribution_appended,
-    no_user_contribution). Jamais remplacé par « l'event open actuel ».
-    no_open_event et context_switched (aucune ancre dans cette
-    AnalysisSession) : logique d'ouverture / continuation normale.
+    Cible de la réponse : response_context_event_id, figé sous verrou à la
+    capture côté entrée, quel que soit input_action. Jamais remplacé par
+    « l'event open actuel ».
 
     Sous verrous AnalysisSession -> events open (plus d'un : fail closed) :
 
-    - event attendu qui n'est plus open : stale_delivery (aucun
-      SupportTrace, aucun event ouvert ni fermé, l'event courant intact) ;
-    - aucun event de référence : marqueur de tâche que la progression produit
-      a effectivement appliqué (= current_step de la session) ->
-      opened_event ; sinon no_cognitive_action ;
+    - cible figée qui n'est plus open : stale_delivery (aucun SupportTrace,
+      aucun event ouvert ni fermé, l'event courant intact) ;
+    - aucune cible figée mais un event open est apparu depuis la capture :
+      stale_delivery également (jamais de continuation opportuniste, jamais
+      un second event open dans l'AnalysisSession) ;
+    - aucune cible figée et aucun event open : marqueur de tâche que la
+      progression produit a effectivement appliqué (= current_step de la
+      session) -> opened_event ; sinon no_cognitive_action ;
     - marqueur absent / inconnu / non appliqué -> SupportTrace,
       continued_without_boundary_signal ;
     - même marqueur -> SupportTrace, continued_event ;
@@ -723,9 +781,10 @@ def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCog
     if marker is not None and boundary is None:
         logger.info("[R1-C2] assistant_turn=%s marker=%s without_product_progress", delivery.id, marker)
 
-    expected_id = link.input_context_event_id if link.input_action in ANCHORED_INPUT_ACTIONS else None
-    if link.input_action in ANCHORED_INPUT_ACTIONS and expected_id is None:
-        raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : tour ancré sans input_context_event_id")
+    expected_id = link.response_context_event_id
+    if link.input_action in ANCHORED_INPUT_ACTIONS and (expected_id is None
+                                                        or expected_id != link.input_context_event_id):
+        raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : tour ancré sans cible de réponse")
     context_session_id = delivery.analysis_session_id
     if expected_id is not None:
         expected_session_id = _event_session_id(db, expected_id)
@@ -742,9 +801,11 @@ def _capture_response_v2(db, *, delivery: AssistantDelivery, link: DecryptageCog
                 f"assistant turn {delivery.id} : {len(candidates)} events open compatibles")
         reference = candidates[0] if candidates else None
 
-    if expected_id is not None and (reference is None or reference.id != expected_id):
-        # La réponse a réellement été rendue (delivered) mais elle dépendait
-        # d'un event fermé entre-temps : jamais rattachée à l'event courant.
+    if (expected_id is not None and (reference is None or reference.id != expected_id)) or (
+            expected_id is None and reference is not None):
+        # La réponse a réellement été rendue (delivered) mais sa cible figée
+        # a été fermée, ou un event est apparu après la capture : jamais
+        # rattachée à l'event courant.
         logger.warning("[R1-C4] assistant_turn=%s action=stale_delivery expected_event=%s current_event=%s",
                        delivery.id, expected_id, reference.id if reference is not None else None)
         return _record_response(db, delivery=delivery, link=link, action=STALE_DELIVERY, response_event=None,

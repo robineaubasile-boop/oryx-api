@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
 import api
@@ -579,13 +580,22 @@ def test_other_ticker_and_other_user_are_isolated(db, client, claude):
 
 def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_engine):
     """(18) Après un parcours complet (analyse, GET, DELETE, nouvelle
-    analyse) : schéma = head (0012), Base.metadata identique au schéma migré,
+    analyse) : schéma = head (0013), Base.metadata identique au schéma migré,
     company_analyses absente (supprimée par T1-C2)."""
     _full_attempt(client, claude, "A")
     client.theses()
     _turn(client, claude, "business")
     client.delete()
-    _turn(client, claude, "business")
+    # R1-C4 (blocker 3) : la conversation reste ancrée à la tentative
+    # abandonnée par le DELETE ; même ticker => état obsolète, 409
+    # stale_conversation_context. La nouvelle analyse se fait dans une
+    # nouvelle conversation (« Nouvelle conversation » / « Reprendre »).
+    with pytest.raises(HTTPException) as failure:
+        _turn(client, claude, "business")
+    assert (failure.value.status_code, failure.value.detail["error"]) == (409, "stale_conversation_context")
+    claude.next_step = "business"
+    assert client.decryptage({"ticker": TICKER, "question": "", "context": "", "last_method_id": None,
+                              "user_id": USER, "conversation_key": "conv-apres-suppression"})["success"]
 
     with pg_engine.connect() as conn:
         assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C4

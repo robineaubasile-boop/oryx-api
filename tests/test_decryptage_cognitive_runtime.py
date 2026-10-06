@@ -118,7 +118,9 @@ def test_public_api_is_exact_and_keyword_only():
     tree = ast.parse(RUNTIME_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == {
-        "runtime_private_metadata", "capture_user_turn", "capture_delivered_response", "precheck_conversation_context"}
+        "runtime_private_metadata", "capture_user_turn", "capture_delivered_response", "precheck_conversation_context",
+        "answered_step"}
+    assert list(inspect.signature(dcr.answered_step).parameters) == ["db", "link"]
     assert list(inspect.signature(dcr.capture_user_turn).parameters) == ["db", "delivery", "ticker", "user_text"]
     assert list(inspect.signature(dcr.capture_delivered_response).parameters) == ["db", "delivery"]
     for name in ("capture_user_turn", "capture_delivered_response"):
@@ -249,7 +251,7 @@ def test_web_v2_knows_nothing_about_cognitive_capture_and_has_no_close_endpoint(
 
 LINK_COLUMNS = ("assistant_delivery_id, capture_version, input_action, input_event_id, context_exit_event_id, "
                 "capture_state, response_action, response_event_id, support_trace_id, created_at, captured_at, "
-                "input_context_event_id")
+                "input_context_event_id, response_context_event_id")
 
 
 def _links(engine):
@@ -906,12 +908,13 @@ def test_pg_k_text_typed_in_a_new_conversation_is_never_a_contribution(engine, S
 
 # --- L. nouvelle AnalysisSession ---------------------------------------------
 
-@pytest.mark.parametrize("conv, action", [(CONV, "context_switched"), (CONV_2, "no_open_event")],
-                         ids=["meme-conversation", "autre-conversation"])
-def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext, conv, action):
+def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, ext):
     """Nouvelle AnalysisSession : l'ancien event n'est jamais repris, et
-    (R1-C4) jamais fermé par cette navigation, quelle que soit la
-    conversation."""
+    (R1-C4) jamais fermé. Depuis une AUTRE conversation : no_open_event, la
+    nouvelle tentative démarre. Depuis la conversation encore ancrée à
+    l'ancienne tentative du MÊME ticker : état obsolète, 409
+    stale_conversation_context (blocker 3 : même ticker != context switch),
+    rien n'est écrit."""
     _turn(Sessions, ext, _reply("A1", "business"))
     _turn(Sessions, ext, _reply("A2", "business"), "Ils vendent du luxe.")
     [old] = _events(engine)
@@ -919,11 +922,18 @@ def test_pg_l_new_analysis_session_never_resumes_an_old_event(engine, Sessions, 
     with engine.begin() as conn:
         conn.execute(sa.text("UPDATE analysis_sessions SET status = 'abandoned' WHERE id = :s"),
                      {"s": old["analysis_session_id"]})
-    fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=conv)
+    state, product = _t2_state(engine), _product(engine)
+    with pytest.raises(HTTPException) as failure:
+        _send(Sessions, ext, _reply("B0", "business"), "Analyse LVMH", context="", conv=CONV)
+    assert (failure.value.status_code, failure.value.detail["error"]) == (409, "stale_conversation_context")
+    assert (_t2_state(engine), _product(engine)) == (state, product)
+
+    fresh = _send(Sessions, ext, _reply("B1", "business"), "Analyse LVMH", context="", conv=CONV_2)
     link = _link(engine, fresh["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"]) == (action, None, None)
+    assert (link["input_action"], link["input_event_id"], link["context_exit_event_id"],
+            link["response_context_event_id"]) == ("no_open_event", None, None, None)
     assert _event(engine, old["id"]) == old
-    _ack(Sessions, fresh, conv=conv)
+    _ack(Sessions, fresh, conv=CONV_2)
     new = _events(engine)[-1]
     assert new["analysis_session_id"] == _session_id(engine) != old["analysis_session_id"]
     assert new["id"] != old["id"] and new["status"] == "open"
@@ -1270,12 +1280,15 @@ def test_pg_ack_and_next_turn_serialize_on_the_analysis_session(engine, Sessions
 
 def test_pg_two_pending_openings_on_one_session_never_create_two_open_events(engine, Sessions, ext):
     """Deux onglets : deux premières réponses business en attente d'ACK sur
-    la même AnalysisSession. Les ACK se sérialisent sur l'AnalysisSession ;
-    le second voit l'event ouvert par le premier (unique event compatible)
-    et le continue au lieu d'en ouvrir un second."""
+    la même AnalysisSession. Les ACK se sérialisent sur l'AnalysisSession.
+    R1-C4 : le second tour a été capturé sans event cible
+    (response_context_event_id NULL) ; l'event ouvert par le premier ACK est
+    apparu APRÈS cette capture : jamais une cible rétroactive. Le second ACK
+    est delivered mais stale_delivery ; jamais deux events open."""
     first = _send(Sessions, ext, _reply("onglet 1", "business"), "", context="")
     second = _send(Sessions, ext, _reply("onglet 2", "business"), "", context="", conv=CONV_2)
-    assert _link(engine, second["assistant_turn_id"])["input_action"] == "no_open_event"
+    link = _link(engine, second["assistant_turn_id"])
+    assert (link["input_action"], link["response_context_event_id"]) == ("no_open_event", None)
     request = api.AssistantDeliveryAckRequest(user_id=USER, conversation_key=CONV_2)
     with Sessions() as holder, Sessions() as waiter:
         delivery = ad.lock_delivery_for_ack(holder, assistant_turn_id=_id(first), user_id=USER, conversation_key=CONV)
@@ -1286,9 +1299,10 @@ def test_pg_two_pending_openings_on_one_session_never_create_two_open_events(eng
     assert error is None and result["delivery_status"] == "delivered"
     [event] = _events(engine)
     assert event["status"] == "open"
-    assert _link(engine, second["assistant_turn_id"])["response_action"] == "continued_event"
-    [trace] = _traces(engine, event["id"])
-    assert trace["support_payload"] == {"visible_content": "Réponse onglet 2."}
+    link = _link(engine, second["assistant_turn_id"])
+    assert (link["response_action"], link["response_event_id"], link["support_trace_id"]) == (
+        "stale_delivery", None, None)
+    assert _traces(engine, event["id"]) == []
 
 
 def test_pg_rolled_back_ack_leaves_the_next_ack_free(engine, Sessions, ext):

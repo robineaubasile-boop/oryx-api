@@ -18,7 +18,8 @@ réutilise les helpers) :
            python -m pytest tests/test_migration_0013_decryptage_conversation_affinity.py
 
 Doctrine : 0013 est strictement EXPAND et sans backfill. Elle étend
-decryptage_cognitive_links (colonne input_context_event_id + FK, CHECK
+decryptage_cognitive_links (colonnes input_context_event_id et
+response_context_event_id + FK, CHECK
 étendus et de cohérence par version de runtime) ; aucune colonne supprimée
 ni renommée ; les lignes V1 restent valides et gardent leur sémantique.
 """
@@ -81,13 +82,16 @@ R1C2_SHA256 = "13e10ac183e6b9455ac0bceda7f1db41a0ddf15920b118b94b508cc4883f2c28"
 
 COLUMN = "input_context_event_id"
 FK = "decryptage_cognitive_links_input_context_event_id_fkey"
+RCOLUMN = "response_context_event_id"
+RFK = "decryptage_cognitive_links_response_context_event_id_fkey"
 NEW_CHECKS = {
     "ck_decryptage_cognitive_links_context_switched",
     "ck_decryptage_cognitive_links_stale_delivery",
     "ck_decryptage_cognitive_links_runtime_version",
+    "ck_decryptage_cognitive_links_response_attachment",
 }
 HEAD_CHECKS = CHECKS_0012 | NEW_CHECKS
-HEAD_COLUMNS = COLUMNS_0012 + [COLUMN]
+HEAD_COLUMNS = COLUMNS_0012 + [COLUMN, RCOLUMN]
 V1 = "decryptage-cognitive-runtime-v1"
 V2 = "decryptage-cognitive-runtime-v2"
 INPUT_ACTIONS = ("no_open_event", "no_user_contribution", "contribution_appended", "event_closed_context_change",
@@ -133,25 +137,28 @@ def test_0011_and_0012_files_are_unchanged():
 def test_offline_sql_of_0013_upgrade_only_extends_the_links_table():
     sql = _run_alembic("postgresql://offline@localhost/offline", "upgrade", f"{R1C2}:{R1C4}", "--sql").stdout
     statements = _statements(sql)
-    assert statements[:2] == [
+    assert statements[:4] == [
         f"ALTER TABLE {LINKS} ADD COLUMN {COLUMN} UUID",
+        f"ALTER TABLE {LINKS} ADD COLUMN {RCOLUMN} UUID",
         f"ALTER TABLE {LINKS} ADD CONSTRAINT {FK} FOREIGN KEY({COLUMN}) REFERENCES cognitive_events (id)",
+        f"ALTER TABLE {LINKS} ADD CONSTRAINT {RFK} FOREIGN KEY({RCOLUMN}) REFERENCES cognitive_events (id)",
     ]
-    assert statements[2] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action"
-    assert statements[3].startswith(
-        f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_input_action CHECK")
-    assert "'context_switched'" in statements[3] and "'event_closed_context_change'" in statements[3]
-    assert statements[4] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_action"
+    assert statements[4] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action"
     assert statements[5].startswith(
+        f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_input_action CHECK")
+    assert "'context_switched'" in statements[5] and "'event_closed_context_change'" in statements[5]
+    assert statements[6] == f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_action"
+    assert statements[7].startswith(
         f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_response_action CHECK")
-    assert "'stale_delivery'" in statements[5] and "'no_cognitive_action'" in statements[5]
+    assert "'stale_delivery'" in statements[7] and "'no_cognitive_action'" in statements[7]
     added = ("ck_decryptage_cognitive_links_context_switched", "ck_decryptage_cognitive_links_stale_delivery",
-             "ck_decryptage_cognitive_links_runtime_version")
+             "ck_decryptage_cognitive_links_runtime_version", "ck_decryptage_cognitive_links_response_attachment")
     assert set(added) == NEW_CHECKS
-    for statement, name in zip(statements[6:9], added):
+    for statement, name in zip(statements[8:12], added):
         assert statement.startswith(f"ALTER TABLE {LINKS} ADD CONSTRAINT {name} CHECK"), statement
-    assert statements[9] == f"UPDATE alembic_version SET version_num='{R1C4}' WHERE alembic_version.version_num = '{R1C2}'"
-    assert len(statements) == 10
+    assert statements[12] == (f"UPDATE alembic_version SET version_num='{R1C4}' "
+                              f"WHERE alembic_version.version_num = '{R1C2}'")
+    assert len(statements) == 13
     upper = sql.upper()
     # Aucune donnée écrite (aucun backfill), aucune suppression de colonne,
     # aucun objet de schéma hors de la table.
@@ -159,13 +166,14 @@ def test_offline_sql_of_0013_upgrade_only_extends_the_links_table():
                       "CREATE TYPE", "CREATE TRIGGER", "CREATE FUNCTION", "DEFAULT", "ON DELETE", "ON UPDATE",
                       "CASCADE", "NOT VALID", "SET NOT NULL"):
         assert forbidden not in upper, forbidden
-    assert [s for s in statements if s.upper().startswith("UPDATE")] == [statements[9]]
+    assert [s for s in statements if s.upper().startswith("UPDATE")] == [statements[12]]
 
 
 def test_offline_sql_of_0013_downgrade_reverts_exactly_r1c4():
     sql = _run_alembic("postgresql://offline@localhost/offline", "downgrade", f"{R1C4}:{R1C2}", "--sql").stdout
     statements = _statements(sql)
-    assert statements[:5] == [
+    assert statements[:6] == [
+        f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_response_attachment",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_runtime_version",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_stale_delivery",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_context_switched",
@@ -174,16 +182,19 @@ def test_offline_sql_of_0013_downgrade_reverts_exactly_r1c4():
         "IS NULL OR response_action IN ('opened_event', 'continued_event', 'continued_without_boundary_signal', "
         "'transitioned_event', 'closed_terminal', 'no_cognitive_action'))",
     ]
-    assert statements[5:9] == [
+    assert statements[6:12] == [
         f"ALTER TABLE {LINKS} DROP CONSTRAINT ck_decryptage_cognitive_links_input_action",
         f"ALTER TABLE {LINKS} ADD CONSTRAINT ck_decryptage_cognitive_links_input_action CHECK (input_action IN "
         "('no_open_event', 'no_user_contribution', 'contribution_appended', 'event_closed_context_change', "
         "'event_abandoned_context_change'))",
+        f"ALTER TABLE {LINKS} DROP CONSTRAINT {RFK}",
         f"ALTER TABLE {LINKS} DROP CONSTRAINT {FK}",
+        f"ALTER TABLE {LINKS} DROP COLUMN {RCOLUMN}",
         f"ALTER TABLE {LINKS} DROP COLUMN {COLUMN}",
     ]
-    assert statements[9] == f"UPDATE alembic_version SET version_num='{R1C2}' WHERE alembic_version.version_num = '{R1C4}'"
-    assert len(statements) == 10 and "CASCADE" not in sql.upper()
+    assert statements[12] == (f"UPDATE alembic_version SET version_num='{R1C2}' "
+                              f"WHERE alembic_version.version_num = '{R1C4}'")
+    assert len(statements) == 13 and "CASCADE" not in sql.upper()
 
 
 def test_upgrade_writes_no_data_and_backfills_nothing():
@@ -196,18 +207,19 @@ def test_upgrade_writes_no_data_and_backfills_nothing():
 
 
 def test_model_matches_the_migration_exactly():
-    """Le modèle porte la colonne (fin de table, nullable, FK sans cascade)
-    et les CHECK avec le MÊME texte SQL que la migration."""
+    """Le modèle porte les deux colonnes (fin de table, nullables, FK sans
+    cascade) et les CHECK avec le MÊME texte SQL que la migration."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("migration_0013", MIGRATION_PATH)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     table = DecryptageCognitiveLink.__table__
     assert [c.name for c in table.columns] == HEAD_COLUMNS
-    column = table.c[COLUMN]
-    assert column.nullable and isinstance(column.type, sa.Uuid) and column.server_default is None
-    [fk] = column.foreign_keys
-    assert (fk.target_fullname, fk.ondelete, fk.onupdate) == ("cognitive_events.id", None, None)
+    for name in (COLUMN, RCOLUMN):
+        column = table.c[name]
+        assert column.nullable and isinstance(column.type, sa.Uuid) and column.server_default is None
+        [fk] = column.foreign_keys
+        assert (fk.target_fullname, fk.ondelete, fk.onupdate) == ("cognitive_events.id", None, None)
     checks = {c.name: str(c.sqltext) for c in table.constraints if isinstance(c, sa.CheckConstraint)}
     assert set(checks) == HEAD_CHECKS
     assert checks["ck_decryptage_cognitive_links_input_action"] == migration.INPUT_ACTIONS_0013
@@ -215,6 +227,7 @@ def test_model_matches_the_migration_exactly():
     assert checks["ck_decryptage_cognitive_links_context_switched"] == migration.CONTEXT_SWITCHED
     assert checks["ck_decryptage_cognitive_links_stale_delivery"] == migration.STALE_DELIVERY
     assert checks["ck_decryptage_cognitive_links_runtime_version"] == migration.RUNTIME_VERSION
+    assert checks["ck_decryptage_cognitive_links_response_attachment"] == migration.RESPONSE_ATTACHMENT
 
 
 def test_runtime_vocabularies_are_exactly_the_checks():
@@ -238,7 +251,7 @@ def _insert_link(conn, **overrides):
         "assistant_delivery_id": None, "capture_version": V1, "input_action": "no_open_event",
         "input_event_id": None, "context_exit_event_id": None, "capture_state": "awaiting_delivery",
         "response_action": None, "response_event_id": None, "support_trace_id": None, "created_at": NOW,
-        "captured_at": None, COLUMN: None,
+        "captured_at": None, COLUMN: None, RCOLUMN: None,
     }
     values.update(overrides)
     if values["assistant_delivery_id"] is None:
@@ -330,14 +343,15 @@ def test_pg_upgrade_0012_to_0013_keeps_v1_rows_untouched_then_downgrade(pg_url, 
     data_0013 = _data(pg_engine, HEAD_TABLES - {"alembic_version"})
     assert {t: rows for t, rows in data_0013.items() if t != LINKS} == {
         t: rows for t, rows in data_0012.items() if t != LINKS}
-    # Lignes V1 : mêmes valeurs, nouvelle colonne NULL (aucun backfill).
-    assert data_0013[LINKS] == [row + (None,) for row in data_0012[LINKS]]
+    # Lignes V1 : mêmes valeurs, nouvelles colonnes NULL (aucun backfill).
+    assert data_0013[LINKS] == [row + (None, None) for row in data_0012[LINKS]]
     assert _compare_metadata(pg_engine) == []
     catalog = _catalog(pg_engine, {LINKS})[LINKS]
-    assert catalog["columns"][-1] == (COLUMN, "uuid", "YES", None)
-    assert [c[0] for c in catalog["columns"][:-1]] == COLUMNS_0012  # aucune colonne supprimée / renommée
+    assert catalog["columns"][-2:] == [(COLUMN, "uuid", "YES", None), (RCOLUMN, "uuid", "YES", None)]
+    assert [c[0] for c in catalog["columns"][:-2]] == COLUMNS_0012  # aucune colonne supprimée / renommée
     assert {c[0] for c in catalog["constraints"] if c[1] == "c"} == HEAD_CHECKS
-    assert (FK, "f", f"FOREIGN KEY ({COLUMN}) REFERENCES cognitive_events(id)", "a", "a") in catalog["constraints"]
+    for column, fk in ((COLUMN, FK), (RCOLUMN, RFK)):
+        assert (fk, "f", f"FOREIGN KEY ({column}) REFERENCES cognitive_events(id)", "a", "a") in catalog["constraints"]
     assert catalog["indexes"] == catalog_0012[LINKS]["indexes"]
     schema_0013 = _snapshot(pg_engine, {LINKS})
     catalog_0013 = _catalog(pg_engine, {LINKS})
@@ -384,9 +398,12 @@ def test_pg_v2_vocabulary_and_context_switched_check(conn):
     other = _insert_event(conn, event_dedup_key="b" * 64)
     v2 = {"capture_version": V2}
     _insert_link(conn, **v2, input_action="context_switched", **{COLUMN: anchor})
-    _insert_link(conn, **v2, input_action="no_user_contribution", **{COLUMN: anchor})
-    _insert_link(conn, **v2, input_action="contribution_appended", input_event_id=anchor, **{COLUMN: anchor})
+    _insert_link(conn, **v2, input_action="context_switched", **{COLUMN: anchor, RCOLUMN: other})
+    _insert_link(conn, **v2, input_action="no_user_contribution", **{COLUMN: anchor, RCOLUMN: anchor})
+    _insert_link(conn, **v2, input_action="contribution_appended", input_event_id=anchor,
+                 **{COLUMN: anchor, RCOLUMN: anchor})
     _insert_link(conn, **v2, input_action="no_open_event")
+    _insert_link(conn, **v2, input_action="no_open_event", **{RCOLUMN: other})
     check = "ck_decryptage_cognitive_links_context_switched"
     _rejected(conn, check, **v2, input_action="context_switched")  # ancre obligatoire
     _rejected(conn, check, **v2, input_action="context_switched", context_exit_event_id=other, **{COLUMN: anchor})
@@ -400,7 +417,7 @@ def test_pg_stale_delivery_check(conn):
     event_id = _insert_event(conn, event_dedup_key="a" * 64)
     trace_id = _insert_trace(conn, event_id)
     captured = {"capture_version": V2, "input_action": "no_user_contribution", COLUMN: event_id,
-                "capture_state": "captured", "captured_at": NOW}
+                RCOLUMN: event_id, "capture_state": "captured", "captured_at": NOW}
     _insert_link(conn, response_action="stale_delivery", **captured)
     for overrides in ({"response_event_id": event_id}, {"support_trace_id": trace_id},
                       {"response_event_id": event_id, "support_trace_id": trace_id}):
@@ -408,7 +425,8 @@ def test_pg_stale_delivery_check(conn):
             with conn.begin_nested():
                 _insert_link(conn, response_action="stale_delivery", **captured, **overrides)
     _rejected(conn, "ck_decryptage_cognitive_links_capture_state_fields", capture_version=V2,
-              input_action="no_user_contribution", response_action="stale_delivery", **{COLUMN: event_id})
+              input_action="no_user_contribution", response_action="stale_delivery",
+              **{COLUMN: event_id, RCOLUMN: event_id})
     _rejected(conn, "ck_decryptage_cognitive_links_response_action", response_action="stale", **captured)
 
 
@@ -427,17 +445,25 @@ def test_pg_runtime_version_check(conn):
         _rejected(conn, check, capture_version=V2, input_action=action, context_exit_event_id=anchor,
                   **{COLUMN: anchor})
     _rejected(conn, check, capture_version=V2, input_action="no_user_contribution", context_exit_event_id=other,
-              **{COLUMN: anchor})
+              **{COLUMN: anchor, RCOLUMN: anchor})
     _rejected(conn, check, capture_version=V2, input_action="no_open_event", **{COLUMN: anchor})
     _rejected(conn, check, capture_version=V2, input_action="no_user_contribution")
     _rejected(conn, check, capture_version=V2, input_action="contribution_appended", input_event_id=other,
-              **{COLUMN: anchor})
+              **{COLUMN: anchor, RCOLUMN: anchor})
+    # R1-C4 (blocker 1) : V1 jamais de cible de réponse figée ; un tour ancré
+    # destine sa réponse exactement à son ancre ; un context switch jamais à
+    # l'event quitté.
+    _rejected(conn, check, capture_version=V1, **{RCOLUMN: anchor})
+    for action, extra in (("no_user_contribution", {}), ("contribution_appended", {"input_event_id": anchor})):
+        _rejected(conn, check, capture_version=V2, input_action=action, **extra, **{COLUMN: anchor})
+        _rejected(conn, check, capture_version=V2, input_action=action, **extra, **{COLUMN: anchor, RCOLUMN: other})
+    _rejected(conn, check, capture_version=V2, input_action="context_switched", **{COLUMN: anchor, RCOLUMN: anchor})
     for version in ("decryptage-cognitive-runtime-v3", "v2", ""):
         _rejected(conn, check, capture_version=version)
 
 
 def test_pg_input_context_event_fk_is_no_action(conn):
-    _rejected(conn, FK, capture_version=V2, input_action="no_user_contribution", **{COLUMN: uuid.uuid4()})
+    _rejected(conn, FK, capture_version=V2, input_action="context_switched", **{COLUMN: uuid.uuid4()})
     anchor = _insert_event(conn, event_dedup_key="a" * 64)
     _insert_link(conn, capture_version=V2, input_action="context_switched", **{COLUMN: anchor})
     with pytest.raises(sa.exc.IntegrityError, match=FK):
@@ -445,10 +471,53 @@ def test_pg_input_context_event_fk_is_no_action(conn):
             conn.execute(sa.text("DELETE FROM cognitive_events WHERE id = :e"), {"e": anchor})
 
 
+def test_pg_response_context_event_fk_is_no_action(conn):
+    _rejected(conn, RFK, capture_version=V2, input_action="no_open_event", **{RCOLUMN: uuid.uuid4()})
+    target = _insert_event(conn, event_dedup_key="a" * 64)
+    _insert_link(conn, capture_version=V2, input_action="no_open_event", **{RCOLUMN: target})
+    with pytest.raises(sa.exc.IntegrityError, match=RFK):
+        with conn.begin_nested():
+            conn.execute(sa.text("DELETE FROM cognitive_events WHERE id = :e"), {"e": target})
+
+
+def test_pg_response_context_check(conn):
+    """R1-C4 (blocker 1) : la réponse ne se rattache qu'à sa cible figée."""
+    target = _insert_event(conn, event_dedup_key="a" * 64)
+    other = _insert_event(conn, event_dedup_key="b" * 64)
+    trace = _insert_trace(conn, target)
+    other_trace = _insert_trace(conn, other)
+    check = "ck_decryptage_cognitive_links_response_attachment"
+    v2 = {"capture_version": V2, "input_action": "no_open_event", "capture_state": "captured", "captured_at": NOW}
+    # Valides.
+    for action in ("continued_event", "continued_without_boundary_signal"):
+        _insert_link(conn, **v2, response_action=action, response_event_id=target, support_trace_id=trace,
+                     **{RCOLUMN: target})
+    _insert_link(conn, **v2, response_action="transitioned_event", response_event_id=other, **{RCOLUMN: target})
+    _insert_link(conn, **v2, response_action="closed_terminal", **{RCOLUMN: target})
+    _insert_link(conn, **v2, response_action="no_cognitive_action")
+    _insert_link(conn, **v2, response_action="stale_delivery", **{RCOLUMN: target})
+    _insert_link(conn, **v2, response_action="stale_delivery")
+    # Refusés : continuation d'un autre event que la cible figée (ou sans
+    # cible), transition / fermeture sans cible, ouverture alors qu'une cible
+    # existait.
+    for action in ("continued_event", "continued_without_boundary_signal"):
+        _rejected(conn, check, **v2, response_action=action, response_event_id=other, support_trace_id=other_trace,
+                  **{RCOLUMN: target})
+        _rejected(conn, check, **v2, response_action=action, response_event_id=other, support_trace_id=other_trace)
+    _rejected(conn, check, **v2, response_action="transitioned_event", response_event_id=other)
+    _rejected(conn, check, **v2, response_action="closed_terminal")
+    _rejected(conn, check, **v2, response_action="no_cognitive_action", **{RCOLUMN: target})
+    # (opened_event avec cible : transition/ouverture déguisée)
+    fresh = _insert_event(conn, event_dedup_key="c" * 64)
+    _rejected(conn, check, **v2, response_action="opened_event", response_event_id=fresh, **{RCOLUMN: target})
+
+
 def test_pg_opening_index_is_unchanged(conn):
     event_id = _insert_event(conn, event_dedup_key="a" * 64)
+    previous = _insert_event(conn, event_dedup_key="b" * 64)
     captured = {"capture_version": V2, "capture_state": "captured", "captured_at": NOW}
     _insert_link(conn, response_action="opened_event", response_event_id=event_id, **captured)
     with pytest.raises(sa.exc.IntegrityError, match=OPENING_INDEX):
         with conn.begin_nested():
-            _insert_link(conn, response_action="transitioned_event", response_event_id=event_id, **captured)
+            _insert_link(conn, response_action="transitioned_event", response_event_id=event_id,
+                         **captured, **{RCOLUMN: previous})

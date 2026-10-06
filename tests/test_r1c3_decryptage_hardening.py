@@ -344,13 +344,19 @@ def _seed(Sessions, step, ticker="NVDA", status="in_progress"):
         return session.id
 
 
-def _apply(Sessions, step, thesis_text=None, ticker="NVDA", user_contribution=True):
-    """Progression d'un tour. Par défaut une vraie contribution (R1-C4 :
-    seule une contribution fait avancer une session existante)."""
+def _apply(Sessions, step, thesis_text=None, ticker="NVDA", user_contribution=True, answered_step=None):
+    """Progression d'un tour. Par défaut une vraie contribution qui répond à
+    l'étape actuellement ouverte (R1-C4 : seule une contribution fait avancer
+    une session existante, et seulement si answered_step == current_step) ;
+    answered_step explicite pour les autres cas."""
     with Sessions() as s:
+        if user_contribution and answered_step is None:
+            active = dp.find_active_analysis_session(s, USER, ticker)
+            answered_step = active.current_step if active is not None else None
         result = dp.apply_construction_these_progress(s, user_id=USER, ticker=ticker, step=step,
                                                       thesis_text=thesis_text, data=None,
-                                                      user_contribution=user_contribution)
+                                                      user_contribution=user_contribution,
+                                                      answered_step=answered_step)
         result_id = result.id if result is not None else None
         s.commit()
         return result_id
@@ -395,7 +401,12 @@ def test_pg_risques_to_swot_final_completes(engine, Sessions, ext):
 
 
 def test_pg_swot_final_without_a_session_is_none_as_before(engine, Sessions, ext):
-    assert _apply(Sessions, "swot_final", thesis_text="Merci !") is None
+    assert _apply(Sessions, "swot_final", user_contribution=False) is None
+    assert _state(Sessions) == []
+    # R1-C4 : une contribution sans AnalysisSession active est incohérente
+    # (une contribution répond à un event d'une session active) : fail closed.
+    with pytest.raises(ValueError):
+        _apply(Sessions, "swot_final", thesis_text="Merci !", answered_step="risques")
     assert _state(Sessions) == []
     assert _product(engine) == {"sessions": [], "statements": [], "facts": [], "theses": []}
 
@@ -418,7 +429,7 @@ def test_pg_retrograde_never_touches_a_completed_session(engine, Sessions, ext):
     """Une session completed n'est jamais reprise : un marqueur ultérieur
     ouvre une NOUVELLE tentative (règle T1-C1 inchangée)."""
     done = _seed(Sessions, "swot_final", status="completed")
-    new = _apply(Sessions, "business")
+    new = _apply(Sessions, "business", user_contribution=False)
     assert new != done
     assert [(s[1], s[2]) for s in _state(Sessions)] == [("completed", "swot_final"), ("in_progress", "business")]
 
@@ -429,14 +440,16 @@ def test_pg_concurrent_mutation_never_regresses_under_a_stale_snapshot(engine, S
     « chiffres » : sans relecture verrouillée il lirait moat (snapshot
     stale), verrait une avancée et écraserait valorisation par chiffres. Le
     verrou le fait attendre puis relire valorisation : rétrograde, la BDD
-    reste à valorisation."""
+    reste à valorisation (R1-C4 : sa contribution répondait au moat, qui
+    n'est plus l'étape ouverte : aucune progression non plus)."""
     sid = _seed(Sessions, "moat")
     with Sessions() as holder, Sessions() as waiter:
         assert dp.apply_construction_these_progress(holder, user_id=USER, ticker="NVDA", step="valorisation",
-                                                    thesis_text=None, data=None, user_contribution=True).id == sid
+                                                    thesis_text=None, data=None, user_contribution=True,
+                                                    answered_step="moat").id == sid
         result, error = _run_blocked(engine, holder, waiter, lambda s: dp.apply_construction_these_progress(
             s, user_id=USER, ticker="NVDA", step="chiffres", thesis_text=None, data=None,
-            user_contribution=True).current_step)
+            user_contribution=True, answered_step="moat").current_step)
     assert error is None
     assert result == "valorisation"
     assert _state(Sessions) == [(sid, "in_progress", "valorisation", False)]
