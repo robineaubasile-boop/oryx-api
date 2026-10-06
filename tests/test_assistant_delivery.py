@@ -159,7 +159,7 @@ def test_public_api_is_exact_and_keyword_only():
     assert list(inspect.signature(ad.bind_analysis_session).parameters) == [
         "db", "delivery_id", "analysis_session_id"]
     assert list(inspect.signature(dp.apply_construction_these_progress).parameters) == [
-        "db", "user_id", "ticker", "step", "thesis_text", "data"]
+        "db", "user_id", "ticker", "step", "thesis_text", "data", "user_contribution", "answered_step"]
 
 
 def test_exceptions_are_a_small_business_hierarchy():
@@ -216,7 +216,8 @@ def test_progress_module_owns_no_transaction_and_swallows_nothing():
         assert forbidden not in tokens, forbidden
     tree = ast.parse(source)
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Try)], "aucune capture d'erreur DB"
-    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "core.models"}
+    # typing : ProgressOutcome (NamedTuple, R1-C4), aucune I/O.
+    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "typing", "core.models"}
 
 
 @pytest.mark.parametrize("path", [SERVICE_PATH, PROGRESS_PATH], ids=lambda p: p.name)
@@ -386,7 +387,8 @@ def test_progress_refuses_steps_outside_the_closed_vocabulary_before_db():
     for step in ("inconnu", None, "Moat"):
         with pytest.raises(dp.InvalidDecryptageStep):
             dp.apply_construction_these_progress(_NoDB(), user_id=USER, ticker="MC.PA", step=step,
-                                                 thesis_text=None, data=None)
+                                                 thesis_text=None, data=None, user_contribution=False,
+                                                 answered_step=None)
 
 
 # --- validation structurelle avant tout accès à la base ---------------------
@@ -927,8 +929,9 @@ def _marker(step):
 
 def _route_metadata(marker):
     """private_metadata d'une livraison créée par la route depuis R1-C2 :
-    marqueur privé + opt-in explicite de la capture cognitive."""
-    return {"decryptage_step_marker": marker, "cognitive_runtime_version": "decryptage-cognitive-runtime-v1"}
+    marqueur privé + opt-in explicite de la capture cognitive (runtime V2
+    depuis R1-C4)."""
+    return {"decryptage_step_marker": marker, "cognitive_runtime_version": "decryptage-cognitive-runtime-v2"}
 
 
 def test_pg_route_new_generation_persists_a_pending_delivery_before_responding(engine, Sessions, ext):

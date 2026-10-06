@@ -918,8 +918,16 @@ def test_32_not_wired_to_api_nor_web_chat_nor_migrated():
                  "PedagogicalProjection", "PEDAGOGICAL_RESPONSE_CONTEXT_SCHEMA_VERSION"):
         assert name not in api, name
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0012_decryptage_cognitive_links.py" and len(versions) == 12
+    assert versions[-1] == "0013_decryptage_conversation_affinity.py" and len(versions) == 13
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
+    # R1-C4 : decryptage_cognitive_links.response_context_event_id (FK T2 vers
+    # cognitive_events : event cible de la réponse assistant, provenance) n'est
+    # PAS un contexte de réponse pédagogique Step 6 ; seul cet identifiant
+    # exact est toléré, et il reste une simple FK vers cognitive_events.
+    from core.models import DecryptageCognitiveLink
+    [fk] = DecryptageCognitiveLink.__table__.c["response_context_event_id"].foreign_keys
+    assert fk.target_fullname == "cognitive_events.id"
+    models = models.replace("response_context_event_id", "")
     for word in ("ResponseContext", "response_context", "PedagogicalProjection"):
         assert word not in models, word
     for word in ("__tablename__", "Column", "Base", "mapped_column", "relationship"):

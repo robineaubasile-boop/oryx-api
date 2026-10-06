@@ -57,6 +57,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     _data,
     _statements,
     _without_r1c2_changes,
+    R1C4,
+    R1C4_FILE,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     OTHER_USER,
@@ -110,20 +112,21 @@ PRE_R1C1_TABLES = ALL_TABLES | R1B_TABLES
 
 def test_revision_chain_is_exactly_0001_to_0011_then_0012():
     """0001 -> ... -> 0010 -> 0011 ; 0011 est la seule migration ajoutée par
-    R1-C1. Depuis R1-C2, 0012 (decryptage_cognitive_links) la suit et est la
-    tête unique."""
+    R1-C1. Depuis R1-C2, 0012 (decryptage_cognitive_links) la suit ; depuis
+    R1-C4, 0013 (affinité conversationnelle) est la tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
+    assert script.get_heads() == [R1C4]
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)
+    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
     assert set(revisions) == set(chain)
+    assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain]
-    assert len(files) == 12
+    assert files == [f"{rev}.py" for rev in chain[:-1]] + [R1C4_FILE]
+    assert len(files) == 13
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -298,7 +301,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1C2
+    assert _version(pg_engine) == R1C4
     assert _tables(pg_engine) == HEAD_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)

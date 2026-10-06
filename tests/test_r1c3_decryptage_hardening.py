@@ -12,6 +12,11 @@ uniquement pour une vraie contribution R1-C2 (contribution_appended).
 R1-C3A (conversation_key par onglet) et le contexte filtré par ticker sont
 testés côté frontend (tests/web/decryptage_tab_scope.test.js).
 
+R1-C4 : une avancée / terminalisation d'une session existante exige en plus
+une vraie contribution (user_contribution) ; la navigation est
+context_switched et une reprise sans ancre no_open_event. Les tests
+ci-dessous l'expriment explicitement.
+
 1. Tests sans base (toujours exécutés) : prompt de reprise, classement
    des marqueurs, structure de la route, aucune migration, aucun T3+.
 
@@ -183,19 +188,24 @@ def test_route_always_loads_the_active_session_before_choosing_the_method():
 
 def test_route_passes_text_to_the_product_only_for_a_real_contribution():
     """R1-C3C : thesis_text = question SEULEMENT si R1-C2 a classé le tour
-    contribution_appended ; capture_user_turn reste avant la progression."""
+    contribution_appended ; capture_user_turn reste avant la progression.
+    R1-C4 : la même classification autorise seule l'avancée produit."""
     _, source = _route_source()
     assert "cognitive_link = capture_user_turn(" in source
-    assert ("progress_thesis_text = question if cognitive_link is not None and cognitive_link.input_action == "
-            "CONTRIBUTION_APPENDED else None") in source
+    assert ("user_contribution = cognitive_link is not None and cognitive_link.input_action == "
+            "CONTRIBUTION_APPENDED") in source
+    assert "progress_thesis_text = question if user_contribution else None" in source
     assert "thesis_text=progress_thesis_text" in source
+    assert "user_contribution=user_contribution" in source
     assert "thesis_text=question" not in source
     assert source.index("capture_user_turn(") < source.index("apply_construction_these_progress(")
 
 
 def test_no_migration_and_no_t3_in_the_hardened_modules():
+    """R1-C3 n'a ajouté aucune migration (0013 est celle de R1-C4)."""
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-1] == "0012_decryptage_cognitive_links.py" and len(files) == 12
+    assert files[-2:] == ["0012_decryptage_cognitive_links.py", "0013_decryptage_conversation_affinity.py"]
+    assert len(files) == 13
     for path in ("core/decryptage_progress.py", "core/decryptage_engine.py"):
         tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
         imported = set()
@@ -334,11 +344,20 @@ def _seed(Sessions, step, ticker="NVDA", status="in_progress"):
         return session.id
 
 
-def _apply(Sessions, step, thesis_text=None, ticker="NVDA"):
+def _apply(Sessions, step, thesis_text=None, ticker="NVDA", user_contribution=True, answered_step=None):
+    """Progression d'un tour. Par défaut une vraie contribution qui répond à
+    l'étape actuellement ouverte (R1-C4 : seule une contribution fait avancer
+    une session existante, et seulement si answered_step == current_step) ;
+    answered_step explicite pour les autres cas."""
     with Sessions() as s:
+        if user_contribution and answered_step is None:
+            active = dp.find_active_analysis_session(s, USER, ticker)
+            answered_step = active.current_step if active is not None else None
         result = dp.apply_construction_these_progress(s, user_id=USER, ticker=ticker, step=step,
-                                                      thesis_text=thesis_text, data=None)
-        result_id = result.id if result is not None else None
+                                                      thesis_text=thesis_text, data=None,
+                                                      user_contribution=user_contribution,
+                                                      answered_step=answered_step)
+        result_id = result.analysis_session.id if result is not None else None
         s.commit()
         return result_id
 
@@ -382,25 +401,35 @@ def test_pg_risques_to_swot_final_completes(engine, Sessions, ext):
 
 
 def test_pg_swot_final_without_a_session_is_none_as_before(engine, Sessions, ext):
-    assert _apply(Sessions, "swot_final", thesis_text="Merci !") is None
+    assert _apply(Sessions, "swot_final", user_contribution=False) is None
+    assert _state(Sessions) == []
+    # R1-C4 : une contribution sans AnalysisSession active est incohérente
+    # (une contribution répond à un event d'une session active) : fail closed.
+    with pytest.raises(ValueError):
+        _apply(Sessions, "swot_final", thesis_text="Merci !", answered_step="risques")
     assert _state(Sessions) == []
     assert _product(engine) == {"sessions": [], "statements": [], "facts": [], "theses": []}
 
 
-def test_pg_swot_final_without_real_contribution_creates_no_empty_thesis(engine, Sessions, ext):
-    """InvestmentThesis : jamais créée artificiellement sans contribution
-    réelle (thesis_text None) ; la session est tout de même complétée."""
+def test_pg_swot_final_without_real_contribution_neither_completes_nor_creates_a_thesis(engine, Sessions, ext,
+                                                                                        caplog):
+    """R1-C4 : swot_final sans contribution réelle ne termine pas une session
+    existante (status, current_step, completed_at inchangés) et ne crée
+    jamais d'InvestmentThesis ; anomalie terminal_without_contribution."""
     sid = _seed(Sessions, "risques")
-    assert _apply(Sessions, "swot_final", thesis_text=None) == sid
-    assert _state(Sessions) == [(sid, "completed", "swot_final", True)]
+    with caplog.at_level(logging.INFO, logger=PROGRESS_LOGGER):
+        assert _apply(Sessions, "swot_final", thesis_text=None, user_contribution=False) == sid
+    assert _state(Sessions) == [(sid, "in_progress", "risques", False)]
     assert _product(engine)["theses"] == [] and _product(engine)["statements"] == []
+    assert (f"[DECRYPTAGE-PROGRESS] session={sid} anomaly=terminal_without_contribution current=risques "
+            "received=swot_final") in caplog.text
 
 
 def test_pg_retrograde_never_touches_a_completed_session(engine, Sessions, ext):
     """Une session completed n'est jamais reprise : un marqueur ultérieur
     ouvre une NOUVELLE tentative (règle T1-C1 inchangée)."""
     done = _seed(Sessions, "swot_final", status="completed")
-    new = _apply(Sessions, "business")
+    new = _apply(Sessions, "business", user_contribution=False)
     assert new != done
     assert [(s[1], s[2]) for s in _state(Sessions)] == [("completed", "swot_final"), ("in_progress", "business")]
 
@@ -411,13 +440,16 @@ def test_pg_concurrent_mutation_never_regresses_under_a_stale_snapshot(engine, S
     « chiffres » : sans relecture verrouillée il lirait moat (snapshot
     stale), verrait une avancée et écraserait valorisation par chiffres. Le
     verrou le fait attendre puis relire valorisation : rétrograde, la BDD
-    reste à valorisation."""
+    reste à valorisation (R1-C4 : sa contribution répondait au moat, qui
+    n'est plus l'étape ouverte : aucune progression non plus)."""
     sid = _seed(Sessions, "moat")
     with Sessions() as holder, Sessions() as waiter:
         assert dp.apply_construction_these_progress(holder, user_id=USER, ticker="NVDA", step="valorisation",
-                                                    thesis_text=None, data=None).id == sid
+                                                    thesis_text=None, data=None, user_contribution=True,
+                                                    answered_step="moat").analysis_session.id == sid
         result, error = _run_blocked(engine, holder, waiter, lambda s: dp.apply_construction_these_progress(
-            s, user_id=USER, ticker="NVDA", step="chiffres", thesis_text=None, data=None).current_step)
+            s, user_id=USER, ticker="NVDA", step="chiffres", thesis_text=None, data=None,
+            user_contribution=True, answered_step="moat").analysis_session.current_step)
     assert error is None
     assert result == "valorisation"
     assert _state(Sessions) == [(sid, "in_progress", "valorisation", False)]
@@ -441,15 +473,15 @@ def test_pg_a_contribution_appended_creates_the_statement(engine, Sessions, ext)
 
 
 def test_pg_b_no_open_event_creates_no_statement(engine, Sessions, ext):
-    """(B) Réponse précédente jamais acquittée (aucun event ouvert) : le
-    texte n'est pas une contribution R1-C2, donc aucun UserStatement (avant
-    R1-C3 il l'aurait été)."""
+    """(B) Réponse précédente jamais acquittée (aucune ancre) : le texte n'est
+    pas une contribution R1-C2, donc aucun UserStatement, et (R1-C4) la
+    progression produit n'avance PAS sur le seul marqueur de Claude."""
     _send(Sessions, ext, _reply("1", "business"))
     second = _send(Sessions, ext, _reply("2", "moat"), "Ils vendent du luxe.")
     assert _link(engine, second["assistant_turn_id"])["input_action"] == "no_open_event"
     assert _statements(engine) == []
     [(_, status, step, _)] = _product(engine)["sessions"]
-    assert (status, step) == ("in_progress", "moat")  # la progression produit avance quand même
+    assert (status, step) == ("in_progress", "business")
 
 
 def test_pg_c_no_user_contribution_creates_no_statement(engine, Sessions, ext):
@@ -466,27 +498,27 @@ def _lvmh_in_a_and_nvda_in_b(Sessions, ext, *, lvmh_work=True):
     _nvda_at_moat(Sessions, ext, conv=CONV_B)
 
 
-@pytest.mark.parametrize("lvmh_work, action", [(True, "event_closed_context_change"),
-                                               (False, "event_abandoned_context_change")])
-def test_pg_d_e_f_navigation_never_becomes_a_statement(engine, Sessions, ext, lvmh_work, action):
-    """(D)(E)(F) « Passons à NVIDIA » dans A (sortie de contexte LVMH) :
+@pytest.mark.parametrize("lvmh_work", [True, False], ids=["travail", "vide"])
+def test_pg_d_e_f_navigation_never_becomes_a_statement(engine, Sessions, ext, lvmh_work):
+    """(D)(E)(F) « Passons à NVIDIA » dans A (R1-C4 : context_switched) :
     aucun UserStatement, ni dans l'ancienne (LVMH) ni dans la nouvelle
     (NVDA) AnalysisSession."""
     _lvmh_in_a_and_nvda_in_b(Sessions, ext, lvmh_work=lvmh_work)
     before = _statements(engine)
     switch = _turn(Sessions, ext, _reply("N3", "moat"), "Passons à NVIDIA", conv=CONV_A, ticker="NVDA",
                    context="")
-    assert _link(engine, switch["assistant_turn_id"])["input_action"] == action
+    assert _link(engine, switch["assistant_turn_id"])["input_action"] == "context_switched"
     assert _statements(engine) == before
     assert "Passons à NVIDIA" not in json.dumps(_product(engine), default=str)
 
 
 def test_pg_g_empty_resume_creates_no_statement(engine, Sessions, ext):
-    """(G) Reprise vide dans une nouvelle conversation : aucun UserStatement."""
+    """(G) Reprise vide dans une nouvelle conversation (aucune ancre) : aucun
+    UserStatement."""
     _nvda_at_moat(Sessions, ext, conv=CONV_B)
     before = _statements(engine)
     resume = _turn(Sessions, ext, _reply("R", "moat"), "", context="", conv=CONV_A, ticker="NVDA")
-    assert _link(engine, resume["assistant_turn_id"])["input_action"] == "no_user_contribution"
+    assert _link(engine, resume["assistant_turn_id"])["input_action"] == "no_open_event"
     assert _statements(engine) == before
 
 
@@ -526,7 +558,7 @@ def test_pg_cross_switch_to_nvda_resumes_moat_and_survives_a_retrograde_marker(e
     assert switch["method_used"] == "construction_these"
     # Navigation : non-contribution R1-C2, aucun UserStatement.
     link = _link(engine, switch["assistant_turn_id"])
-    assert (link["input_action"], link["input_event_id"]) == ("event_closed_context_change", None)
+    assert (link["input_action"], link["input_event_id"]) == ("context_switched", None)
     assert "Passons à NVIDIA" not in json.dumps(_product(engine), default=str)
     # Marqueur business accidentel : la session reste moat et la livraison y
     # est rattachée.

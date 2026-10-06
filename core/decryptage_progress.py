@@ -34,6 +34,25 @@ R1-C3 (hardening avant T3) :
   navigation ou une reprise vide ne devient jamais UserStatement ni
   InvestmentThesis.
 
+R1-C4 (affinité conversationnelle) : Claude seul ne fait JAMAIS progresser
+une AnalysisSession existante. Une avancée (étape suivante, saut) ou la
+terminalisation swot_final d'une session existante n'est appliquée que si
+le tour est une vraie contribution (user_contribution=True, c'est-à-dire
+input_action contribution_appended) ; sinon current_step, status et
+completed_at restent inchangés et l'anomalie forward_without_contribution /
+terminal_without_contribution est journalisée. La création initiale d'une
+session (marqueur initial) et swot_final sans session active (ignoré)
+restent inchangés.
+
+R1-C4 (étape réellement répondue) : une contribution répond à l'étape de
+l'event auquel la conversation était ancrée (answered_step, dérivée par le
+runtime cognitif de la provenance de l'event), pas forcément à current_step
+(un autre onglet a pu faire avancer la session entre-temps). Le
+UserStatement porte answered_step ; avancée / terminalisation exigent en
+plus answered_step == current_step (relu sous verrou), sinon anomalie
+stale_contribution_step et aucune progression. swot_final ne termine la
+session que si answered_step == current_step == risques.
+
 Aucun appel à un service pédagogique T2+ (capture cognitive, observations,
 longitudinal, inférence).
 """
@@ -41,6 +60,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from core.models import AnalysisFact, AnalysisSession, InvestmentThesis, UserStatement
 
@@ -64,6 +84,37 @@ PROGRESS_SAME = "same"
 PROGRESS_FORWARD = "forward"
 PROGRESS_STEP_SKIP = "step_skip"
 PROGRESS_RETROGRADE = "retrograde_marker"
+# R1-C4 : avancée / terminalisation refusée faute de contribution réelle.
+ANOMALY_FORWARD_WITHOUT_CONTRIBUTION = "forward_without_contribution"
+ANOMALY_TERMINAL_WITHOUT_CONTRIBUTION = "terminal_without_contribution"
+# R1-C4 : contribution qui répond à une étape qui n'est plus l'étape ouverte.
+ANOMALY_STALE_CONTRIBUTION_STEP = "stale_contribution_step"
+# R1-C4 : swot_final reçu alors que l'étape ouverte n'est pas risques.
+ANOMALY_TERMINAL_BEFORE_RISQUES = "terminal_before_risques"
+LAST_TASK_STEP = "risques"
+# Étapes auxquelles une contribution peut répondre (swot_final n'est pas une
+# tâche : aucun event, aucune contribution).
+ANSWERABLE_STEPS = tuple(step for step in DECRYPTAGE_STEP_MARKERS if step != FINAL_STEP)
+# Vocabulaire fermé de la décision de progression d'UN tour (ProgressOutcome
+# .action), persistée par le runtime cognitif comme provenance du tour
+# (decryptage_cognitive_links.product_progress_action, R1-C4).
+PROGRESS_ACTIONS = (
+    PROGRESS_NEW, PROGRESS_SAME, PROGRESS_FORWARD, PROGRESS_STEP_SKIP, PROGRESS_RETROGRADE,
+    ANOMALY_FORWARD_WITHOUT_CONTRIBUTION, ANOMALY_TERMINAL_WITHOUT_CONTRIBUTION, ANOMALY_STALE_CONTRIBUTION_STEP,
+    ANOMALY_TERMINAL_BEFORE_RISQUES,
+)
+# Décisions par lesquelles CE tour a réellement fait avancer (ou terminé,
+# marqueur swot_final) la session jusqu'à son marqueur.
+ADVANCING_PROGRESS_ACTIONS = (PROGRESS_FORWARD, PROGRESS_STEP_SKIP)
+
+
+class ProgressOutcome(NamedTuple):
+    """Résultat de la progression d'UN tour : l'AnalysisSession (à lier à la
+    livraison) et la décision réellement prise par CE tour, sous verrou
+    (PROGRESS_ACTIONS). Seule une action de ADVANCING_PROGRESS_ACTIONS
+    signifie que ce tour a lui-même appliqué son marqueur comme avancée."""
+    analysis_session: AnalysisSession
+    action: str
 
 # Tout marqueur <!--ORYX_STEP:...-->, reconnu ou non, est retiré du texte
 # visible ; seul un marqueur du vocabulaire fermé est retenu.
@@ -156,11 +207,16 @@ def apply_construction_these_progress(
     step: str,
     thesis_text: str | None,
     data: dict | None,
-) -> AnalysisSession | None:
+    user_contribution: bool,
+    answered_step: str | None,
+) -> ProgressOutcome | None:
     """Enregistre la progression construction_these de ce tour dans la
     transaction de l'appelant (mutation + flush ; jamais de commit,
-    rollback ni capture d'erreur DB). Retourne l'AnalysisSession mise à
-    jour, ou None si aucun suivi ne s'applique.
+    rollback ni capture d'erreur DB). Retourne ProgressOutcome
+    (AnalysisSession mise à jour, décision de CE tour), ou None si aucun
+    suivi ne s'applique. La décision (PROGRESS_ACTIONS) est la seule preuve
+    que CE tour a appliqué son marqueur (R1-C4) : l'état courant de la
+    session, qu'un autre tour peut avoir produit, n'en est jamais une.
 
     AnalysisSession est l'unique identité d'une tentative (T1-C1) :
     - session in_progress existante pour user+ticker → réutilisée ;
@@ -181,17 +237,49 @@ def apply_construction_these_progress(
       ce marqueur comme continued_without_boundary_signal) ;
     - swot_final (toujours en avant) → completed + completed_at.
 
+    R1-C4 : pour une session EXISTANTE, étape suivante, saut et swot_final
+    exigent user_contribution=True (vraie contribution R1-C2) ; sans elle,
+    current_step / status / completed_at restent inchangés, aucune
+    InvestmentThesis, anomalie forward_without_contribution (ou
+    terminal_without_contribution) journalisée, et la session est retournée
+    normalement (rattachement de la livraison). Même étape et rétrograde :
+    inchangés. Nouvelle session : marqueur initial autorisé.
+
+    answered_step (R1-C4) : None sans contribution ; sinon l'étape TASK de
+    l'event d'ancrage de la contribution (fournie par le runtime cognitif,
+    jamais par le frontend ni déduite de current_step / du marqueur / du
+    texte). Une contribution exige une session existante. Si answered_step
+    != current_step (relu sous verrou) : aucune progression ni completion ni
+    InvestmentThesis (anomalie stale_contribution_step), même pour un même
+    marqueur ; le UserStatement est tout de même écrit sur answered_step.
+    swot_final ne termine la session que si answered_step == current_step
+    == risques (sinon anomalie terminal_before_risques, aucune progression).
+
     thesis_text : fourni par l'orchestrateur UNIQUEMENT pour une vraie
     contribution R1-C2 (contribution_appended), sinon None. Il répond à
-    l'étape qui était ouverte AVANT ce tour (UserStatement sur cette
-    étape) et, sur swot_final, devient l'InvestmentThesis. Sans
-    contribution réelle : ni UserStatement, ni InvestmentThesis.
+    answered_step (UserStatement sur cette étape) et, sur un swot_final
+    accepté, devient l'InvestmentThesis. Sans contribution réelle : ni
+    UserStatement, ni InvestmentThesis.
 
     Tout ce qui est écrit pour la tentative porte
     analysis_session_id = session.id."""
     if step not in DECRYPTAGE_STEP_MARKERS:
         raise InvalidDecryptageStep("étape hors vocabulaire construction_these")
+    if type(user_contribution) is not bool:
+        raise TypeError("user_contribution doit être un bool explicite")
+    if thesis_text and not user_contribution:
+        # thesis_text n'existe que pour une vraie contribution : incohérence
+        # d'orchestration, jamais un UserStatement sans contribution.
+        raise ValueError("thesis_text fourni sans contribution réelle")
+    if user_contribution and answered_step not in ANSWERABLE_STEPS:
+        raise ValueError("contribution sans étape répondue valide")
+    if not user_contribution and answered_step is not None:
+        raise ValueError("answered_step fourni sans contribution réelle")
     active = find_active_analysis_session(db, user_id, ticker, for_update=True)
+    if user_contribution and active is None:
+        # Une contribution répond à un event d'une session ACTIVE (verrouillée
+        # par la capture cognitive du même tour) : fail closed.
+        raise ValueError("contribution sans AnalysisSession active")
     if active is None and step == FINAL_STEP:
         print(f"[DB-TRACKING] Ignoré : user={user_id}, ticker={ticker}, swot_final hors tentative en cours (conversation libre après le bilan)")
         return None
@@ -211,15 +299,38 @@ def apply_construction_these_progress(
         logger.info("[DECRYPTAGE-PROGRESS] session=%s action=new step=%s", active.id, step)
     else:
         action = _progress_action(active.current_step, step)
-    # Étape ouverte AVANT ce tour : celle à laquelle le texte de ce tour
-    # répond (None au premier tour d'une session : message déclencheur).
+    # Étape ouverte AVANT ce tour (None au premier tour d'une session :
+    # message déclencheur).
     previous_step = None if is_new_session else active.current_step
 
+    # R1-C4 : Claude seul ne fait jamais avancer ni terminer une session
+    # existante (jamais pour une nouvelle session : action new) ; une
+    # contribution qui répond à une autre étape que l'étape ouverte non plus.
+    stale_answer = user_contribution and answered_step != previous_step
+    blocked = (action in (PROGRESS_FORWARD, PROGRESS_STEP_SKIP) and not user_contribution) or (
+        stale_answer and action != PROGRESS_RETROGRADE)
+    early_terminal = (not blocked and step == FINAL_STEP and action != PROGRESS_RETROGRADE
+                      and previous_step != LAST_TASK_STEP)
+    if stale_answer:
+        logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=stale_contribution_step answered=%s current=%s "
+                       "received=%s", active.id, answered_step, active.current_step, step)
     if action == PROGRESS_RETROGRADE:
         # Le marqueur rétrograde reste attaché à la session active sans muter
         # sa progression : current_step, status, completed_at intacts.
         logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=retrograde_marker current=%s received=%s",
                        active.id, active.current_step, step)
+    elif stale_answer:
+        action = ANOMALY_STALE_CONTRIBUTION_STEP
+    elif blocked:
+        anomaly = (ANOMALY_TERMINAL_WITHOUT_CONTRIBUTION if step == FINAL_STEP
+                   else ANOMALY_FORWARD_WITHOUT_CONTRIBUTION)
+        logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=%s current=%s received=%s",
+                       active.id, anomaly, active.current_step, step)
+        action = anomaly
+    elif early_terminal:
+        logger.warning("[DECRYPTAGE-PROGRESS] session=%s anomaly=terminal_before_risques current=%s received=%s",
+                       active.id, active.current_step, step)
+        action = ANOMALY_TERMINAL_BEFORE_RISQUES
     else:
         if action == PROGRESS_SAME:
             logger.info("[DECRYPTAGE-PROGRESS] session=%s action=same step=%s", active.id, step)
@@ -231,21 +342,21 @@ def apply_construction_these_progress(
                            active.id, previous_step, step)
         active.current_step = step
     active.updated_at = now_aware
-    is_new_swot = step == FINAL_STEP and action != PROGRESS_RETROGRADE
+    is_new_swot = (step == FINAL_STEP and action != PROGRESS_RETROGRADE and not blocked and not early_terminal
+                   and user_contribution)
     if is_new_swot:
         active.status = "completed"
         active.completed_at = now_aware
 
-    # Le texte reçu à ce tour répond à l'étape qui était OUVERTE avant lui
-    # (previous_step), pas à l'étape que ce marqueur annonce : le marqueur
-    # reflète l'étape que la réponse de l'assistant vient d'ouvrir,
-    # toujours un tour d'avance sur ce que l'utilisateur vient de dire. Au
-    # premier tour d'une session, c'est le message déclencheur : on ne
-    # l'enregistre pas. thesis_text n'est non vide que pour une vraie
-    # contribution R1-C2 (voir api.py).
-    if thesis_text and previous_step:
+    # Le texte reçu à ce tour répond à l'étape de la tâche réellement vue
+    # dans sa conversation (answered_step, R1-C4), pas à l'étape que ce
+    # marqueur annonce (la réponse de l'assistant a toujours un tour
+    # d'avance), ni forcément à current_step (un autre onglet a pu avancer).
+    # thesis_text n'est non vide que pour une vraie contribution R1-C2 (voir
+    # api.py) ; le message déclencheur d'une session n'est jamais enregistré.
+    if thesis_text:
         db.add(UserStatement(
-            user_id=user_id, ticker=ticker, step=previous_step, statement_text=thesis_text,
+            user_id=user_id, ticker=ticker, step=answered_step, statement_text=thesis_text,
             analysis_session_id=active.id,
         ))
 
@@ -267,4 +378,4 @@ def apply_construction_these_progress(
 
     db.flush()
     print(f"[DB-TRACKING] Écrit (non commité) : user={user_id}, ticker={ticker}, session={active.id} (nouvelle={is_new_session}), étape={active.current_step}, marqueur={step}, progression={action}, thèse_capturée={is_new_swot and bool(thesis_text)}, faits_snapshot={facts_written}")
-    return active
+    return ProgressOutcome(active, action)

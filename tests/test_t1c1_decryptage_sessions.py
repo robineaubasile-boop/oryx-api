@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
 import api
@@ -74,6 +75,8 @@ T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
 R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
+R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
+R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 USER = "user-t1c1"
 TICKER = "MC.PA"
 DATA = {
@@ -87,15 +90,16 @@ SNAPSHOT = {"operating_margin": 0.26, "roe": 0.24, "net_cash": -1.0e9}
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_no_migration_added_by_t1c1_head_is_0012():
+def test_no_migration_added_by_t1c1_head_is_0013():
     """(1) T1-C1 n'a ajouté aucune migration ; les seules ajoutées depuis
     sont 0004 (T1-C2), 0005 (T2-A), 0006 (T3-A), 0007 (T4-A), 0008 (T5-A),
-    0009 (T6-A), 0010 (R1-B), 0011 (R1-C1) et 0012 (R1-C2), qui est la
-    tête."""
+    0009 (T6-A), 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
+    qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
+    assert script.get_heads() == [R1C4]
+    assert script.get_revision(R1C4).down_revision == R1C2
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B, R1C1, R1C2}
+                                                                 T6A, R1B, R1C1, R1C2, R1C4}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [
         "0001_current_oryx_baseline.py",
@@ -110,6 +114,7 @@ def test_no_migration_added_by_t1c1_head_is_0012():
         "0010_r1b_event_idempotence.py",
         "0011_assistant_deliveries.py",
         "0012_decryptage_cognitive_links.py",
+        "0013_decryptage_conversation_affinity.py",
     ]
 
 
@@ -575,16 +580,25 @@ def test_other_ticker_and_other_user_are_isolated(db, client, claude):
 
 def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_engine):
     """(18) Après un parcours complet (analyse, GET, DELETE, nouvelle
-    analyse) : schéma = head (0012), Base.metadata identique au schéma migré,
+    analyse) : schéma = head (0013), Base.metadata identique au schéma migré,
     company_analyses absente (supprimée par T1-C2)."""
     _full_attempt(client, claude, "A")
     client.theses()
     _turn(client, claude, "business")
     client.delete()
-    _turn(client, claude, "business")
+    # R1-C4 (blocker 3) : la conversation reste ancrée à la tentative
+    # abandonnée par le DELETE ; même ticker => état obsolète, 409
+    # stale_conversation_context. La nouvelle analyse se fait dans une
+    # nouvelle conversation (« Nouvelle conversation » / « Reprendre »).
+    with pytest.raises(HTTPException) as failure:
+        _turn(client, claude, "business")
+    assert (failure.value.status_code, failure.value.detail["error"]) == (409, "stale_conversation_context")
+    claude.next_step = "business"
+    assert client.decryptage({"ticker": TICKER, "question": "", "context": "", "last_method_id": None,
+                              "user_id": USER, "conversation_key": "conv-apres-suppression"})["success"]
 
     with pg_engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C2
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C4
         assert "company_analyses" not in sa.inspect(conn).get_table_names()
 
     from alembic.autogenerate import compare_metadata

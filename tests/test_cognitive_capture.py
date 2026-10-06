@@ -75,6 +75,8 @@ T6A = "0009_competency_inference_state"
 R1B = "0010_r1b_event_idempotence"
 R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
+R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
+R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
 PUBLIC_API = {
@@ -192,17 +194,19 @@ def capture_event(session, *, text="rentabilité des capitaux propres", close=No
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_head_is_0012_after_r1b_r1c1_and_r1c2():
+def test_head_is_0013_after_r1b_r1c1_r1c2_and_r1c4():
     """T2-B n'a ajouté aucune migration ; R1-B ajoute 0010, R1-C1 ajoute
     0011 (assistant_deliveries, sans lien avec ce service), R1-C2 ajoute
-    0012 (decryptage_cognitive_links, liens runtime vers les events), la
-    tête."""
+    0012 (decryptage_cognitive_links, liens runtime vers les events), R1-C4
+    ajoute 0013 (affinité conversationnelle des liens), la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
+    assert script.get_heads() == [R1C4]
+    assert script.get_revision(R1C4).down_revision == R1C2
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B, R1C1, R1C2}
+                                                                 T6A, R1B, R1C1, R1C2, R1C4}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
+        R1C4_FILE]
 
 
 def test_public_api_is_exactly_the_capture_functions():
@@ -230,7 +234,10 @@ def test_open_and_append_signatures_are_exact():
     assert {n: p.default for n, p in params.items() if p.default is not inspect.Parameter.empty} == {
         "task_kind": None, "analysis_session_id": None}
     assert list(inspect.signature(cc.append_user_contribution).parameters) == [
-        "db", "event_id", "contribution_id", "source_turn_ref", "surface", "session_ref", "text_excerpt"]
+        "db", "event_id", "contribution_id", "source_turn_ref", "surface", "session_ref", "text_excerpt",
+        "support_refs_before"]
+    # R1-C4 : paramètre optionnel, défaut = comportement historique.
+    assert inspect.signature(cc.append_user_contribution).parameters["support_refs_before"].default is None
 
 
 def test_versions_are_explicit_and_stable():
@@ -344,7 +351,9 @@ def test_lifecycle_and_derived_fields_cannot_be_supplied():
                   "event_dedup_key", "event_schema_version"):
         with pytest.raises(TypeError):
             cc.open_event_idempotent(_NoDB(), **_open_kwargs(**{field: None}))
-    for field in ("phase", "occurred_at", "support_refs_before", "text"):
+    # support_refs_before est un paramètre optionnel depuis R1-C4 (sous-
+    # ensemble explicite des aides disponibles), validé à part.
+    for field in ("phase", "occurred_at", "text"):
         with pytest.raises(TypeError):
             cc.append_user_contribution(_NoDB(), event_id=uuid.uuid4(), **_contribution(**{field: None}))
     with pytest.raises(TypeError):
@@ -1087,6 +1096,52 @@ def test_pg_support_refs_before_follow_sequence_no_not_insertion_order(engine, S
             ), {"id": ids[seq], "e": event_id, "s": seq})
     event = cc.append_user_contribution(db, event_id=event_id, **_contribution())
     assert event.user_work_snapshot[0]["support_refs_before"] == [str(ids[1]), str(ids[2])]
+
+
+@pytest.mark.parametrize("value", [
+    [uuid.uuid4()], (str(uuid.uuid4()),), (uuid.uuid4(), "x"), ("",), (None,), (1,),
+], ids=["liste", "str", "mixte", "vide", "none", "int"])
+def test_explicit_support_refs_before_are_validated_before_db(value):
+    """R1-C4 : support_refs_before fourni = tuple d'uuid.UUID exacts, sans
+    doublon ; refusé avant tout accès à la base."""
+    with pytest.raises(InvalidCognitivePayload):
+        cc.append_user_contribution(_NoDB(), event_id=uuid.uuid4(), **_contribution(), support_refs_before=value)
+    ref = uuid.uuid4()
+    with pytest.raises(InvalidCognitivePayload, match="doublon"):
+        cc.append_user_contribution(_NoDB(), event_id=uuid.uuid4(), **_contribution(), support_refs_before=(ref, ref))
+
+
+def test_pg_explicit_support_refs_before_keep_only_the_given_traces_in_chronological_order(engine, db):
+    """R1-C4 : l'orchestrateur fournit les aides réellement disponibles ;
+    le service n'en garde que celles-là, en ordre sequence_no (quel que soit
+    l'ordre fourni), sans dupliquer ni créer de SupportTrace. () = aucune."""
+    event = cc.open_event_idempotent(db, **_open_kwargs())
+    s1, s2, s3 = (cc.add_support_trace(db, event_id=event.id, support_kind="hint", support_payload={"n": n})
+                  for n in range(3))
+    cc.append_user_contribution(db, event_id=event.id, **_contribution(), support_refs_before=(s3.id, s1.id))
+    cc.append_user_contribution(db, event_id=event.id, **_contribution(), support_refs_before=(s2.id,))
+    cc.append_user_contribution(db, event_id=event.id, **_contribution(), support_refs_before=())
+    cc.append_user_contribution(db, event_id=event.id, **_contribution())  # défaut historique : toutes
+    db.commit()
+    assert [c["support_refs_before"] for c in _row(engine, event.id)["user_work_snapshot"]] == [
+        [str(s1.id), str(s3.id)], [str(s2.id)], [], [str(s1.id), str(s2.id), str(s3.id)]]
+    assert _count(engine, "support_traces") == 3
+
+
+def test_pg_explicit_support_refs_before_refuse_a_foreign_trace(engine, Sessions, db):
+    """Une aide d'un AUTRE événement (ou inexistante) n'est jamais
+    référencée : InvalidCognitivePayload, aucune mutation."""
+    other_id = _committed_event(Sessions, conversation_key="conv-autre", traces=["hint"])
+    with engine.connect() as conn:
+        foreign = conn.execute(sa.text("SELECT id FROM support_traces WHERE cognitive_event_id = :e"),
+                               {"e": other_id}).scalar_one()
+    event_id = _committed_event(Sessions, traces=["hint"])
+    before = _row(engine, event_id)
+    for refs in ((foreign,), (uuid.uuid4(),)):
+        with pytest.raises(InvalidCognitivePayload, match="hors des aides persistées"):
+            cc.append_user_contribution(db, event_id=event_id, **_contribution(), support_refs_before=refs)
+        db.rollback()
+    assert _row(engine, event_id) == before
 
 
 def test_pg_contribution_retry_is_a_no_op(engine, db, clock):

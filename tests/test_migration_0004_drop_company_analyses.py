@@ -107,6 +107,15 @@ R1C1_TABLES = {"assistant_deliveries"}
 # table runtime et son index unique partiel).
 R1C2_TABLES = {"decryptage_cognitive_links"}
 R1C2_INDEXES = {"uq_decryptage_cognitive_links_opening_event"}
+# R1-C4 (0013, testé à part) : affinité conversationnelle Décrypter (une
+# colonne nullable + sa FK sur decryptage_cognitive_links, CHECK étendus).
+# Identifiant de révision court (alembic_version.version_num VARCHAR(32)) ;
+# fichier nommé selon la spec.
+R1C4 = "0013_decryptage_conv_affinity"
+R1C4_FILE = "0013_decryptage_conversation_affinity.py"
+R1C4_LINK_COLUMN = "input_context_event_id"
+R1C4_LINK_COLUMNS = (R1C4_LINK_COLUMN, "response_context_event_id")
+R1C4_PROGRESS_COLUMN = "product_progress_action"
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -391,6 +400,29 @@ def _without_r1c2_changes(diff) -> list:
     assert sorted((d[0], d[1].name) for d in found) == sorted(
         [("add_table", t) for t in R1C2_TABLES] + [("add_index", i) for i in R1C2_INDEXES])
     return [d for d in diff if not any(d is f for f in found)]
+
+
+def _without_r1c4_changes(diff) -> list:
+    """Retire du diff compare_metadata d'un schéma 0012 EXACTEMENT les
+    écarts introduits par R1-C4 (colonnes input_context_event_id et
+    response_context_event_id de decryptage_cognitive_links et leurs FK,
+    colonne product_progress_action ; les CHECK ne sont pas comparés par
+    Alembic), et échoue s'ils manquent.
+    Retourne le reste."""
+    def is_r1c4(d):
+        if not isinstance(d, tuple):
+            return False
+        if d[0] == "add_column":
+            return (d[2] == "decryptage_cognitive_links"
+                    and d[3].name in (*R1C4_LINK_COLUMNS, R1C4_PROGRESS_COLUMN))
+        if d[0] == "add_fk":
+            return (d[1].parent.name == "decryptage_cognitive_links"
+                    and len(d[1].columns) == 1 and [c.name for c in d[1].columns][0] in R1C4_LINK_COLUMNS)
+        return False
+
+    found = [d for d in diff if is_r1c4(d)]
+    assert sorted(d[0] for d in found) == ["add_column", "add_column", "add_column", "add_fk", "add_fk"], diff
+    return [d for d in diff if not is_r1c4(d)]
 
 
 def _assert_metadata_matches_0004(engine) -> None:

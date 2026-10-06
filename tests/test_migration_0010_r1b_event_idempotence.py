@@ -63,6 +63,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     _statements,
     _without_r1c1_changes,
     _without_r1c2_changes,
+    R1C4,
+    R1C4_FILE,
 )
 from tests.test_migration_0005_cognitive_support_traces import (
     OTHER_USER,
@@ -107,20 +109,24 @@ EXISTING = ALL_TABLES | {"alembic_version"}
 def test_revision_chain_is_exactly_0001_to_0010_then_0011_0012():
     """0001 -> ... -> 0009 -> 0010 ; 0010 est la seule migration ajoutée par
     R1-B. Depuis R1-C1, 0011 (assistant_deliveries) la suit ; depuis R1-C2,
-    0012 (decryptage_cognitive_links) est la tête unique (testées dans
-    tests/test_migration_0011_assistant_deliveries.py et
-    tests/test_migration_0012_decryptage_cognitive_links.py)."""
+    0012 (decryptage_cognitive_links) la suit ; depuis R1-C4, 0013
+    (affinité conversationnelle) est la tête unique (testées dans
+    tests/test_migration_0011_assistant_deliveries.py,
+    tests/test_migration_0012_decryptage_cognitive_links.py et
+    tests/test_migration_0013_decryptage_conversation_affinity.py)."""
     script = _script_directory()
-    assert script.get_heads() == [R1C2]
+    assert script.get_heads() == [R1C4]
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4}
+    assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     assert revisions[T6A].down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)]
+    assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
+        R1C4_FILE]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -289,7 +295,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1C2
+    assert _version(pg_engine) == R1C4
     assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)

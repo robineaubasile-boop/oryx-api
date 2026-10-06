@@ -1004,7 +1004,7 @@ def test_no_later_step6_brick():
 
 def test_no_migration_no_step6_model_and_not_wired_to_the_runtime():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0012_decryptage_cognitive_links.py" and len(versions) == 12
+    assert versions[-1] == "0013_decryptage_conversation_affinity.py" and len(versions) == 13
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Adaptation" not in models
     # Étape 6.1C : socle positif localisé non branché, consommateur des seuls
