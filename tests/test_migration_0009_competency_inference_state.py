@@ -67,6 +67,9 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
+    R1D1,
+    R1D1_FILE,
     R1B_TABLES,
     R1C1_TABLES,
     R1C2_TABLES,
@@ -401,11 +404,12 @@ def test_revision_chain_is_exactly_0001_to_0009():
     T6-A. Seules 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
     testées à part, ont été ajoutées depuis : 0013 est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
@@ -415,7 +419,7 @@ def test_revision_chain_is_exactly_0001_to_0009():
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
-        R1C4_FILE]
+        R1C4_FILE, R1D1_FILE]
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -1235,8 +1239,9 @@ def test_pg_upgrade_from_empty_database_to_0009(pg_url, pg_engine):
     assert _version(pg_engine) == T6A
     assert _tables(pg_engine) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                   | T6A_TABLES | {"alembic_version"})
-    assert _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(pg_engine))),
-                                events_created=True) == []
+    assert _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(pg_engine)))),
+        events_created=True) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)
     # Aucune séquence T6 (UUID applicatifs ; state_generation n'est pas un serial).
@@ -2133,8 +2138,9 @@ def test_pg_upgrade_0008_to_0009_preserves_everything_then_downgrade(pg_url, pg_
     assert _data(pg_engine, T6A_TABLES) == {name: [] for name in sorted(T6A_TABLES)}
     assert _global_catalog(pg_engine) == global_0008
     assert (global_0008["enums"], global_0008["triggers"], global_0008["functions"]) == (0, 0, 0)
-    assert _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(pg_engine))),
-                                events_created=True) == []
+    assert _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(pg_engine)))),
+        events_created=True) == []
     schema_t6 = _snapshot(pg_engine, T6A_TABLES)
     catalog_t6 = _catalog(pg_engine, T6A_TABLES)
 
@@ -2169,5 +2175,6 @@ def test_pg_upgrade_0008_to_0009_preserves_everything_then_downgrade(pg_url, pg_
     assert _catalog(pg_engine, T6A_TABLES) == catalog_t6
     assert _data(pg_engine, DATA_TABLES) == data_0008
     assert _data(pg_engine, T6A_TABLES) == {name: [] for name in sorted(T6A_TABLES)}
-    assert _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(pg_engine))),
-                                events_created=True) == []
+    assert _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(pg_engine)))),
+        events_created=True) == []

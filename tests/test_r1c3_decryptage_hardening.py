@@ -202,10 +202,12 @@ def test_route_passes_text_to_the_product_only_for_a_real_contribution():
 
 
 def test_no_migration_and_no_t3_in_the_hardened_modules():
-    """R1-C3 n'a ajouté aucune migration (0013 est celle de R1-C4)."""
+    """R1-C3 n'a ajouté aucune migration (0013 est celle de R1-C4, 0014 celle
+    de R1-D1)."""
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-2:] == ["0012_decryptage_cognitive_links.py", "0013_decryptage_conversation_affinity.py"]
-    assert len(files) == 13
+    assert files[-3:] == ["0012_decryptage_cognitive_links.py", "0013_decryptage_conversation_affinity.py",
+                          "0014_evaluation_run_leases.py"]
+    assert len(files) == 14
     for path in ("core/decryptage_progress.py", "core/decryptage_engine.py"):
         tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
         imported = set()

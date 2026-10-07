@@ -108,7 +108,7 @@ from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
 from tests.test_migration_0010_r1b_event_idempotence import R1B
 from tests.test_migration_0011_assistant_deliveries import R1C1
 from tests.test_migration_0012_decryptage_cognitive_links import R1C2
-from tests.test_migration_0004_drop_company_analyses import R1C4, R1C4_FILE
+from tests.test_migration_0004_drop_company_analyses import R1C4, R1C4_FILE, R1D1, R1D1_FILE
 from tests.test_observation_service import INVALID_JSON_VALUES, _blocked, _NoDB, _obs_kwargs, _reaches_db, _recording
 from tests.test_observation_service import _event as _finalized_event
 from tests.test_observation_service import _start_kwargs as t3_kwargs
@@ -234,14 +234,16 @@ def test_no_migration_added_by_t6b():
     (R1-C2, liens cognitifs Décrypter) et 0013 (R1-C4, affinité
     conversationnelle), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert script.get_revision(R1C2).down_revision == R1C1
     assert script.get_revision(R1C1).down_revision == R1B
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-5:] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE] and len(files) == 13
+    assert files[-6:] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE, R1D1_FILE]
+    assert len(files) == 14
 
 
 def test_t6a_schema_files_are_unchanged_by_t6b():

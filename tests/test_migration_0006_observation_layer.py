@@ -52,6 +52,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1, _statements
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
     R1B_TABLES,
     R1C1_TABLES,
     R1C2_TABLES,
@@ -183,6 +184,15 @@ TIMESTAMPTZ_COLUMNS = {
     (OBS, "created_at"),
 }
 TEXT_COLUMNS = {(OBS, "observation_text"), (OBS, "invalidation_reason")}
+# R1-D1 (0014, testée à part) : lease persistée ajoutée au MODÈLE
+# ObservationEvaluationRun (la migration 0006 reste inchangée).
+R1D1_RUN_COLUMNS = ["lease_token", "lease_expires_at"]
+R1D1_UUID_COLUMNS = {(RUNS, "lease_token")}
+R1D1_TIMESTAMPTZ_COLUMNS = {(RUNS, "lease_expires_at")}
+R1D1_RUN_CHECKS = {
+    "ck_observation_evaluation_runs_lease_pair": "(lease_token IS NULL) = (lease_expires_at IS NULL)",
+    "ck_observation_evaluation_runs_lease_running": "lease_token IS NULL OR execution_status = 'running'",
+}
 
 # Vocabulaires fermés : (table, colonne) -> valeurs autorisées, dans l'ordre
 # du CHECK. Toute autre colonne VARCHAR est extensible (trigger, task_kind,
@@ -360,11 +370,11 @@ def _assert_columns(table, expected, nullable):
     assert {c.name: c.nullable for c in table.columns} == {n: n in nullable for n in expected}
     for col in table.columns:
         key = (table.name, col.name)
-        if key in UUID_COLUMNS:
+        if key in UUID_COLUMNS | R1D1_UUID_COLUMNS:
             assert isinstance(col.type, sa.Uuid) and col.type.as_uuid is True, key
         elif key in JSONB_COLUMNS:
             assert type(col.type) is JSONB, key
-        elif key in TIMESTAMPTZ_COLUMNS:
+        elif key in TIMESTAMPTZ_COLUMNS | R1D1_TIMESTAMPTZ_COLUMNS:
             assert isinstance(col.type, sa.DateTime) and col.type.timezone is True, key
         elif key in TEXT_COLUMNS:
             assert type(col.type) is sa.Text, key
@@ -378,7 +388,7 @@ def _assert_columns(table, expected, nullable):
 
 def test_observation_evaluation_run_columns_types_nullability_and_fks():
     table = ObservationEvaluationRun.__table__
-    _assert_columns(table, RUN_COLUMNS, RUN_NULLABLE)
+    _assert_columns(table, RUN_COLUMNS + R1D1_RUN_COLUMNS, RUN_NULLABLE | set(R1D1_RUN_COLUMNS))
     fks = sorted((fk.parent.name, fk.target_fullname) for fk in table.foreign_keys)
     # La FK de pedagogical_taxonomy_release_id est ajoutée par T4-A (0007,
     # testée à part) ; la colonne reste nullable.
@@ -408,7 +418,8 @@ def test_check_constraints_are_exactly_the_closed_vocabularies_and_cross_checks(
     for model in (ObservationEvaluationRun, PedagogicalObservation):
         table = model.__table__
         checks = {c.name: str(c.sqltext) for c in table.constraints if isinstance(c, sa.CheckConstraint)}
-        assert checks == _expected_checks(table.name), table.name
+        expected = _expected_checks(table.name) | (R1D1_RUN_CHECKS if table.name == RUNS else {})
+        assert checks == expected, table.name
         for sqltext in checks.values():
             assert "trigger" not in sqltext and "task_kind" not in sqltext
 
@@ -492,7 +503,7 @@ def test_jsonb_and_timestamptz_columns():
                 assert col.type.timezone is True, col.name
                 tz.add((table.name, col.name))
     assert jsonb == JSONB_COLUMNS
-    assert tz == TIMESTAMPTZ_COLUMNS
+    assert tz == TIMESTAMPTZ_COLUMNS | R1D1_TIMESTAMPTZ_COLUMNS
 
 
 def test_no_relationships_and_t2_models_untouched():
@@ -512,7 +523,9 @@ def test_no_score_progress_or_global_state_columns():
                  "inference", "user_level", "competency_state")
     for table in (ObservationEvaluationRun.__table__, PedagogicalObservation.__table__):
         for col in table.columns:
-            assert not any(word in col.name for word in forbidden), (table.name, col.name)
+            # lease_expires_at (R1-D1) : « xp » de « expires », pas un XP.
+            name = col.name.replace("expires", "")
+            assert not any(word in name for word in forbidden), (table.name, col.name)
         assert "user_id" not in table.c, table.name
 
 
@@ -544,7 +557,14 @@ def test_t3a_tables_are_not_wired_to_the_application():
                # T6-B : service d'inférence, qui LIT et verrouille en FOR
                # SHARE les observations et runs T3 du dossier (jamais
                # d'écriture T3 ; non branché : tests/test_inference_service.py).
-               "core/inference_service.py"}
+               "core/inference_service.py",
+               # R1-D1 : migration 0014 (lease des runs), orchestration du
+               # worker interne d'évaluation (écritures exclusivement via
+               # T3-B / T4-B) et vérification de schéma au démarrage du
+               # worker. Aucune route : api.py ne les nomme pas.
+               "alembic/versions/0014_evaluation_run_leases.py",
+               "core/evaluation_runtime.py",
+               "core/evaluation_worker.py"}
     needles = ("ObservationEvaluationRun", "PedagogicalObservation",
                "observation_evaluation_run", "pedagogical_observation")
     checked = 0
@@ -715,7 +735,8 @@ def _assert_metadata_matches_0006(engine) -> None:
     index ; et par T6-A (0009) : les six tables d'inférence de l'état et
     leurs index ; et par les écarts R1-B (0010) ; tout le reste correspond
     exactement."""
-    diff = _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(engine))),
+    diff = _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(engine)))),
                                 events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T4A_TABLES | T5A_TABLES | T6A_TABLES]

@@ -77,6 +77,30 @@ Invariants :
   n'est converti silencieusement. Logique volontairement dupliquée de T2-B
   plutôt que partagée, pour garder la frontière T2/T3 nette.
 
+- Lease d'exécution (R1-D1, migration 0014_evaluation_run_leases) : le
+  worker d'évaluation (core/evaluation_runtime.py) appelle le LLM HORS de
+  toute transaction ; sa propriété d'exécution d'un run running /
+  candidate est une lease persistée (lease_token, lease_expires_at), jamais
+  un statut (execution_status / interpretation_status inchangés).
+      claim_evaluation_lease  : run ouvert sans lease valide -> nouvelle
+                                lease (AlreadyLeased si une lease valide
+                                existe, InvalidEvaluationState si terminal) ;
+      renew_evaluation_lease  : prolonge SA lease ;
+      verify_evaluation_lease : vérifie SA lease sous le verrou du run (la
+                                transaction résultat la détient ensuite
+                                jusqu'au commit : aucun claim concurrent).
+  Toute mutation qui reçoit lease_token (add_observation,
+  complete_evaluation_run, fail_evaluation_run) exige, sous le verrou du
+  run : run running / candidate, lease_token identique et
+  lease_expires_at > clock_timestamp() PostgreSQL ; sinon
+  LostEvaluationLease, AUCUNE mutation (un worker dont la lease a expiré ne
+  touche jamais le run repris par un autre). Sans lease_token, une mutation
+  sur un run dont la lease est encore valide est refusée (AlreadyLeased) ;
+  un run sans lease garde exactement le comportement T3-B. complete et fail
+  effacent toujours la lease (un run terminal n'en porte jamais :
+  ck_observation_evaluation_runs_lease_running). L'horloge de référence est
+  celle de PostgreSQL (clock_timestamp()), jamais celle d'un worker.
+
 Les garanties d'immutabilité sont celles de ce service (aucun trigger en
 base) : elles ne couvrent pas une modification directe des objets ORM par
 un appelant qui contournerait ce module. Les contraintes PostgreSQL de
@@ -85,7 +109,7 @@ active par événement ») restent la défense finale.
 """
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -130,6 +154,10 @@ CAPABILITY_LOCALIZATIONS = frozenset({"localized", "competency_only"})
 DEDUP_CONSTRAINT = "uq_observation_evaluation_runs_dedup_key"
 # ordinal est un SMALLINT.
 MAX_ORDINAL = 32767
+# Durée d'une lease (R1-D1) : bornes de validation structurelle ; la valeur
+# vient de la configuration du worker (ORYX_EVALUATION_LEASE_SECONDS).
+MIN_LEASE_SECONDS = 1
+MAX_LEASE_SECONDS = 86400
 
 
 class ObservationServiceError(Exception):
@@ -173,6 +201,16 @@ class DuplicateEvaluationRun(ObservationServiceError):
 
 class ObservationAlreadyInvalidated(ObservationServiceError):
     """L'observation est déjà invalidated : jamais de no-op."""
+
+
+class AlreadyLeased(ObservationServiceError):
+    """Le run porte une lease encore valide d'un autre détenteur (R1-D1) :
+    ni claim, ni mutation sans son jeton."""
+
+
+class LostEvaluationLease(ObservationServiceError):
+    """Le jeton fourni ne détient plus le run (lease expirée, reprise par un
+    autre worker, ou run devenu terminal) : AUCUNE mutation (R1-D1)."""
 
 
 def _utcnow() -> datetime:
@@ -275,6 +313,13 @@ def _check_polarity(polarity: str, local_stage, contradiction_scope) -> None:
             raise InvalidObservationPayload("contradictory : contradiction_scope obligatoire")
 
 
+def _require_lease_seconds(value) -> int:
+    if type(value) is not int or not MIN_LEASE_SECONDS <= value <= MAX_LEASE_SECONDS:
+        raise InvalidObservationPayload(
+            f"lease_seconds doit être un int dans [{MIN_LEASE_SECONDS}, {MAX_LEASE_SECONDS}]")
+    return value
+
+
 def _is_dedup_violation(exc: IntegrityError) -> bool:
     """Vrai seulement pour une violation de la contrainte UNIQUE
     d'evaluation_dedup_key (nom de contrainte rapporté par PostgreSQL)."""
@@ -315,14 +360,55 @@ def _lock_run(db, run_id: uuid.UUID) -> ObservationEvaluationRun:
     return run
 
 
+def _is_open(run: ObservationEvaluationRun) -> bool:
+    return run.execution_status == RUNNING and run.interpretation_status == CANDIDATE
+
+
 def _lock_open_run(db, run_id: uuid.UUID) -> ObservationEvaluationRun:
     """Verrouille le run puis exige running / candidate."""
     run = _lock_run(db, run_id)
-    if run.execution_status != RUNNING or run.interpretation_status != CANDIDATE:
+    if not _is_open(run):
         raise InvalidEvaluationState(
             f"{run_id} est {run.execution_status} / {run.interpretation_status}"
             f" (running / candidate requis)")
     return run
+
+
+def _db_now(db) -> datetime:
+    """Horloge de référence des leases : clock_timestamp() PostgreSQL (pas
+    now(), figé au début de la transaction ; jamais l'horloge du worker)."""
+    return db.execute(select(func.clock_timestamp())).scalar_one()
+
+
+def _lease_valid(run: ObservationEvaluationRun, now: datetime) -> bool:
+    return run.lease_token is not None and run.lease_expires_at > now
+
+
+def _lock_leased_run(db, run_id: uuid.UUID, lease_token: uuid.UUID) -> ObservationEvaluationRun:
+    """Verrouille le run puis exige que lease_token le détienne encore :
+    running / candidate, même jeton, lease non expirée (horloge PostgreSQL
+    lue SOUS le verrou). Sinon LostEvaluationLease, sans aucune mutation."""
+    run = _lock_run(db, run_id)
+    if not _is_open(run) or run.lease_token != lease_token or not _lease_valid(run, _db_now(db)):
+        raise LostEvaluationLease(f"{run_id} : lease perdue")
+    return run
+
+
+def _lock_mutable_run(db, run_id: uuid.UUID, lease_token: uuid.UUID | None) -> ObservationEvaluationRun:
+    """Verrou d'une mutation de run ouvert. Avec lease_token : propriété
+    exigée (LostEvaluationLease). Sans : comportement T3-B, sauf si une
+    lease valide est détenue par un worker (AlreadyLeased)."""
+    if lease_token is not None:
+        return _lock_leased_run(db, run_id, lease_token)
+    run = _lock_open_run(db, run_id)
+    if run.lease_token is not None and _lease_valid(run, _db_now(db)):
+        raise AlreadyLeased(f"{run_id} : lease valide détenue par un worker")
+    return run
+
+
+def _clear_lease(run: ObservationEvaluationRun) -> None:
+    run.lease_token = None
+    run.lease_expires_at = None
 
 
 # --------------------------------------------------------------------------
@@ -456,13 +542,16 @@ def add_observation(
     error_type: str | None,
     observation_text: str,
     capability_localization: str,
+    lease_token: uuid.UUID | None = None,
 ) -> PedagogicalObservation:
     """Ajoute une observation (integrity_status valid) à un run running /
     candidate. Tout est validé avant le verrou ; les payloads sont copiés.
 
     ordinal est alloué ici (1, puis MAX + 1) sous le verrou du run parent,
     qui sérialise les ajouts concurrents ;
-    UNIQUE(evaluation_run_id, ordinal) reste la seconde défense."""
+    UNIQUE(evaluation_run_id, ordinal) reste la seconde défense.
+
+    lease_token (R1-D1) : voir _lock_mutable_run."""
     _require_uuid(run_id, "run_id")
     _require_choice(competency_code, "competency_code", COMPETENCY_CODES)
     _require_choice(observation_role, "observation_role", OBSERVATION_ROLES)
@@ -481,8 +570,9 @@ def add_observation(
     _optional_choice(error_type, "error_type", ERROR_TYPES)
     _require_text(observation_text, "observation_text")
     _require_choice(capability_localization, "capability_localization", CAPABILITY_LOCALIZATIONS)
+    _optional_uuid(lease_token, "lease_token")
 
-    run = _lock_open_run(db, run_id)
+    run = _lock_mutable_run(db, run_id, lease_token)
     last = db.execute(
         select(func.max(PedagogicalObservation.ordinal))
         .where(PedagogicalObservation.evaluation_run_id == run.id)
@@ -525,6 +615,7 @@ def complete_evaluation_run(
     *,
     run_id: uuid.UUID,
     output_fingerprint: str,
+    lease_token: uuid.UUID | None = None,
 ) -> ObservationEvaluationRun:
     """running / candidate -> completed / active, atomiquement avec la
     supersession de l'ancien active du même événement (s'il existe). Zéro
@@ -549,11 +640,15 @@ def complete_evaluation_run(
     nouveau : l'index unique partiel (non différable) est vérifié ligne par
     ligne et le flush SQLAlchemy n'ordonne pas les UPDATE d'une même table
     selon l'ordre des mutations. Ni l'ancien run ni ses observations ne sont
-    supprimés ou modifiés au-delà de interpretation_status."""
+    supprimés ou modifiés au-delà de interpretation_status.
+
+    lease_token (R1-D1) : vérifié à l'étape 1 (voir _lock_mutable_run) ; la
+    lease est effacée à la complétion."""
     _require_uuid(run_id, "run_id")
     _require_text(output_fingerprint, "output_fingerprint")
+    _optional_uuid(lease_token, "lease_token")
 
-    run = _lock_open_run(db, run_id)
+    run = _lock_mutable_run(db, run_id, lease_token)
     _validate_run_capability_mappings(db, run)
     _lock_event(db, run.event_id)
     previous = db.execute(
@@ -574,6 +669,7 @@ def complete_evaluation_run(
     run.completed_at = _utcnow()
     run.output_fingerprint = output_fingerprint
     run.failure_code = None
+    _clear_lease(run)
     db.flush()
     return run
 
@@ -583,22 +679,89 @@ def fail_evaluation_run(
     *,
     run_id: uuid.UUID,
     failure_code: str,
+    lease_token: uuid.UUID | None = None,
 ) -> ObservationEvaluationRun:
     """running / candidate -> failed / obsolete. N'affecte jamais l'active
     courant (aucun verrou parent requis) ; les observations déjà ajoutées
     sont conservées pour l'audit (jamais de DELETE) et ne deviendront jamais
-    l'interprétation active."""
+    l'interprétation active.
+
+    lease_token (R1-D1) : un worker n'échoue un run que s'il le détient
+    encore (sinon LostEvaluationLease : jamais l'échec d'un run repris par
+    un autre worker). La lease est effacée."""
     _require_uuid(run_id, "run_id")
     _require_text(failure_code, "failure_code")
+    _optional_uuid(lease_token, "lease_token")
 
-    run = _lock_open_run(db, run_id)
+    run = _lock_mutable_run(db, run_id, lease_token)
     run.execution_status = FAILED
     run.interpretation_status = OBSOLETE
     run.completed_at = _utcnow()
     run.failure_code = failure_code
     run.output_fingerprint = None
+    _clear_lease(run)
     db.flush()
     return run
+
+
+def claim_evaluation_lease(
+    db,
+    *,
+    run_id: uuid.UUID,
+    lease_seconds: int,
+) -> ObservationEvaluationRun:
+    """Prend la lease d'exécution d'un run running / candidate (R1-D1) :
+    nouveau lease_token, lease_expires_at = clock_timestamp() +
+    lease_seconds. Sous le verrou du run : terminal => InvalidEvaluationState
+    (rien à exécuter) ; lease valide d'un autre détenteur => AlreadyLeased ;
+    lease absente ou expirée => reprise (même run, jamais un nouveau).
+    Statuts inchangés. Le jeton est lu sur le run retourné."""
+    _require_uuid(run_id, "run_id")
+    seconds = _require_lease_seconds(lease_seconds)
+
+    run = _lock_open_run(db, run_id)
+    now = _db_now(db)
+    if _lease_valid(run, now):
+        raise AlreadyLeased(f"{run_id} : lease valide jusqu'à {run.lease_expires_at.isoformat()}")
+    run.lease_token = uuid.uuid4()
+    run.lease_expires_at = now + timedelta(seconds=seconds)
+    db.flush()
+    return run
+
+
+def renew_evaluation_lease(
+    db,
+    *,
+    run_id: uuid.UUID,
+    lease_token: uuid.UUID,
+    lease_seconds: int,
+) -> ObservationEvaluationRun:
+    """Prolonge la lease détenue par lease_token (lease_expires_at =
+    clock_timestamp() + lease_seconds). Lease perdue => LostEvaluationLease,
+    aucune mutation : une lease expirée n'est jamais « ressuscitée »."""
+    _require_uuid(run_id, "run_id")
+    _require_uuid(lease_token, "lease_token")
+    seconds = _require_lease_seconds(lease_seconds)
+
+    run = _lock_leased_run(db, run_id, lease_token)
+    run.lease_expires_at = _db_now(db) + timedelta(seconds=seconds)
+    db.flush()
+    return run
+
+
+def verify_evaluation_lease(
+    db,
+    *,
+    run_id: uuid.UUID,
+    lease_token: uuid.UUID,
+) -> ObservationEvaluationRun:
+    """Vérifie, sous le verrou du run (FOR NO KEY UPDATE, conservé jusqu'à
+    la fin de la transaction de l'appelant), que lease_token détient encore
+    le run ; LostEvaluationLease sinon. Aucune mutation : sert de première
+    étape à la transaction résultat du worker."""
+    _require_uuid(run_id, "run_id")
+    _require_uuid(lease_token, "lease_token")
+    return _lock_leased_run(db, run_id, lease_token)
 
 
 def invalidate_observation(

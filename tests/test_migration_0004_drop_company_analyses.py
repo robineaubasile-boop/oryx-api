@@ -116,6 +116,11 @@ R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 R1C4_LINK_COLUMN = "input_context_event_id"
 R1C4_LINK_COLUMNS = (R1C4_LINK_COLUMN, "response_context_event_id")
 R1C4_PROGRESS_COLUMN = "product_progress_action"
+# R1-D1 (0014, testé à part) : lease persistée des runs d'évaluation (deux
+# colonnes nullable sur observation_evaluation_runs, deux CHECK).
+R1D1 = "0014_evaluation_run_leases"
+R1D1_FILE = "0014_evaluation_run_leases.py"
+R1D1_RUN_COLUMNS = ("lease_token", "lease_expires_at")
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -423,6 +428,20 @@ def _without_r1c4_changes(diff) -> list:
     found = [d for d in diff if is_r1c4(d)]
     assert sorted(d[0] for d in found) == ["add_column", "add_column", "add_column", "add_fk", "add_fk"], diff
     return [d for d in diff if not is_r1c4(d)]
+
+
+def _without_r1d1_changes(diff) -> list:
+    """Retire du diff compare_metadata d'un schéma 0006..0013 EXACTEMENT les
+    écarts introduits par R1-D1 (colonnes lease_token et lease_expires_at
+    d'observation_evaluation_runs ; les CHECK ne sont pas comparés par
+    Alembic), et échoue s'ils manquent. Retourne le reste."""
+    def is_r1d1(d):
+        return (isinstance(d, tuple) and d[0] == "add_column" and d[2] == "observation_evaluation_runs"
+                and d[3].name in R1D1_RUN_COLUMNS and d[3].nullable)
+
+    found = [d for d in diff if is_r1d1(d)]
+    assert sorted(d[3].name for d in found) == sorted(R1D1_RUN_COLUMNS), diff
+    return [d for d in diff if not is_r1d1(d)]
 
 
 def _assert_metadata_matches_0004(engine) -> None:

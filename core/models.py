@@ -254,7 +254,14 @@ class ObservationEvaluationRun(Base):
 
     T3-A : table créée par la migration 0006_observation_layer ; ni lue ni
     écrite par l'application (lifecycle et écriture en T3-B). trigger est
-    un vocabulaire extensible, volontairement sans CHECK."""
+    un vocabulaire extensible, volontairement sans CHECK.
+
+    R1-D1 (migration 0014_evaluation_run_leases) : lease_token /
+    lease_expires_at, propriété d'exécution persistée du worker
+    d'évaluation (core/evaluation_runtime.py), vérifiée par T3-B avant toute
+    mutation du worker. Les deux sont NULL ensemble
+    (ck_observation_evaluation_runs_lease_pair) et seul un run running peut
+    porter une lease (ck_observation_evaluation_runs_lease_running)."""
     __tablename__ = "observation_evaluation_runs"
     __table_args__ = (
         CheckConstraint(
@@ -278,6 +285,15 @@ class ObservationEvaluationRun(Base):
         Index(
             "ix_observation_evaluation_runs_pedagogical_taxonomy_release_id",
             "pedagogical_taxonomy_release_id",
+        ),
+        # R1-D1 (0014_evaluation_run_leases)
+        CheckConstraint(
+            "(lease_token IS NULL) = (lease_expires_at IS NULL)",
+            name="ck_observation_evaluation_runs_lease_pair",
+        ),
+        CheckConstraint(
+            "lease_token IS NULL OR execution_status = 'running'",
+            name="ck_observation_evaluation_runs_lease_running",
         ),
     )
 
@@ -309,6 +325,12 @@ class ObservationEvaluationRun(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
     failure_code = Column(String, nullable=True)
+    # R1-D1 (0014_evaluation_run_leases) : lease persistée du worker
+    # d'évaluation. NULL / NULL = aucun worker ne détient le run (runs
+    # historiques, runs terminaux). Ne change ni execution_status ni
+    # interpretation_status ; seul core/observation_service.py la mute.
+    lease_token = Column(Uuid, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class PedagogicalObservation(Base):

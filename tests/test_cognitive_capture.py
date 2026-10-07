@@ -77,6 +77,8 @@ R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
+R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
+R1D1_FILE = "0014_evaluation_run_leases.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
 PUBLIC_API = {
@@ -200,13 +202,14 @@ def test_head_is_0013_after_r1b_r1c1_r1c2_and_r1c4():
     0012 (decryptage_cognitive_links, liens runtime vers les events), R1-C4
     ajoute 0013 (affinité conversationnelle des liens), la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B, R1C1, R1C2, R1C4}
+                                                                 T6A, R1B, R1C1, R1C2, R1C4, R1D1}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
-        R1C4_FILE]
+        R1C4_FILE, R1D1_FILE]
 
 
 def test_public_api_is_exactly_the_capture_functions():
