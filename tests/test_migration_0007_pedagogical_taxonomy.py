@@ -63,6 +63,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
     R1B_TABLES,
     R1C1_TABLES,
     R1C2_TABLES,
@@ -586,7 +587,10 @@ def test_no_t4b_operation_anywhere():
     le fingerprint de T4-C vivent dans core/pedagogy/taxonomy_v1.py
     (validate_spec, compute_spec_fingerprint)."""
     t4b_operations = ("create_candidate_release", "activate_release", "map_observation_capability")
-    t4c_callers = {"core/pedagogy/taxonomy_bootstrap.py": ("create_candidate_release", "activate_release")}
+    t4c_callers = {"core/pedagogy/taxonomy_bootstrap.py": ("create_candidate_release", "activate_release"),
+                   # R1-D1 : le runtime d'évaluation interne localise les
+                   # observations qu'il persiste (D1D) par la primitive T4-B.
+                   "core/evaluation_runtime.py": ("map_observation_capability",)}
     never = ("retire_release", "reuse_capability_definition", "validate_taxonomy",
              "calculate_spec_fingerprint")
     checked = 0
@@ -641,7 +645,10 @@ def test_t4a_tables_are_not_wired_to_the_application():
     # par la seule lecture des mappings d'une observation positive citée
     # (jamais la release active globale ; voir tests/test_progress_evidence.py).
     step6_reads = {"core/adaptation_state.py": ("get_observation_capabilities", "get_release_capabilities"),
-                   "core/progress_evidence.py": ("get_observation_capabilities",)}
+                   "core/progress_evidence.py": ("get_observation_capabilities",),
+                   # R1-D1 : runtime d'évaluation interne (sans route), par
+                   # les seules primitives T4-B (aucun modèle ni table T4).
+                   "core/evaluation_runtime.py": ("map_observation_capability",)}
     checked = 0
     for rel, source in _application_sources():
         checked += 1
@@ -782,7 +789,8 @@ def _assert_metadata_matches_0007(engine) -> None:
     T5-A et les six tables de T6-A et leurs index, créés seulement en 0008
     et 0009, et par les écarts R1-B (0010) ; tout le reste correspond
     exactement."""
-    diff = _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(engine))),
+    diff = _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(engine)))),
                                 events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T5A_TABLES | T6A_TABLES]

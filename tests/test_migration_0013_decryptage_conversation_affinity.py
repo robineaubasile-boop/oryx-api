@@ -44,6 +44,9 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
+    R1D1,
+    R1D1_FILE,
     R1C2_TABLES,
     R1C4,
     R1C4_FILE,
@@ -109,10 +112,11 @@ HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
 
 def test_revision_chain_ends_with_0013_as_the_single_head():
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-2:] == [f"{R1C2}.py", R1C4_FILE] and len(files) == 13
+    assert files[-3:] == [f"{R1C2}.py", R1C4_FILE, R1D1_FILE] and len(files) == 14
 
 
 def test_revision_id_is_short_because_alembic_version_is_varchar_32():
@@ -360,7 +364,7 @@ def test_pg_upgrade_0012_to_0013_keeps_v1_rows_untouched_then_downgrade(pg_url, 
         t: rows for t, rows in data_0012.items() if t != LINKS}
     # Lignes V1 : mêmes valeurs, nouvelles colonnes NULL (aucun backfill).
     assert data_0013[LINKS] == [row + (None, None, None) for row in data_0012[LINKS]]
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1d1_changes(_compare_metadata(pg_engine)) == []
     catalog = _catalog(pg_engine, {LINKS})[LINKS]
     assert catalog["columns"][-3:] == [(COLUMN, "uuid", "YES", None), (RCOLUMN, "uuid", "YES", None),
                                        (PCOLUMN, "character varying", "YES", None)]
@@ -379,20 +383,21 @@ def test_pg_upgrade_0012_to_0013_keeps_v1_rows_untouched_then_downgrade(pg_url, 
     assert _catalog(pg_engine, HEAD_TABLES) == catalog_0012
     assert _global_catalog(pg_engine) == global_0012
     assert _data(pg_engine, HEAD_TABLES - {"alembic_version"}) == data_0012
-    assert _without_r1c4_changes(_compare_metadata(pg_engine)) == []
+    assert _without_r1c4_changes(_without_r1d1_changes(_compare_metadata(pg_engine))) == []
 
     # --- ré-upgrade --------------------------------------------------------
     _run_alembic(pg_url, "upgrade", R1C4)
     assert _snapshot(pg_engine, {LINKS}) == schema_0013
     assert _catalog(pg_engine, {LINKS}) == catalog_0013
-    assert _compare_metadata(pg_engine) == []
+    assert _without_r1d1_changes(_compare_metadata(pg_engine)) == []
 
 
 def test_pg_downgrade_refuses_to_lose_v2_semantics(pg_url, pg_engine):  # noqa: F811
     """Une ligne V2 context_switched existe : le downgrade échoue (le CHECK
-    d'origine la refuse) sans rien perdre ; la base reste à 0013."""
+    d'origine la refuse) sans rien perdre ; la base reste à 0013 (montée à
+    0013 explicitement : depuis R1-D1, head est 0014)."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", R1C4)
     _seed_users(pg_engine)
     with pg_engine.begin() as connection:
         anchor = _insert_event(connection, event_dedup_key="a" * 64)

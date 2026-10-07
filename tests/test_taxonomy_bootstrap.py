@@ -87,6 +87,8 @@ R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
+R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
+R1D1_FILE = "0014_evaluation_run_leases.py"
 
 MODULE_PATH = REPO_ROOT / "core" / "pedagogy" / "taxonomy_bootstrap.py"
 CLI_PATH = REPO_ROOT / "scripts" / "bootstrap_pedagogical_taxonomy_v1.py"
@@ -111,7 +113,8 @@ def test_no_migration_added_by_t4c_head_is_0010():
     tests/test_migration_0009_competency_inference_state.py et
     tests/test_migration_0010_r1b_event_idempotence.py."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert script.get_revision(R1C2).down_revision == R1C1
     assert script.get_revision(R1C1).down_revision == R1B
@@ -119,9 +122,9 @@ def test_no_migration_added_by_t4c_head_is_0010():
     assert script.get_revision(T6A).down_revision == T5A
     assert script.get_revision(T5A).down_revision == T4A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-7:] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
-                          R1C4_FILE]
-    assert len(files) == 13
+    assert files[-8:] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
+                          R1C4_FILE, R1D1_FILE]
+    assert len(files) == 14
 
 
 def test_public_api_is_exactly_bootstrap_verify_activate():
@@ -222,7 +225,12 @@ def test_t4c_is_not_wired_to_the_application():
     # compétences par la seule lecture load_taxonomy_v1 (jamais bootstrap /
     # verify / activate ; voir tests/test_progress_projection.py).
     step6_reads = {"core/adaptation_focus.py": ("load_taxonomy_v1", "oryx-v1"),
-                   "core/progress_projection.py": ("load_taxonomy_v1",)}
+                   "core/progress_projection.py": ("load_taxonomy_v1",),
+                   # R1-D1 : runtime d'évaluation interne (sans route). Avant
+                   # tout run : SPEC canonique (load_taxonomy_v1) et
+                   # vérification stricte de la release persistée
+                   # (verify_taxonomy_v1) ; jamais bootstrap ni activate.
+                   "core/evaluation_runtime.py": ("load_taxonomy_v1", "verify_taxonomy_v1")}
     checked = 0
     for rel, source in _application_sources():
         checked += 1

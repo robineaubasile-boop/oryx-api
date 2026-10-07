@@ -111,6 +111,8 @@ R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
+R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
+R1D1_FILE = "0014_evaluation_run_leases.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "taxonomy_service.py"
 PUBLIC_API = {
@@ -166,12 +168,13 @@ def test_no_migration_added_by_t4b_head_is_0013():
     ajoutées depuis sont 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1),
     0012 (R1-C2) et 0013 (R1-C4), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in revisions[:-1]] + [R1C4_FILE]
+    assert files == [f"{rev}.py" for rev in revisions[:-2]] + [R1C4_FILE, R1D1_FILE]
 
 
 def test_public_api_is_exactly_the_eight_operations():
@@ -284,7 +287,9 @@ def test_service_is_not_wired_to_the_application():
     contrôle interne appelé par complete_evaluation_run (T3-B) et, depuis
     T4-C, l'orchestration interne core/pedagogy/taxonomy_bootstrap.py
     (bootstrap / vérification / activation de V1, sans route ; voir
-    tests/test_taxonomy_bootstrap.py)."""
+    tests/test_taxonomy_bootstrap.py) et, depuis R1-D1, le runtime
+    d'évaluation interne core/evaluation_runtime.py (release active,
+    memberships, mapping des observations persistées ; sans route)."""
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -296,6 +301,10 @@ def test_service_is_not_wired_to_the_application():
             source = _code_tokens(source)
         checked += 1
         if rel == "core/pedagogy/taxonomy_bootstrap.py":
+            assert "_validate_run_capability_mappings" not in source, rel
+        elif rel == "core/evaluation_runtime.py":
+            # R1-D1 : runtime d'évaluation interne (sans route) ; seulement
+            # des primitives publiques T4-B (voir tests/test_r1d1_runtime.py).
             assert "_validate_run_capability_mappings" not in source, rel
         elif rel not in ("core/taxonomy_service.py", "core/observation_service.py"):
             assert "taxonomy_service" not in source, rel
@@ -733,7 +742,7 @@ def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, e
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1C4
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == R1D1
     assert tax.get_active_release(db) is None
 
 

@@ -52,6 +52,7 @@ from core import cognitive_capture as cc
 from core import observation_service as svc
 from core.models import ObservationEvaluationRun, PedagogicalObservation, User
 from core.observation_service import (
+    AlreadyLeased,
     DuplicateEvaluationRun,
     EvaluationRunNotFound,
     EventNotEvaluable,
@@ -59,6 +60,7 @@ from core.observation_service import (
     InvalidEvaluationState,
     InvalidObservationPayload,
     InvalidReevaluationTarget,
+    LostEvaluationLease,
     ObservationAlreadyInvalidated,
     ObservationNotFound,
     ObservationServiceError,
@@ -84,6 +86,8 @@ R1C1 = "0011_assistant_deliveries"
 R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
+R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
+R1D1_FILE = "0014_evaluation_run_leases.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "observation_service.py"
 DEDUP_INDEX = "uq_observation_evaluation_runs_dedup_key"
@@ -96,6 +100,10 @@ PUBLIC_API = {
     "get_evaluation_run",
     "get_observation",
     "get_observations",
+    # R1-D1 : lease d'exécution persistée du worker d'évaluation.
+    "claim_evaluation_lease",
+    "renew_evaluation_lease",
+    "verify_evaluation_lease",
 }
 EXCEPTIONS = {
     EventNotFound,
@@ -107,6 +115,8 @@ EXCEPTIONS = {
     InvalidReevaluationTarget,
     DuplicateEvaluationRun,
     ObservationAlreadyInvalidated,
+    AlreadyLeased,
+    LostEvaluationLease,
 }
 START_REQUIRED_TEXT = [
     "trigger",
@@ -242,17 +252,19 @@ def test_no_migration_added_by_t3b_head_is_0013():
     0007 (T4-A), 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1), 0012
     (R1-C2) et 0013 (R1-C4), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
-    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
+    revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
     assert {rev.revision for rev in script.walk_revisions()} == set(revisions)
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in revisions[:-1]] + [R1C4_FILE]
+    assert files == [f"{rev}.py" for rev in revisions[:-2]] + [R1C4_FILE, R1D1_FILE]
 
 
 def test_public_api_is_exactly_the_eight_operations():
     """Pas d'activate/supersede séparés, pas d'update/delete d'observation,
-    pas de get_or_create, pas d'inférence."""
+    pas de get_or_create, pas d'inférence. Depuis R1-D1 : trois primitives de
+    lease (claim / renew / verify), sans statut supplémentaire."""
     tree = ast.parse(SERVICE_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert {f for f in functions if not f.startswith("_")} == PUBLIC_API
@@ -280,9 +292,15 @@ def test_exact_signatures():
     }
     # Aucun champ d'observation n'a de valeur par défaut : l'évaluateur
     # doit tout expliciter, y compris les None.
-    assert params(svc.add_observation) == {name: empty for name in ["run_id"] + list(_obs_kwargs())}
-    assert params(svc.complete_evaluation_run) == {"run_id": empty, "output_fingerprint": empty}
-    assert params(svc.fail_evaluation_run) == {"run_id": empty, "failure_code": empty}
+    # R1-D1 : lease_token optionnel (None = comportement T3-B).
+    assert params(svc.add_observation) == {**{name: empty for name in ["run_id"] + list(_obs_kwargs())},
+                                           "lease_token": None}
+    assert params(svc.complete_evaluation_run) == {"run_id": empty, "output_fingerprint": empty,
+                                                   "lease_token": None}
+    assert params(svc.fail_evaluation_run) == {"run_id": empty, "failure_code": empty, "lease_token": None}
+    assert params(svc.claim_evaluation_lease) == {"run_id": empty, "lease_seconds": empty}
+    assert params(svc.renew_evaluation_lease) == {"run_id": empty, "lease_token": empty, "lease_seconds": empty}
+    assert params(svc.verify_evaluation_lease) == {"run_id": empty, "lease_token": empty}
     assert params(svc.invalidate_observation) == {"observation_id": empty, "reason": empty}
     assert params(svc.get_evaluation_run) == {"run_id": empty}
     assert params(svc.get_observation) == {"observation_id": empty}
@@ -334,8 +352,10 @@ def test_service_contains_no_inference_or_evaluator_vocabulary():
 
 
 def test_service_is_not_wired_to_the_application():
-    """Aucune route ni module applicatif n'importe le service (seuls les
-    tests l'utilisent) : l'application produit toujours zéro run."""
+    """Aucune route ni module applicatif n'importe le service : seul le
+    runtime d'évaluation interne R1-D1 (core/evaluation_runtime.py, appelé
+    par le worker oryx-evaluation-worker, jamais par api.py) l'utilise ;
+    l'API produit toujours zéro run."""
     checked = 0
     for path in REPO_ROOT.rglob("*"):
         rel = path.relative_to(REPO_ROOT).as_posix()
@@ -346,9 +366,11 @@ def test_service_is_not_wired_to_the_application():
         if path.suffix == ".py":
             source = _code_tokens(source)
         checked += 1
-        if rel != "core/observation_service.py":
+        if rel not in ("core/observation_service.py", "core/evaluation_runtime.py"):
             assert "observation_service" not in source, rel
     assert checked > 0
+    api = _code_tokens((REPO_ROOT / "api.py").read_text(encoding="utf-8"))
+    assert "evaluation_runtime" not in api and "evaluation_worker" not in api
 
 
 def test_service_does_not_touch_the_t4_taxonomy():
@@ -374,7 +396,7 @@ def test_service_delegates_the_t4_check_to_the_taxonomy_service():
     assert len(calls) == 1
     complete = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "complete_evaluation_run")
     called = [n.func.id for n in ast.walk(complete) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert (called.index("_lock_open_run") < called.index("_validate_run_capability_mappings")
+    assert (called.index("_lock_mutable_run") < called.index("_validate_run_capability_mappings")
             < called.index("_lock_event"))
     taxonomy = ast.parse((REPO_ROOT / "core" / "taxonomy_service.py").read_text(encoding="utf-8"))
     modules = {n.module for n in ast.walk(taxonomy) if isinstance(n, ast.ImportFrom)}

@@ -67,6 +67,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
     R1B_TABLES,
     R1C1_TABLES,
     R1C2_TABLES,
@@ -1015,7 +1016,8 @@ def _assert_metadata_matches_0008(engine) -> None:
     """Au schéma 0008, Base.metadata ne diffère que par les six tables de
     T6-A et leurs index, créés seulement en 0009 ; tout le reste correspond
     exactement, hormis les écarts R1-B (0010)."""
-    diff = _without_r1b_changes(_without_r1c1_changes(_without_r1c2_changes(_compare_metadata(engine))),
+    diff = _without_r1b_changes(
+        _without_r1c1_changes(_without_r1c2_changes(_without_r1d1_changes(_compare_metadata(engine)))),
                                 events_created=True)
     assert sorted((d[0], d[1].name) for d in diff) == sorted(
         [("add_table", t) for t in T6A_TABLES] + [("add_index", i) for i in T6A_INDEXES]

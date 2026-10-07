@@ -1068,7 +1068,7 @@ def test_not_wired_to_api_runtime_or_any_other_module():
 
 def test_no_migration_no_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0013_decryptage_conversation_affinity.py" and len(versions) == 13
+    assert versions[-1] == "0014_evaluation_run_leases.py" and len(versions) == 14
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Progress" not in models and "progress_projection" not in models
     tokens = _code_tokens(_source())

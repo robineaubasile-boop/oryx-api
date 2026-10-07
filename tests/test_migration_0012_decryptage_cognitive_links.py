@@ -46,6 +46,9 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    _without_r1d1_changes,
+    R1D1,
+    R1D1_FILE,
     R1C1_TABLES,
     R1C2_INDEXES,
     R1C2_TABLES,
@@ -138,17 +141,18 @@ def test_revision_chain_is_exactly_0001_to_0012_then_0013():
     R1-C2. Depuis R1-C4, 0013 (affinité conversationnelle) la suit et est la
     tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1C4]
+    assert script.get_heads() == [R1D1]
+    assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4)
+    chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
     assert set(revisions) == set(chain)
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain[:-1]] + [R1C4_FILE]
-    assert len(files) == 13
+    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE]
+    assert len(files) == 14
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -327,7 +331,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1C4
+    assert _version(pg_engine) == R1D1
     assert _tables(pg_engine) == HEAD_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
@@ -514,7 +518,7 @@ def test_pg_upgrade_0011_to_0012_preserves_everything_then_downgrade(pg_url, pg_
     assert _data(pg_engine, PRE_R1C2_TABLES) == data_0011
     assert _data(pg_engine, R1C2_TABLES) == {LINKS: []}
     # Le modèle (tête) porte en plus exactement les ajouts R1-C4 (0013).
-    assert _without_r1c4_changes(_compare_metadata(pg_engine)) == []
+    assert _without_r1c4_changes(_without_r1d1_changes(_compare_metadata(pg_engine))) == []
     schema_r1c2 = _snapshot(pg_engine, R1C2_TABLES)
     catalog_r1c2 = _catalog(pg_engine, R1C2_TABLES)
 
@@ -541,4 +545,4 @@ def test_pg_upgrade_0011_to_0012_preserves_everything_then_downgrade(pg_url, pg_
     assert _snapshot(pg_engine, R1C2_TABLES) == schema_r1c2
     assert _catalog(pg_engine, R1C2_TABLES) == catalog_r1c2
     assert _data(pg_engine, R1C2_TABLES) == {LINKS: []}
-    assert _without_r1c4_changes(_compare_metadata(pg_engine)) == []
+    assert _without_r1c4_changes(_without_r1d1_changes(_compare_metadata(pg_engine))) == []
