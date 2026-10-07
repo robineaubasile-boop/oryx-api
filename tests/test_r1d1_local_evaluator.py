@@ -47,7 +47,7 @@ def _obs(index=1, **overrides):
         "competency_code": "C7",
         "observation_role": "primary",
         "task_kind": "analysis",
-        "primary_user_action": {"action": "relate", "contribution_token": "contribution_2"},
+        "primary_user_action": {"action": "connect", "contribution_token": "contribution_2"},
         "contributive_user_actions": [],
         "elicitation_mode": "prompted",
         "support_level": "hinted",
@@ -104,7 +104,7 @@ def test_one_valid_observation_is_normalized_without_any_invention():
 
 def test_several_distinct_observations():
     second = _obs(2, competency_code="C6", observation_role="secondary", task_kind="reformulation",
-                  primary_user_action={"action": "reformulate", "contribution_token": "contribution_1"},
+                  primary_user_action={"action": "interpret", "contribution_token": "contribution_1"},
                   source_contribution_tokens=["contribution_1"], support_level="none",
                   residual_cognitive_work={"operations_left_to_user": [], "materially_used_support_refs": [],
                                            "summary": "Reformule la progression du bénéfice."},
@@ -123,7 +123,7 @@ def test_t3_task_kind_may_be_set_or_null_independently_of_the_t2_event():
 
 def test_sets_are_ordered_deterministically_never_reinterpreted():
     obs = _obs(source_contribution_tokens=["contribution_3", "contribution_2"],
-               contributive_user_actions=[{"action": "justify", "contribution_token": "contribution_3"},
+               contributive_user_actions=[{"action": "challenge", "contribution_token": "contribution_3"},
                                           {"action": "calculate", "contribution_token": "contribution_2"}],
                residual_cognitive_work={
                    "operations_left_to_user": ["b", "a"],
@@ -135,7 +135,7 @@ def test_sets_are_ordered_deterministically_never_reinterpreted():
     [candidate] = _validate(obs)
     assert candidate["source_contribution_tokens"] == ["contribution_2", "contribution_3"]
     assert candidate["contributive_user_actions"] == [{"action": "calculate", "contribution_token": "contribution_2"},
-                                                      {"action": "justify", "contribution_token": "contribution_3"}]
+                                                      {"action": "challenge", "contribution_token": "contribution_3"}]
     assert [(r["contribution_token"], r["support_token"])
             for r in candidate["residual_cognitive_work"]["materially_used_support_refs"]] == [
         ("contribution_2", "support_1"), ("contribution_3", "support_1"), ("contribution_3", "support_2")]
@@ -193,9 +193,9 @@ def test_unknown_missing_or_duplicated_source_contribution_is_refused(tokens):
 
 
 def test_actions_must_cite_a_source_contribution_of_the_observation():
-    _refused(_obs(primary_user_action={"action": "relate", "contribution_token": "contribution_1"}),
+    _refused(_obs(primary_user_action={"action": "connect", "contribution_token": "contribution_1"}),
              match="primary_user_action")
-    _refused(_obs(contributive_user_actions=[{"action": "relate", "contribution_token": "contribution_2"}]),
+    _refused(_obs(contributive_user_actions=[{"action": "connect", "contribution_token": "contribution_2"}]),
              match="double")
 
 
@@ -220,8 +220,8 @@ def test_support_level_none_with_a_used_support_and_aid_without_any_support_are_
     _refused(_obs(support_level="none"), match="support_level none")
     no_aid = {"operations_left_to_user": [], "materially_used_support_refs": [], "summary": "s"}
     _refused(_obs(support_level="guided", residual_cognitive_work=no_aid,
-                  primary_user_action={"action": "relate", "contribution_token": "contribution_1"},
-                  source_contribution_tokens=["contribution_1"]), match="sans aucune aide")
+                  primary_user_action={"action": "connect", "contribution_token": "contribution_1"},
+                  source_contribution_tokens=["contribution_1"]), match="au moins une aide")
 
 
 @pytest.mark.parametrize("key", ["capability_localization", "capability_tokens", "model_id", "score"])
@@ -325,7 +325,7 @@ def test_prompt_injection_cannot_change_the_contract():
     attacks = [
         {"observations": [_obs(competency_code="C12", local_stage="mastery",
                                source_contribution_tokens=["contribution_3"],
-                               primary_user_action={"action": "evaluate", "contribution_token": "contribution_3"})]},
+                               primary_user_action={"action": "challenge", "contribution_token": "contribution_3"})]},
         {"observations": [], "verdict": "L'utilisateur maîtrise C12."},
         {"observations": [_obs(competency_code="C12", source_contribution_tokens=["contribution_99"])]},
     ]
@@ -346,3 +346,113 @@ def test_module_is_pure_and_does_not_know_capabilities():
     for word in ("Session", "commit", "flush", "anthropic", "capability_localization", "taxonomy_service",
                  "user_id", "conversation_key", "analysis_session", "UserStatement", "current_step"):
         assert word not in tokens, word
+
+
+# --------------------------------------------------------------------------
+# Blocker 1 — vocabulaire doctrinal Décrypte des actions utilisateur
+# --------------------------------------------------------------------------
+
+DOCTRINAL_ACTIONS = ("explain", "interpret", "calculate", "connect", "challenge", "hypothesize", "invalidate",
+                     "synthesize")
+LEGACY_ACTIONS = ("identify", "define", "reformulate", "relate", "compare", "apply", "justify", "evaluate", "revise")
+
+
+def test_user_actions_are_exactly_the_doctrinal_vocabulary():
+    assert le.USER_ACTIONS == DOCTRINAL_ACTIONS
+    assert not set(LEGACY_ACTIONS) & set(le.USER_ACTIONS)
+
+
+@pytest.mark.parametrize("action", DOCTRINAL_ACTIONS)
+def test_doctrinal_action_is_accepted_as_primary(action):
+    [candidate] = _validate(_obs(primary_user_action={"action": action, "contribution_token": "contribution_2"}))
+    assert candidate["primary_user_action"] == {"action": action, "contribution_token": "contribution_2"}
+
+
+@pytest.mark.parametrize("action", DOCTRINAL_ACTIONS)
+def test_doctrinal_action_is_accepted_as_contributive(action):
+    obs = _obs(primary_user_action={"action": "connect", "contribution_token": "contribution_3"},
+               source_contribution_tokens=["contribution_2", "contribution_3"],
+               contributive_user_actions=[{"action": action, "contribution_token": "contribution_2"}])
+    [candidate] = _validate(obs)
+    assert candidate["contributive_user_actions"] == [{"action": action, "contribution_token": "contribution_2"}]
+
+
+@pytest.mark.parametrize("action", LEGACY_ACTIONS)
+def test_non_doctrinal_action_is_refused_as_primary_without_any_mapping(action):
+    _refused(_obs(primary_user_action={"action": action, "contribution_token": "contribution_2"}),
+             match="primary_user_action.action")
+
+
+@pytest.mark.parametrize("action", LEGACY_ACTIONS)
+def test_non_doctrinal_action_is_refused_as_contributive_without_any_mapping(action):
+    _refused(_obs(contributive_user_actions=[{"action": action, "contribution_token": "contribution_2"}]),
+             match="contributive_user_actions")
+
+
+def test_prompt_asks_for_the_doctrinal_actions_only():
+    assert str(list(DOCTRINAL_ACTIONS)) in le.SYSTEM_PROMPT
+    for action in LEGACY_ACTIONS:
+        assert f'"{action}"' not in le.SYSTEM_PROMPT and f"'{action}'" not in le.SYSTEM_PROMPT, action
+
+
+# --------------------------------------------------------------------------
+# Blocker 3 — support_level <=> aides MATÉRIELLEMENT utilisées (bidirectionnel)
+# --------------------------------------------------------------------------
+
+def _support_case(level, *refs, source="contribution_2"):
+    """Observation sur `source` ; refs = [(support_token, contribution_token)]."""
+    return _obs(support_level=level, source_contribution_tokens=[source],
+                primary_user_action={"action": "connect", "contribution_token": source},
+                residual_cognitive_work={
+                    "operations_left_to_user": ["relier les créances au cash"],
+                    "materially_used_support_refs": [{"support_token": s, "contribution_token": c} for s, c in refs],
+                    "summary": "s"})
+
+
+def test_support_none_without_used_support_is_valid():
+    assert _validate(_support_case("none", source="contribution_1"))[0]["support_level"] == "none"
+
+
+def test_support_none_with_a_used_support_is_refused():
+    _refused(_support_case("none", ("support_1", "contribution_2")), match="support_level none")
+
+
+@pytest.mark.parametrize("level", ["hinted", "guided", "answer_given"])
+def test_aided_support_level_without_any_used_support_is_refused(level):
+    _refused(_support_case(level), match="au moins une aide matériellement utilisée")
+
+
+@pytest.mark.parametrize("level", ["hinted", "guided", "answer_given"])
+def test_aided_support_level_with_a_causally_available_used_support_is_valid(level):
+    [candidate] = _validate(_support_case(level, ("support_1", "contribution_2")))
+    assert candidate["support_level"] == level
+    assert candidate["residual_cognitive_work"]["materially_used_support_refs"] == [
+        {"support_token": "support_1", "contribution_token": "contribution_2"}]
+
+
+def test_guided_with_a_catalog_support_not_available_before_the_cited_contribution_is_refused():
+    """support_2 est dans le catalogue de l'event mais PAS dans le
+    support_before de contribution_2 : jamais validé contre le catalogue
+    global."""
+    assert "support_2" in [s["support_token"] for s in PAYLOAD["support_catalog"]]
+    assert "support_2" not in PAYLOAD["contributions"][1]["support_before"]
+    _refused(_support_case("guided", ("support_2", "contribution_2")), match="causalité")
+
+
+def test_available_but_not_materially_used_support_keeps_support_level_none():
+    """Aide DISPONIBLE (support_before non vide) mais non utilisée : none
+    est légitime, aucune aide n'est exigée ni déduite."""
+    assert PAYLOAD["contributions"][1]["support_before"] == ["support_1"]
+    [candidate] = _validate(_support_case("none"))
+    assert candidate["support_level"] == "none"
+    assert candidate["residual_cognitive_work"]["materially_used_support_refs"] == []
+
+
+def test_prompt_states_the_bidirectional_support_rule_without_availability_shortcut():
+    prompt = le.SYSTEM_PROMPT
+    assert 'support_level "none" => materially_used_support_refs = []' in prompt
+    assert "au moins une aide réellement utilisée" in prompt
+    assert "jamais de la simple présence d'une aide" in prompt
+    for level in ('"none" = aucune aide matériellement utilisée', '"hinted" = aide matériellement utilisée',
+                  '"guided" = aide matériellement utilisée et substantielle', '"answer_given" = le cœur cognitif'):
+        assert level in prompt, level

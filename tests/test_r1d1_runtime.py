@@ -500,7 +500,7 @@ def test_pg_full_pipeline_one_c7_observation_localized_on_two_capabilities(engin
     contribution_2 = expected_bundle.contribution_ids["contribution_2"]
     assert observation["source_contribution_refs"] == [
         {"contribution_token": "contribution_2", "contribution_id": contribution_2, "phase": 2}]
-    assert observation["primary_user_action"] == {"action": "relate", "contribution_token": "contribution_2",
+    assert observation["primary_user_action"] == {"action": "connect", "contribution_token": "contribution_2",
                                                   "contribution_id": contribution_2}
     assert observation["residual_cognitive_work"]["materially_used_support_refs"] == [
         {"support_token": "support_1", "support_trace_id": expected_bundle.support_ids["support_1"],

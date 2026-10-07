@@ -18,8 +18,9 @@ capacités Cx_* (R5 : jamais cross-competency).
 Sortie du modèle : {"mappings": [{"observation_token", "localization",
 "capability_tokens"}]}, exactement une entrée par observation ;
 localized => au moins une capacité, competency_only => aucune (R6). La
-localisation est indépendante de la polarité (une contradiction peut être
-localized). D1D n'ajoute que capability_localization et les capacités :
+localisation est indépendante de la polarité : une observation
+contradictory peut être localized sur une capacité précise, elle reste
+contradictory (la localisation ne modifie jamais la polarité). D1D n'ajoute que capability_localization et les capacités :
 aucun champ D1B n'est lu en retour ni modifiable (validate ne renvoie que
 la localisation). Aucune réparation silencieuse : EvaluationOutputInvalid.
 """
@@ -102,7 +103,8 @@ compétence).
 nécessaire, respecte include / exclude / boundary_notes ; un mot-clé ne suffit jamais).
 - "competency_only" : la compétence est claire mais aucune capacité n'est localisable proprement ; \
 capability_tokens = [].
-- Une contradiction peut être localisée comme une preuve supportive.
+- Une observation contradictory peut être "localized" sur une capacité précise ; elle reste \
+contradictory et la localisation ne modifie jamais sa polarité.
 
 SORTIE
 Réponds UNIQUEMENT par un objet JSON valide, sans texte autour ni bloc de code, avec exactement une \

@@ -26,7 +26,7 @@ MODULE_PATH = REPO_ROOT / "core" / "capability_mapper.py"
 
 def _c6(index):
     return _obs(index, competency_code="C6", observation_role="secondary",
-                primary_user_action={"action": "reformulate", "contribution_token": "contribution_1"},
+                primary_user_action={"action": "interpret", "contribution_token": "contribution_1"},
                 source_contribution_tokens=["contribution_1"], support_level="none",
                 residual_cognitive_work={"operations_left_to_user": [], "materially_used_support_refs": [],
                                          "summary": "s"},
@@ -191,3 +191,33 @@ def test_module_is_pure():
     imported = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert imported == {"json", "dataclasses", "core.local_evaluator"}
+
+
+# --------------------------------------------------------------------------
+# Blocker 2 — une contradiction localisée reste contradictory
+# --------------------------------------------------------------------------
+
+def test_d1d_prompt_never_suggests_that_a_contradiction_becomes_supportive():
+    prompt = cm.SYSTEM_PROMPT
+    assert "supportive" not in prompt
+    assert "preuve supportive" not in prompt
+    assert ('Une observation contradictory peut être "localized" sur une capacité précise ; elle reste '
+            "contradictory et la localisation ne modifie jamais sa polarité.") in prompt
+    assert "ne les modifies jamais (ni compétence, ni polarité" in prompt
+
+
+def test_contradictory_c7_localized_keeps_its_polarity_end_to_end():
+    from core import evaluation_runtime as rt
+    [contradiction] = _validate(_contradictory())
+    assert (contradiction["competency_code"], contradiction["polarity"]) == ("C7", "contradictory")
+    context = build_capability_reference_context(SPEC, {"C7"})
+    raw = {"mappings": [_mapping("observation_1", "localized", _token(context, "C7_B"))]}
+    [mapping] = validate_capability_mapping_result(raw, [contradiction], context)
+    assert mapping["capability_localization"] == "localized"
+    assert "polarity" not in mapping and "local_stage" not in mapping
+    [final] = rt.build_final_result([contradiction], [mapping])["observations"]
+    assert final["capabilities"] == ["C7_B@1"]
+    assert (final["polarity"], final["local_stage"], final["contradiction_scope"], final["error_type"]) == (
+        "contradictory", None, "comprehension", "conceptual")
+    assert {k: final[k] for k in contradiction if k in final} == {
+        k: v for k, v in contradiction.items() if k in final}

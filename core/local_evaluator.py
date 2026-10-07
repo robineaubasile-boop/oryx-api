@@ -21,10 +21,16 @@ capability_localization ni capacité (D1D).
 - task_kind : interprétation T3 versionnée (TASK_KINDS ou null), jamais
   dérivée de l'étape produit ;
 - primary_user_action / contributive_user_actions : {"action",
-  "contribution_token"} dans le vocabulaire fermé USER_ACTIONS, contribution
+  "contribution_token"} dans le vocabulaire DOCTRINAL Décrypte USER_ACTIONS
+  (explain, interpret, calculate, connect, challenge, hypothesize,
+  invalidate, synthesize ; aucun synonyme, aucune conversion), contribution
   parmi les sources de l'observation ; liste minimale, jamais un compteur ;
 - elicitation_mode, support_level, polarity, evidence_strength : vocabulaires
   fermés de T3-A (0006) ; support_level n'est jamais un coefficient ;
+- support_level == none SI ET SEULEMENT SI materially_used_support_refs est
+  vide : une aide simplement DISPONIBLE (support_before) n'est pas une aide
+  matériellement UTILISÉE ; hinted / guided / answer_given exigent au moins
+  une aide matériellement utilisée ;
 - residual_cognitive_work : {"operations_left_to_user": [str],
   "materially_used_support_refs": [{"support_token", "contribution_token"}],
   "summary": str}. Chaque aide déclarée doit avoir été CAUSALEMENT
@@ -50,10 +56,12 @@ from dataclasses import dataclass
 COMPETENCY_CODES = tuple(f"C{i}" for i in range(1, 13))
 OBSERVATION_ROLES = ("primary", "secondary")
 TASK_KINDS = ("recognition", "reformulation", "calculation", "application", "analysis", "synthesis")
-# Vocabulaire fermé des actions utilisateur observables (R1-D1, versionné par
-# EVALUATION_SCHEMA_VERSION) : ce que la contribution FAIT, jamais un niveau.
-USER_ACTIONS = ("identify", "define", "reformulate", "explain", "relate", "calculate", "interpret", "compare",
-                "apply", "justify", "hypothesize", "evaluate", "synthesize", "revise")
+# Vocabulaire doctrinal Décrypte des actions utilisateur (contrat conceptuel
+# figé, versionné par EVALUATION_SCHEMA_VERSION) : ce que la contribution
+# FAIT, jamais un niveau. Le modèle l'émet tel quel : aucun synonyme accepté
+# ni converti.
+USER_ACTIONS = ("explain", "interpret", "calculate", "connect", "challenge", "hypothesize", "invalidate",
+                "synthesize")
 ELICITATION_MODES = ("prompted", "spontaneous")
 SUPPORT_LEVELS = ("none", "hinted", "guided", "answer_given")
 POLARITIES = ("supportive", "contradictory")
@@ -138,12 +146,20 @@ contributif). Ce n'est pas un poids.
 sans répéter l'action principale.
 - elicitation_mode : "prompted" (réponse à la question posée) ou "spontaneous" (raisonnement non \
 demandé), pour CE raisonnement.
-- support_level : "none", "hinted", "guided" ou "answer_given", relatif à CE raisonnement (jamais un \
-coefficient). "none" si aucune aide n'a matériellement servi.
+- support_level : relatif à CE raisonnement, jamais un coefficient ; il dépend de l'aide \
+MATÉRIELLEMENT UTILISÉE, jamais de la simple présence d'une aide dans l'événement :
+  "none" = aucune aide matériellement utilisée pour ce raisonnement (même si des aides étaient \
+disponibles dans "support_before") ;
+  "hinted" = aide matériellement utilisée, orientation légère ;
+  "guided" = aide matériellement utilisée et substantielle ;
+  "answer_given" = le cœur cognitif a été largement fourni par l'aide.
 - residual_cognitive_work : {{"operations_left_to_user": [opérations que l'utilisateur a dû \
 construire lui-même], "materially_used_support_refs": [{{"support_token": ..., \
 "contribution_token": ...}}], "summary": "..."}}. Une aide ne peut être citée que pour une \
-contribution dont "support_before" la contient.
+contribution source dont "support_before" la contient.
+- Cohérence obligatoire : support_level "none" => materially_used_support_refs = [] ; support_level \
+"hinted", "guided" ou "answer_given" => materially_used_support_refs contient au moins une aide \
+réellement utilisée.
 - polarity : "supportive" ou "contradictory" (jamais mixte : deux mécanismes distincts = deux \
 observations).
 - evidence_strength : "weak", "medium" ou "strong" : qualité diagnostique LOCALE de cet événement \
@@ -161,7 +177,7 @@ conclusion globale ni de prochaine étape.
 SORTIE
 Réponds UNIQUEMENT par un objet JSON valide, sans texte autour ni bloc de code :
 {{"observations": [{{"observation_token": "observation_1", "competency_code": "C7", \
-"observation_role": "primary", "task_kind": "analysis", "primary_user_action": {{"action": "relate", \
+"observation_role": "primary", "task_kind": "analysis", "primary_user_action": {{"action": "connect", \
 "contribution_token": "contribution_1"}}, "contributive_user_actions": [], "elicitation_mode": \
 "prompted", "support_level": "none", "source_contribution_tokens": ["contribution_1"], \
 "residual_cognitive_work": {{"operations_left_to_user": ["..."], "materially_used_support_refs": [], \
@@ -315,10 +331,12 @@ def _validate_observation(index: int, raw, payload_view) -> dict:
             _fail(f"{ref_path} : doublon")
         refs.append(pair)
     summary = _text(residual["summary"], f"{path}.residual_cognitive_work.summary")
+    # Bidirectionnel : none <=> aucune aide matériellement utilisée. Une aide
+    # seulement disponible (support_before) ne suffit jamais à un niveau > none.
     if support_level == "none" and refs:
         _fail(f"{path} : support_level none incompatible avec une aide matériellement utilisée")
-    if support_level != "none" and not any(support_before[token] for token in sources):
-        _fail(f"{path} : support_level {support_level} sans aucune aide disponible avant les contributions sources")
+    if support_level != "none" and not refs:
+        _fail(f"{path} : support_level {support_level} exige au moins une aide matériellement utilisée")
 
     polarity = _choice(raw["polarity"], POLARITIES, f"{path}.polarity")
     if polarity == "supportive":
