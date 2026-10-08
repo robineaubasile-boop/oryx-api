@@ -6,8 +6,15 @@ depuis la SPEC canonique oryx-v1 (jamais cross-competency), requête batch,
 validation stricte de la sortie (une entrée par observation, localized /
 competency_only, tokens connus de la même compétence, doublons), et
 immutabilité des champs D1B.
+
+Depuis R1-D1E, ces tests protègent le contrat V1 LEGACY (localization +
+capability_tokens choisis par le modèle), toujours exécuté pour la recovery
+des runs V1 ; le contrat V2 (éligibilité explicite par capacité,
+localisation dérivée serveur) est couvert par
+tests/test_r1d1e_capability_mapper_v2.py.
 """
 import ast
+import hashlib
 import copy
 import json
 
@@ -191,6 +198,23 @@ def test_module_is_pure():
     imported = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert imported == {"json", "dataclasses", "core.local_evaluator"}
+
+
+# --------------------------------------------------------------------------
+# R1-D1E — le contrat V1 legacy reste byte-identique à R1-D1 (PR #217)
+# --------------------------------------------------------------------------
+
+# Empreintes calculées sur origin/main 033b8d1 AVANT R1-D1E.
+V1_SYSTEM_PROMPT_SHA256 = "5682befaf62cd782c2706d9926e2a95c1f485e8dbc1e8c7ac5e25192663829df"
+V1_REQUEST_USER_SHA256 = "e559a89cd9618398d360555f096314a42f45ff483fbc1daad3133ec36220f3d3"
+
+
+def test_v1_prompt_and_request_are_byte_identical_to_r1d1(observations, context):
+    request = cm.build_mapping_request(observations, context, PAYLOAD)
+    assert request.system == cm.SYSTEM_PROMPT
+    assert hashlib.sha256(request.system.encode("utf-8")).hexdigest() == V1_SYSTEM_PROMPT_SHA256
+    assert hashlib.sha256(request.user.encode("utf-8")).hexdigest() == V1_REQUEST_USER_SHA256
+    assert "residual_cognitive_work" not in json.loads(request.user)["observations"][0]
 
 
 # --------------------------------------------------------------------------
