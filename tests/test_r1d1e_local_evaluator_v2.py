@@ -13,6 +13,7 @@ restent la garantie du contrat legacy.
 import copy
 import itertools
 import json
+import re
 
 import pytest
 
@@ -369,10 +370,29 @@ def test_v2_prompt_states_the_stage_basis_definitions_and_never_asks_for_a_stage
     assert '"local_stage"' not in prompt and "mastery" not in prompt
     for stage in ("discovery", "comprehension", "application"):
         assert f'"{stage}"' not in prompt, stage
-    # L'exemple de sortie respecte exactement le contrat V2.
+    # L'exemple de sortie respecte exactement le contrat V2, quelle que soit
+    # la valeur donnée à chaque emplacement <true|false>.
     example = prompt.split("SORTIE\n", 1)[1].split("\n", 1)[1].split("\nou ", 1)[0]
-    [example_obs] = json.loads(example)["observations"]
-    assert set(example_obs) == le.OBSERVATION_KEYS_V2
+    for value in ("true", "false"):
+        [example_obs] = json.loads(example.replace("<true|false>", value))["observations"]
+        assert set(example_obs) == le.OBSERVATION_KEYS_V2
+        assert example_obs["stage_basis"] == dict.fromkeys(KEYS, value == "true")
+
+
+def test_v2_prompt_example_suggests_no_default_stage_basis_combination():
+    """Anti-ancrage : l'exemple ne fixe aucune combinaison de stage_basis
+    (une combinaison concrète, ex. contextualized_use true + substantive
+    false, orienterait implicitement vers un stade)."""
+    prompt = le.SYSTEM_PROMPT_V2
+    example = prompt.split("SORTIE\n", 1)[1].split("\n", 1)[1].split("\nou ", 1)[0]
+    for key in KEYS:
+        assert f'"{key}": <true|false>' in example, key
+    # Aucun objet stage_basis du prompt ne porte de booléen concret.
+    for stage_basis in re.findall(r'"stage_basis"\s*:\s*\{[^}]*\}', prompt):
+        assert not re.search(r"\b(true|false)\b", stage_basis.replace("<true|false>", "")), stage_basis
+    assert example.count("<true|false>") == len(KEYS)
+    assert ("évalué indépendamment pour chaque clé ; aucune combinaison n'est une valeur par défaut"
+            in " ".join(prompt.split()))
 
 
 def test_prompt_injection_cannot_change_the_v2_contract():

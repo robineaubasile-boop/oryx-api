@@ -288,16 +288,19 @@ mécanisme, une relation structurante ou une distinction conceptuelle correcte.
 discrimination cognitive correcte, au-delà de la simple restitution.
 
 SORTIE
-Réponds UNIQUEMENT par un objet JSON valide, sans texte autour ni bloc de code :
+Réponds UNIQUEMENT par un objet JSON valide, sans texte autour ni bloc de code. Format (dans \
+"stage_basis", chaque <true|false> est à remplacer par le booléen JSON true ou false que le \
+raisonnement observé justifie, évalué indépendamment pour chaque clé ; aucune combinaison n'est une \
+valeur par défaut) :
 {{"observations": [{{"observation_token": "observation_1", "competency_code": "C7", \
 "observation_role": "primary", "task_kind": "analysis", "primary_user_action": {{"action": "connect", \
 "contribution_token": "contribution_1"}}, "contributive_user_actions": [], "elicitation_mode": \
 "prompted", "support_level": "none", "source_contribution_tokens": ["contribution_1"], \
 "residual_cognitive_work": {{"operations_left_to_user": ["..."], "materially_used_support_refs": [], \
 "summary": "..."}}, "polarity": "supportive", "evidence_strength": "medium", "stage_basis": \
-{{"contextualized_use": true, "substantive_selection_adaptation_interpretation": false, \
-"semantic_mechanism_explained": true, "cognitive_discrimination": true}}, "contradiction_scope": null, \
-"error_type": null, "observation_text": "..."}}]}}
+{{"contextualized_use": <true|false>, "substantive_selection_adaptation_interpretation": <true|false>, \
+"semantic_mechanism_explained": <true|false>, "cognitive_discrimination": <true|false>}}, \
+"contradiction_scope": null, "error_type": null, "observation_text": "..."}}]}}
 ou {{"observations": []}}. Aucune autre clé."""
 
 
