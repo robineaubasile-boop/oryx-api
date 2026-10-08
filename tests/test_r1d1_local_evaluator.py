@@ -5,7 +5,13 @@ strict, validation déterministe de la sortie du modèle (vocabulaires fermés,
 cohérence polarité / stade / portée, références de contributions et d'aides
 causalement disponibles PAR contribution, nombre d'observations), résistance
 à l'injection de prompt (le serveur reste autoritaire).
+
+Depuis R1-D1E, ces tests protègent le contrat V1 LEGACY (local_stage émis
+par le modèle), toujours exécuté pour la recovery des runs V1 ; le contrat
+V2 (stage_basis, stade dérivé serveur) est couvert par
+tests/test_r1d1e_local_evaluator_v2.py.
 """
+import hashlib
 import ast
 import copy
 import json
@@ -446,6 +452,29 @@ def test_available_but_not_materially_used_support_keeps_support_level_none():
     [candidate] = _validate(_support_case("none"))
     assert candidate["support_level"] == "none"
     assert candidate["residual_cognitive_work"]["materially_used_support_refs"] == []
+
+
+# --------------------------------------------------------------------------
+# R1-D1E — le contrat V1 legacy reste byte-identique à R1-D1 (PR #217)
+# --------------------------------------------------------------------------
+
+# Empreintes calculées sur origin/main 033b8d1 AVANT R1-D1E.
+V1_SYSTEM_PROMPT_SHA256 = "02fa78b354af6c8e615af7e67c65d0ab4c212b8351165c83e6ac1e8077f90c98"
+V1_REQUEST_USER_SHA256 = "d97171691b13587048b197950ddf6bff84fdcf635efd0f51dee1680987253dba"
+
+
+def test_v1_prompt_and_request_are_byte_identical_to_r1d1():
+    spec, _ = load_taxonomy_v1()
+    request = le.build_evaluator_request(PAYLOAD, le.build_competency_reference_context(spec))
+    assert request.system == le.SYSTEM_PROMPT
+    assert hashlib.sha256(request.system.encode("utf-8")).hexdigest() == V1_SYSTEM_PROMPT_SHA256
+    assert hashlib.sha256(request.user.encode("utf-8")).hexdigest() == V1_REQUEST_USER_SHA256
+
+
+def test_v1_contract_still_has_the_model_emit_local_stage():
+    assert "local_stage" in le.OBSERVATION_KEYS and "stage_basis" not in le.OBSERVATION_KEYS
+    for stage in le.LOCAL_STAGES:
+        assert _validate(_obs(local_stage=stage))[0]["local_stage"] == stage
 
 
 def test_prompt_states_the_bidirectional_support_rule_without_availability_shortcut():

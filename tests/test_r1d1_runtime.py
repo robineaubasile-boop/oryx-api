@@ -18,14 +18,20 @@ worker interne (core/evaluation_worker.py).
    initial logique (dont concurrence réelle), recovery du même run,
    taxonomie canonique (release active, release retired, changement de
    release en cours de run), cutoff d'admission, boucle du worker.
+
+Depuis R1-D1E, les nouveaux runs sont V2 : les réponses simulées suivent le
+contrat V2 (stage_basis, évaluations de capacités). Bundles et recovery des
+runs V1 legacy : tests/test_r1d1e_runtime_bundles.py.
 """
 import ast
+import dataclasses
 import json
 import logging
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 import pytest
 import sqlalchemy as sa
@@ -53,13 +59,27 @@ from tests.test_r1d1_evaluation_input import (  # noqa: F401 — fixture r1d1
     r1d1,
 )
 from tests.test_r1d1_local_evaluator import _contradictory, _obs
+from tests.test_r1d1e_local_evaluator_v2 import contradictory_v2, obs_v2
 
 MODEL = "claude-test-evaluator"
 LEASE = 300
-D1B_ONE = {"observations": [_obs()]}
+# Contrat courant (V2) : stage_basis (stade dérivé : comprehension, comme
+# _obs() en V1) et éligibilité explicite des 4 capacités C7 (capability_1..4
+# = C7_A..C7_D quand seule C7 est observée).
+D1B_ONE = {"observations": [obs_v2()]}
 D1B_ZERO = {"observations": []}
-D1D_TWO = {"mappings": [{"observation_token": "observation_1", "localization": "localized",
-                         "capability_tokens": ["capability_2", "capability_1"]}]}
+
+
+def _d1d_v2(*supported, observation_token="observation_1", candidates=("capability_1", "capability_2",
+                                                                         "capability_3", "capability_4")):
+    return {"observation_token": observation_token, "capability_assessments": [
+        {"capability_token": t, "supported": t in supported,
+         "reason": "include_satisfied" if t in supported else "insufficient_specificity"}
+        for t in reversed(candidates)]}
+
+
+D1D_TWO = {"mappings": [_d1d_v2("capability_2", "capability_1")]}
+D1D_COMPETENCY_ONLY = {"mappings": [_d1d_v2()]}
 RUNTIME_PATH = REPO_ROOT / "core" / "evaluation_runtime.py"
 WORKER_PATH = REPO_ROOT / "core" / "evaluation_worker.py"
 PROVIDER_PATH = REPO_ROOT / "core" / "evaluation_provider.py"
@@ -102,13 +122,15 @@ class Crash(BaseException):
 # --------------------------------------------------------------------------
 
 def test_pipeline_versions_are_explicit_and_frozen():
+    """Nouveaux runs initiaux : versions V2 (R1-D1E) ; D1A et normalisation
+    restent V1 (sémantique inchangée)."""
     assert (rt.EVALUATION_INPUT_SCHEMA_VERSION, rt.NORMALIZATION_VERSION, rt.LOCAL_STAGE_VERSION,
             rt.CAPABILITY_MAPPING_VERSION, rt.EVALUATION_SCHEMA_VERSION, rt.EVALUATOR_VERSION,
             rt.PROMPT_SPEC_VERSION) == (
-        "decryptage-evaluation-input-v1", "decryptage-normalization-v1", "decryptage-local-stage-v1",
-        "decryptage-capability-mapping-v1", "decryptage-evaluation-schema-v1",
-        "decryptage-local-evaluation-pipeline-v1", "decryptage-t3-prompt-bundle-v1")
-    assert dict(rt.RUN_VERSIONS) == {
+        "decryptage-evaluation-input-v1", "decryptage-normalization-v1", "decryptage-local-stage-v2",
+        "decryptage-capability-mapping-v2", "decryptage-evaluation-schema-v2",
+        "decryptage-local-evaluation-pipeline-v2", "decryptage-t3-prompt-bundle-v2")
+    assert dict(rt.RUN_VERSIONS) == dict(rt.CURRENT_V2_BUNDLE.versions) == {
         "normalization_version": rt.NORMALIZATION_VERSION, "local_stage_version": rt.LOCAL_STAGE_VERSION,
         "capability_mapping_version": rt.CAPABILITY_MAPPING_VERSION,
         "evaluation_schema_version": rt.EVALUATION_SCHEMA_VERSION, "evaluator_version": rt.EVALUATOR_VERSION,
@@ -118,11 +140,11 @@ def test_pipeline_versions_are_explicit_and_frozen():
     assert rt.INITIAL_TRIGGER == "initial"
 
 
-def _manifest(**overrides):
+def _manifest(pipeline=rt.CURRENT_V2_BUNDLE, **overrides):
     values = {"source_fingerprint": "s" * 64, "taxonomy_version_key": "oryx-v1",
               "taxonomy_spec_fingerprint": EXPECTED_V1_FINGERPRINT, "model_id": MODEL}
     values.update(overrides)
-    return rt.build_input_manifest(**values)
+    return rt.build_input_manifest(pipeline=pipeline, **values)
 
 
 def test_input_manifest_is_exactly_the_contract_and_its_fingerprint_is_stable():
@@ -146,13 +168,15 @@ def test_input_fingerprint_changes_with_any_input(change):
     assert rt.compute_input_fingerprint(_manifest(**change)) != rt.compute_input_fingerprint(_manifest())
 
 
-@pytest.mark.parametrize("constant", ["EVALUATION_INPUT_SCHEMA_VERSION", "NORMALIZATION_VERSION",
-                                      "LOCAL_STAGE_VERSION", "CAPABILITY_MAPPING_VERSION",
-                                      "EVALUATION_SCHEMA_VERSION", "EVALUATOR_VERSION", "PROMPT_SPEC_VERSION"])
-def test_input_fingerprint_changes_with_any_pipeline_version(monkeypatch, constant):
+@pytest.mark.parametrize("name", ["evaluation_input_schema_version", *rt.RUN_VERSIONS])
+def test_input_fingerprint_changes_with_any_pipeline_version(name):
     before = rt.compute_input_fingerprint(_manifest())
-    monkeypatch.setattr(rt, constant, getattr(rt, constant) + "-next")
-    assert rt.compute_input_fingerprint(_manifest()) != before
+    current = rt.CURRENT_V2_BUNDLE
+    if name == "evaluation_input_schema_version":
+        changed = dataclasses.replace(current, evaluation_input_schema_version="next")
+    else:
+        changed = dataclasses.replace(current, versions=MappingProxyType({**current.versions, name: "next"}))
+    assert rt.compute_input_fingerprint(_manifest(changed)) != before
 
 
 def test_dedup_key_is_deterministic_per_trigger_event_and_input():
@@ -478,7 +502,8 @@ def test_pg_full_pipeline_one_c7_observation_localized_on_two_capabilities(engin
     assert (run["lease_token"], run["lease_expires_at"], run["failure_code"]) == (None, None, None)
     assert run["pedagogical_taxonomy_release_id"] == release and run["model_id"] == MODEL
     assert {k: run[k] for k in rt.RUN_VERSIONS} == dict(rt.RUN_VERSIONS)
-    manifest = rt.build_input_manifest(source_fingerprint=expected_bundle.source_fingerprint,
+    manifest = rt.build_input_manifest(pipeline=rt.CURRENT_V2_BUNDLE,
+                                       source_fingerprint=expected_bundle.source_fingerprint,
                                        taxonomy_version_key="oryx-v1",
                                        taxonomy_spec_fingerprint=EXPECTED_V1_FINGERPRINT, model_id=MODEL)
     assert run["input_fingerprint"] == rt.compute_input_fingerprint(manifest)
@@ -541,12 +566,9 @@ def test_pg_zero_observation_is_a_completed_run_without_d1d(engine, Sessions, ex
 
 def test_pg_competency_only_and_contradictory_observations(engine, Sessions, ext, r1d1):
     event_id = finalized_event(Sessions, ext, engine)
-    contradiction = _contradictory(2)
-    d1d = {"mappings": [{"observation_token": "observation_1", "localization": "competency_only",
-                         "capability_tokens": []},
-                        {"observation_token": "observation_2", "localization": "localized",
-                         "capability_tokens": ["capability_3"]}]}
-    assert _process(Sessions, event_id, FakeProvider({"observations": [_obs(), contradiction]}, d1d)) == rt.COMPLETED
+    contradiction = contradictory_v2(2)
+    d1d = {"mappings": [_d1d_v2(), _d1d_v2("capability_3", observation_token="observation_2")]}
+    assert _process(Sessions, event_id, FakeProvider({"observations": [obs_v2(), contradiction]}, d1d)) == rt.COMPLETED
     [run] = _runs(engine, event_id)
     first, second = _observations(engine, run["id"])
     assert (first["capability_localization"], second["capability_localization"]) == ("competency_only", "localized")
@@ -564,11 +586,21 @@ def test_pg_competency_only_and_contradictory_observations(engine, Sessions, ext
     ([rt.ProviderTimeout("timeout")], "provider_timeout", 1),
     (["not json"], "invalid_d1b_output", 1),
     (['```json\n{"observations": []}\n```'], "invalid_d1b_output", 1),
-    ([{"observations": [_obs(local_stage="mastery")]}], "invalid_d1b_output", 1),
+    ([{"observations": [dict(obs_v2(), local_stage="mastery")]}], "invalid_d1b_output", 1),
+    # Contrat V1 (stade choisi par le modèle) refusé pour un run V2.
+    ([{"observations": [_obs()]}], "invalid_d1b_output", 1),
+    ([{"observations": [obs_v2(stage_basis={**obs_v2()["stage_basis"], "contextualized_use": False,
+                                            "substantive_selection_adaptation_interpretation": True})]}],
+     "invalid_d1b_output", 1),
     ([D1B_ONE, rt.ProviderError("http 529")], "provider_error", 2),
     ([D1B_ONE, {"mappings": []}], "invalid_d1d_output", 2),
+    ([D1B_ONE, {"mappings": [_d1d_v2(candidates=("capability_1", "capability_2", "capability_3",
+                                                 "capability_9"))]}], "invalid_d1d_output", 2),
+    ([D1B_ONE, {"mappings": [_d1d_v2(candidates=("capability_1", "capability_2", "capability_3"))]}],
+     "invalid_d1d_output", 2),
+    # Contrat V1 (localisation choisie par le modèle) refusé pour un run V2.
     ([D1B_ONE, {"mappings": [{"observation_token": "observation_1", "localization": "localized",
-                              "capability_tokens": ["capability_9"]}]}], "invalid_d1d_output", 2),
+                              "capability_tokens": ["capability_2"]}]}], "invalid_d1d_output", 2),
 ])
 def test_pg_failures_leave_a_failed_run_and_no_partial_result(engine, Sessions, ext, r1d1, responses, code, calls):
     event_id = finalized_event(Sessions, ext, engine)
@@ -595,7 +627,7 @@ def test_pg_unexpected_provider_or_validation_errors_fail_the_run_instead_of_loo
     def broken(*args, **kwargs):
         raise KeyError("bug")
 
-    monkeypatch.setattr(rt, "validate_local_evaluation_result", broken)
+    monkeypatch.setattr(rt, "CURRENT_V2_BUNDLE", dataclasses.replace(rt.CURRENT_V2_BUNDLE, validate_d1b=broken))
     assert _process(Sessions, second, FakeProvider(D1B_ONE)) == rt.FAILED
     assert _runs(engine, second)[0]["failure_code"] == "internal_validation_error"
 
@@ -650,9 +682,8 @@ def test_pg_lease_lost_during_d1b_the_old_worker_mutates_nothing(engine, Session
     """A claim, D1B lent ; sa lease expire ; B reprend le MÊME run et le
     termine. A revient : ni renew, ni fail, ni persist."""
     event_id = finalized_event(Sessions, ext, engine)
-    other = {"observations": [_contradictory()]}
-    worker_b = FakeProvider(other, {"mappings": [{"observation_token": "observation_1",
-                                                 "localization": "competency_only", "capability_tokens": []}]})
+    other = {"observations": [contradictory_v2()]}
+    worker_b = FakeProvider(other, D1D_COMPETENCY_ONLY)
 
     def slow_d1b(request):
         [run] = _runs(engine, event_id)

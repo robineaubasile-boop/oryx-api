@@ -41,13 +41,27 @@ Identités :
   sémantique seulement : jamais d'UUID, d'horodatage ni d'identifiant
   fournisseur) ; zéro observation => SHA-256 de {"observations": []}.
 
+Bundles versionnés (R1-D1E) : l'exécution (prompts, contrats, validation
+D1B / D1D) est sélectionnée par un EvaluationRuntimeBundle, jamais par des
+if dispersés. Tout NOUVEAU run initial utilise CURRENT_V2_BUNDLE (stade
+local dérivé serveur depuis stage_basis, localisation dérivée serveur
+depuis l'éligibilité explicite de chaque capacité candidate). Les
+versions PERSISTÉES d'un run déterminent le bundle de sa recovery : un run
+V1 (LEGACY_V1_BUNDLE) est terminé avec EXACTEMENT les règles, prompts et
+input_fingerprint V1 ; une combinaison inconnue lève
+UnsupportedEvaluationRunVersion sans aucune mutation. Les deux bundles
+produisent des candidats et localisations de MÊME forme : persistance et
+output_fingerprint sont communs (contenu sémantique final seulement ;
+stage_basis et évaluations de capacités sont transitoires).
+
 Recovery : un run running / candidate dont la lease est absente ou expirée
-est REPRIS (même run, jamais un nouveau) si et seulement si ses versions,
-son model_id et sa release sont exactement ceux que ce worker sait exécuter
-(sinon UnsupportedEvaluationRunVersion, aucune mutation). La release est
-celle stockée dans le run (même retired, revérifiée conforme à oryx-v1),
-jamais la release active courante. L'input_fingerprint reconstruit doit
-être identique (sinon échec lease-aware input_fingerprint_mismatch).
+est REPRIS (même run, jamais un nouveau) si et seulement si ses versions
+correspondent exactement à un bundle supporté, et son model_id et sa
+release à ceux de ce worker (sinon UnsupportedEvaluationRunVersion, aucune
+mutation). La release est celle stockée dans le run (même retired,
+revérifiée conforme à oryx-v1), jamais la release active courante.
+L'input_fingerprint reconstruit (avec le bundle du run) doit être
+identique (sinon échec lease-aware input_fingerprint_mismatch).
 
 Erreurs (failure_code, vocabulaire fermé FAILURE_CODES) : D1B
 observations=[] est un SUCCÈS ; timeout / erreur fournisseur, JSON ou
@@ -64,6 +78,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
+from typing import Callable
 
 from sqlalchemy import and_, exists, func, or_, select
 
@@ -73,7 +88,9 @@ from core.capability_mapper import (
     LOCALIZED,
     build_capability_reference_context,
     build_mapping_request,
+    build_mapping_request_v2,
     validate_capability_mapping_result,
+    validate_capability_mapping_result_v2,
 )
 from core.evaluation_input import (
     SUPPORTED_ADMISSION_VERSION,
@@ -90,8 +107,10 @@ from core.local_evaluator import (
     EvaluatorRequest,
     build_competency_reference_context,
     build_evaluator_request,
+    build_evaluator_request_v2,
     parse_json_object,
     validate_local_evaluation_result,
+    validate_local_evaluation_result_v2,
 )
 from core.models import CognitiveEvent, ObservationEvaluationRun
 from core.pedagogy.taxonomy_bootstrap import TaxonomyBootstrapError, verify_taxonomy_v1
@@ -100,29 +119,80 @@ from core.pedagogy.taxonomy_v1 import EXPECTED_V1_FINGERPRINT, VERSION_KEY, Taxo
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
-# Versions du pipeline (immuables pour V1 ; toute modification de prompt,
-# de vocabulaire, de validation ou de paramètre fournisseur exige une
-# nouvelle valeur, donc un nouvel input_fingerprint).
+# Versions du pipeline (immuables par bundle ; toute modification de
+# prompt, de vocabulaire, de validation ou de paramètre fournisseur exige
+# une nouvelle valeur, donc un nouvel input_fingerprint).
 # --------------------------------------------------------------------------
 
+# Sémantique inchangée depuis R1-D1 (D1A et normalisation) : V1 partout.
 EVALUATION_INPUT_SCHEMA_VERSION = "decryptage-evaluation-input-v1"
 NORMALIZATION_VERSION = "decryptage-normalization-v1"
-LOCAL_STAGE_VERSION = "decryptage-local-stage-v1"
-CAPABILITY_MAPPING_VERSION = "decryptage-capability-mapping-v1"
-EVALUATION_SCHEMA_VERSION = "decryptage-evaluation-schema-v1"
-EVALUATOR_VERSION = "decryptage-local-evaluation-pipeline-v1"
-PROMPT_SPEC_VERSION = "decryptage-t3-prompt-bundle-v1"
+# Bundle courant (R1-D1E) : tout NOUVEAU run initial.
+LOCAL_STAGE_VERSION = "decryptage-local-stage-v2"
+CAPABILITY_MAPPING_VERSION = "decryptage-capability-mapping-v2"
+EVALUATION_SCHEMA_VERSION = "decryptage-evaluation-schema-v2"
+EVALUATOR_VERSION = "decryptage-local-evaluation-pipeline-v2"
+PROMPT_SPEC_VERSION = "decryptage-t3-prompt-bundle-v2"
 
 INITIAL_TRIGGER = "initial"
 
-RUN_VERSIONS = MappingProxyType({
-    "normalization_version": NORMALIZATION_VERSION,
-    "local_stage_version": LOCAL_STAGE_VERSION,
-    "capability_mapping_version": CAPABILITY_MAPPING_VERSION,
-    "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
-    "evaluator_version": EVALUATOR_VERSION,
-    "prompt_spec_version": PROMPT_SPEC_VERSION,
-})
+
+@dataclass(frozen=True)
+class EvaluationRuntimeBundle:
+    """Ce qui détermine l'exécution d'un run : ses versions (colonnes du
+    run, toutes incluses dans l'input_fingerprint) et les contrats D1B / D1D
+    correspondants. validate_d1b renvoie des ObservationCandidate et
+    validate_d1d des localisations de MÊME forme quel que soit le bundle."""
+    name: str
+    evaluation_input_schema_version: str
+    versions: MappingProxyType
+    build_d1b_request: Callable
+    validate_d1b: Callable
+    build_d1d_request: Callable
+    validate_d1d: Callable
+
+
+# R1-D1 tel que déployé (PR #217) : recovery des runs V1 uniquement. Valeurs
+# littérales : jamais affectées par une évolution des constantes courantes.
+LEGACY_V1_BUNDLE = EvaluationRuntimeBundle(
+    name="legacy-v1",
+    evaluation_input_schema_version="decryptage-evaluation-input-v1",
+    versions=MappingProxyType({
+        "normalization_version": "decryptage-normalization-v1",
+        "local_stage_version": "decryptage-local-stage-v1",
+        "capability_mapping_version": "decryptage-capability-mapping-v1",
+        "evaluation_schema_version": "decryptage-evaluation-schema-v1",
+        "evaluator_version": "decryptage-local-evaluation-pipeline-v1",
+        "prompt_spec_version": "decryptage-t3-prompt-bundle-v1",
+    }),
+    build_d1b_request=build_evaluator_request,
+    validate_d1b=validate_local_evaluation_result,
+    build_d1d_request=build_mapping_request,
+    validate_d1d=validate_capability_mapping_result,
+)
+
+# R1-D1E : stage_basis -> local_stage dérivé ; éligibilité par capacité ->
+# localisation dérivée.
+CURRENT_V2_BUNDLE = EvaluationRuntimeBundle(
+    name="current-v2",
+    evaluation_input_schema_version=EVALUATION_INPUT_SCHEMA_VERSION,
+    versions=MappingProxyType({
+        "normalization_version": NORMALIZATION_VERSION,
+        "local_stage_version": LOCAL_STAGE_VERSION,
+        "capability_mapping_version": CAPABILITY_MAPPING_VERSION,
+        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+        "evaluator_version": EVALUATOR_VERSION,
+        "prompt_spec_version": PROMPT_SPEC_VERSION,
+    }),
+    build_d1b_request=build_evaluator_request_v2,
+    validate_d1b=validate_local_evaluation_result_v2,
+    build_d1d_request=build_mapping_request_v2,
+    validate_d1d=validate_capability_mapping_result_v2,
+)
+
+# Versions des nouveaux runs initiaux ; bundles reconnus en recovery.
+RUN_VERSIONS = CURRENT_V2_BUNDLE.versions
+SUPPORTED_BUNDLES = (CURRENT_V2_BUNDLE, LEGACY_V1_BUNDLE)
 
 # failure_code persistés (vocabulaire fermé). lost_lease n'est jamais écrit :
 # un worker qui a perdu sa lease ne mute plus rien.
@@ -247,21 +317,17 @@ def load_run_taxonomy(db, release_id: uuid.UUID) -> TaxonomyContext:
 # Manifest, fingerprints, résultat canonique
 # --------------------------------------------------------------------------
 
-def build_input_manifest(*, source_fingerprint: str, taxonomy_version_key: str, taxonomy_spec_fingerprint: str,
-                         model_id: str) -> dict:
-    """EvaluationRunInputManifest (tout ce qui détermine le résultat)."""
+def build_input_manifest(*, pipeline: EvaluationRuntimeBundle, source_fingerprint: str, taxonomy_version_key: str,
+                         taxonomy_spec_fingerprint: str, model_id: str) -> dict:
+    """EvaluationRunInputManifest (tout ce qui détermine le résultat), avec
+    les versions du bundle EXPLICITE (jamais de bundle implicite)."""
     return {
-        "evaluation_input_schema_version": EVALUATION_INPUT_SCHEMA_VERSION,
+        "evaluation_input_schema_version": pipeline.evaluation_input_schema_version,
         "source_fingerprint": source_fingerprint,
         "taxonomy_version_key": taxonomy_version_key,
         "taxonomy_spec_fingerprint": taxonomy_spec_fingerprint,
-        "normalization_version": NORMALIZATION_VERSION,
-        "local_stage_version": LOCAL_STAGE_VERSION,
-        "capability_mapping_version": CAPABILITY_MAPPING_VERSION,
-        "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
-        "evaluator_version": EVALUATOR_VERSION,
+        **pipeline.versions,
         "model_id": model_id,
-        "prompt_spec_version": PROMPT_SPEC_VERSION,
     }
 
 
@@ -461,18 +527,19 @@ def _validated(validate, invalid_code: str):
         return None, INTERNAL_VALIDATION_ERROR
 
 
-def _persist(sessions, *, run_id, lease_token, bundle, taxonomy, input_fingerprint, candidates, mappings,
+def _persist(sessions, *, run_id, lease_token, bundle, pipeline, taxonomy, input_fingerprint, candidates, mappings,
              output_fingerprint) -> str:
     """TX résultat unique : verify lease (verrou du run conservé jusqu'au
-    commit), revalidation de l'entrée et des versions, observations,
-    mappings, complete (efface la lease), COMMIT. Tout échec => ROLLBACK
-    TOTAL, puis fail lease-aware dans une transaction séparée."""
+    commit), revalidation de l'entrée et des versions (celles du bundle
+    exécuté), observations, mappings, complete (efface la lease), COMMIT.
+    Tout échec => ROLLBACK TOTAL, puis fail lease-aware dans une transaction
+    séparée."""
     by_token = {m["observation_token"]: m for m in mappings}
     with sessions() as db:
         try:
             run = svc.verify_evaluation_lease(db, run_id=run_id, lease_token=lease_token)
             versions = {name: getattr(run, name) for name in RUN_VERSIONS}
-            if (run.input_fingerprint != input_fingerprint or versions != dict(RUN_VERSIONS)
+            if (run.input_fingerprint != input_fingerprint or versions != dict(pipeline.versions)
                     or run.pedagogical_taxonomy_release_id != taxonomy.release_id or run.event_id != bundle.event_id):
                 raise EvaluationRuntimeError(f"run {run_id} : entrée ou versions divergentes")
             for candidate in candidates:
@@ -516,14 +583,16 @@ def _persist(sessions, *, run_id, lease_token, bundle, taxonomy, input_fingerpri
 
 
 def execute_run(sessions, *, run_id: uuid.UUID, lease_token: uuid.UUID, bundle: EvaluationInputBundle,
-                taxonomy: TaxonomyContext, input_fingerprint: str, provider, lease_seconds: int) -> str:
+                pipeline: EvaluationRuntimeBundle, taxonomy: TaxonomyContext, input_fingerprint: str, provider,
+                lease_seconds: int) -> str:
     """D1B -> (renew -> D1D) -> TX résultat, pour un run dont ce worker
-    détient la lease. Aucune Session ouverte pendant les appels fournisseur."""
-    request = build_evaluator_request(bundle.evaluator_payload, list(taxonomy.competency_reference))
+    détient la lease, avec les contrats du bundle de CE run. Aucune Session
+    ouverte pendant les appels fournisseur ; au plus deux appels."""
+    request = pipeline.build_d1b_request(bundle.evaluator_payload, list(taxonomy.competency_reference))
     text, failure = _call(provider, request)
     if failure is None:
         candidates, failure = _validated(
-            lambda: validate_local_evaluation_result(parse_json_object(text), bundle.evaluator_payload),
+            lambda: pipeline.validate_d1b(parse_json_object(text), bundle.evaluator_payload),
             INVALID_D1B_OUTPUT)
     if failure is not None:
         return _fail_run(sessions, run_id, lease_token, failure)
@@ -534,10 +603,10 @@ def execute_run(sessions, *, run_id: uuid.UUID, lease_token: uuid.UUID, bundle: 
         if not _renew(sessions, run_id, lease_token, lease_seconds):
             return LEASE_LOST
         context = build_capability_reference_context(taxonomy.spec, {c["competency_code"] for c in candidates})
-        text, failure = _call(provider, build_mapping_request(candidates, context, bundle.evaluator_payload))
+        text, failure = _call(provider, pipeline.build_d1d_request(candidates, context, bundle.evaluator_payload))
         if failure is None:
             mappings, failure = _validated(
-                lambda: validate_capability_mapping_result(parse_json_object(text), candidates, context),
+                lambda: pipeline.validate_d1d(parse_json_object(text), candidates, context),
                 INVALID_D1D_OUTPUT)
         if failure is not None:
             return _fail_run(sessions, run_id, lease_token, failure)
@@ -546,19 +615,21 @@ def execute_run(sessions, *, run_id: uuid.UUID, lease_token: uuid.UUID, bundle: 
                     len(mappings) - localized)
 
     output_fingerprint = compute_output_fingerprint(build_final_result(candidates, mappings))
-    return _persist(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, taxonomy=taxonomy,
-                    input_fingerprint=input_fingerprint, candidates=candidates, mappings=mappings,
+    return _persist(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, pipeline=pipeline,
+                    taxonomy=taxonomy, input_fingerprint=input_fingerprint, candidates=candidates, mappings=mappings,
                     output_fingerprint=output_fingerprint)
 
 
 def process_new_event(sessions, *, event_id: uuid.UUID, provider, lease_seconds: int) -> str:
-    """Nouveau run initial pour un event découvert. Lève EvaluationInputError
-    (D1A), TaxonomyUnavailable / TaxonomyMismatch (aucun run démarré)."""
+    """Nouveau run initial pour un event découvert, TOUJOURS avec le bundle
+    courant (V2). Lève EvaluationInputError (D1A), TaxonomyUnavailable /
+    TaxonomyMismatch (aucun run démarré)."""
+    pipeline = CURRENT_V2_BUNDLE
     with sessions() as db:
         bundle = build_evaluation_input(db, event_id=event_id)
         taxonomy = load_active_taxonomy(db)
         db.rollback()
-    manifest = build_input_manifest(source_fingerprint=bundle.source_fingerprint,
+    manifest = build_input_manifest(pipeline=pipeline, source_fingerprint=bundle.source_fingerprint,
                                     taxonomy_version_key=taxonomy.version_key,
                                     taxonomy_spec_fingerprint=taxonomy.spec_fingerprint, model_id=provider.model_id)
     input_fingerprint = compute_input_fingerprint(manifest)
@@ -569,7 +640,7 @@ def process_new_event(sessions, *, event_id: uuid.UUID, provider, lease_seconds:
             run = svc.start_evaluation_run(
                 db, event_id=event_id, trigger=INITIAL_TRIGGER, evaluation_dedup_key=dedup_key,
                 input_fingerprint=input_fingerprint, pedagogical_taxonomy_release_id=taxonomy.release_id,
-                model_id=provider.model_id, re_evaluates_run_id=None, **RUN_VERSIONS)
+                model_id=provider.model_id, re_evaluates_run_id=None, **pipeline.versions)
             _require_single_initial_run(db, event_id)
             run = svc.claim_evaluation_lease(db, run_id=run.id, lease_seconds=lease_seconds)
             run_id, lease_token = run.id, run.lease_token
@@ -578,29 +649,45 @@ def process_new_event(sessions, *, event_id: uuid.UUID, provider, lease_seconds:
             db.rollback()
             logger.info("[R1-D1] initial_run_exists event=%s", event_id)
             return ALREADY_HANDLED
-    logger.info("[R1-D1] run_started run=%s event=%s", run_id, event_id)
+    logger.info("[R1-D1] run_started run=%s event=%s bundle=%s", run_id, event_id, pipeline.name)
     logger.info("[R1-D1] lease_claimed run=%s", run_id)
-    return execute_run(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, taxonomy=taxonomy,
-                       input_fingerprint=input_fingerprint, provider=provider, lease_seconds=lease_seconds)
+    return execute_run(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, pipeline=pipeline,
+                       taxonomy=taxonomy, input_fingerprint=input_fingerprint, provider=provider,
+                       lease_seconds=lease_seconds)
 
 
-def check_run_supported(run: ObservationEvaluationRun, model_id: str) -> None:
-    """Le worker ne reprend que les versions EXACTES qu'il sait exécuter."""
-    versions = {name: getattr(run, name) for name in RUN_VERSIONS}
-    if (run.trigger != INITIAL_TRIGGER or run.re_evaluates_run_id is not None or versions != dict(RUN_VERSIONS)
-            or run.model_id != model_id or run.pedagogical_taxonomy_release_id is None):
+def bundle_for_versions(versions: dict) -> EvaluationRuntimeBundle:
+    """Bundle dont les versions sont EXACTEMENT celles données (colonnes
+    persistées d'un run) ; aucune combinaison partielle ou mixte."""
+    for pipeline in SUPPORTED_BUNDLES:
+        if dict(pipeline.versions) == versions:
+            return pipeline
+    raise UnsupportedEvaluationRunVersion("combinaison de versions inconnue")
+
+
+def check_run_supported(run: ObservationEvaluationRun, model_id: str) -> EvaluationRuntimeBundle:
+    """Le worker ne reprend que les runs initiaux de son modèle dont les
+    versions persistées correspondent EXACTEMENT à un bundle supporté ;
+    retourne ce bundle (celui du run, jamais le bundle courant par défaut)."""
+    if (run.trigger != INITIAL_TRIGGER or run.re_evaluates_run_id is not None or run.model_id != model_id
+            or run.pedagogical_taxonomy_release_id is None):
         raise UnsupportedEvaluationRunVersion(f"run {run.id} : versions non exécutables par ce worker")
+    try:
+        return bundle_for_versions({name: getattr(run, name) for name in RUN_VERSIONS})
+    except UnsupportedEvaluationRunVersion:
+        raise UnsupportedEvaluationRunVersion(f"run {run.id} : versions non exécutables par ce worker") from None
 
 
 def process_recovery_run(sessions, *, run_id: uuid.UUID, provider, lease_seconds: int) -> str:
-    """Reprise du MÊME run running / candidate sans lease valide. Lève
+    """Reprise du MÊME run running / candidate sans lease valide, avec le
+    bundle de SES versions persistées (V1 legacy ou V2). Lève
     UnsupportedEvaluationRunVersion ou TaxonomyUnavailable / TaxonomyMismatch
     AVANT toute mutation."""
     with sessions() as db:
         run = svc.get_evaluation_run(db, run_id=run_id)
         if run.execution_status != svc.RUNNING or run.interpretation_status != svc.CANDIDATE:
             return ALREADY_HANDLED
-        check_run_supported(run, provider.model_id)
+        pipeline = check_run_supported(run, provider.model_id)
         taxonomy = load_run_taxonomy(db, run.pedagogical_taxonomy_release_id)
         event_id, stored_fingerprint, stored_dedup = run.event_id, run.input_fingerprint, run.evaluation_dedup_key
         try:
@@ -610,7 +697,7 @@ def process_recovery_run(sessions, *, run_id: uuid.UUID, provider, lease_seconds
         except (svc.AlreadyLeased, svc.InvalidEvaluationState):
             db.rollback()
             return ALREADY_HANDLED
-    logger.info("[R1-D1] recovery run=%s event=%s", run_id, event_id)
+    logger.info("[R1-D1] recovery run=%s event=%s bundle=%s", run_id, event_id, pipeline.name)
     logger.info("[R1-D1] lease_claimed run=%s", run_id)
 
     try:
@@ -619,12 +706,13 @@ def process_recovery_run(sessions, *, run_id: uuid.UUID, provider, lease_seconds
             db.rollback()
     except EvaluationInputError:
         return _fail_run(sessions, run_id, lease_token, INVALID_EVALUATION_INPUT)
-    manifest = build_input_manifest(source_fingerprint=bundle.source_fingerprint,
+    manifest = build_input_manifest(pipeline=pipeline, source_fingerprint=bundle.source_fingerprint,
                                     taxonomy_version_key=taxonomy.version_key,
                                     taxonomy_spec_fingerprint=taxonomy.spec_fingerprint, model_id=provider.model_id)
     input_fingerprint = compute_input_fingerprint(manifest)
     if (input_fingerprint != stored_fingerprint
             or compute_evaluation_dedup_key(event_id=event_id, input_fingerprint=input_fingerprint) != stored_dedup):
         return _fail_run(sessions, run_id, lease_token, INPUT_FINGERPRINT_MISMATCH)
-    return execute_run(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, taxonomy=taxonomy,
-                       input_fingerprint=input_fingerprint, provider=provider, lease_seconds=lease_seconds)
+    return execute_run(sessions, run_id=run_id, lease_token=lease_token, bundle=bundle, pipeline=pipeline,
+                       taxonomy=taxonomy, input_fingerprint=input_fingerprint, provider=provider,
+                       lease_seconds=lease_seconds)

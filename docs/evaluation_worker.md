@@ -48,9 +48,11 @@ Exemple de valeurs : `POLL=30`, `LEASE=600`, `TIMEOUT=300`.
 
 1. **Recovery d'abord** : runs `running / candidate` sans lease valide
    (absente ou expirée) repris — même run, jamais un nouveau — uniquement si
-   leurs versions, model_id et release sont exactement ceux du worker (sinon
-   `unsupported_version`, aucune mutation). La release utilisée est celle du
-   run (même `retired`), jamais la release active courante.
+   leurs versions correspondent EXACTEMENT à un bundle supporté (V2 courant
+   ou V1 legacy, voir ci-dessous) et leur model_id et release à ceux du
+   worker (sinon `unsupported_version`, aucune mutation). La release
+   utilisée est celle du run (même `retired`), jamais la release active
+   courante.
 2. **Nouveaux events** : Décrypter, `finalized`, `closed_at >= cutoff`,
    versions T2 supportées, contributions capturées par le runtime
    `decryptage-cognitive-runtime-v2`, et AUCUN run initial existant (même
@@ -61,6 +63,40 @@ Exemple de valeurs : `POLL=30`, `LEASE=600`, `TIMEOUT=300`.
    résultat atomique (observations + mappings + complete).
 4. Arrêt : SIGTERM / SIGINT terminent l'élément en cours. Un crash ne fait
    jamais échouer un run : sa lease expire et il est repris.
+
+## Versions et bundles d'exécution (R1-D1E)
+
+L'exécution d'un run (prompts, contrats et validation D1B / D1D) est
+sélectionnée par un bundle versionné ; les versions PERSISTÉES du run
+déterminent le bundle de sa recovery.
+
+| Version | `LEGACY_V1_BUNDLE` (R1-D1) | `CURRENT_V2_BUNDLE` (R1-D1E) |
+| --- | --- | --- |
+| evaluation_input_schema | `decryptage-evaluation-input-v1` | `decryptage-evaluation-input-v1` |
+| normalization | `decryptage-normalization-v1` | `decryptage-normalization-v1` |
+| local_stage | `decryptage-local-stage-v1` | `decryptage-local-stage-v2` |
+| capability_mapping | `decryptage-capability-mapping-v1` | `decryptage-capability-mapping-v2` |
+| evaluation_schema | `decryptage-evaluation-schema-v1` | `decryptage-evaluation-schema-v2` |
+| evaluator | `decryptage-local-evaluation-pipeline-v1` | `decryptage-local-evaluation-pipeline-v2` |
+| prompt_spec | `decryptage-t3-prompt-bundle-v1` | `decryptage-t3-prompt-bundle-v2` |
+
+- **Nouveaux runs initiaux : V2 uniquement.** D1B émet `stage_basis`
+  (quatre booléens descriptifs) pour une observation supportive ; le serveur
+  dérive `local_stage` (application -> comprehension -> discovery -> none,
+  jamais mastery). D1D évalue chaque capacité candidate (`supported` +
+  `reason`) ; le serveur dérive `localized` / `competency_only`. Seuls le
+  stade et la localisation dérivés sont persistés : aucune colonne, aucune
+  migration.
+- **Run V1 `running / candidate`** (laissé par le worker R1-D1) : repris
+  avec le bundle V1 exact (mêmes prompts, contrats, `input_fingerprint`).
+- **Run V1 `completed` / `failed`** : intact ; jamais de retry, jamais de
+  second run initial V2 pour son event (un seul run initial par event,
+  toutes versions confondues).
+- **Combinaison de versions inconnue ou mixte** : `unsupported_version`,
+  aucune mutation.
+- Toujours au plus deux appels LLM par run (D1B, puis D1D batch si au
+  moins une observation). Journaux `run_started` / `recovery` : nom du
+  bundle (`current-v2` / `legacy-v1`).
 
 ## Journaux
 
