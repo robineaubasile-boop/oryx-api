@@ -41,18 +41,20 @@ Identités :
   sémantique seulement : jamais d'UUID, d'horodatage ni d'identifiant
   fournisseur) ; zéro observation => SHA-256 de {"observations": []}.
 
-Bundles versionnés (R1-D1E) : l'exécution (prompts, contrats, validation
-D1B / D1D) est sélectionnée par un EvaluationRuntimeBundle, jamais par des
-if dispersés. Tout NOUVEAU run initial utilise CURRENT_V2_BUNDLE (stade
-local dérivé serveur depuis stage_basis, localisation dérivée serveur
-depuis l'éligibilité explicite de chaque capacité candidate). Les
-versions PERSISTÉES d'un run déterminent le bundle de sa recovery : un run
+Bundles versionnés (R1-D1E, R1-D1F) : l'exécution (prompts, contrats,
+validation D1B / D1D) est sélectionnée par un EvaluationRuntimeBundle,
+jamais par des if dispersés. Tout NOUVEAU run initial utilise
+CURRENT_V3_BUNDLE (stade local V2 dérivé serveur depuis stage_basis ;
+éligibilité de chaque capacité candidate dérivée serveur depuis les
+prémisses D1D V3, puis localisation dérivée). Les versions PERSISTÉES d'un
+run déterminent le bundle de sa recovery : un run V2 (LEGACY_V2_BUNDLE) ou
 V1 (LEGACY_V1_BUNDLE) est terminé avec EXACTEMENT les règles, prompts et
-input_fingerprint V1 ; une combinaison inconnue lève
-UnsupportedEvaluationRunVersion sans aucune mutation. Les deux bundles
-produisent des candidats et localisations de MÊME forme : persistance et
-output_fingerprint sont communs (contenu sémantique final seulement ;
-stage_basis et évaluations de capacités sont transitoires).
+input_fingerprint de SA version (jamais d'upgrade silencieux vers V3) ;
+une combinaison inconnue ou mixte lève UnsupportedEvaluationRunVersion
+sans aucune mutation. Tous les bundles produisent des candidats et
+localisations de MÊME forme : persistance et output_fingerprint sont
+communs (contenu sémantique final seulement ; stage_basis, évaluations et
+prémisses de capacités sont transitoires).
 
 Recovery : un run running / candidate dont la lease est absente ou expirée
 est REPRIS (même run, jamais un nouveau) si et seulement si ses versions
@@ -89,8 +91,10 @@ from core.capability_mapper import (
     build_capability_reference_context,
     build_mapping_request,
     build_mapping_request_v2,
+    build_mapping_request_v3,
     validate_capability_mapping_result,
     validate_capability_mapping_result_v2,
+    validate_capability_mapping_result_v3,
 )
 from core.evaluation_input import (
     SUPPORTED_ADMISSION_VERSION,
@@ -127,12 +131,13 @@ logger = logging.getLogger(__name__)
 # Sémantique inchangée depuis R1-D1 (D1A et normalisation) : V1 partout.
 EVALUATION_INPUT_SCHEMA_VERSION = "decryptage-evaluation-input-v1"
 NORMALIZATION_VERSION = "decryptage-normalization-v1"
-# Bundle courant (R1-D1E) : tout NOUVEAU run initial.
+# Stade local inchangé depuis R1-D1E : V2.
 LOCAL_STAGE_VERSION = "decryptage-local-stage-v2"
-CAPABILITY_MAPPING_VERSION = "decryptage-capability-mapping-v2"
-EVALUATION_SCHEMA_VERSION = "decryptage-evaluation-schema-v2"
-EVALUATOR_VERSION = "decryptage-local-evaluation-pipeline-v2"
-PROMPT_SPEC_VERSION = "decryptage-t3-prompt-bundle-v2"
+# Bundle courant (R1-D1F) : tout NOUVEAU run initial.
+CAPABILITY_MAPPING_VERSION = "decryptage-capability-mapping-v3"
+EVALUATION_SCHEMA_VERSION = "decryptage-evaluation-schema-v3"
+EVALUATOR_VERSION = "decryptage-local-evaluation-pipeline-v3"
+PROMPT_SPEC_VERSION = "decryptage-t3-prompt-bundle-v3"
 
 INITIAL_TRIGGER = "initial"
 
@@ -171,10 +176,30 @@ LEGACY_V1_BUNDLE = EvaluationRuntimeBundle(
     validate_d1d=validate_capability_mapping_result,
 )
 
-# R1-D1E : stage_basis -> local_stage dérivé ; éligibilité par capacité ->
-# localisation dérivée.
-CURRENT_V2_BUNDLE = EvaluationRuntimeBundle(
-    name="current-v2",
+# R1-D1E tel que déployé (PR #218) : recovery des runs V2 uniquement.
+# stage_basis -> local_stage dérivé ; éligibilité par capacité choisie par
+# le modèle -> localisation dérivée. Valeurs littérales.
+LEGACY_V2_BUNDLE = EvaluationRuntimeBundle(
+    name="legacy-v2",
+    evaluation_input_schema_version="decryptage-evaluation-input-v1",
+    versions=MappingProxyType({
+        "normalization_version": "decryptage-normalization-v1",
+        "local_stage_version": "decryptage-local-stage-v2",
+        "capability_mapping_version": "decryptage-capability-mapping-v2",
+        "evaluation_schema_version": "decryptage-evaluation-schema-v2",
+        "evaluator_version": "decryptage-local-evaluation-pipeline-v2",
+        "prompt_spec_version": "decryptage-t3-prompt-bundle-v2",
+    }),
+    build_d1b_request=build_evaluator_request_v2,
+    validate_d1b=validate_local_evaluation_result_v2,
+    build_d1d_request=build_mapping_request_v2,
+    validate_d1d=validate_capability_mapping_result_v2,
+)
+
+# R1-D1F : D1B / stade local V2 inchangés ; D1D V3 (prémisses analytiques
+# par capacité -> éligibilité dérivée serveur -> localisation dérivée).
+CURRENT_V3_BUNDLE = EvaluationRuntimeBundle(
+    name="current-v3",
     evaluation_input_schema_version=EVALUATION_INPUT_SCHEMA_VERSION,
     versions=MappingProxyType({
         "normalization_version": NORMALIZATION_VERSION,
@@ -186,13 +211,13 @@ CURRENT_V2_BUNDLE = EvaluationRuntimeBundle(
     }),
     build_d1b_request=build_evaluator_request_v2,
     validate_d1b=validate_local_evaluation_result_v2,
-    build_d1d_request=build_mapping_request_v2,
-    validate_d1d=validate_capability_mapping_result_v2,
+    build_d1d_request=build_mapping_request_v3,
+    validate_d1d=validate_capability_mapping_result_v3,
 )
 
 # Versions des nouveaux runs initiaux ; bundles reconnus en recovery.
-RUN_VERSIONS = CURRENT_V2_BUNDLE.versions
-SUPPORTED_BUNDLES = (CURRENT_V2_BUNDLE, LEGACY_V1_BUNDLE)
+RUN_VERSIONS = CURRENT_V3_BUNDLE.versions
+SUPPORTED_BUNDLES = (CURRENT_V3_BUNDLE, LEGACY_V2_BUNDLE, LEGACY_V1_BUNDLE)
 
 # failure_code persistés (vocabulaire fermé). lost_lease n'est jamais écrit :
 # un worker qui a perdu sa lease ne mute plus rien.
@@ -622,9 +647,9 @@ def execute_run(sessions, *, run_id: uuid.UUID, lease_token: uuid.UUID, bundle: 
 
 def process_new_event(sessions, *, event_id: uuid.UUID, provider, lease_seconds: int) -> str:
     """Nouveau run initial pour un event découvert, TOUJOURS avec le bundle
-    courant (V2). Lève EvaluationInputError (D1A), TaxonomyUnavailable /
+    courant (V3). Lève EvaluationInputError (D1A), TaxonomyUnavailable /
     TaxonomyMismatch (aucun run démarré)."""
-    pipeline = CURRENT_V2_BUNDLE
+    pipeline = CURRENT_V3_BUNDLE
     with sessions() as db:
         bundle = build_evaluation_input(db, event_id=event_id)
         taxonomy = load_active_taxonomy(db)
@@ -680,7 +705,7 @@ def check_run_supported(run: ObservationEvaluationRun, model_id: str) -> Evaluat
 
 def process_recovery_run(sessions, *, run_id: uuid.UUID, provider, lease_seconds: int) -> str:
     """Reprise du MÊME run running / candidate sans lease valide, avec le
-    bundle de SES versions persistées (V1 legacy ou V2). Lève
+    bundle de SES versions persistées (V1 / V2 legacy ou V3). Lève
     UnsupportedEvaluationRunVersion ou TaxonomyUnavailable / TaxonomyMismatch
     AVANT toute mutation."""
     with sessions() as db:

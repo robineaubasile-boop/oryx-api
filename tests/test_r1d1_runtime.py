@@ -19,9 +19,10 @@ worker interne (core/evaluation_worker.py).
    taxonomie canonique (release active, release retired, changement de
    release en cours de run), cutoff d'admission, boucle du worker.
 
-Depuis R1-D1E, les nouveaux runs sont V2 : les réponses simulées suivent le
-contrat V2 (stage_basis, évaluations de capacités). Bundles et recovery des
-runs V1 legacy : tests/test_r1d1e_runtime_bundles.py.
+Depuis R1-D1F, les nouveaux runs sont V3 : les réponses simulées suivent le
+contrat D1B V2 (stage_basis) et D1D V3 (prémisses analytiques par
+capacité). Bundles et recovery des runs V1 / V2 legacy :
+tests/test_r1d1e_runtime_bundles.py et tests/test_r1d1f_runtime_bundles.py.
 """
 import ast
 import dataclasses
@@ -63,9 +64,9 @@ from tests.test_r1d1e_local_evaluator_v2 import contradictory_v2, obs_v2
 
 MODEL = "claude-test-evaluator"
 LEASE = 300
-# Contrat courant (V2) : stage_basis (stade dérivé : comprehension, comme
-# _obs() en V1) et éligibilité explicite des 4 capacités C7 (capability_1..4
-# = C7_A..C7_D quand seule C7 est observée).
+# Contrat courant (V3) : stage_basis (stade dérivé V2 : comprehension, comme
+# _obs() en V1) et prémisses D1D V3 des 4 capacités C7 (capability_1..4 =
+# C7_A..C7_D quand seule C7 est observée).
 D1B_ONE = {"observations": [obs_v2()]}
 D1B_ZERO = {"observations": []}
 
@@ -78,8 +79,21 @@ def _d1d_v2(*supported, observation_token="observation_1", candidates=("capabili
         for t in reversed(candidates)]}
 
 
-D1D_TWO = {"mappings": [_d1d_v2("capability_2", "capability_1")]}
-D1D_COMPETENCY_ONLY = {"mappings": [_d1d_v2()]}
+def _d1d_v3(*supported, observation_token="observation_1", candidates=("capability_1", "capability_2",
+                                                                         "capability_3", "capability_4")):
+    """Prémisses V3 : capacité de `supported` => définition satisfaite, include
+    0 démontré, clear ; sinon rien de démontré, insufficient_specificity."""
+    return {"observation_token": observation_token, "capability_assessments": [
+        {"capability_token": t, "definition_satisfied": t in supported,
+         "matched_include_indices": [0] if t in supported else [], "matched_exclude_indices": [],
+         "boundary_status": "clear" if t in supported else "insufficient_specificity"}
+        for t in reversed(candidates)]}
+
+
+D1D_TWO = {"mappings": [_d1d_v3("capability_2", "capability_1")]}
+D1D_COMPETENCY_ONLY = {"mappings": [_d1d_v3()]}
+# Contrat D1D V2 (R1-D1E) : recovery des runs V2 legacy uniquement.
+D1D_TWO_V2 = {"mappings": [_d1d_v2("capability_2", "capability_1")]}
 RUNTIME_PATH = REPO_ROOT / "core" / "evaluation_runtime.py"
 WORKER_PATH = REPO_ROOT / "core" / "evaluation_worker.py"
 PROVIDER_PATH = REPO_ROOT / "core" / "evaluation_provider.py"
@@ -122,15 +136,15 @@ class Crash(BaseException):
 # --------------------------------------------------------------------------
 
 def test_pipeline_versions_are_explicit_and_frozen():
-    """Nouveaux runs initiaux : versions V2 (R1-D1E) ; D1A et normalisation
-    restent V1 (sémantique inchangée)."""
+    """Nouveaux runs initiaux : versions V3 (R1-D1F) ; D1A et normalisation
+    restent V1, le stade local reste V2 (sémantique inchangée)."""
     assert (rt.EVALUATION_INPUT_SCHEMA_VERSION, rt.NORMALIZATION_VERSION, rt.LOCAL_STAGE_VERSION,
             rt.CAPABILITY_MAPPING_VERSION, rt.EVALUATION_SCHEMA_VERSION, rt.EVALUATOR_VERSION,
             rt.PROMPT_SPEC_VERSION) == (
         "decryptage-evaluation-input-v1", "decryptage-normalization-v1", "decryptage-local-stage-v2",
-        "decryptage-capability-mapping-v2", "decryptage-evaluation-schema-v2",
-        "decryptage-local-evaluation-pipeline-v2", "decryptage-t3-prompt-bundle-v2")
-    assert dict(rt.RUN_VERSIONS) == dict(rt.CURRENT_V2_BUNDLE.versions) == {
+        "decryptage-capability-mapping-v3", "decryptage-evaluation-schema-v3",
+        "decryptage-local-evaluation-pipeline-v3", "decryptage-t3-prompt-bundle-v3")
+    assert dict(rt.RUN_VERSIONS) == dict(rt.CURRENT_V3_BUNDLE.versions) == {
         "normalization_version": rt.NORMALIZATION_VERSION, "local_stage_version": rt.LOCAL_STAGE_VERSION,
         "capability_mapping_version": rt.CAPABILITY_MAPPING_VERSION,
         "evaluation_schema_version": rt.EVALUATION_SCHEMA_VERSION, "evaluator_version": rt.EVALUATOR_VERSION,
@@ -140,7 +154,7 @@ def test_pipeline_versions_are_explicit_and_frozen():
     assert rt.INITIAL_TRIGGER == "initial"
 
 
-def _manifest(pipeline=rt.CURRENT_V2_BUNDLE, **overrides):
+def _manifest(pipeline=rt.CURRENT_V3_BUNDLE, **overrides):
     values = {"source_fingerprint": "s" * 64, "taxonomy_version_key": "oryx-v1",
               "taxonomy_spec_fingerprint": EXPECTED_V1_FINGERPRINT, "model_id": MODEL}
     values.update(overrides)
@@ -171,7 +185,7 @@ def test_input_fingerprint_changes_with_any_input(change):
 @pytest.mark.parametrize("name", ["evaluation_input_schema_version", *rt.RUN_VERSIONS])
 def test_input_fingerprint_changes_with_any_pipeline_version(name):
     before = rt.compute_input_fingerprint(_manifest())
-    current = rt.CURRENT_V2_BUNDLE
+    current = rt.CURRENT_V3_BUNDLE
     if name == "evaluation_input_schema_version":
         changed = dataclasses.replace(current, evaluation_input_schema_version="next")
     else:
@@ -502,7 +516,7 @@ def test_pg_full_pipeline_one_c7_observation_localized_on_two_capabilities(engin
     assert (run["lease_token"], run["lease_expires_at"], run["failure_code"]) == (None, None, None)
     assert run["pedagogical_taxonomy_release_id"] == release and run["model_id"] == MODEL
     assert {k: run[k] for k in rt.RUN_VERSIONS} == dict(rt.RUN_VERSIONS)
-    manifest = rt.build_input_manifest(pipeline=rt.CURRENT_V2_BUNDLE,
+    manifest = rt.build_input_manifest(pipeline=rt.CURRENT_V3_BUNDLE,
                                        source_fingerprint=expected_bundle.source_fingerprint,
                                        taxonomy_version_key="oryx-v1",
                                        taxonomy_spec_fingerprint=EXPECTED_V1_FINGERPRINT, model_id=MODEL)
@@ -567,7 +581,7 @@ def test_pg_zero_observation_is_a_completed_run_without_d1d(engine, Sessions, ex
 def test_pg_competency_only_and_contradictory_observations(engine, Sessions, ext, r1d1):
     event_id = finalized_event(Sessions, ext, engine)
     contradiction = contradictory_v2(2)
-    d1d = {"mappings": [_d1d_v2(), _d1d_v2("capability_3", observation_token="observation_2")]}
+    d1d = {"mappings": [_d1d_v3(), _d1d_v3("capability_3", observation_token="observation_2")]}
     assert _process(Sessions, event_id, FakeProvider({"observations": [obs_v2(), contradiction]}, d1d)) == rt.COMPLETED
     [run] = _runs(engine, event_id)
     first, second = _observations(engine, run["id"])
@@ -587,18 +601,20 @@ def test_pg_competency_only_and_contradictory_observations(engine, Sessions, ext
     (["not json"], "invalid_d1b_output", 1),
     (['```json\n{"observations": []}\n```'], "invalid_d1b_output", 1),
     ([{"observations": [dict(obs_v2(), local_stage="mastery")]}], "invalid_d1b_output", 1),
-    # Contrat V1 (stade choisi par le modèle) refusé pour un run V2.
+    # Contrat V1 (stade choisi par le modèle) refusé pour un run V3.
     ([{"observations": [_obs()]}], "invalid_d1b_output", 1),
     ([{"observations": [obs_v2(stage_basis={**obs_v2()["stage_basis"], "contextualized_use": False,
                                             "substantive_selection_adaptation_interpretation": True})]}],
      "invalid_d1b_output", 1),
     ([D1B_ONE, rt.ProviderError("http 529")], "provider_error", 2),
     ([D1B_ONE, {"mappings": []}], "invalid_d1d_output", 2),
-    ([D1B_ONE, {"mappings": [_d1d_v2(candidates=("capability_1", "capability_2", "capability_3",
+    ([D1B_ONE, {"mappings": [_d1d_v3(candidates=("capability_1", "capability_2", "capability_3",
                                                  "capability_9"))]}], "invalid_d1d_output", 2),
-    ([D1B_ONE, {"mappings": [_d1d_v2(candidates=("capability_1", "capability_2", "capability_3"))]}],
+    ([D1B_ONE, {"mappings": [_d1d_v3(candidates=("capability_1", "capability_2", "capability_3"))]}],
      "invalid_d1d_output", 2),
-    # Contrat V1 (localisation choisie par le modèle) refusé pour un run V2.
+    # Contrat D1D V2 (supported / reason choisis par le modèle) refusé pour un run V3.
+    ([D1B_ONE, D1D_TWO_V2], "invalid_d1d_output", 2),
+    # Contrat V1 (localisation choisie par le modèle) refusé pour un run V3.
     ([D1B_ONE, {"mappings": [{"observation_token": "observation_1", "localization": "localized",
                               "capability_tokens": ["capability_2"]}]}], "invalid_d1d_output", 2),
 ])
@@ -627,7 +643,7 @@ def test_pg_unexpected_provider_or_validation_errors_fail_the_run_instead_of_loo
     def broken(*args, **kwargs):
         raise KeyError("bug")
 
-    monkeypatch.setattr(rt, "CURRENT_V2_BUNDLE", dataclasses.replace(rt.CURRENT_V2_BUNDLE, validate_d1b=broken))
+    monkeypatch.setattr(rt, "CURRENT_V3_BUNDLE", dataclasses.replace(rt.CURRENT_V3_BUNDLE, validate_d1b=broken))
     assert _process(Sessions, second, FakeProvider(D1B_ONE)) == rt.FAILED
     assert _runs(engine, second)[0]["failure_code"] == "internal_validation_error"
 

@@ -1,7 +1,12 @@
 """Tests de R1-D1E : bundles d'exécution versionnés et recovery V1 / V2
 (core/evaluation_runtime.py).
 
-1. Sans base : LEGACY_V1_BUNDLE et CURRENT_V2_BUNDLE (versions exactes,
+Depuis R1-D1F, le bundle V2 est LEGACY_V2_BUNDLE (recovery des runs V2
+uniquement) et les nouveaux runs initiaux sont V3 : les tests « nouveau run
+V2 » simulent le worker R1-D1E déployé AVANT D1F (_pre_d1f_worker). Bundles
+V3 et recovery V1 / V2 / V3 : tests/test_r1d1f_runtime_bundles.py.
+
+1. Sans base : LEGACY_V1_BUNDLE et LEGACY_V2_BUNDLE (versions exactes,
    contrats D1B / D1D associés), input_fingerprint V1 identique à R1-D1 et
    V2 différent, sélection du bundle par les versions persistées EXACTES
    (combinaison mixte ou inconnue => UnsupportedEvaluationRunVersion).
@@ -41,7 +46,7 @@ from tests.test_r1d1_evaluation_input import (  # noqa: F401 — fixture r1d1
 from tests.test_r1d1_local_evaluator import _obs
 from tests.test_r1d1_runtime import (
     D1B_ONE,
-    D1D_TWO,
+    D1D_TWO_V2,
     MODEL,
     Crash,
     FakeProvider,
@@ -96,33 +101,33 @@ def _reference_manifest(pipeline, **overrides):
 
 def test_bundles_have_the_exact_versions_and_contracts():
     assert dict(rt.LEGACY_V1_BUNDLE.versions) == V1_VERSIONS
-    assert dict(rt.CURRENT_V2_BUNDLE.versions) == V2_VERSIONS == dict(rt.RUN_VERSIONS)
-    for pipeline in (rt.LEGACY_V1_BUNDLE, rt.CURRENT_V2_BUNDLE):
+    assert dict(rt.LEGACY_V2_BUNDLE.versions) == V2_VERSIONS != dict(rt.RUN_VERSIONS)
+    for pipeline in (rt.LEGACY_V1_BUNDLE, rt.LEGACY_V2_BUNDLE):
         assert pipeline.evaluation_input_schema_version == "decryptage-evaluation-input-v1"
         assert set(pipeline.versions) == set(rt.RUN_VERSIONS)
-    legacy, current = rt.LEGACY_V1_BUNDLE, rt.CURRENT_V2_BUNDLE
+    legacy, current = rt.LEGACY_V1_BUNDLE, rt.LEGACY_V2_BUNDLE
     assert (legacy.build_d1b_request, legacy.validate_d1b, legacy.build_d1d_request, legacy.validate_d1d) == (
         le.build_evaluator_request, le.validate_local_evaluation_result, cm.build_mapping_request,
         cm.validate_capability_mapping_result)
     assert (current.build_d1b_request, current.validate_d1b, current.build_d1d_request, current.validate_d1d) == (
         le.build_evaluator_request_v2, le.validate_local_evaluation_result_v2, cm.build_mapping_request_v2,
         cm.validate_capability_mapping_result_v2)
-    assert rt.SUPPORTED_BUNDLES == (current, legacy)
+    assert rt.SUPPORTED_BUNDLES == (rt.CURRENT_V3_BUNDLE, current, legacy)
 
 
 def test_bundles_are_immutable():
     with pytest.raises(dataclasses.FrozenInstanceError):
-        rt.CURRENT_V2_BUNDLE.name = "x"
+        rt.LEGACY_V2_BUNDLE.name = "x"
     with pytest.raises(TypeError):
         rt.LEGACY_V1_BUNDLE.versions["local_stage_version"] = "decryptage-local-stage-v2"
 
 
 def test_v1_input_fingerprint_is_unchanged_and_v2_differs():
     v1 = rt.compute_input_fingerprint(_reference_manifest(rt.LEGACY_V1_BUNDLE))
-    v2 = rt.compute_input_fingerprint(_reference_manifest(rt.CURRENT_V2_BUNDLE))
+    v2 = rt.compute_input_fingerprint(_reference_manifest(rt.LEGACY_V2_BUNDLE))
     assert v1 == V1_REFERENCE_INPUT_FINGERPRINT
     assert v2 != v1
-    assert set(_reference_manifest(rt.LEGACY_V1_BUNDLE)) == set(_reference_manifest(rt.CURRENT_V2_BUNDLE))
+    assert set(_reference_manifest(rt.LEGACY_V1_BUNDLE)) == set(_reference_manifest(rt.LEGACY_V2_BUNDLE))
     event_id = uuid.uuid4()
     assert (rt.compute_evaluation_dedup_key(event_id=event_id, input_fingerprint=v1)
             != rt.compute_evaluation_dedup_key(event_id=event_id, input_fingerprint=v2))
@@ -136,7 +141,7 @@ def test_the_manifest_requires_an_explicit_bundle():
 
 def test_bundle_selection_is_by_exact_persisted_versions():
     assert rt.bundle_for_versions(dict(V1_VERSIONS)) is rt.LEGACY_V1_BUNDLE
-    assert rt.bundle_for_versions(dict(V2_VERSIONS)) is rt.CURRENT_V2_BUNDLE
+    assert rt.bundle_for_versions(dict(V2_VERSIONS)) is rt.LEGACY_V2_BUNDLE
     with pytest.raises(rt.UnsupportedEvaluationRunVersion):
         rt.bundle_for_versions({})
 
@@ -158,7 +163,7 @@ def _fake_run(versions, **overrides):
 
 def test_check_run_supported_returns_the_bundle_of_the_run():
     assert rt.check_run_supported(_fake_run(V1_VERSIONS), MODEL) is rt.LEGACY_V1_BUNDLE
-    assert rt.check_run_supported(_fake_run(V2_VERSIONS), MODEL) is rt.CURRENT_V2_BUNDLE
+    assert rt.check_run_supported(_fake_run(V2_VERSIONS), MODEL) is rt.LEGACY_V2_BUNDLE
     for overrides in ({"trigger": "engine_upgrade"}, {"re_evaluates_run_id": "other"}, {"model_id": "other"},
                       {"pedagogical_taxonomy_release_id": None}, {"evaluator_version": "x"}):
         for versions in (V1_VERSIONS, V2_VERSIONS):
@@ -175,7 +180,16 @@ def _pre_d1e_worker(monkeypatch):
     """Simule le worker R1-D1 déployé AVANT D1E : ses nouveaux runs
     initiaux utilisent le bundle V1."""
     with monkeypatch.context() as patched:
-        patched.setattr(rt, "CURRENT_V2_BUNDLE", rt.LEGACY_V1_BUNDLE)
+        patched.setattr(rt, "CURRENT_V3_BUNDLE", rt.LEGACY_V1_BUNDLE)
+        yield
+
+
+@contextlib.contextmanager
+def _pre_d1f_worker(monkeypatch):
+    """Simule le worker R1-D1E déployé AVANT D1F : ses nouveaux runs
+    initiaux utilisent le bundle V2."""
+    with monkeypatch.context() as patched:
+        patched.setattr(rt, "CURRENT_V3_BUNDLE", rt.LEGACY_V2_BUNDLE)
         yield
 
 
@@ -195,17 +209,18 @@ def _v1_fingerprint(Sessions, event_id):  # noqa: F811
 
 
 # --------------------------------------------------------------------------
-# 2. PostgreSQL — nouveaux runs initiaux : V2
+# 2. PostgreSQL — runs initiaux V2 (worker R1-D1E, avant D1F)
 # --------------------------------------------------------------------------
 
-def test_pg_a_new_initial_run_is_v2_with_v2_prompts_and_derived_results(engine, Sessions, ext, r1d1):
+def test_pg_a_new_initial_run_is_v2_with_v2_prompts_and_derived_results(engine, Sessions, ext, r1d1, monkeypatch):
     event_id = finalized_event(Sessions, ext, engine)
-    provider = FakeProvider({"observations": [obs_v2(stage_basis=FULL_APPLICATION)]}, D1D_TWO)
-    assert _process(Sessions, event_id, provider) == rt.COMPLETED
+    provider = FakeProvider({"observations": [obs_v2(stage_basis=FULL_APPLICATION)]}, D1D_TWO_V2)
+    with _pre_d1f_worker(monkeypatch):
+        assert _process(Sessions, event_id, provider) == rt.COMPLETED
     [run] = _runs(engine, event_id)
     assert {k: run[k] for k in rt.RUN_VERSIONS} == V2_VERSIONS
     source = bundle(Sessions, event_id).source_fingerprint
-    expected = rt.compute_input_fingerprint(_reference_manifest(rt.CURRENT_V2_BUNDLE, source_fingerprint=source))
+    expected = rt.compute_input_fingerprint(_reference_manifest(rt.LEGACY_V2_BUNDLE, source_fingerprint=source))
     assert run["input_fingerprint"] == expected != _v1_fingerprint(Sessions, event_id)
     # Deux appels au plus, contrats V2.
     assert [r.system for r in provider.requests] == [le.SYSTEM_PROMPT_V2, cm.SYSTEM_PROMPT_V2]
@@ -219,12 +234,13 @@ def test_pg_a_new_initial_run_is_v2_with_v2_prompts_and_derived_results(engine, 
     assert set(counts(engine, T5_T6_TABLES).values()) == {0}
 
 
-def test_pg_v2_zero_supported_capability_is_competency_only(engine, Sessions, ext, r1d1):
+def test_pg_v2_zero_supported_capability_is_competency_only(engine, Sessions, ext, r1d1, monkeypatch):
     event_id = finalized_event(Sessions, ext, engine)
     d1d = {"mappings": [{"observation_token": "observation_1", "capability_assessments": [
         {"capability_token": f"capability_{i}", "supported": False, "reason": "insufficient_specificity"}
         for i in range(1, 5)]}]}
-    assert _process(Sessions, event_id, FakeProvider(D1B_ONE, d1d)) == rt.COMPLETED
+    with _pre_d1f_worker(monkeypatch):
+        assert _process(Sessions, event_id, FakeProvider(D1B_ONE, d1d)) == rt.COMPLETED
     [run] = _runs(engine, event_id)
     [observation] = _observations(engine, run["id"])
     assert observation["capability_localization"] == "competency_only"
@@ -269,7 +285,7 @@ def test_pg_a_crashed_v1_run_is_recovered_with_the_exact_v1_bundle(engine, Sessi
 
 @pytest.mark.parametrize("responses, code", [
     ([D1B_ONE], "invalid_d1b_output"),            # sortie V2 (stage_basis) refusée par le contrat V1
-    ([D1B_ONE_V1, D1D_TWO], "invalid_d1d_output"),  # évaluations V2 refusées par le contrat V1
+    ([D1B_ONE_V1, D1D_TWO_V2], "invalid_d1d_output"),  # évaluations V2 refusées par le contrat V1
 ])
 def test_pg_a_v1_recovery_never_accepts_the_v2_contract(engine, Sessions, ext, r1d1, monkeypatch, responses, code):
     event_id = finalized_event(Sessions, ext, engine)
@@ -307,16 +323,16 @@ def test_pg_v1_recovery_stays_on_the_run_release(engine, Sessions, ext, r1d1, mo
     assert {row[4] for row in _mappings(engine, run["id"])} == {v1_release}
 
 
-def test_pg_a_crashed_v2_run_is_recovered_with_the_v2_bundle(engine, Sessions, ext, r1d1, caplog):
+def test_pg_a_crashed_v2_run_is_recovered_with_the_v2_bundle(engine, Sessions, ext, r1d1, caplog, monkeypatch):
     event_id = finalized_event(Sessions, ext, engine)
-    with pytest.raises(Crash):
+    with _pre_d1f_worker(monkeypatch), pytest.raises(Crash):
         _process(Sessions, event_id, FakeProvider(Crash()))
     [crashed] = _runs(engine, event_id)
     _expire(engine, crashed["id"])
-    provider = FakeProvider(D1B_ONE, D1D_TWO)
+    provider = FakeProvider(D1B_ONE, D1D_TWO_V2)
     with caplog.at_level("INFO", logger="core.evaluation_runtime"):
         assert _recover(Sessions, crashed["id"], provider) == rt.COMPLETED
-    assert "bundle=current-v2" in caplog.text
+    assert "bundle=legacy-v2" in caplog.text
     [run] = _runs(engine, event_id)
     assert {k: run[k] for k in rt.RUN_VERSIONS} == V2_VERSIONS
     assert run["input_fingerprint"] == crashed["input_fingerprint"]
