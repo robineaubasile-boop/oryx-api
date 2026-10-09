@@ -28,8 +28,9 @@ REFUSE DE DÉMARRER, jamais de valeur par défaut implicite) :
 
 Boucle : reprise prioritaire des runs running / candidate sans lease valide
 (recovery du même run, avec le bundle de SES versions persistées : V1
-legacy ou V2), puis découverte des nouveaux events éligibles (nouveaux runs
-initiaux toujours V2, cf. core/evaluation_runtime.py), puis
+legacy, V2 legacy ou V3), puis découverte des nouveaux events éligibles
+(nouveaux runs initiaux toujours V3, via CURRENT_V3_BUNDLE, cf.
+core/evaluation_runtime.py), puis
 pause si rien n'a été traité (aucune boucle active). SIGTERM / SIGINT :
 arrêt propre après l'élément en cours (un arrêt brutal ne fait jamais échouer
 un run : sa lease expire et il est repris). Aucune route, aucun T5 / T6.
