@@ -64,39 +64,46 @@ Exemple de valeurs : `POLL=30`, `LEASE=600`, `TIMEOUT=300`.
 4. Arrêt : SIGTERM / SIGINT terminent l'élément en cours. Un crash ne fait
    jamais échouer un run : sa lease expire et il est repris.
 
-## Versions et bundles d'exécution (R1-D1E)
+## Versions et bundles d'exécution (R1-D1E, R1-D1F)
 
 L'exécution d'un run (prompts, contrats et validation D1B / D1D) est
 sélectionnée par un bundle versionné ; les versions PERSISTÉES du run
 déterminent le bundle de sa recovery.
 
-| Version | `LEGACY_V1_BUNDLE` (R1-D1) | `CURRENT_V2_BUNDLE` (R1-D1E) |
-| --- | --- | --- |
-| evaluation_input_schema | `decryptage-evaluation-input-v1` | `decryptage-evaluation-input-v1` |
-| normalization | `decryptage-normalization-v1` | `decryptage-normalization-v1` |
-| local_stage | `decryptage-local-stage-v1` | `decryptage-local-stage-v2` |
-| capability_mapping | `decryptage-capability-mapping-v1` | `decryptage-capability-mapping-v2` |
-| evaluation_schema | `decryptage-evaluation-schema-v1` | `decryptage-evaluation-schema-v2` |
-| evaluator | `decryptage-local-evaluation-pipeline-v1` | `decryptage-local-evaluation-pipeline-v2` |
-| prompt_spec | `decryptage-t3-prompt-bundle-v1` | `decryptage-t3-prompt-bundle-v2` |
+| Version | `LEGACY_V1_BUNDLE` (R1-D1) | `LEGACY_V2_BUNDLE` (R1-D1E) | `CURRENT_V3_BUNDLE` (R1-D1F) |
+| --- | --- | --- | --- |
+| evaluation_input_schema | `decryptage-evaluation-input-v1` | `decryptage-evaluation-input-v1` | `decryptage-evaluation-input-v1` |
+| normalization | `decryptage-normalization-v1` | `decryptage-normalization-v1` | `decryptage-normalization-v1` |
+| local_stage | `decryptage-local-stage-v1` | `decryptage-local-stage-v2` | `decryptage-local-stage-v2` |
+| capability_mapping | `decryptage-capability-mapping-v1` | `decryptage-capability-mapping-v2` | `decryptage-capability-mapping-v3` |
+| evaluation_schema | `decryptage-evaluation-schema-v1` | `decryptage-evaluation-schema-v2` | `decryptage-evaluation-schema-v3` |
+| evaluator | `decryptage-local-evaluation-pipeline-v1` | `decryptage-local-evaluation-pipeline-v2` | `decryptage-local-evaluation-pipeline-v3` |
+| prompt_spec | `decryptage-t3-prompt-bundle-v1` | `decryptage-t3-prompt-bundle-v2` | `decryptage-t3-prompt-bundle-v3` |
 
-- **Nouveaux runs initiaux : V2 uniquement.** D1B émet `stage_basis`
-  (quatre booléens descriptifs) pour une observation supportive ; le serveur
-  dérive `local_stage` (application -> comprehension -> discovery -> none,
-  jamais mastery). D1D évalue chaque capacité candidate (`supported` +
-  `reason`) ; le serveur dérive `localized` / `competency_only`. Seuls le
-  stade et la localisation dérivés sont persistés : aucune colonne, aucune
-  migration.
+- **Nouveaux runs initiaux : V3 uniquement.** D1B est celui de V2
+  (inchangé) : `stage_basis` (quatre booléens descriptifs) pour une
+  observation supportive, `local_stage` dérivé serveur (application ->
+  comprehension -> discovery -> none, jamais mastery). D1D V3 ne décide
+  plus `supported` : pour chaque capacité candidate le modèle émet des
+  prémisses (`definition_satisfied`, `matched_include_indices`,
+  `matched_exclude_indices`, `boundary_status`) ; le serveur les valide
+  strictement puis dérive l'éligibilité (supportée UNIQUEMENT si définition
+  satisfaite, au moins un include, aucun exclude et `boundary_status =
+  clear`) et `localized` / `competency_only`. Seuls le stade et la
+  localisation dérivés sont persistés : aucune colonne, aucune migration.
+- **Run V2 `running / candidate`** (laissé par le worker R1-D1E) : repris
+  avec le bundle V2 exact (mêmes prompts, contrats, `input_fingerprint`),
+  jamais avec V3.
 - **Run V1 `running / candidate`** (laissé par le worker R1-D1) : repris
-  avec le bundle V1 exact (mêmes prompts, contrats, `input_fingerprint`).
-- **Run V1 `completed` / `failed`** : intact ; jamais de retry, jamais de
-  second run initial V2 pour son event (un seul run initial par event,
+  avec le bundle V1 exact.
+- **Run V1 / V2 `completed` / `failed`** : intact ; jamais de retry, jamais
+  de second run initial pour son event (un seul run initial par event,
   toutes versions confondues).
 - **Combinaison de versions inconnue ou mixte** : `unsupported_version`,
   aucune mutation.
 - Toujours au plus deux appels LLM par run (D1B, puis D1D batch si au
   moins une observation). Journaux `run_started` / `recovery` : nom du
-  bundle (`current-v2` / `legacy-v1`).
+  bundle (`current-v3` / `legacy-v2` / `legacy-v1`).
 
 ## Journaux
 
