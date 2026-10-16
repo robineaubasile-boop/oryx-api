@@ -843,7 +843,7 @@ def test_not_wired_to_api_runtime_or_any_module_but_its_selector():
 
 def test_no_migration_nor_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0014_evaluation_run_leases.py" and len(versions) == 14
+    assert versions[-1] == "0017_oryx_auth_foundations.py" and len(versions) == 17
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Selection" not in models and "selected_evidence" not in models and "progress_evidence" not in models
 

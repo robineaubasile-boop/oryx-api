@@ -30,6 +30,12 @@ from alembic.script import ScriptDirectory
 
 from core.db import Base, normalize_database_url
 from core.models import AnalysisSession
+from tests.pg_guard import (
+    UnsafeTestDatabase,
+    assert_disposable_connection,
+    scrubbed_environment,
+    validate_test_database_url,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE = "0001_current_oryx_baseline"
@@ -65,8 +71,14 @@ def _script_directory() -> ScriptDirectory:
 def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess:
     """Lance Alembic dans un sous-processus : alembic/env.py lit
     core.db.DATABASE_URL à l'import, donc l'URL doit être dans
-    l'environnement du processus qui exécute Alembic."""
-    env = dict(os.environ, DATABASE_URL=database_url)
+    l'environnement du processus qui exécute Alembic.
+
+    R1 PR 1 : hors mode offline (--sql, aucune connexion), l'URL doit passer
+    les garde-fous de tests/pg_guard.py ; le sous-processus reçoit un
+    environnement sans aucune variable Railway / DATABASE_* / PG*."""
+    if "--sql" not in args:
+        validate_test_database_url(database_url)
+    env = dict(scrubbed_environment(), DATABASE_URL=database_url)
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
@@ -210,8 +222,13 @@ def test_model_does_not_touch_historical_tables():
     # de l'état C1-C12 ; R1-B (0010, testé à part) le registre
     # conversation_identities ; R1-C1 (0011, testé à part) la table runtime
     # assistant_deliveries ; R1-C2 (0012, testé à part) la table runtime
-    # decryptage_cognitive_links.
+    # decryptage_cognitive_links ; R1 PR 1 (0016 / 0017, testées à part) le
+    # registre portefeuille et les onze tables F2.
     assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
+        "portfolio_write_idempotency", "auth_identities", "invitations", "auth_operations",
+        "auth_preauth_candidates", "auth_otp_requests", "auth_otp_verification_attempts",
+        "auth_abuse_subjects", "auth_abuse_events", "oryx_sessions", "oryx_session_generations",
+        "auth_operation_results",
         "analysis_sessions", "cognitive_events", "support_traces",
         "observation_evaluation_runs", "pedagogical_observations",
         "pedagogical_taxonomy_releases", "core_capability_definitions",
@@ -243,9 +260,11 @@ _PG_URL = normalize_database_url(os.getenv("ORYX_TEST_DATABASE_URL", ""))
 def pg_url():
     if not _PG_URL:
         pytest.skip("ORYX_TEST_DATABASE_URL non défini : tests PostgreSQL réels non exécutés")
-    url = sa.engine.make_url(_PG_URL)
-    if url.get_backend_name() != "postgresql" or "test" not in (url.database or ""):
-        pytest.fail("ORYX_TEST_DATABASE_URL doit viser une base PostgreSQL dédiée dont le nom contient 'test'")
+    # R1 PR 1 : base locale jetable uniquement (tests/pg_guard.py).
+    try:
+        validate_test_database_url(_PG_URL)
+    except UnsafeTestDatabase as exc:
+        pytest.fail(f"ORYX_TEST_DATABASE_URL refusée : {exc}")
     return _PG_URL
 
 
@@ -257,7 +276,10 @@ def pg_engine(pg_url):
 
 
 def _reset_schema(engine) -> None:
+    validate_test_database_url(engine.url.render_as_string(hide_password=False))
     with engine.begin() as conn:
+        # Contrôle serveur dans la connexion même qui détruit (R1 PR 1).
+        assert_disposable_connection(conn)
         conn.execute(sa.text("DROP SCHEMA public CASCADE"))
         conn.execute(sa.text("CREATE SCHEMA public"))
 

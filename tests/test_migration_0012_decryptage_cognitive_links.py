@@ -46,7 +46,12 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    PR1_TABLES,
     _without_r1d1_changes,
+    PR1_0015,
+    PR1_0016,
+    PR1_0017,
+    PR1_FILES,
     R1D1,
     R1D1_FILE,
     R1C1_TABLES,
@@ -141,18 +146,18 @@ def test_revision_chain_is_exactly_0001_to_0012_then_0013():
     R1-C2. Depuis R1-C4, 0013 (affinité conversationnelle) la suit et est la
     tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1D1]
+    assert script.get_heads() == [PR1_0017]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
     chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
-    assert set(revisions) == set(chain)
+    assert set(revisions) == set(chain) | {PR1_0015, PR1_0016, PR1_0017}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE]
-    assert len(files) == 14
+    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES
+    assert len(files) == 17
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -212,7 +217,7 @@ def test_offline_sql_of_0012_downgrade_reverts_exactly_r1c2():
 
 
 def test_metadata_declares_exactly_the_links_table_in_addition():
-    assert set(Base.metadata.tables) == PRE_R1C2_TABLES | R1C2_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PRE_R1C2_TABLES | R1C2_TABLES
     assert DecryptageCognitiveLink.__table__ is Base.metadata.tables[LINKS]
 
 
@@ -331,8 +336,8 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1D1
-    assert _tables(pg_engine) == HEAD_TABLES
+    assert _version(pg_engine) == PR1_0017
+    assert _tables(pg_engine) == HEAD_TABLES | PR1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)

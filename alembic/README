@@ -415,6 +415,47 @@ tables dans l'ordre inverse des dépendances (retour exact à 0008). Tests :
 tests/test_migration_0009_competency_inference_state.py (même variable
 ORYX_TEST_DATABASE_URL).
 
+R1 PR 1 : 0015 à 0017 — fondations PostgreSQL (EXPAND, structures inactives)
+---------------------------------------------------------------------------
+
+  0015_users_level_revision   users.level_revision BIGINT NOT NULL DEFAULT 0,
+                              CHECK >= 0. Seul server_default de la chaîne :
+                              l'ancien backend insère sans la colonne. SET
+                              LOCAL lock_timeout = '5s' (toute la transaction).
+  0016_portfolio_idempotency  portfolio_write_idempotency : reçu durable,
+                              PK (user_id, operation_type, operation_id),
+                              aucune purge, position_id sans FK.
+  0017_oryx_auth_foundations  onze tables F2 : identités (provider, issuer,
+                              subject), invitations à usage unique (e-mail
+                              facultatif), opérations (sign-in Supabase,
+                              activation d'invitation, email_linking),
+                              candidats pré-authentification, demandes et
+                              tentatives OTP (HMAC du code attendu et du
+                              code soumis), budgets anti-abus, sessions
+                              Oryx (15 jours absolus), générations (cookie
+                              immuable, preuve de livraison), résultat
+                              canonique (reprise de 5 minutes).
+
+Aucune route, aucun service ni frontend ne lit ou n'écrit ces structures ;
+aucun ancien portefeuille n'est importé. Aucun secret en clair : *_hash /
+*_hmac = HMAC-SHA256 hexadécimal à clé versionnée. Unique cycle de FK, non
+obligatoire : auth_operations.initiating_session_id -> oryx_sessions (NULL
+hors email_linking), ajoutée par ALTER après oryx_sessions.
+
+Tests PostgreSQL : base LOCALE jetable uniquement (tests/pg_guard.py,
+tests/conftest.py). La session pytest s'arrête si une variable RAILWAY_*,
+DATABASE_URL, DATABASE_PUBLIC_URL, DATABASE_PRIVATE_URL ou PG* est présente.
+L'URL doit viser la boucle locale ou un socket Unix et une base nommée
+^oryx_[a-z0-9_]*_test$, et la base doit porter le commentaire sentinelle
+vérifié avant chaque DROP SCHEMA :
+
+    COMMENT ON DATABASE oryx_pr1_test IS 'oryx-disposable-test-db';
+
+    ORYX_TEST_DATABASE_URL='postgresql://oryx_test@/oryx_pr1_test?host=/tmp/oryxpg' \
+        python -m pytest tests/test_migration_0015_users_level_revision.py \
+        tests/test_migration_0016_portfolio_idempotency.py \
+        tests/test_migration_0017_oryx_auth_foundations.py
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 
