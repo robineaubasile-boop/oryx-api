@@ -9,13 +9,23 @@
    historiques représentatives (aucune donnée modifiée, colonne à 0),
    compatibilité de l'ancien backend (INSERT / UPDATE sans la colonne, ORM
    historique), CHECK >= 0, downgrade exact puis ré-upgrade.
+
+3. Garde-fous de verrouillage (PostgreSQL réel, mêmes conditions) : délais
+   posés dans la seule transaction de migration, échec complet par
+   lock_timeout sans état partiel (0015 à 0017), libération du verrou de
+   users quand le client se tait (idle_in_transaction_session_timeout).
 """
 import hashlib
+import importlib.util
+import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy.orm import Session, declarative_base
 
 from core.models import User
@@ -51,6 +61,21 @@ R1D1_SHA256 = "38ec8a38e9720ba84f0c4ff5b1ac055a6f8e7977fb0fe0b20e7cdd7215e4c241"
 CHECK_NAME = "ck_users_level_revision_non_negative"
 NOW = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
 LEGACY_USERS = ("legacy-anon-1", "legacy-anon-2", "user_7f3a")
+# Garde-fous de verrouillage attendus, dans l'ordre (attente, exécution,
+# conservation du verrou).
+LOCK_GUARDS = [
+    "SET LOCAL lock_timeout = '5s'",
+    "SET LOCAL statement_timeout = '15s'",
+    "SET LOCAL idle_in_transaction_session_timeout = '15s'",
+]
+GUARD_SETTINGS = {"lock_timeout": "5s", "statement_timeout": "15s", "idle_in_transaction_session_timeout": "15s"}
+
+
+def _load_0015():
+    spec = importlib.util.spec_from_file_location("migration_0015_under_test", MIGRATION_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # --------------------------------------------------------------------------
@@ -80,7 +105,7 @@ def test_0014_file_is_unchanged():
 def test_offline_sql_of_0015_upgrade_only_adds_level_revision():
     sql = _run_alembic("postgresql://offline@localhost/offline", "upgrade", f"{R1D1}:{PR1_0015}", "--sql").stdout
     assert _statements(sql) == [
-        "SET LOCAL lock_timeout = '5s'",
+        *LOCK_GUARDS,
         "ALTER TABLE users ADD COLUMN level_revision BIGINT DEFAULT 0 NOT NULL",
         f"ALTER TABLE users ADD CONSTRAINT {CHECK_NAME} CHECK (level_revision >= 0)",
         f"UPDATE alembic_version SET version_num='{PR1_0015}' WHERE alembic_version.version_num = '{R1D1}'",
@@ -94,12 +119,25 @@ def test_offline_sql_of_0015_upgrade_only_adds_level_revision():
 def test_offline_sql_of_0015_downgrade_reverts_exactly():
     sql = _run_alembic("postgresql://offline@localhost/offline", "downgrade", f"{PR1_0015}:{R1D1}", "--sql").stdout
     assert _statements(sql) == [
-        "SET LOCAL lock_timeout = '5s'",
+        *LOCK_GUARDS,
         f"ALTER TABLE users DROP CONSTRAINT {CHECK_NAME}",
         "ALTER TABLE users DROP COLUMN level_revision",
         f"UPDATE alembic_version SET version_num='{R1D1}' WHERE alembic_version.version_num = '{PR1_0015}'",
     ]
     assert "CASCADE" not in sql.upper()
+
+
+def test_lock_guards_are_transaction_local_and_never_persisted():
+    """Les garde-fous sont des SET LOCAL : rien n'est écrit dans un rôle,
+    une base ou la configuration du serveur (le SQL offline exact de
+    l'upgrade et du downgrade ne contient aucune autre instruction)."""
+    module = _load_0015()
+    assert list(module.LOCK_GUARDS) == LOCK_GUARDS
+    assert all(guard.startswith("SET LOCAL ") for guard in module.LOCK_GUARDS)
+    sql = _run_alembic("postgresql://offline@localhost/offline", "upgrade", f"{R1D1}:{PR1_0015}", "--sql").stdout
+    upper = sql.upper()
+    for forbidden in ("ALTER ROLE", "ALTER DATABASE", "ALTER SYSTEM", "SET SESSION", "SET STATEMENT_TIMEOUT"):
+        assert forbidden not in upper, forbidden
 
 
 def test_model_level_revision_is_a_server_default_only():
@@ -287,3 +325,103 @@ def test_pg_new_model_inserts_rely_on_the_server_default(pg_url, pg_engine):  # 
             "WHERE id = 'model-user' AND level_revision = 0"))
         assert stale.rowcount == 0
         assert conn.execute(sa.text("SELECT level, level_revision FROM users")).one() == ("avance", 1)
+
+
+# --------------------------------------------------------------------------
+# 3. Garde-fous de verrouillage (PostgreSQL réel)
+# --------------------------------------------------------------------------
+
+def _settings(conn) -> dict:
+    return {name: conn.execute(sa.text(f"SHOW {name}")).scalar_one() for name in GUARD_SETTINGS}
+
+
+def _users_locks(engine, pid) -> list:
+    with engine.connect() as conn:
+        return conn.execute(sa.text(
+            "SELECT l.mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+            "WHERE c.relname = 'users' AND l.pid = :pid AND l.granted ORDER BY l.mode"), {"pid": pid}).scalars().all()
+
+
+def test_pg_0015_guards_hold_inside_the_migration_transaction_only(pg_url, pg_engine):  # noqa: F811
+    """upgrade() pose les trois délais dans SA transaction, sous le verrou
+    ACCESS EXCLUSIVE de users ; ils disparaissent avec elle."""
+    _reset_schema(pg_engine)
+    _run_alembic(pg_url, "upgrade", R1D1)
+    module = _load_0015()
+    with pg_engine.connect() as conn:
+        before = _settings(conn)
+        conn.rollback()
+        assert before != GUARD_SETTINGS
+        pid = conn.execute(sa.text("SELECT pg_backend_pid()")).scalar_one()
+        with Operations.context(MigrationContext.configure(conn)):
+            module.upgrade()
+        assert _settings(conn) == GUARD_SETTINGS
+        assert "AccessExclusiveLock" in _users_locks(pg_engine, pid)
+        conn.rollback()
+        assert _settings(conn) == before
+        assert _users_locks(pg_engine, pid) == []
+    assert _version(pg_engine) == R1D1
+
+
+def test_pg_lock_timeout_aborts_the_whole_upgrade_and_leaves_0014_intact(pg_url, pg_engine):  # noqa: F811
+    """Une transaction applicative ouverte sur users : `upgrade head` échoue
+    au bout de lock_timeout, sans rien laisser de 0015, 0016 ni 0017 ;
+    rejoué après la libération, il réussit."""
+    _reset_schema(pg_engine)
+    _run_alembic(pg_url, "upgrade", R1D1)
+    _seed_historical(pg_engine)
+    tables = _tables(pg_engine)
+    schema_0014 = _snapshot(pg_engine, tables)
+    data_0014 = _data(pg_engine, tables - {"alembic_version"})
+    with pg_engine.connect() as blocker:
+        blocker.execute(sa.text("SELECT count(*) FROM users")).scalar_one()  # ACCESS SHARE jusqu'au rollback
+        started = time.monotonic()
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            _run_alembic(pg_url, "upgrade", "head")
+        elapsed = time.monotonic() - started
+        blocker.rollback()
+    assert "LockNotAvailable" in failure.value.stderr and "lock timeout" in failure.value.stderr
+    assert 5 <= elapsed < 15
+    assert _version(pg_engine) == R1D1
+    assert _tables(pg_engine) == tables
+    assert _snapshot(pg_engine, tables) == schema_0014
+    assert _data(pg_engine, tables - {"alembic_version"}) == data_0014
+
+    _run_alembic(pg_url, "upgrade", "head")
+    assert _version(pg_engine) == PR1_0017
+    assert _compare_metadata(pg_engine) == []
+
+
+def test_pg_idle_in_transaction_guard_releases_the_users_lock(pg_url, pg_engine):  # noqa: F811
+    """Un client Alembic qui se tait après l'ALTER (conteneur pre-deploy
+    supprimé, réseau coupé) : le serveur termine sa session au bout de
+    idle_in_transaction_session_timeout et libère le verrou de users, sans
+    rien valider."""
+    _reset_schema(pg_engine)
+    _run_alembic(pg_url, "upgrade", R1D1)
+    module = _load_0015()
+    silent = pg_engine.connect()
+    try:
+        pid = silent.execute(sa.text("SELECT pg_backend_pid()")).scalar_one()
+        with Operations.context(MigrationContext.configure(silent)):
+            module.upgrade()
+        assert "AccessExclusiveLock" in _users_locks(pg_engine, pid)
+        deadline = time.monotonic() + 30
+        while _users_locks(pg_engine, pid) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert _users_locks(pg_engine, pid) == []
+        with pg_engine.connect() as conn:
+            assert conn.execute(sa.text(
+                "SELECT count(*) FROM pg_stat_activity WHERE pid = :pid"), {"pid": pid}).scalar_one() == 0
+            assert conn.execute(sa.text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'users' AND column_name = 'level_revision'")).scalar_one() == 0
+            # Une lecture de users n'attend plus.
+            conn.execute(sa.text("SET LOCAL lock_timeout = '1s'"))
+            conn.execute(sa.text("SELECT count(*) FROM users")).scalar_one()
+    finally:
+        try:
+            silent.close()
+        except sa.exc.DBAPIError:
+            pass  # session déjà terminée par le serveur
+    assert _version(pg_engine) == R1D1

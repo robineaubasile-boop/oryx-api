@@ -421,7 +421,9 @@ R1 PR 1 : 0015 à 0017 — fondations PostgreSQL (EXPAND, structures inactives)
   0015_users_level_revision   users.level_revision BIGINT NOT NULL DEFAULT 0,
                               CHECK >= 0. Seul server_default de la chaîne :
                               l'ancien backend insère sans la colonne. SET
-                              LOCAL lock_timeout = '5s' (toute la transaction).
+                              LOCAL lock_timeout = '5s', statement_timeout =
+                              '15s', idle_in_transaction_session_timeout =
+                              '15s' (toute la transaction, voir plus bas).
   0016_portfolio_idempotency  portfolio_write_idempotency : reçu durable,
                               PK (user_id, operation_type, operation_id),
                               aucune purge, position_id sans FK.
@@ -455,6 +457,98 @@ vérifié avant chaque DROP SCHEMA :
         python -m pytest tests/test_migration_0015_users_level_revision.py \
         tests/test_migration_0016_portfolio_idempotency.py \
         tests/test_migration_0017_oryx_auth_foundations.py
+
+Verrous de 0015 (mesurés sur PostgreSQL 16.15 et 18.4) : ADD COLUMN avec
+constante par défaut ne réécrit pas users (relfilenode inchangé) ; l'ADD
+CONSTRAINT CHECK parcourt users sous le verrou ACCESS EXCLUSIVE déjà pris
+(~50 ms par million de lignes). Le verrou est conservé jusqu'au COMMIT de
+toute la transaction (0015 à 0017, moins d'une seconde mesurée, 5 millions
+de lignes comprises). Trois délais serveur (SET LOCAL) bornent :
+  - l'attente du verrou (lock_timeout 5 s) : pendant cette attente, les
+    requêtes sur users se mettent en file derrière l'ALTER (5 s au plus) ;
+  - l'exécution de chaque instruction (statement_timeout 15 s) ;
+  - la conservation du verrou par un client qui ne répond plus
+    (idle_in_transaction_session_timeout 15 s).
+Tout dépassement annule la transaction entière : la base reste en 0014.
+Tests : tests/test_migration_0015_users_level_revision.py (section 3).
+
+R1 PR 1 : préflight de production (AVANT le merge)
+--------------------------------------------------
+
+Le service oryx-api exécute en pre-deploy `cd /app && /app/.venv/bin/python
+-m alembic upgrade head` : merger la PR applique 0015 à 0017 en production.
+oryx-api et oryx-evaluation-worker se déploient depuis main, sans attendre
+les checks GitHub. Le worker n'a pas de pre-deploy ; il reste compatible
+avec une base encore en 0014 (il ne lit que User.id, jamais l'entité User
+complète). Si le pre-deploy échoue, Railway ne déploie pas la nouvelle
+version : l'ancienne continue de servir, la base reste en 0014.
+
+1. Preuves lues en base : scripts/r1_pr1_preflight.py (READ-ONLY, une seule
+   instruction SELECT, aucune ligne métier lue, DATABASE_URL jamais
+   affiché). Il vérifie la version PostgreSQL (majeure.mineure, >= 11),
+   que le serveur est primaire, la révision installée (exactement
+   0014_evaluation_run_leases), l'absence des objets de 0015 à 0017, le
+   volume de users et l'activité concurrente (transactions de plus de
+   5 s, verrous sur users).
+
+   Le conteneur déployé ne contient pas encore le script : il est
+   autonome (bibliothèque standard + SQLAlchemy) et se transmet par
+   l'entrée standard, dans le réseau privé, avec la DATABASE_URL déjà
+   présente dans le conteneur :
+
+       railway ssh --service oryx-api -- sh -c \
+         "echo $(base64 -w0 scripts/r1_pr1_preflight.py) | base64 -d | /app/.venv/bin/python -"
+
+   À défaut, `python scripts/r1_pr1_preflight.py --print-sql` affiche la
+   requête seule (sans connexion), à exécuter avec psql dans le service
+   Postgres ou dans l'onglet de requête du tableau de bord Railway.
+
+   Attendu : dernière ligne « GO TECHNIQUE R1 PR 1 », exit code 0. Un
+   FAIL (exit code 1) interdit le merge ; un WARN d'activité concurrente
+   impose d'attendre une fenêtre calme.
+
+2. Vérifications humaines (aucun script ne peut les prouver) :
+   - Sauvegarde : créer une sauvegarde manuelle du volume Postgres juste
+     avant le merge (onglet Backups) et noter son horodatage. Une
+     restauration Railway est une modification « staged » : la déployer
+     déploierait aussi toute autre modification staged de l'environnement.
+   - Proxy : l'environnement production porte une modification staged sur
+     le service Postgres (proxy TCP public 5432 et variable
+     DATABASE_PUBLIC_URL). La migration n'en dépend pas : le pre-deploy
+     utilise la DATABASE_URL d'oryx-api dans le réseau privé. Confirmer que
+     cette variable référence l'URL privée de Postgres, et appliquer ou
+     abandonner explicitement ce patch AVANT la fenêtre, jamais en même
+     temps qu'une restauration.
+   - Pre-deploy Timeout d'oryx-api : aucune limite par défaut ; en fixer
+     une (par exemple 300 s) borne le déploiement de l'extérieur.
+   - Fenêtre : faible trafic, aucun run d'évaluation long en cours ;
+     relancer le préflight juste avant le merge.
+
+3. Après le merge : les logs du pre-deploy doivent montrer les trois
+   « Running upgrade » 0014 -> 0015 -> 0016 -> 0017, puis
+   `SELECT version_num FROM alembic_version` = 0017_oryx_auth_foundations
+   (le préflight répond alors NO-GO « déjà appliquée », comme attendu). En
+   cas d'échec du pre-deploy (lock timeout), ne jamais lancer Alembic à la
+   main : relancer le préflight, puis redéployer dans une fenêtre calme.
+
+R1 PR 1 : conditions AVANT toute activation de l'authentification
+-----------------------------------------------------------------
+
+Cette PR n'active rien. Avant le premier service qui lira ou écrira les
+tables de 0017 ou users.level_revision :
+  - fermer ou adapter les anciennes routes non authentifiées qui reçoivent
+    l'identité du client : GET /api/user/{user_id}, PUT
+    /api/user/{user_id}/level, GET/POST /api/user/{user_id}/portfolio,
+    PUT/DELETE /api/user/{user_id}/portfolio/{position_id}, GET
+    /api/user/{user_id}/theses, DELETE /api/user/{user_id}/theses/{ticker}
+    (GET /api/user/{user_id}, PUT /level et POST /portfolio créent même
+    l'utilisateur implicitement) ;
+  - faire avancer level_revision à chaque écriture du niveau (comparaison
+    puis incrément dans la même instruction) : PUT /level ne l'incrémente
+    pas aujourd'hui, la valeur 0 des lignes existantes ne prouve donc
+    aucune absence de changement ;
+  - level_revision versionne le niveau DÉCLARÉ, jamais la compétence
+    réelle ; il ne devient ni preuve ni score pédagogique.
 
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
