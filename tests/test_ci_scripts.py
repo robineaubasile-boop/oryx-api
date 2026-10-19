@@ -288,13 +288,15 @@ def test_database_url_refuses_remote_or_non_disposable_targets_without_leaking(u
 
 def _server(**overrides):
     row = {"database": "oryx_ci_postgres_18_test", "server_addr": "127.0.0.1", "comment": "oryx-disposable-test-db",
-           "in_recovery": False, "listen_addresses": "127.0.0.1", "server_version": "18.6"}
+           "in_recovery": False, "listen_addresses": "127.0.0.1",
+           "server_version": "18.6 (Debian 18.6-1.pgdg13+2)", "server_version_num": "180006"}
     row.update(overrides)
     return row
 
 
 def test_database_server_accepts_the_pinned_local_disposable_server():
     verify_test_database.check_server(_server(), "18.6")
+    assert verify_test_database.numeric_version("160015") == "16.15"
 
 
 @pytest.mark.parametrize("overrides", [
@@ -306,7 +308,9 @@ def test_database_server_accepts_the_pinned_local_disposable_server():
     {"comment": "production"},
     {"in_recovery": True},
     {"listen_addresses": "*"},
-    {"server_version": "18.5"},
+    {"server_version_num": "180005"},
+    {"server_version_num": "160006"},
+    {"server_version_num": "180060"},
 ])
 def test_database_server_refuses_anything_but_the_pinned_local_disposable_server(overrides):
     with pytest.raises(verify_test_database.Refused):

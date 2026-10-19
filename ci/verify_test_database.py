@@ -65,6 +65,13 @@ def check_url(raw_url: str) -> sa.engine.URL:
     return url
 
 
+def numeric_version(server_version_num) -> str:
+    """'160015' -> '16.15' ; server_version porte aussi la distribution
+    (« 16.15 (Debian 16.15-1.pgdg13+2) »)."""
+    number = int(server_version_num)
+    return f"{number // 10000}.{number % 10000}"
+
+
 def check_server(row: dict, expected_version: str) -> None:
     if not TEST_DATABASE_NAME.match(row["database"] or ""):
         raise Refused("current_database() n'est pas une base de test Oryx")
@@ -78,7 +85,7 @@ def check_server(row: dict, expected_version: str) -> None:
         raise Refused("le serveur est en recovery")
     if row["listen_addresses"] != "127.0.0.1":
         raise Refused("listen_addresses doit valoir 127.0.0.1")
-    if row["server_version"] != expected_version:
+    if numeric_version(row["server_version_num"]) != expected_version:
         raise Refused(f"version serveur {row['server_version']} != version épinglée {expected_version}")
 
 
