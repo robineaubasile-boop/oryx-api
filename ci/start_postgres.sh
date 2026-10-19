@@ -55,7 +55,22 @@ if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
   echo "::add-mask::${password}"
 fi
 
-docker pull --quiet "$image" >/dev/null
+# Seule étape réseau : trois tentatives au plus, puis échec du job. Le digest
+# garantit le contenu, quelle que soit la tentative qui réussit.
+pulled=0
+for attempt in 1 2 3; do
+  if docker pull --quiet "$image" >/dev/null; then
+    pulled=1
+    break
+  fi
+  echo "docker pull : tentative ${attempt} échouée" >&2
+  sleep $((attempt * 5))
+done
+if [[ "$pulled" != 1 ]]; then
+  echo "image PostgreSQL ${major} indisponible" >&2
+  exit 1
+fi
+
 docker run --detach --name "$container" --network host \
   --env POSTGRES_PASSWORD="$password" \
   --env POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
