@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from core.db import Base
 from core.models import CognitiveEvent, ObservationEvaluationRun, PedagogicalObservation, SupportTrace
+from tests.pg_not_null import not_null_columns, without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -768,7 +769,8 @@ def test_pg_observation_evaluation_runs_exact_structure(pg_url, pg_engine):
     types = {n: "uuid" for (t, n) in UUID_COLUMNS if t == RUNS}
     types.update({n: "timestamp with time zone" for (t, n) in TIMESTAMPTZ_COLUMNS if t == RUNS})
     assert _catalog_columns(pg_engine, RUNS) == _pg_columns(RUN_COLUMNS, RUN_NULLABLE, types)
-    assert _constraints(pg_engine, RUNS) == sorted([
+    assert without_verified_not_null(pg_engine, RUNS, _constraints(pg_engine, RUNS),
+                                     not_null_columns(_pg_columns(RUN_COLUMNS, RUN_NULLABLE, types))) == sorted([
         *[(f"ck_{RUNS}_{col}", "c", _pg_in_check(col, values), " ", " ")
           for col, values in RUN_VOCABULARIES.items()],
         ("observation_evaluation_runs_event_id_fkey", "f",
@@ -810,7 +812,8 @@ def test_pg_pedagogical_observations_exact_structure(pg_url, pg_engine):
     types.update({n: "text" for (_, n) in TEXT_COLUMNS})
     types["ordinal"] = "smallint"
     assert _catalog_columns(pg_engine, OBS) == _pg_columns(OBS_COLUMNS, OBS_NULLABLE, types)
-    assert _constraints(pg_engine, OBS) == sorted([
+    assert without_verified_not_null(pg_engine, OBS, _constraints(pg_engine, OBS),
+                                     not_null_columns(_pg_columns(OBS_COLUMNS, OBS_NULLABLE, types))) == sorted([
         *[(f"ck_{OBS}_{col}", "c", _pg_in_check(col, values), " ", " ")
           for col, values in OBS_VOCABULARIES.items()],
         (POLARITY_CHECK, "c",

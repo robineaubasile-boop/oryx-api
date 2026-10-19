@@ -30,6 +30,7 @@ from alembic.script import ScriptDirectory
 
 from core.db import Base, normalize_database_url
 from core.models import AnalysisSession
+from tests.pg_not_null import without_verified_not_null
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE = "0001_current_oryx_baseline"
@@ -335,12 +336,13 @@ def test_pg_upgrade_0001_to_0002_then_downgrade(pg_url, pg_engine):
         )).scalar_one()
         assert users_id_type == "character varying"
 
-        # Contraintes : PK(id), FK(user_id) -> users(id) NO ACTION, 1 CHECK, rien d'autre.
-        cons = conn.execute(sa.text(
+        # Contraintes : PK(id), FK(user_id) -> users(id) NO ACTION, 1 CHECK, rien d'autre
+        # (les NOT NULL, contraintes 'n' de PostgreSQL 18, sont vérifiés exactement à part).
+        cons = without_verified_not_null(conn, "analysis_sessions", conn.execute(sa.text(
             "SELECT conname, contype, pg_get_constraintdef(oid), confdeltype, confupdtype "
             "FROM pg_constraint WHERE conrelid = 'public.analysis_sessions'::regclass "
             "ORDER BY contype"
-        )).all()
+        )).all(), ["id", "user_id", "ticker", "status", "started_at", "updated_at"])
         by_type = {}
         for name, contype, definition, deltype, updtype in cons:
             by_type.setdefault(contype, []).append((name, definition, deltype, updtype))

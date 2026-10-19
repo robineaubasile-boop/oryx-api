@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from core.db import Base
 from core.models import AnalysisSession, CognitiveEvent, SupportTrace, User
+from tests.pg_not_null import not_null_columns, without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -603,7 +604,8 @@ def test_pg_cognitive_events_exact_structure(pg_url, pg_engine):
         ("updated_at", "timestamp with time zone", "NO", None),
         ("closed_at", "timestamp with time zone", "YES", None),
     ]
-    assert _constraints(pg_engine, EVENTS) == [
+    assert without_verified_not_null(pg_engine, EVENTS, _constraints(pg_engine, EVENTS),
+                                     not_null_columns(_catalog_columns(pg_engine, EVENTS))) == [
         ("ck_cognitive_events_status", "c",
          "CHECK (((status)::text = ANY ((ARRAY['open'::character varying, "
          "'finalized'::character varying, 'abandoned'::character varying])::text[])))", " ", " "),
@@ -627,7 +629,8 @@ def test_pg_support_traces_exact_structure(pg_url, pg_engine):
         ("support_payload", "jsonb", "NO", None),
         ("created_at", "timestamp with time zone", "NO", None),
     ]
-    assert _constraints(pg_engine, TRACES) == [
+    assert without_verified_not_null(pg_engine, TRACES, _constraints(pg_engine, TRACES),
+                                     not_null_columns(_catalog_columns(pg_engine, TRACES))) == [
         ("support_traces_cognitive_event_id_fkey", "f",
          "FOREIGN KEY (cognitive_event_id) REFERENCES cognitive_events(id)", "a", "a"),
         ("support_traces_pkey", "p", "PRIMARY KEY (id)", " ", " "),
