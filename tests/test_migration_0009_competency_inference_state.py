@@ -51,6 +51,7 @@ from core.models import (
     User,
     UserCompetencyState,
 )
+from tests.pg_not_null import not_null_columns, without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -1357,7 +1358,8 @@ def test_pg_exact_structure_of_the_six_tables(pg_url, pg_engine):
     _run_alembic(pg_url, "upgrade", T6A)
     for table in TABLES_IN_ORDER:
         assert _catalog_columns(pg_engine, table) == _pg_columns(table), table
-        assert _constraints(pg_engine, table) == _expected_constraints(table), table
+        assert without_verified_not_null(pg_engine, table, _constraints(pg_engine, table),
+                                         not_null_columns(_pg_columns(table))) == _expected_constraints(table), table
         assert _indexdefs(pg_engine, table) == _expected_indexdefs(table), table
     assert _indexdefs(pg_engine, RUNS)[ONE_ACTIVE_INDEX] == (
         f"CREATE UNIQUE INDEX {ONE_ACTIVE_INDEX} ON public.{RUNS} USING btree (user_id, competency_code) "

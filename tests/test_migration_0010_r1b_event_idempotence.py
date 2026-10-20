@@ -32,6 +32,7 @@ import sqlalchemy as sa
 
 from core.db import Base
 from core.models import CognitiveEvent, ConversationIdentity, User
+from tests.pg_not_null import without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -311,6 +312,8 @@ def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F81
 def test_pg_catalog_of_the_r1b_objects(pg_url, pg_engine):  # noqa: F811
     _upgrade_head_with_users(pg_url, pg_engine)
     catalog = _catalog(pg_engine, {CONVERSATIONS, EVENTS})
+    catalog[CONVERSATIONS]["constraints"] = without_verified_not_null(
+        pg_engine, CONVERSATIONS, catalog[CONVERSATIONS]["constraints"], ["conversation_key", "user_id", "created_at"])
     assert catalog[CONVERSATIONS] == {
         "columns": [("conversation_key", "character varying", "NO", None),
                     ("user_id", "character varying", "NO", None),

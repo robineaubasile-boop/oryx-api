@@ -30,6 +30,7 @@ import sqlalchemy as sa
 
 import core.models
 from core.db import Base
+from tests.pg_not_null import not_null_columns, without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -491,7 +492,8 @@ def test_pg_upgrade_0003_to_0004_drops_only_company_analyses_then_downgrade(pg_u
         ("created_at", "timestamp without time zone", "YES", None),
         ("updated_at", "timestamp without time zone", "YES", None),
     ]
-    assert dropped_constraints_0003 == [
+    assert without_verified_not_null(pg_engine, DROPPED, dropped_constraints_0003,
+                                     not_null_columns(dropped_columns_0003)) == [
         ("company_analyses_pkey", "p", "PRIMARY KEY (id)", " ", " "),
         ("company_analyses_user_id_fkey", "f", "FOREIGN KEY (user_id) REFERENCES users(id)", "a", "a"),
     ]
