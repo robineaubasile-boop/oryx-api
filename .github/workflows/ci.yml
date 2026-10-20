@@ -1,0 +1,262 @@
+# CI GitHub V1 d'Oryx — voir docs/ci.md.
+#
+# Six contrôles aux noms stables (affichés « ci / <job> ») :
+#   ci / postgres-16, ci / postgres-18     suite Python complète
+#   ci / migrations-16, ci / migrations-18 contrôles Alembic indépendants
+#   ci / web                               suite Node de tests/web
+#   ci / required                          agrégateur, seul contrôle à rendre obligatoire
+#
+# Aucun secret, aucun accès Railway, aucune base distante : chaque job crée
+# son propre PostgreSQL jetable en boucle locale (ci/start_postgres.sh).
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.11.9"
+  NODE_VERSION: "22.23.3"
+
+jobs:
+  postgres:
+    name: postgres-${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
+    env:
+      LEG: postgres-${{ matrix.postgres }}
+      POSTGRES_MAJOR: ${{ matrix.postgres }}
+    steps:
+      - name: Checkout (historique complet, sans identifiants persistés)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dépendances Python verrouillées (empreintes obligatoires)
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r ci/requirements-ci.txt
+          python -m pip check
+
+      - name: Environnement exécuté
+        run: |
+          echo "commit testé : ${GITHUB_SHA}"
+          git log -1 --format='HEAD %H parents %P %s'
+          test "$(python -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
+          python ci/describe_environment.py --out reports/environment.json
+          echo "variables RAILWAY_* / DATABASE_* / PG* du runner (jamais transmises aux tests) :"
+          env | cut -d= -f1 | grep -E '^(RAILWAY_|DATABASE_|PG)' || echo "  aucune"
+          docker version --format 'docker client {{.Client.Version}} / server {{.Server.Version}}'
+
+      - name: PostgreSQL jetable (réseau hôte, 127.0.0.1)
+        run: bash ci/start_postgres.sh "$POSTGRES_MAJOR" "oryx_ci_postgres_${POSTGRES_MAJOR}_test"
+
+      - name: Suite Python complète
+        run: bash ci/run_pytest.sh "$LEG" "$(command -v python)" reports
+
+      - name: Journal du serveur PostgreSQL
+        if: always()
+        run: docker logs "oryx-ci-postgres-${POSTGRES_MAJOR}" > reports/postgres-server.log 2>&1
+
+      - name: Rapports (JUnit, journaux, versions)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-${{ env.LEG }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Résumé pour ci / required
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ env.LEG }}
+          path: reports/result.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  migrations:
+    name: migrations-${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
+    env:
+      LEG: migrations-${{ matrix.postgres }}
+      POSTGRES_MAJOR: ${{ matrix.postgres }}
+    steps:
+      - name: Checkout (sans identifiants persistés)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dépendances Python verrouillées (empreintes obligatoires)
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes -r ci/requirements-ci.txt
+          python -m pip check
+
+      - name: Environnement exécuté
+        run: |
+          echo "commit testé : ${GITHUB_SHA}"
+          git log -1 --format='HEAD %H parents %P %s'
+          test "$(python -c 'import platform; print(platform.python_version())')" = "$PYTHON_VERSION"
+          python ci/describe_environment.py --out reports/environment.json
+          echo "variables RAILWAY_* / DATABASE_* / PG* du runner (jamais transmises aux tests) :"
+          env | cut -d= -f1 | grep -E '^(RAILWAY_|DATABASE_|PG)' || echo "  aucune"
+
+      - name: Migrations historiques 0001-0014 inchangées (sha256)
+        run: sha256sum --check --strict ci/migration_history.sha256
+
+      - name: PostgreSQL jetable (réseau hôte, 127.0.0.1)
+        run: >-
+          bash ci/start_postgres.sh "$POSTGRES_MAJOR"
+          "oryx_ci_migrations_${POSTGRES_MAJOR}_test" "oryx_ci_offline_${POSTGRES_MAJOR}_test"
+
+      - name: Contrôles Alembic
+        run: >-
+          bash ci/run_migration_checks.sh "$LEG" "$(command -v python)" reports
+          "oryx_ci_offline_${POSTGRES_MAJOR}_test"
+
+      - name: Journal du serveur PostgreSQL
+        if: always()
+        run: docker logs "oryx-ci-postgres-${POSTGRES_MAJOR}" > reports/postgres-server.log 2>&1
+
+      - name: Rapports (contrôles, journaux, versions)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-${{ env.LEG }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Résumé pour ci / required
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ env.LEG }}
+          path: reports/result.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  web:
+    name: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LEG: web
+    steps:
+      - name: Checkout (sans identifiants persistés)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Python (contrôle du rapport)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Environnement exécuté
+        run: |
+          echo "commit testé : ${GITHUB_SHA}"
+          echo "node $(node --version) / npm $(npm --version)"
+          test "$(node --version)" = "v${NODE_VERSION}"
+
+      - name: npm ci (package-lock.json, sans scripts d'installation)
+        working-directory: tests/web
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Suite Node (npm test)
+        working-directory: tests/web
+        run: |
+          mkdir -p ../../reports
+          set +e
+          npm test -- --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=../../reports/junit.xml \
+            2>&1 | tee ../../reports/node-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          cd ../..
+          python ci/check_test_report.py --kind node --leg "$LEG" \
+            --junit reports/junit.xml --log reports/node-test.log \
+            --exit-code "$status" --commit "$GITHUB_SHA" --out reports/result.json
+
+      - name: Rapports (JUnit, journal)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-${{ env.LEG }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Résumé pour ci / required
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ env.LEG }}
+          path: reports/result.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  required:
+    name: required
+    if: always()
+    needs: [postgres, migrations, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (sans identifiants persistés)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Résumés des jobs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: result-*
+          path: results
+
+      - name: Tous les contrôles obligatoires ont réussi
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python ci/verify_required.py --results results --commit "$GITHUB_SHA"

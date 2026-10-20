@@ -48,6 +48,7 @@ from core.models import (
     PedagogicalObservation,
     PedagogicalTaxonomyRelease,
 )
+from tests.pg_not_null import not_null_columns, without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -848,13 +849,15 @@ def test_pg_exact_structure_of_the_four_tables(pg_url, pg_engine):
     _run_alembic(pg_url, "upgrade", T4A)
     for table in T4A_TABLES:
         assert _catalog_columns(pg_engine, table) == _pg_columns(table), table
-    assert _constraints(pg_engine, RELEASES) == sorted([
+    assert without_verified_not_null(pg_engine, RELEASES, _constraints(pg_engine, RELEASES),
+                                     not_null_columns(_pg_columns(RELEASES))) == sorted([
         (STATUS_CHECK, "c", _pg_in_check("status", RELEASE_STATUSES), " ", " "),
         ("pedagogical_taxonomy_releases_pkey", "p", "PRIMARY KEY (id)", " ", " "),
         ("uq_pedagogical_taxonomy_releases_spec_fingerprint", "u", "UNIQUE (spec_fingerprint)", " ", " "),
         ("uq_pedagogical_taxonomy_releases_version_key", "u", "UNIQUE (version_key)", " ", " "),
     ])
-    assert _constraints(pg_engine, DEFS) == sorted([
+    assert without_verified_not_null(pg_engine, DEFS, _constraints(pg_engine, DEFS),
+                                     not_null_columns(_pg_columns(DEFS))) == sorted([
         (CODE_CHECK, "c", _pg_in_check("capability_code", CAPABILITY_CODES), " ", " "),
         (COHERENCE_CHECK, "c",
          "CHECK ((split_part((capability_code)::text, '_'::text, 1) = (competency_code)::text))", " ", " "),
@@ -864,7 +867,8 @@ def test_pg_exact_structure_of_the_four_tables(pg_url, pg_engine):
         ("uq_core_capability_definitions_code_revision", "u", "UNIQUE (capability_code, semantic_revision)",
          " ", " "),
     ])
-    assert _constraints(pg_engine, MEMBERSHIPS) == sorted([
+    assert without_verified_not_null(pg_engine, MEMBERSHIPS, _constraints(pg_engine, MEMBERSHIPS),
+                                     not_null_columns(_pg_columns(MEMBERSHIPS))) == sorted([
         ("capability_taxonomy_memberships_capability_definition_id_fkey", "f",
          "FOREIGN KEY (capability_definition_id) REFERENCES core_capability_definitions(id)", "a", "a"),
         ("capability_taxonomy_memberships_pkey", "p", "PRIMARY KEY (id)", " ", " "),
@@ -873,7 +877,8 @@ def test_pg_exact_structure_of_the_four_tables(pg_url, pg_engine):
         ("uq_capability_taxonomy_memberships_release_definition", "u",
          "UNIQUE (taxonomy_release_id, capability_definition_id)", " ", " "),
     ])
-    assert _constraints(pg_engine, OBS_CAPS) == sorted([
+    assert without_verified_not_null(pg_engine, OBS_CAPS, _constraints(pg_engine, OBS_CAPS),
+                                     not_null_columns(_pg_columns(OBS_CAPS))) == sorted([
         ("observation_capabilities_capability_membership_id_fkey", "f",
          "FOREIGN KEY (capability_membership_id) REFERENCES capability_taxonomy_memberships(id)", "a", "a"),
         ("observation_capabilities_observation_id_fkey", "f",

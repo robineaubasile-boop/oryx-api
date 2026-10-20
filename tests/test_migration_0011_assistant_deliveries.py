@@ -31,6 +31,7 @@ from sqlalchemy.dialects import postgresql
 
 from core.db import Base
 from core.models import AssistantDelivery, User
+from tests.pg_not_null import without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -322,7 +323,10 @@ def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F81
 
 def test_pg_catalog_of_assistant_deliveries(pg_url, pg_engine):  # noqa: F811
     _upgrade_head_with_users(pg_url, pg_engine)
-    assert _catalog(pg_engine, {DELIVERIES})[DELIVERIES] == {
+    catalog = _catalog(pg_engine, {DELIVERIES})[DELIVERIES]
+    catalog["constraints"] = without_verified_not_null(
+        pg_engine, DELIVERIES, catalog["constraints"], [c for c in COLUMNS if c not in NULLABLE])
+    assert catalog == {
         "columns": [
             ("id", "uuid", "NO", None),
             ("user_id", "character varying", "NO", None),

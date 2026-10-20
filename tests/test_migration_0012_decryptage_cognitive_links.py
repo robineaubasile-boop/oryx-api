@@ -30,6 +30,7 @@ import sqlalchemy as sa
 
 from core.db import Base
 from core.models import AssistantDelivery, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
+from tests.pg_not_null import without_verified_not_null
 from tests.test_migration_0002_analysis_sessions import (
     BASELINE,
     BASELINE_SHA256,
@@ -366,7 +367,9 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("response_context_event_id", "uuid", "YES", None),
         ("product_progress_action", "character varying", "YES", None),
     ]
-    assert [c for c in catalog["constraints"] if c[1] != "c"] == [
+    constraints = without_verified_not_null(pg_engine, LINKS, catalog["constraints"], [
+        "assistant_delivery_id", "capture_version", "input_action", "capture_state", "created_at"])
+    assert [c for c in constraints if c[1] != "c"] == [
         ("decryptage_cognitive_links_assistant_delivery_id_fkey", "f",
          "FOREIGN KEY (assistant_delivery_id) REFERENCES assistant_deliveries(id)", "a", "a"),
         ("decryptage_cognitive_links_context_exit_event_id_fkey", "f",
@@ -383,7 +386,7 @@ def test_pg_catalog_of_decryptage_cognitive_links(pg_url, pg_engine):  # noqa: F
         ("decryptage_cognitive_links_support_trace_id_fkey", "f",
          "FOREIGN KEY (support_trace_id) REFERENCES support_traces(id)", "a", "a"),
     ]
-    assert {c[0] for c in catalog["constraints"] if c[1] == "c"} == CHECKS | R1C4_CHECKS
+    assert {c[0] for c in constraints if c[1] == "c"} == CHECKS | R1C4_CHECKS
     assert catalog["indexes"] == ["decryptage_cognitive_links_pkey", OPENING_INDEX]
 
 

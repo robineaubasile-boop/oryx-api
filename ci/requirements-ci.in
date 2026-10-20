@@ -1,0 +1,9 @@
+# Dépendances Python de la CI : celles de l'application (requirements.txt,
+# inchangé) et les outils de test. Verrou complet avec empreintes dans
+# ci/requirements-ci.txt, régénéré par la commande notée en tête de ce dernier.
+-r ../requirements.txt
+pytest
+# fastapi.testclient (Starlette 0.36.x) repose sur httpx.
+httpx
+# tests/test_ci_scripts.py lit le workflow.
+pyyaml
