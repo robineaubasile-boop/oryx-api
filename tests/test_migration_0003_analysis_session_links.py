@@ -287,6 +287,9 @@ def test_pg_upgrade_0002_to_0003_preserves_history_then_downgrade(pg_url, pg_eng
     with pg_engine.connect() as conn:
         ctx = MigrationContext.configure(conn, opts={"compare_type": True})
         diff = compare_metadata(ctx, Base.metadata)
+    # R1 PR 1 : écarts de 0015 à 0017 retirés exactement (échoue s'il en manque).
+    from tests.test_migration_0004_drop_company_analyses import _without_pr1_changes
+    diff = _without_pr1_changes(diff, 0)
     assert sorted((d[0], d[1].name) for d in diff) == [
         ("add_index", "ix_capability_taxonomy_memberships_capability_definition_id"),
         ("add_index", "ix_competency_inference_basis_refs_inference_run_id"),

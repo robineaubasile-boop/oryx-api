@@ -122,6 +122,33 @@ R1C4_PROGRESS_COLUMN = "product_progress_action"
 R1D1 = "0014_evaluation_run_leases"
 R1D1_FILE = "0014_evaluation_run_leases.py"
 R1D1_RUN_COLUMNS = ("lease_token", "lease_expires_at")
+# R1 PR 1 (0015 à 0017, testés à part) : users.level_revision, registre
+# d'idempotence portefeuille, onze tables F2 (dans l'ordre de création).
+PR1_0015 = "0015_users_level_revision"
+PR1_0015_FILE = "0015_users_level_revision.py"
+PR1_0016 = "0016_portfolio_idempotency"
+PR1_0016_FILE = "0016_portfolio_idempotency.py"
+PR1_0017 = "0017_oryx_auth_foundations"
+PR1_0017_FILE = "0017_oryx_auth_foundations.py"
+PR1_FILES = [PR1_0015_FILE, PR1_0016_FILE, PR1_0017_FILE]
+PR1_REVISIONS = {PR1_0015, PR1_0016, PR1_0017}
+PR1_0016_TABLES = ("portfolio_write_idempotency",)
+PR1_0017_TABLES = (
+    "auth_identities", "invitations", "auth_operations", "auth_preauth_candidates", "auth_otp_requests",
+    "auth_otp_verification_attempts", "auth_abuse_subjects", "auth_abuse_events", "oryx_sessions",
+    "oryx_session_generations", "auth_operation_results",
+)
+PR1_0017_INDEXES = {
+    "ix_auth_identities_user_id", "ix_invitations_invited_by_user_id", "uq_invitations_one_pending_email",
+    "ix_auth_operations_invitation_id", "ix_auth_operations_auth_identity_id", "ix_auth_operations_user_id",
+    "ix_auth_operations_target_user_id", "ix_auth_operations_initiating_session_id",
+    "uq_auth_operations_one_committed_invitation", "uq_auth_preauth_candidates_one_open",
+    "uq_auth_preauth_candidates_one_ever_bound", "uq_auth_otp_requests_one_live",
+    "uq_auth_otp_verification_attempts_one_unresolved", "uq_auth_otp_verification_attempts_one_accepted",
+    "ix_auth_abuse_events_window", "ix_auth_abuse_events_auth_operation_id", "ix_auth_abuse_events_otp_request_id",
+    "ix_oryx_sessions_user_id",
+}
+PR1_TABLES = set(PR1_0016_TABLES + PR1_0017_TABLES)
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -226,7 +253,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
@@ -351,7 +378,52 @@ def _indexes(engine, table) -> list:
         ), {"t": table}).scalars().all()
 
 
+def _pr1_revisions_applied(engine) -> int:
+    """Nombre de révisions R1 PR 1 (0015, 0016, 0017) présentes en base."""
+    with engine.connect() as conn:
+        if conn.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar() is None:
+            return 0
+        version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
+    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3}.get(version, 0)
+
+
+def _without_pr1_changes(diff, applied: int) -> list:
+    """Retire du diff compare_metadata EXACTEMENT les écarts des révisions
+    R1 PR 1 non encore appliquées (users.level_revision, tables et index de
+    0016 / 0017), et échoue si l'un d'eux manque ou si un écart PR 1 apparaît
+    alors que sa révision est appliquée. Retourne le reste."""
+    expected = []
+    if applied < 1:
+        expected.append(("add_column", "users.level_revision"))
+    if applied < 2:
+        expected += [("add_table", t) for t in PR1_0016_TABLES]
+    if applied < 3:
+        expected += [("add_table", t) for t in PR1_0017_TABLES] + [("add_index", i) for i in PR1_0017_INDEXES]
+    found, rest = [], []
+    for d in diff:
+        key = None
+        if isinstance(d, tuple) and d[0] == "add_column" and d[2] == "users" and d[3].name == "level_revision":
+            key = ("add_column", "users.level_revision")
+        elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in PR1_0016_TABLES + PR1_0017_TABLES:
+            key = ("add_table", d[1].name)
+        elif isinstance(d, tuple) and d[0] == "add_index" and d[1].name in PR1_0017_INDEXES:
+            key = ("add_index", d[1].name)
+        if key:
+            found.append(key)
+        else:
+            rest.append(d)
+    assert sorted(found) == sorted(expected), diff
+    return rest
+
+
 def _compare_metadata(engine) -> list:
+    """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1 des
+    révisions 0015 à 0017 pas encore appliquées (retirés exactement par
+    _without_pr1_changes). À la tête, aucun écart n'est retiré."""
+    return _without_pr1_changes(_raw_compare_metadata(engine), _pr1_revisions_applied(engine))
+
+
+def _raw_compare_metadata(engine) -> list:
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     with engine.connect() as conn:

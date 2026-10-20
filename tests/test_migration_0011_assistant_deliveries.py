@@ -48,7 +48,12 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    PR1_TABLES,
     _without_r1d1_changes,
+    PR1_0015,
+    PR1_0016,
+    PR1_0017,
+    PR1_FILES,
     R1D1,
     R1D1_FILE,
     R1C1_TABLES,
@@ -119,19 +124,19 @@ def test_revision_chain_is_exactly_0001_to_0011_then_0012():
     R1-C1. Depuis R1-C2, 0012 (decryptage_cognitive_links) la suit ; depuis
     R1-C4, 0013 (affinité conversationnelle) est la tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [R1D1]
+    assert script.get_heads() == [PR1_0017]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
     chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
-    assert set(revisions) == set(chain)
+    assert set(revisions) == set(chain) | {PR1_0015, PR1_0016, PR1_0017}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE]
-    assert len(files) == 14
+    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES
+    assert len(files) == 17
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -198,7 +203,7 @@ def test_offline_sql_of_0011_downgrade_reverts_exactly_r1c1():
 
 def test_metadata_declares_exactly_the_assistant_deliveries_table_in_addition():
     """(+ decryptage_cognitive_links de R1-C2, testée à part.)"""
-    assert set(Base.metadata.tables) == PRE_R1C1_TABLES | R1C1_TABLES | R1C2_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PRE_R1C1_TABLES | R1C1_TABLES | R1C2_TABLES
     assert AssistantDelivery.__table__ is Base.metadata.tables[DELIVERIES]
 
 
@@ -246,7 +251,8 @@ def test_no_server_defaults_and_no_relationships():
 
 
 def test_users_and_registry_tables_are_untouched():
-    assert [c.name for c in User.__table__.columns] == ["id", "level", "created_at"]
+    # R1 PR 1 (0015) : seul un compteur de révision du niveau est ajouté.
+    assert [c.name for c in User.__table__.columns] == ["id", "level", "created_at", "level_revision"]
     registry = Base.metadata.tables[CONVERSATIONS]
     assert [c.name for c in registry.columns] == ["conversation_key", "user_id", "created_at"]
 
@@ -306,8 +312,8 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == R1D1
-    assert _tables(pg_engine) == HEAD_TABLES
+    assert _version(pg_engine) == PR1_0017
+    assert _tables(pg_engine) == HEAD_TABLES | PR1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)

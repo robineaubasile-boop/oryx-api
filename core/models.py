@@ -1,19 +1,28 @@
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Float, Integer, SmallInteger, BigInteger, Text, DateTime, ForeignKey, Uuid,
-    CheckConstraint, UniqueConstraint, Index, text,
+    Column, String, Float, Integer, SmallInteger, BigInteger, Boolean, Text, DateTime, ForeignKey, Uuid,
+    CheckConstraint, ForeignKeyConstraint, UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from core.db import Base
 
 
 class User(Base):
+    """R1 PR 1 (migration 0015_users_level_revision) : level_revision BIGINT
+    NOT NULL DEFAULT 0, CHECK >= 0. Seul server_default de la chaîne :
+    l'ancien backend insère sans connaître la colonne. Les anciennes routes
+    ne font pas avancer la révision ; elle ne fait foi que pour le futur
+    contrat versionné."""
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("level_revision >= 0", name="ck_users_level_revision_non_negative"),
+    )
 
     id = Column(String, primary_key=True)
     level = Column(String, nullable=False, default="debutant")
     created_at = Column(DateTime, default=datetime.utcnow)
+    level_revision = Column(BigInteger, nullable=False, server_default=text("0"))
 
 
 class PortfolioPosition(Base):
@@ -1659,3 +1668,886 @@ class DecryptageCognitiveLink(Base):
     input_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
     response_context_event_id = Column(Uuid, ForeignKey("cognitive_events.id"), nullable=True)
     product_progress_action = Column(String, nullable=True)
+
+
+# --------------------------------------------------------------------------
+# R1 PR 1 — Fondations PostgreSQL (migrations 0016 et 0017).
+#
+# Structures INACTIVES : aucune route, aucun service ni le frontend ne les
+# lit ou ne les écrit encore. Conventions : UUID générés par l'application,
+# TIMESTAMPTZ, VARCHAR sans longueur, CHECK nommés, aucun ENUM, aucun
+# trigger, FK sans ON DELETE / ON UPDATE, aucun server_default.
+#
+# Aucun secret en clair : les colonnes *_hash / *_hmac contiennent un
+# HMAC-SHA256 hexadécimal à clé serveur versionnée (colonne *_key_version).
+# Les FK composites (MATCH SIMPLE, défaut PostgreSQL) ne portent que sur des
+# colonnes immuables ou écrites une seule fois, à l'exception du statut
+# 'committed' d'une auth_operation, terminal dans le protocole.
+# --------------------------------------------------------------------------
+
+class PortfolioWriteIdempotency(Base):
+    """Reçu durable d'une écriture portefeuille idempotente (R1 PR 1,
+    migration 0016_portfolio_idempotency).
+
+    La clé d'idempotence est (user_id, operation_type, operation_id) :
+    operation_id est l'UUID d'opération du contrat R1, operation_type une
+    identité d'opération explicitement typée. Le reçu est écrit dans la même
+    transaction que l'écriture de la position ; le même triplet rejoue
+    result_payload, une empreinte différente donne 409 (règle du service).
+
+    request_fingerprint est un HMAC (valeurs financières de faible entropie)
+    versionné par fingerprint_version (canonicalisation) et
+    fingerprint_key_version (clé). Aucune déduplication fondée sur les
+    valeurs financières : aucun index sur l'empreinte. position_id est une
+    référence logique sans FK : le reçu survit à la suppression de la
+    position. Aucune purge automatique pendant R1."""
+    __tablename__ = "portfolio_write_idempotency"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_type IN ('portfolio_position_create', 'portfolio_position_update', "
+            "'portfolio_position_delete')",
+            name="ck_portfolio_write_idempotency_operation_type",
+        ),
+        CheckConstraint(
+            "request_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_portfolio_write_idempotency_request_fingerprint_format",
+        ),
+        CheckConstraint(
+            "result_status BETWEEN 200 AND 299",
+            name="ck_portfolio_write_idempotency_result_status",
+        ),
+    )
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    operation_type = Column(String, primary_key=True)
+    operation_id = Column(Uuid, primary_key=True)
+    fingerprint_version = Column(String, nullable=False)
+    fingerprint_key_version = Column(String, nullable=False)
+    request_fingerprint = Column(String, nullable=False)
+    result_version = Column(String, nullable=False)
+    result_status = Column(SmallInteger, nullable=False)
+    result_payload = Column(JSONB(none_as_null=True), nullable=False)
+    position_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class AuthIdentity(Base):
+    """Identité externe vérifiée rattachée à un profil (users.id) — R1 PR 1,
+    migration 0017_oryx_auth_foundations.
+
+    Identité durable = (provider, issuer, subject) : subject est
+    l'identifiant fournisseur vérifié (Supabase), jamais l'adresse e-mail.
+    Plusieurs identités par profil ; une identité n'appartient qu'à un seul
+    profil (UNIQUE(provider, issuer, subject)). Aucune déliaison, aucun
+    déplacement ni fusion en Vague 0 : user_id, issuer et subject sont figés
+    dès qu'une auth_operation référence l'identité (FK composites)."""
+    __tablename__ = "auth_identities"
+    __table_args__ = (
+        CheckConstraint("provider IN ('supabase')", name="ck_auth_identities_provider"),
+        CheckConstraint("issuer ~ '^https://'", name="ck_auth_identities_issuer"),
+        CheckConstraint("subject <> ''", name="ck_auth_identities_subject"),
+        CheckConstraint(
+            "verified_email_normalized IS NULL OR (verified_email_normalized = lower(btrim(verified_email_normalized)) "
+            "AND verified_email_normalized ~ '^[^@[:space:]]+@[^@[:space:]]+$')",
+            name="ck_auth_identities_verified_email_normalized",
+        ),
+        CheckConstraint(
+            "verified_email_normalized IS NULL OR email_verified_at IS NOT NULL",
+            name="ck_auth_identities_email_verified",
+        ),
+        CheckConstraint(
+            "pii_redacted_at IS NULL OR verified_email_normalized IS NULL",
+            name="ck_auth_identities_pii",
+        ),
+        UniqueConstraint("provider", "issuer", "subject", name="uq_auth_identities_provider_issuer_subject"),
+        UniqueConstraint("id", "user_id", name="uq_auth_identities_id_user"),
+        UniqueConstraint("id", "provider", "issuer", "subject", name="uq_auth_identities_id_provider_issuer_subject"),
+        Index("ix_auth_identities_user_id", "user_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    provider = Column(String, nullable=False)
+    issuer = Column(String, nullable=False)
+    subject = Column(String, nullable=False)
+    verified_email_normalized = Column(String, nullable=True)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    last_authenticated_at = Column(DateTime(timezone=True), nullable=True)
+    pii_redacted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class Invitation(Base):
+    """Invitation à usage unique, créable avant l'existence du profil invité
+    (aucune FK vers le profil invité) — R1 PR 1, migration 0017.
+
+    recipient_email_normalized est facultatif : un invité peut activer son
+    lien sans compte Supabase. Le profil activé se déduit de l'unique
+    auth_operation 'invitation_activation' committed (index partiel
+    uq_auth_operations_one_committed_invitation). Aucune récupération
+    automatique après perte de l'accès."""
+    __tablename__ = "invitations"
+    __table_args__ = (
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="ck_invitations_token_hash_format"),
+        CheckConstraint(
+            "recipient_email_normalized IS NULL OR (recipient_email_normalized = "
+            "lower(btrim(recipient_email_normalized)) "
+            "AND recipient_email_normalized ~ '^[^@[:space:]]+@[^@[:space:]]+$')",
+            name="ck_invitations_recipient_email_normalized",
+        ),
+        CheckConstraint("status IN ('pending', 'accepted', 'revoked')", name="ck_invitations_status"),
+        CheckConstraint("expires_at > created_at", name="ck_invitations_expiry"),
+        CheckConstraint(
+            "(status = 'pending' AND accepted_at IS NULL AND revoked_at IS NULL) "
+            "OR (status = 'accepted' AND accepted_at IS NOT NULL AND revoked_at IS NULL "
+            "AND accepted_at <= expires_at) "
+            "OR (status = 'revoked' AND revoked_at IS NOT NULL AND accepted_at IS NULL)",
+            name="ck_invitations_state",
+        ),
+        CheckConstraint(
+            "pii_redacted_at IS NULL OR recipient_email_normalized IS NULL",
+            name="ck_invitations_pii",
+        ),
+        UniqueConstraint("token_hash", name="uq_invitations_token_hash"),
+        Index("ix_invitations_invited_by_user_id", "invited_by_user_id"),
+        Index(
+            "uq_invitations_one_pending_email", "recipient_email_normalized", unique=True,
+            postgresql_where=text("status = 'pending' AND recipient_email_normalized IS NOT NULL"),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    token_hash = Column(String, nullable=False)
+    hash_key_version = Column(String, nullable=False)
+    recipient_email_normalized = Column(String, nullable=True)
+    cohort = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    invited_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    pii_redacted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthOperation(Base):
+    """Opération d'authentification F2 — R1 PR 1, migration 0017.
+
+    kind : supabase_email_sign_in (OTP Supabase), invitation_activation
+    (lien d'invitation, sans e-mail ni identité fournisseur) ou
+    email_linking (une session invitée authentifiée rattache une identité
+    e-mail Supabase prouvée par OTP récent à son profil cible ; aucune
+    fusion : conflict_other_profile => failed). Les champs spécifiques ne
+    sont imposés qu'au kind qui en a besoin.
+
+    proven_provider / proven_issuer / proven_subject : identité réellement
+    prouvée par le fournisseur, contrôlée contre auth_identity_id par FK
+    composite ; identity_resolution trace le contrôle d'appartenance.
+
+    Le cycle de FK avec oryx_sessions (initiating_session_id) n'est pas
+    obligatoire : colonne NULL hors email_linking, session toujours
+    préexistante, FK créée par ALTER après oryx_sessions (use_alter).
+    'committed' est terminal : le résultat canonique
+    (auth_operation_results) fige (id, kind, status, committed_at)."""
+    __tablename__ = "auth_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('supabase_email_sign_in', 'invitation_activation', 'email_linking')",
+            name="ck_auth_operations_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'committed', 'failed', 'expired')",
+            name="ck_auth_operations_status",
+        ),
+        CheckConstraint(
+            "email_normalized IS NULL OR (email_normalized = lower(btrim(email_normalized)) "
+            "AND email_normalized ~ '^[^@[:space:]]+@[^@[:space:]]+$')",
+            name="ck_auth_operations_email_normalized",
+        ),
+        CheckConstraint(
+            "initiating_session_method = 'invitation_activation'",
+            name="ck_auth_operations_initiating_session_method",
+        ),
+        CheckConstraint("proven_provider IN ('supabase')", name="ck_auth_operations_proven_provider"),
+        CheckConstraint(
+            "identity_resolution IN ('existing_identity', 'new_identity', 'conflict_other_profile')",
+            name="ck_auth_operations_identity_resolution",
+        ),
+        CheckConstraint("expires_at > created_at", name="ck_auth_operations_expiry"),
+        CheckConstraint(
+            "committed_at IS NULL OR committed_at <= expires_at",
+            name="ck_auth_operations_commit_in_time",
+        ),
+        CheckConstraint(
+            "(kind = 'invitation_activation') = (invitation_id IS NOT NULL)",
+            name="ck_auth_operations_invitation_kind",
+        ),
+        CheckConstraint(
+            "kind <> 'invitation_activation' OR (email_normalized IS NULL AND auth_identity_id IS NULL "
+            "AND proven_subject IS NULL AND identity_resolution IS NULL)",
+            name="ck_auth_operations_invitation_fields",
+        ),
+        CheckConstraint(
+            "kind NOT IN ('supabase_email_sign_in', 'email_linking') OR email_normalized IS NOT NULL "
+            "OR pii_redacted_at IS NOT NULL",
+            name="ck_auth_operations_email_fields",
+        ),
+        CheckConstraint(
+            "(kind = 'email_linking') = (target_user_id IS NOT NULL) "
+            "AND (kind = 'email_linking') = (initiating_session_id IS NOT NULL) "
+            "AND (kind = 'email_linking') = (initiating_session_method IS NOT NULL)",
+            name="ck_auth_operations_linking_fields",
+        ),
+        CheckConstraint(
+            "target_user_id IS NULL OR user_id IS NULL OR user_id = target_user_id",
+            name="ck_auth_operations_linking_target",
+        ),
+        CheckConstraint(
+            "(proven_provider IS NULL) = (proven_issuer IS NULL) "
+            "AND (proven_issuer IS NULL) = (proven_subject IS NULL) "
+            "AND (identity_resolution IS NULL OR proven_subject IS NOT NULL)",
+            name="ck_auth_operations_proven_identity",
+        ),
+        CheckConstraint(
+            "(status = 'committed') = (committed_at IS NOT NULL) "
+            "AND (status <> 'committed' OR user_id IS NOT NULL) "
+            "AND (status <> 'committed' OR kind = 'invitation_activation' "
+            "OR (auth_identity_id IS NOT NULL AND identity_resolution IS NOT NULL "
+            "AND identity_resolution IN ('existing_identity', 'new_identity') "
+            "AND proven_provider IS NOT NULL AND proven_issuer IS NOT NULL AND proven_subject IS NOT NULL))",
+            name="ck_auth_operations_commit",
+        ),
+        CheckConstraint(
+            "identity_resolution <> 'conflict_other_profile' "
+            "OR (kind = 'email_linking' AND status = 'failed' AND auth_identity_id IS NULL)",
+            name="ck_auth_operations_no_merge",
+        ),
+        CheckConstraint("(status = 'failed') = (failure_code IS NOT NULL)", name="ck_auth_operations_failure"),
+        CheckConstraint("pii_redacted_at IS NULL OR email_normalized IS NULL", name="ck_auth_operations_pii"),
+        ForeignKeyConstraint(
+            ["auth_identity_id", "user_id"], ["auth_identities.id", "auth_identities.user_id"],
+            name="auth_operations_identity_user_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["auth_identity_id", "proven_provider", "proven_issuer", "proven_subject"],
+            ["auth_identities.id", "auth_identities.provider", "auth_identities.issuer", "auth_identities.subject"],
+            name="auth_operations_proven_identity_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["initiating_session_id", "target_user_id", "initiating_session_method"],
+            ["oryx_sessions.id", "oryx_sessions.user_id", "oryx_sessions.auth_method"],
+            name="auth_operations_linking_session_fkey", use_alter=True,
+        ),
+        UniqueConstraint("id", "kind", name="uq_auth_operations_id_kind"),
+        UniqueConstraint("id", "user_id", "kind", name="uq_auth_operations_id_user_kind"),
+        UniqueConstraint("id", "invitation_id", name="uq_auth_operations_id_invitation"),
+        UniqueConstraint("id", "auth_identity_id", name="uq_auth_operations_id_identity"),
+        UniqueConstraint("id", "kind", "status", "committed_at", name="uq_auth_operations_id_kind_commit"),
+        Index("ix_auth_operations_invitation_id", "invitation_id"),
+        Index("ix_auth_operations_auth_identity_id", "auth_identity_id"),
+        Index("ix_auth_operations_user_id", "user_id"),
+        Index("ix_auth_operations_target_user_id", "target_user_id"),
+        Index("ix_auth_operations_initiating_session_id", "initiating_session_id"),
+        Index(
+            "uq_auth_operations_one_committed_invitation", "invitation_id", unique=True,
+            postgresql_where=text("status = 'committed'"),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    email_normalized = Column(String, nullable=True)
+    invitation_id = Column(Uuid, ForeignKey("invitations.id"), nullable=True)
+    auth_identity_id = Column(Uuid, ForeignKey("auth_identities.id"), nullable=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    target_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    initiating_session_id = Column(Uuid, nullable=True)
+    initiating_session_method = Column(String, nullable=True)
+    proven_provider = Column(String, nullable=True)
+    proven_issuer = Column(String, nullable=True)
+    proven_subject = Column(String, nullable=True)
+    identity_resolution = Column(String, nullable=True)
+    failure_code = Column(String, nullable=True)
+    operation_schema_version = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware, onupdate=_utcnow_aware)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    committed_at = Column(DateTime(timezone=True), nullable=True)
+    pii_redacted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthPreauthCandidate(Base):
+    """Candidat pré-authentification F2 (génération g d'une opération qui
+    ouvre une session) — R1 PR 1, migration 0017.
+
+    candidate_hash : HMAC du secret candidat (jamais en clair). La fenêtre
+    d'authentification (authentication_expires_at, au plus dix minutes)
+    borne uniquement l'activation : bound_at <= authentication_expires_at.
+    Un candidat bound reste présentable pendant la reprise de cinq minutes
+    après commit (auth_operation_results.resume_until), même si sa fenêtre
+    d'authentification a expiré ; la reprise ne valide jamais une nouvelle
+    authentification. Après liaison, bound_at est conservé : la clôture
+    (closed) ou la révocation (revoked) restent possibles, aucune FK ne
+    porte sur status."""
+    __tablename__ = "auth_preauth_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_kind IN ('supabase_email_sign_in', 'invitation_activation')",
+            name="ck_auth_preauth_candidates_operation_kind",
+        ),
+        CheckConstraint("generation_no >= 1", name="ck_auth_preauth_candidates_generation_no"),
+        CheckConstraint("candidate_hash ~ '^[0-9a-f]{64}$'", name="ck_auth_preauth_candidates_candidate_hash_format"),
+        CheckConstraint(
+            "status IN ('open', 'bound', 'closed', 'superseded', 'expired', 'revoked')",
+            name="ck_auth_preauth_candidates_status",
+        ),
+        CheckConstraint(
+            "authentication_expires_at > created_at "
+            "AND authentication_expires_at - created_at <= interval '10 minutes'",
+            name="ck_auth_preauth_candidates_authentication_window",
+        ),
+        CheckConstraint(
+            "(status = 'open' AND bound_at IS NULL AND closed_at IS NULL) "
+            "OR (status = 'bound' AND bound_at IS NOT NULL AND closed_at IS NULL) "
+            "OR (status = 'closed' AND bound_at IS NOT NULL AND closed_at IS NOT NULL) "
+            "OR (status IN ('superseded', 'expired') AND bound_at IS NULL AND closed_at IS NOT NULL) "
+            "OR (status = 'revoked' AND closed_at IS NOT NULL)",
+            name="ck_auth_preauth_candidates_state",
+        ),
+        CheckConstraint(
+            "(bound_at IS NULL OR (bound_at >= created_at AND bound_at <= authentication_expires_at)) "
+            "AND (closed_at IS NULL OR closed_at >= created_at) "
+            "AND (closed_at IS NULL OR bound_at IS NULL OR closed_at >= bound_at)",
+            name="ck_auth_preauth_candidates_timeline",
+        ),
+        ForeignKeyConstraint(
+            ["auth_operation_id", "operation_kind"], ["auth_operations.id", "auth_operations.kind"],
+            name="auth_preauth_candidates_operation_kind_fkey",
+        ),
+        UniqueConstraint("candidate_hash", name="uq_auth_preauth_candidates_hash"),
+        UniqueConstraint("auth_operation_id", "generation_no", name="uq_auth_preauth_candidates_operation_generation"),
+        UniqueConstraint(
+            "id", "generation_no", "auth_operation_id", name="uq_auth_preauth_candidates_id_generation_operation",
+        ),
+        UniqueConstraint("id", "auth_operation_id", "bound_at", name="uq_auth_preauth_candidates_id_operation_bound"),
+        Index(
+            "uq_auth_preauth_candidates_one_open", "auth_operation_id", unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+        Index(
+            "uq_auth_preauth_candidates_one_ever_bound", "auth_operation_id", unique=True,
+            postgresql_where=text("bound_at IS NOT NULL"),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    auth_operation_id = Column(Uuid, nullable=False)
+    operation_kind = Column(String, nullable=False)
+    generation_no = Column(Integer, nullable=False)
+    candidate_hash = Column(String, nullable=False)
+    hash_key_version = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    authentication_expires_at = Column(DateTime(timezone=True), nullable=False)
+    bound_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthOtpRequest(Base):
+    """Demande OTP e-mail (une génération de code Supabase) — R1 PR 1,
+    migration 0017.
+
+    Aucun code en clair : expected_code_hmac est l'empreinte HMAC du code
+    attendu, calculée dès sa génération par Supabase et liée à la demande,
+    à sa finalité (purpose) et à sa génération (code_generation). Elle est
+    écrite une seule fois et doit exister avant toute tentative (FK de
+    auth_otp_verification_attempts). États : émission (issuing /
+    issue_uncertain / issued / send_failed), vérification (verifying /
+    verify_uncertain), validation (verified) et clôtures. Les CHECK
+    (600 secondes, 5 échecs par demande) sont des filets ; les budgets
+    effectifs sont calculés par le service sur auth_abuse_events."""
+    __tablename__ = "auth_otp_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_kind IN ('supabase_email_sign_in', 'email_linking')",
+            name="ck_auth_otp_requests_operation_kind",
+        ),
+        CheckConstraint("purpose IN ('sign_in', 'email_linking')", name="ck_auth_otp_requests_purpose"),
+        CheckConstraint(
+            "(operation_kind = 'supabase_email_sign_in' AND purpose = 'sign_in') "
+            "OR (operation_kind = 'email_linking' AND purpose = 'email_linking')",
+            name="ck_auth_otp_requests_purpose_kind",
+        ),
+        CheckConstraint("code_generation >= 1", name="ck_auth_otp_requests_code_generation"),
+        CheckConstraint(
+            "email_normalized IS NULL OR (email_normalized = lower(btrim(email_normalized)) "
+            "AND email_normalized ~ '^[^@[:space:]]+@[^@[:space:]]+$')",
+            name="ck_auth_otp_requests_email_normalized",
+        ),
+        CheckConstraint(
+            "email_normalized IS NOT NULL OR pii_redacted_at IS NOT NULL",
+            name="ck_auth_otp_requests_email_present",
+        ),
+        CheckConstraint("pii_redacted_at IS NULL OR email_normalized IS NULL", name="ck_auth_otp_requests_pii"),
+        CheckConstraint(
+            "expected_code_hmac IS NULL OR expected_code_hmac ~ '^[0-9a-f]{64}$'",
+            name="ck_auth_otp_requests_expected_code_hmac_format",
+        ),
+        CheckConstraint(
+            "(expected_code_hmac IS NULL) = (expected_code_hmac_key_version IS NULL)",
+            name="ck_auth_otp_requests_expected_code_pair",
+        ),
+        CheckConstraint(
+            "status NOT IN ('issued', 'verifying', 'verify_uncertain', 'verified', 'exhausted') "
+            "OR expected_code_hmac IS NOT NULL",
+            name="ck_auth_otp_requests_expected_code_required",
+        ),
+        CheckConstraint(
+            "status IN ('issuing', 'issue_uncertain', 'issued', 'send_failed', 'verifying', "
+            "'verify_uncertain', 'verified', 'exhausted', 'expired', 'superseded')",
+            name="ck_auth_otp_requests_status",
+        ),
+        CheckConstraint("failure_count BETWEEN 0 AND 5", name="ck_auth_otp_requests_failures"),
+        CheckConstraint("status <> 'exhausted' OR failure_count = 5", name="ck_auth_otp_requests_exhausted"),
+        CheckConstraint(
+            "expires_at > requested_at AND expires_at - requested_at <= interval '600 seconds'",
+            name="ck_auth_otp_requests_ttl",
+        ),
+        CheckConstraint(
+            "status NOT IN ('issuing', 'issue_uncertain', 'send_failed') OR provider_sent_at IS NULL",
+            name="ck_auth_otp_requests_issue",
+        ),
+        CheckConstraint(
+            "(status = 'verified') = (verified_at IS NOT NULL) "
+            "AND (verified_at IS NULL OR verified_at <= expires_at)",
+            name="ck_auth_otp_requests_verified",
+        ),
+        CheckConstraint(
+            "(status IN ('send_failed', 'exhausted', 'expired', 'superseded')) = (closed_at IS NOT NULL)",
+            name="ck_auth_otp_requests_closed",
+        ),
+        ForeignKeyConstraint(
+            ["auth_operation_id", "operation_kind"], ["auth_operations.id", "auth_operations.kind"],
+            name="auth_otp_requests_operation_kind_fkey",
+        ),
+        UniqueConstraint("auth_operation_id", "code_generation", name="uq_auth_otp_requests_operation_generation"),
+        UniqueConstraint(
+            "id", "code_generation", "purpose", "expires_at", "expected_code_hmac_key_version", "expected_code_hmac",
+            name="uq_auth_otp_requests_attempt_target",
+        ),
+        UniqueConstraint(
+            "id", "auth_operation_id", "verified_at", "expires_at", name="uq_auth_otp_requests_proof_target",
+        ),
+        Index(
+            "uq_auth_otp_requests_one_live", "auth_operation_id", unique=True,
+            postgresql_where=text(
+                "status IN ('issuing', 'issue_uncertain', 'issued', 'verifying', 'verify_uncertain', 'verified')"
+            ),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    auth_operation_id = Column(Uuid, nullable=False)
+    operation_kind = Column(String, nullable=False)
+    purpose = Column(String, nullable=False)
+    code_generation = Column(Integer, nullable=False)
+    email_normalized = Column(String, nullable=True)
+    expected_code_hmac = Column(String, nullable=True)
+    expected_code_hmac_key_version = Column(String, nullable=True)
+    status = Column(String, nullable=False)
+    failure_count = Column(SmallInteger, nullable=False)
+    requested_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    provider_sent_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    pii_redacted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthOtpVerificationAttempt(Base):
+    """Tentative de vérification d'un code OTP soumis — R1 PR 1, migration
+    0017.
+
+    code_hmac : HMAC local du code soumis (même clé, même finalité, même
+    génération que expected_code_hmac, recopiés et garantis par FK). La
+    comparaison locale précède toute vérification externe : local_match =
+    (code_hmac = expected_code_hmac) ; une tentative sans correspondance est
+    rejetée sans appel fournisseur ; seuls les codes correspondants peuvent
+    être in_flight / uncertain / accepted. Au plus une tentative non résolue
+    et une acceptée par demande (index partiels) : les validations
+    concurrentes et les résultats externes incertains restent distingués et
+    contrôlés durablement."""
+    __tablename__ = "auth_otp_verification_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_no >= 1", name="ck_auth_otp_verification_attempts_attempt_no"),
+        CheckConstraint(
+            "purpose IN ('sign_in', 'email_linking')", name="ck_auth_otp_verification_attempts_purpose",
+        ),
+        CheckConstraint(
+            "expected_code_hmac ~ '^[0-9a-f]{64}$'",
+            name="ck_auth_otp_verification_attempts_expected_code_hmac_format",
+        ),
+        CheckConstraint("code_hmac ~ '^[0-9a-f]{64}$'", name="ck_auth_otp_verification_attempts_code_hmac_format"),
+        CheckConstraint(
+            "state IN ('in_flight', 'uncertain', 'rejected', 'accepted', 'abandoned')",
+            name="ck_auth_otp_verification_attempts_state",
+        ),
+        CheckConstraint(
+            "local_match = (code_hmac = expected_code_hmac)",
+            name="ck_auth_otp_verification_attempts_local_match",
+        ),
+        CheckConstraint(
+            "state NOT IN ('in_flight', 'uncertain', 'accepted') OR local_match",
+            name="ck_auth_otp_verification_attempts_external_requires_match",
+        ),
+        CheckConstraint(
+            "local_match OR (state = 'rejected' AND uncertain_since IS NULL AND provider_error_code IS NULL)",
+            name="ck_auth_otp_verification_attempts_local_rejection",
+        ),
+        CheckConstraint(
+            "(state <> 'in_flight' OR uncertain_since IS NULL) "
+            "AND (state <> 'uncertain' OR uncertain_since IS NOT NULL)",
+            name="ck_auth_otp_verification_attempts_uncertainty",
+        ),
+        CheckConstraint(
+            "(state IN ('rejected', 'accepted', 'abandoned')) = (resolved_at IS NOT NULL) "
+            "AND (resolved_at IS NULL OR resolved_at >= started_at) "
+            "AND (uncertain_since IS NULL OR uncertain_since >= started_at)",
+            name="ck_auth_otp_verification_attempts_resolution",
+        ),
+        CheckConstraint(
+            "started_at <= request_expires_at", name="ck_auth_otp_verification_attempts_started_in_ttl",
+        ),
+        ForeignKeyConstraint(
+            ["otp_request_id", "code_generation", "purpose", "request_expires_at", "code_hmac_key_version",
+             "expected_code_hmac"],
+            ["auth_otp_requests.id", "auth_otp_requests.code_generation", "auth_otp_requests.purpose",
+             "auth_otp_requests.expires_at", "auth_otp_requests.expected_code_hmac_key_version",
+             "auth_otp_requests.expected_code_hmac"],
+            name="auth_otp_verification_attempts_request_fkey",
+        ),
+        UniqueConstraint("otp_request_id", "attempt_no", name="uq_auth_otp_verification_attempts_request_attempt"),
+        Index(
+            "uq_auth_otp_verification_attempts_one_unresolved", "otp_request_id", unique=True,
+            postgresql_where=text("state IN ('in_flight', 'uncertain')"),
+        ),
+        Index(
+            "uq_auth_otp_verification_attempts_one_accepted", "otp_request_id", unique=True,
+            postgresql_where=text("state = 'accepted'"),
+        ),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    otp_request_id = Column(Uuid, nullable=False)
+    attempt_no = Column(Integer, nullable=False)
+    code_generation = Column(Integer, nullable=False)
+    purpose = Column(String, nullable=False)
+    request_expires_at = Column(DateTime(timezone=True), nullable=False)
+    code_hmac_key_version = Column(String, nullable=False)
+    expected_code_hmac = Column(String, nullable=False)
+    code_hmac = Column(String, nullable=False)
+    local_match = Column(Boolean, nullable=False)
+    state = Column(String, nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    uncertain_since = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    provider_error_code = Column(String, nullable=True)
+
+
+class AuthAbuseSubject(Base):
+    """Sujet pseudonymisé d'un budget anti-abus (e-mail ou IP, jamais en
+    clair) — R1 PR 1, migration 0017. Sa ligne sert de verrou (SELECT ...
+    FOR UPDATE) pour sérialiser les émissions concurrentes."""
+    __tablename__ = "auth_abuse_subjects"
+    __table_args__ = (
+        CheckConstraint("scope_kind IN ('email', 'ip')", name="ck_auth_abuse_subjects_scope_kind"),
+        CheckConstraint("scope_hmac ~ '^[0-9a-f]{64}$'", name="ck_auth_abuse_subjects_scope_hmac_format"),
+        UniqueConstraint("scope_kind", "hash_key_version", "scope_hmac", name="uq_auth_abuse_subjects_scope"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope_kind = Column(String, nullable=False)
+    scope_hmac = Column(String, nullable=False)
+    hash_key_version = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+
+
+class AuthAbuseEvent(Base):
+    """Journal en ajout seul des événements anti-abus — R1 PR 1, migration
+    0017. Les budgets glissants (5 échecs par adresse sur 15 minutes,
+    60 secondes entre deux envois, 5 demandes par adresse et par heure,
+    limites IP configurables) sont comptés par le service sur
+    (subject_id, event_kind, occurred_at), sous le verrou du sujet."""
+    __tablename__ = "auth_abuse_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_kind IN ('otp_request', 'otp_failure', 'invitation_attempt', 'resume_attempt')",
+            name="ck_auth_abuse_events_event_kind",
+        ),
+        CheckConstraint(
+            "(event_kind IN ('otp_request', 'otp_failure')) = (otp_request_id IS NOT NULL)",
+            name="ck_auth_abuse_events_otp_link",
+        ),
+        CheckConstraint(
+            "event_kind <> 'resume_attempt' OR auth_operation_id IS NOT NULL",
+            name="ck_auth_abuse_events_resume_link",
+        ),
+        Index("ix_auth_abuse_events_window", "subject_id", "event_kind", "occurred_at"),
+        Index("ix_auth_abuse_events_auth_operation_id", "auth_operation_id"),
+        Index("ix_auth_abuse_events_otp_request_id", "otp_request_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    subject_id = Column(Uuid, ForeignKey("auth_abuse_subjects.id"), nullable=False)
+    event_kind = Column(String, nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    auth_operation_id = Column(Uuid, ForeignKey("auth_operations.id"), nullable=True)
+    otp_request_id = Column(Uuid, ForeignKey("auth_otp_requests.id"), nullable=True)
+    policy_version = Column(String, nullable=False)
+
+
+class OryxSession(Base):
+    """Session canonique Oryx — R1 PR 1, migration 0017.
+
+    Le titulaire est users.id ; auth_method et la provenance
+    (created_by_operation_id, invitation_id, auth_identity_id) sont vérifiés
+    par FK composites contre l'opération créatrice. Une session invitée n'a
+    pas d'auth_identity_id. Expiration absolue de quinze jours, jamais
+    prolongée (ni par la reprise, ni par une rotation, absente en Vague 0).
+    Révocation terminale garantie par le service."""
+    __tablename__ = "oryx_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "auth_method IN ('supabase_email_sign_in', 'invitation_activation')",
+            name="ck_oryx_sessions_auth_method",
+        ),
+        CheckConstraint(
+            "(auth_method = 'invitation_activation') = (invitation_id IS NOT NULL)",
+            name="ck_oryx_sessions_invitation_provenance",
+        ),
+        CheckConstraint(
+            "(auth_method = 'supabase_email_sign_in') = (auth_identity_id IS NOT NULL)",
+            name="ck_oryx_sessions_identity_provenance",
+        ),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_oryx_sessions_status"),
+        CheckConstraint(
+            "absolute_expires_at - created_at = interval '15 days'",
+            name="ck_oryx_sessions_absolute_ttl",
+        ),
+        CheckConstraint(
+            "revocation_reason IN ('logout', 'admin', 'security')",
+            name="ck_oryx_sessions_revocation_reason",
+        ),
+        CheckConstraint(
+            "(status = 'revoked') = (revoked_at IS NOT NULL) AND (revoked_at IS NULL) = (revocation_reason IS NULL) "
+            "AND (revoked_at IS NULL OR revoked_at >= created_at)",
+            name="ck_oryx_sessions_revocation",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_operation_id", "user_id", "auth_method"],
+            ["auth_operations.id", "auth_operations.user_id", "auth_operations.kind"],
+            name="oryx_sessions_operation_holder_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_operation_id", "invitation_id"], ["auth_operations.id", "auth_operations.invitation_id"],
+            name="oryx_sessions_operation_invitation_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_operation_id", "auth_identity_id"], ["auth_operations.id", "auth_operations.auth_identity_id"],
+            name="oryx_sessions_operation_identity_fkey",
+        ),
+        UniqueConstraint("created_by_operation_id", name="uq_oryx_sessions_created_by_operation"),
+        UniqueConstraint("id", "created_by_operation_id", name="uq_oryx_sessions_id_operation"),
+        UniqueConstraint("id", "user_id", "auth_method", name="uq_oryx_sessions_id_user_method"),
+        Index("ix_oryx_sessions_user_id", "user_id"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_by_operation_id = Column(Uuid, nullable=False)
+    auth_method = Column(String, nullable=False)
+    invitation_id = Column(Uuid, nullable=True)
+    auth_identity_id = Column(Uuid, nullable=True)
+    status = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    absolute_expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revocation_reason = Column(String, nullable=True)
+    session_schema_version = Column(String, nullable=False)
+
+
+class OryxSessionGeneration(Base):
+    """Cookie actif immuable d'une génération de session F2 — R1 PR 1,
+    migration 0017.
+
+    active_secret_hash : HMAC du secret actif dérivé (HKDF-SHA256 puis
+    HMAC-SHA256, contrat versionné par derivation_version) de la clé
+    serveur, du candidat, de la génération et de la session canonique ;
+    distinct du candidate_hash. Vague 0 : une génération par session, aucune
+    rotation, aucune tolérance entre générations. La génération g, le
+    candidat et la session appartiennent à la même opération (FK
+    composites). issued_at = émission serveur du Set-Cookie, jamais une
+    preuve ; delivery_confirmed_at = première présentation valide du
+    cookie par le navigateur (preuve de livraison)."""
+    __tablename__ = "oryx_session_generations"
+    __table_args__ = (
+        CheckConstraint("generation_no >= 1", name="ck_oryx_session_generations_generation_no"),
+        CheckConstraint(
+            "active_secret_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_oryx_session_generations_active_secret_hash_format",
+        ),
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_oryx_session_generations_status"),
+        CheckConstraint(
+            "delivery_status IN ('pending', 'confirmed')", name="ck_oryx_session_generations_delivery_status",
+        ),
+        CheckConstraint(
+            "(delivery_status = 'confirmed') = (delivery_confirmed_at IS NOT NULL) "
+            "AND (delivery_confirmed_at IS NULL) = (delivery_proof_version IS NULL) "
+            "AND (delivery_confirmed_at IS NULL OR delivery_confirmed_at >= issued_at) "
+            "AND (delivery_confirmed_at IS NULL OR revoked_at IS NULL OR delivery_confirmed_at <= revoked_at)",
+            name="ck_oryx_session_generations_delivery",
+        ),
+        CheckConstraint(
+            "revocation_reason IN ('logout', 'admin', 'security')",
+            name="ck_oryx_session_generations_revocation_reason",
+        ),
+        CheckConstraint(
+            "(status = 'revoked') = (revoked_at IS NOT NULL) AND (revoked_at IS NULL) = (revocation_reason IS NULL) "
+            "AND (revoked_at IS NULL OR revoked_at >= issued_at)",
+            name="ck_oryx_session_generations_revocation",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "auth_operation_id"], ["oryx_sessions.id", "oryx_sessions.created_by_operation_id"],
+            name="oryx_session_generations_session_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "generation_no", "auth_operation_id"],
+            ["auth_preauth_candidates.id", "auth_preauth_candidates.generation_no",
+             "auth_preauth_candidates.auth_operation_id"],
+            name="oryx_session_generations_candidate_fkey",
+        ),
+        UniqueConstraint("session_id", name="uq_oryx_session_generations_session"),
+        UniqueConstraint("candidate_id", name="uq_oryx_session_generations_candidate"),
+        UniqueConstraint("active_secret_hash", name="uq_oryx_session_generations_secret_hash"),
+        UniqueConstraint("id", "session_id", "candidate_id", name="uq_oryx_session_generations_id_session_candidate"),
+    )
+
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    session_id = Column(Uuid, nullable=False)
+    auth_operation_id = Column(Uuid, nullable=False)
+    candidate_id = Column(Uuid, nullable=False)
+    generation_no = Column(Integer, nullable=False)
+    active_secret_hash = Column(String, nullable=False)
+    derivation_version = Column(String, nullable=False)
+    hash_key_version = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow_aware)
+    delivery_status = Column(String, nullable=False)
+    delivery_confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    delivery_proof_version = Column(String, nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revocation_reason = Column(String, nullable=True)
+
+
+class AuthOperationResult(Base):
+    """Résultat canonique d'une auth_operation committed (reprise idempotente)
+    — R1 PR 1, migration 0017.
+
+    resume_until = committed_at + cinq minutes exactement. Pendant cette
+    fenêtre, la présentation du même candidat bound rend le même résultat et
+    le même cookie (secret actif recalculé, jamais stocké) ; aucune
+    nouvelle session, génération ni authentification (UNIQUE partout).
+    Opérations ouvrant une session : session, candidat (bound_at =
+    committed_at) et génération liés à l'opération par FK composites.
+    email_linking : aucune session, identité liée obligatoire. Opérations
+    OTP : preuve récente (verified_at <= committed_at <= fin de validité de
+    la demande)."""
+    __tablename__ = "auth_operation_results"
+    __table_args__ = (
+        CheckConstraint(
+            "operation_kind IN ('supabase_email_sign_in', 'invitation_activation', 'email_linking')",
+            name="ck_auth_operation_results_operation_kind",
+        ),
+        CheckConstraint("operation_status = 'committed'", name="ck_auth_operation_results_operation_status"),
+        CheckConstraint(
+            "resume_until - committed_at = interval '5 minutes'",
+            name="ck_auth_operation_results_resume_window",
+        ),
+        CheckConstraint(
+            "(operation_kind = 'email_linking') = (session_id IS NULL) "
+            "AND (session_id IS NULL) = (candidate_id IS NULL) "
+            "AND (candidate_id IS NULL) = (generation_id IS NULL) "
+            "AND (candidate_id IS NULL) = (candidate_bound_at IS NULL)",
+            name="ck_auth_operation_results_session_parts",
+        ),
+        CheckConstraint(
+            "candidate_bound_at IS NULL OR candidate_bound_at = committed_at",
+            name="ck_auth_operation_results_candidate_bound_at",
+        ),
+        CheckConstraint(
+            "(operation_kind IN ('supabase_email_sign_in', 'email_linking')) = (auth_identity_id IS NOT NULL)",
+            name="ck_auth_operation_results_identity",
+        ),
+        CheckConstraint(
+            "(operation_kind IN ('supabase_email_sign_in', 'email_linking')) = (otp_request_id IS NOT NULL) "
+            "AND (otp_request_id IS NULL) = (otp_verified_at IS NULL) "
+            "AND (otp_verified_at IS NULL) = (otp_expires_at IS NULL)",
+            name="ck_auth_operation_results_otp_parts",
+        ),
+        CheckConstraint(
+            "otp_verified_at IS NULL OR (committed_at >= otp_verified_at AND committed_at <= otp_expires_at)",
+            name="ck_auth_operation_results_otp_recent",
+        ),
+        ForeignKeyConstraint(
+            ["operation_id", "operation_kind", "operation_status", "committed_at"],
+            ["auth_operations.id", "auth_operations.kind", "auth_operations.status", "auth_operations.committed_at"],
+            name="auth_operation_results_operation_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "operation_id"], ["oryx_sessions.id", "oryx_sessions.created_by_operation_id"],
+            name="auth_operation_results_session_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["candidate_id", "operation_id", "candidate_bound_at"],
+            ["auth_preauth_candidates.id", "auth_preauth_candidates.auth_operation_id",
+             "auth_preauth_candidates.bound_at"],
+            name="auth_operation_results_candidate_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["generation_id", "session_id", "candidate_id"],
+            ["oryx_session_generations.id", "oryx_session_generations.session_id",
+             "oryx_session_generations.candidate_id"],
+            name="auth_operation_results_generation_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["operation_id", "auth_identity_id"], ["auth_operations.id", "auth_operations.auth_identity_id"],
+            name="auth_operation_results_identity_fkey",
+        ),
+        ForeignKeyConstraint(
+            ["otp_request_id", "operation_id", "otp_verified_at", "otp_expires_at"],
+            ["auth_otp_requests.id", "auth_otp_requests.auth_operation_id", "auth_otp_requests.verified_at",
+             "auth_otp_requests.expires_at"],
+            name="auth_operation_results_otp_fkey",
+        ),
+        UniqueConstraint("session_id", name="uq_auth_operation_results_session"),
+        UniqueConstraint("candidate_id", name="uq_auth_operation_results_candidate"),
+        UniqueConstraint("generation_id", name="uq_auth_operation_results_generation"),
+        UniqueConstraint("otp_request_id", name="uq_auth_operation_results_otp_request"),
+    )
+
+    operation_id = Column(Uuid, primary_key=True)
+    operation_kind = Column(String, nullable=False)
+    operation_status = Column(String, nullable=False)
+    committed_at = Column(DateTime(timezone=True), nullable=False)
+    resume_until = Column(DateTime(timezone=True), nullable=False)
+    session_id = Column(Uuid, nullable=True)
+    candidate_id = Column(Uuid, nullable=True)
+    candidate_bound_at = Column(DateTime(timezone=True), nullable=True)
+    generation_id = Column(Uuid, nullable=True)
+    auth_identity_id = Column(Uuid, nullable=True)
+    otp_request_id = Column(Uuid, nullable=True)
+    otp_verified_at = Column(DateTime(timezone=True), nullable=True)
+    otp_expires_at = Column(DateTime(timezone=True), nullable=True)
+    result_version = Column(String, nullable=False)
+    result_payload = Column(JSONB(none_as_null=True), nullable=False)
