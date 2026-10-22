@@ -119,16 +119,28 @@ def test_verify_nonconforming_success_is_uncertain_never_a_proof(body):
 
 
 @pytest.mark.parametrize("status,body,expected", [
+    # Seul refus définitif documenté : code invalide ou expiré.
     (403, {"code": 403, "error_code": "otp_expired", "msg": "Token has expired or is invalid"},
      ProviderRejected("otp_expired")),
-    (400, {"error_code": "Bad Code With Spaces"}, ProviderRejected("http_400")),
-    (429, {"error_code": "over_request_rate_limit"}, ProviderRejected("over_request_rate_limit")),
-    (500, {"error_code": "unexpected_failure"}, ProviderUncertain("http_500")),
+    # Tout le reste est incertain : jamais un « mauvais code certain ».
+    (401, {"code": 401, "error_code": "no_authorization", "msg": "invalid apikey"},
+     ProviderUncertain("http_401:no_authorization")),
+    (401, None, ProviderUncertain("http_401")),
+    (403, {"code": 403, "msg": "Forbidden"}, ProviderUncertain("http_403")),
+    (403, {"error_code": "otp_disabled"}, ProviderUncertain("http_403:otp_disabled")),
+    (400, {"error_code": "otp_expired"}, ProviderUncertain("http_400:otp_expired")),
+    (429, {"error_code": "over_request_rate_limit"}, ProviderUncertain("http_429:over_request_rate_limit")),
+    (403, {"error_code": "Bad Code With Spaces"}, ProviderUncertain("http_403")),
+    (422, {"error_code": "some_future_code"}, ProviderUncertain("http_422:some_future_code")),
+    (403, None, ProviderUncertain("http_403")),
+    (403, "<html>forbidden</html>", ProviderUncertain("http_403")),
+    (403, ["otp_expired"], ProviderUncertain("http_403")),
+    (500, {"error_code": "unexpected_failure"}, ProviderUncertain("http_500:unexpected_failure")),
     (502, None, ProviderUncertain("http_502")),
     (302, None, ProviderUncertain("http_302")),
     (201, verify_body(), ProviderUncertain("http_201")),
 ])
-def test_verify_status_mapping(status, body, expected):
+def test_verify_errors_are_rejected_only_from_the_positive_list(status, body, expected):
     assert parse_verify(status, body, EMAIL) == expected
 
 
@@ -139,18 +151,39 @@ def test_generate_link_requires_eight_ascii_digits_and_the_requested_email():
                  {"email_otp": 123456, "email": EMAIL}, {"email_otp": "００１２３４５６", "email": EMAIL},
                  {"email_otp": "00123456", "email": "other@example.com"}, {"email_otp": "00123456"}, {}, None):
         assert parse_generate_link(200, body, EMAIL) == ProviderRejected("nonconforming_output")
-    assert parse_generate_link(422, {"error_code": "email_address_invalid"}, EMAIL) == ProviderRejected(
-        "email_address_invalid")
-    assert parse_generate_link(503, None, EMAIL) == ProviderUncertain("http_503")
 
 
-def test_resend_status_mapping():
-    assert parse_resend(200, {"id": "49a3999c"}) == MailSent()
-    assert parse_resend(200, {}) == ProviderUncertain("http_200")
-    assert parse_resend(409, {"name": "concurrent_idempotent_requests"}) == ProviderUncertain("http_409")
-    assert parse_resend(429, {"name": "rate_limit_exceeded"}) == ProviderRejected("http_429")
-    assert parse_resend(422, {"error_code": "validation_error"}) == ProviderRejected("validation_error")
-    assert parse_resend(500, None) == ProviderUncertain("http_500")
+@pytest.mark.parametrize("status,body,expected", [
+    (422, {"error_code": "email_address_invalid"}, ProviderRejected("email_address_invalid")),
+    (400, {"error_code": "validation_failed"}, ProviderRejected("validation_failed")),
+    (401, {"error_code": "no_authorization"}, ProviderUncertain("http_401:no_authorization")),
+    (403, {"error_code": "not_admin"}, ProviderUncertain("http_403:not_admin")),
+    (429, {"error_code": "over_email_send_rate_limit"}, ProviderUncertain("http_429:over_email_send_rate_limit")),
+    (422, {"error_code": "unknown_code"}, ProviderUncertain("http_422:unknown_code")),
+    (400, None, ProviderUncertain("http_400")),
+    (400, "not json", ProviderUncertain("http_400")),
+    (503, None, ProviderUncertain("http_503")),
+])
+def test_generate_link_errors_are_rejected_only_from_the_positive_list(status, body, expected):
+    assert parse_generate_link(status, body, EMAIL) == expected
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (200, {"id": "49a3999c"}, MailSent()),
+    (200, {}, ProviderUncertain("http_200")),
+    (200, None, ProviderUncertain("http_200")),
+    (409, {"name": "concurrent_idempotent_requests"}, ProviderUncertain("http_409:concurrent_idempotent_requests")),
+    (429, {"name": "rate_limit_exceeded"}, ProviderRejected("rate_limit_exceeded")),
+    (422, {"name": "validation_error"}, ProviderRejected("validation_error")),
+    (401, {"name": "missing_api_key"}, ProviderRejected("missing_api_key")),
+    (403, {"name": "invalid_api_key"}, ProviderRejected("invalid_api_key")),
+    (403, {"name": "something_new"}, ProviderUncertain("http_403:something_new")),
+    (401, None, ProviderUncertain("http_401")),
+    (429, "slow down", ProviderUncertain("http_429")),
+    (500, None, ProviderUncertain("http_500")),
+])
+def test_resend_errors_are_rejected_only_from_the_positive_list(status, body, expected):
+    assert parse_resend(status, body) == expected
 
 
 def test_issuer_format():

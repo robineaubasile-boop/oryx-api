@@ -17,9 +17,27 @@ client) est la preuve. Elle n'est acceptée que si :
     n'est jamais décodé, journalisé, persisté ni utilisé pour décider).
 
 L'issuer est celui de la CONFIGURATION (https://<projet>/auth/v1), jamais
-lu dans la réponse. Un 4xx est un rejet certain (aucune faute de saisie
-supposée) ; un 200 non conforme, un 3xx, un 5xx, un délai dépassé ou une
-coupure sont INCERTAINS : jamais un succès, jamais une session.
+lu dans la réponse.
+
+Classification des erreurs (correctif d'audit P2) : seul un couple
+(statut HTTP, code d'erreur) figurant dans une LISTE POSITIVE de refus
+définitifs documentés devient ProviderRejected. Tout le reste (401, 403
+sans code ou avec un autre code, 429, code inconnu, corps absent, non
+JSON ou mal formé, 3xx, 5xx, 200 non conforme, délai, coupure) est
+INCERTAIN : jamais un succès, jamais une session, jamais un « mauvais
+code certain ». Listes positives (documentation publique de Supabase
+Auth « Error codes » et de Resend « Errors ») à confirmer sur une réponse
+réelle d'oryx-auth-test avant activation :
+
+  verifyOtp    : (403, otp_expired) — code invalide ou expiré.
+  generateLink : (400 ou 422, email_address_invalid), (400 ou 422,
+                 validation_failed) — demande refusée, aucun OTP émis.
+  Resend       : (400 ou 422, validation_error | missing_required_field |
+                 invalid_idempotency_key), (401, missing_api_key |
+                 restricted_api_key), (403, invalid_api_key |
+                 invalid_from_address), (429, rate_limit_exceeded |
+                 daily_quota_exceeded) — e-mail non accepté, donc non
+                 envoyé.
 
 Ces classes ne transportent aucun jeton fournisseur : GeneratedOtp ne
 garde que le code (masqué par repr), VerifiedIdentity que le subject et
@@ -87,15 +105,38 @@ def is_valid_issuer(issuer) -> bool:
     return isinstance(issuer, str) and _ISSUER_RE.fullmatch(issuer) is not None
 
 
+VERIFY_DEFINITIVE_REJECTIONS = frozenset({(403, "otp_expired")})
+GENERATE_DEFINITIVE_REJECTIONS = frozenset({
+    (400, "email_address_invalid"), (422, "email_address_invalid"),
+    (400, "validation_failed"), (422, "validation_failed"),
+})
+RESEND_DEFINITIVE_REJECTIONS = frozenset({
+    (400, "validation_error"), (422, "validation_error"), (422, "missing_required_field"),
+    (400, "invalid_idempotency_key"), (401, "missing_api_key"), (401, "restricted_api_key"),
+    (403, "invalid_api_key"), (403, "invalid_from_address"), (429, "rate_limit_exceeded"),
+    (429, "daily_quota_exceeded"),
+})
+
+
 def error_code(status: int, body) -> str:
-    """Code d'erreur assaini : body.error_code ou body.code s'il est de la
-    forme [a-z0-9_]{1,64}, sinon 'http_<statut>'. Aucun texte libre."""
+    """Code d'erreur assaini : body.error_code, body.code ou body.name s'il
+    est de la forme [a-z0-9_]{1,64}, sinon 'http_<statut>'. Aucun texte
+    libre."""
     if isinstance(body, dict):
-        for key in ("error_code", "code"):
+        for key in ("error_code", "code", "name"):
             value = body.get(key)
             if isinstance(value, str) and _ERROR_CODE_RE.fullmatch(value):
                 return value
     return f"http_{int(status)}"
+
+
+def _classify_error(status: int, body, definitive: frozenset):
+    """Refus certain seulement pour un couple (statut, code) de la liste
+    positive ; toute autre erreur est incertaine."""
+    code = error_code(status, body)
+    if (int(status), code) in definitive:
+        return ProviderRejected(code)
+    return ProviderUncertain(f"http_{int(status)}:{code}" if not code.startswith("http_") else code)
 
 
 def _same_email(raw, expected: str) -> bool:
@@ -116,18 +157,14 @@ def parse_generate_link(status: int, body, expected_email: str) -> GenerateOutco
         if is_valid_otp_code(code) and _same_email(body.get("email"), expected_email):
             return GeneratedOtp(code=code)
         return ProviderRejected("nonconforming_output")
-    if 400 <= status < 500:
-        return ProviderRejected(error_code(status, body))
-    return ProviderUncertain(f"http_{int(status)}")
+    return _classify_error(status, body, GENERATE_DEFINITIVE_REJECTIONS)
 
 
 def parse_verify(status: int, body, expected_email: str) -> VerifyOutcome:
     """Réponse de POST /auth/v1/verify (type email) : voir la docstring du
     module pour les contrôles de la preuve."""
-    if 400 <= status < 500:
-        return ProviderRejected(error_code(status, body))
     if status != 200:
-        return ProviderUncertain(f"http_{int(status)}")
+        return _classify_error(status, body, VERIFY_DEFINITIVE_REJECTIONS)
     if not isinstance(body, dict) or not isinstance(body.get("user"), dict):
         return ProviderUncertain("nonconforming_success")
     user = body["user"]
@@ -146,12 +183,11 @@ def parse_verify(status: int, body, expected_email: str) -> VerifyOutcome:
 
 def parse_resend(status: int, body) -> SendOutcome:
     """Réponse de POST https://api.resend.com/emails. 200 avec un id :
-    envoyé. 409 (requête idempotente concurrente) : incertain. Autre 4xx
-    (dont 429) : non envoyé. Le reste : incertain."""
+    envoyé. Erreur de la liste positive : non envoyé. Tout le reste (409
+    idempotence concurrente, code inconnu, corps illisible, 5xx, 200 sans
+    id) : incertain."""
     if status == 200 and isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:
         return MailSent()
-    if status == 409:
-        return ProviderUncertain("http_409")
-    if 400 <= status < 500:
-        return ProviderRejected(error_code(status, body))
-    return ProviderUncertain(f"http_{int(status)}")
+    if status == 200:
+        return ProviderUncertain("http_200")
+    return _classify_error(status, body, RESEND_DEFINITIVE_REJECTIONS)

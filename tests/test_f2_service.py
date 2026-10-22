@@ -175,14 +175,23 @@ def test_local_match_alone_never_creates_a_session(env):
     assert env.request(operation_id=start.operation_id)["failure_count"] == 0 and env.events("otp_failure") == 0
 
 
-@pytest.mark.parametrize("outcome", [ProviderUncertain("nonconforming_success"), ProviderUncertain("http_500")])
-def test_uncertain_provider_answers_are_never_success(env, outcome):
+@pytest.mark.parametrize("status,body", [(200, {"user": "x"}), (500, None), (401, {"error_code": "no_authorization"}),
+                                         (403, {"msg": "Forbidden"}), (429, {"error_code": "over_request_rate_limit"}),
+                                         (422, {"error_code": "unknown_code"}), (403, None), (403, "<html>")])
+def test_ambiguous_provider_answers_are_never_success_nor_typing_failures(env, status, body):
+    """P2 : seule la liste positive (403, otp_expired) est un refus certain ;
+    toute autre réponse (401, 403 sans code, 429, code inconnu, corps absent
+    ou invalide) reste incertaine : ni session, ni échec de saisie."""
+    from core.auth_f2.providers import parse_verify
+
     env.service()
     create_profile_with_identity(env.observer, env.supabase, ALICE)
     start = signed_in(env)
-    env.supabase.verify_script = [outcome]
+    env.supabase.verify_script = [parse_verify(status, body, ALICE)]
     assert verify(env, start, env.mailer.last_code(ALICE)).status == "uncertain"
     assert env.count("oryx_sessions") == 0 and env.count("auth_operations", "status = 'committed'") == 0
+    request = env.request(operation_id=start.operation_id)
+    assert (request["status"], request["failure_count"]) == ("verify_uncertain", 0) and env.events("otp_failure") == 0
 
 
 def test_certain_provider_rejection_after_local_match_is_not_a_typing_failure(env):
@@ -439,16 +448,49 @@ def test_invalid_ip_or_email_fail_closed_without_any_write(env):
 # 4. Pannes et incertitudes fournisseur à l'émission
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("generated", [ProviderRejected("http_422"), ProviderUncertain("transport"),
+@pytest.mark.parametrize("generated", [ProviderRejected("email_address_invalid"),
                                        ProviderRejected("nonconforming_output")])
-def test_generate_failure_sends_nothing(env, generated):
+def test_certain_generate_rejection_closes_the_request_without_sending(env, generated):
     env.service()
     env.supabase.generate_script = [generated]
     result = env.svc.start_sign_in(email=ALICE, client_ip=IP1)
     assert result.status == "send_failed" and env.mailer.sent == []
     request = env.request(operation_id=result.operation_id)
     assert request["status"] == "send_failed" and request["expected_code_hmac"] is None
+    assert request["closed_at"] is not None
     assert env.events("otp_request") == 2  # la réservation reste comptée
+
+
+@pytest.mark.parametrize("generated", [ProviderUncertain("transport"), ProviderUncertain("http_503"),
+                                       ProviderUncertain("http_401:no_authorization"),
+                                       ProviderUncertain("http_429:over_email_send_rate_limit")])
+def test_uncertain_generate_link_is_issue_uncertain_never_send_failed(env, generated):
+    """P2 : une issue inconnue de generateLink reste incertaine (issue_uncertain),
+    sans envoi, sans renvoi aveugle, sans restitution de quota ; seule une
+    nouvelle génération explicite, sous quotas, la remplace."""
+    env.service(fixed_clock=True)
+    create_profile_with_identity(env.observer, env.supabase, ALICE)
+    env.supabase.generate_script = [generated]
+    start = env.svc.start_sign_in(email=ALICE, client_ip=IP1)
+    assert (start.status, start.reason) == ("issue_uncertain", "generate_uncertain")
+    assert start.candidate is not None and env.mailer.sent == []
+    request = env.request(operation_id=start.operation_id)
+    assert (request["status"], request["expected_code_hmac"], request["closed_at"]) == ("issue_uncertain", None, None)
+    assert env.events("otp_request") == 2
+    # Aucune vérification possible sans code lié, aucun appel fournisseur.
+    assert verify(env, start, "12345678").reason == "code_not_ready"
+    assert env.supabase.verify_calls == [] and len(env.supabase.generate_calls) == 1
+    # Pas de renvoi automatique : une nouvelle génération reste soumise aux quotas.
+    env.clock.advance(seconds=59)
+    assert env.svc.resend_sign_in_otp(operation_id=start.operation_id, candidate=start.candidate,
+                                      client_ip=IP1).reason == "issue_interval"
+    env.clock.advance(seconds=1)
+    resent = env.svc.resend_sign_in_otp(operation_id=start.operation_id, candidate=start.candidate, client_ip=IP1)
+    assert resent.status == "issued"
+    statuses = rows(env.observer, "SELECT status, code_generation FROM auth_otp_requests ORDER BY code_generation")
+    assert [(r["status"], r["code_generation"]) for r in statuses] == [("superseded", 1), ("issued", 2)]
+    assert env.events("otp_request") == 4  # aucune restitution de la réservation incertaine
+    assert verify(env, start, env.mailer.last_code(ALICE)).status == "authenticated"
 
 
 @pytest.mark.parametrize("sent,status", [(MailSent(), "issued"), (ProviderRejected("http_429"), "send_failed"),

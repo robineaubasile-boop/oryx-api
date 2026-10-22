@@ -19,30 +19,61 @@ Ordre de verrouillage global (absence d'interblocage) :
      (scope_kind, hash_key_version, scope_hmac). Une telle transaction ne
      tient que ses propres insertions et n'attend que d'autres
      insertions de même clé, prises dans le même ordre : pas de cycle.
-  2. Transaction principale : verrou FOR UPDATE de TOUS les sujets e-mail
-     et IP de l'opération, pour TOUTES les versions comptées, en UNE
-     instruction triée par (scope_kind, hash_key_version, scope_hmac)
-     (PostgreSQL trie avant de verrouiller : LockRows au-dessus de Sort).
+  2. Transaction de décision : D'ABORD le verrou consultatif PARTAGÉ de
+     l'état de clé puis la lecture de auth_abuse_key_state
+     (lock_key_state), PUIS verrou FOR UPDATE de TOUS les sujets
+     e-mail et IP de l'opération, pour TOUTES les versions lues sous ce
+     verrou, en UNE instruction triée par (scope_kind, hash_key_version,
+     scope_hmac) (PostgreSQL trie avant de verrouiller : LockRows
+     au-dessus de Sort).
   3. Puis, selon le parcours : invitation, profil users, opération,
-     candidat, demande OTP, tentative, session, génération (core.auth_f2
-     .service respecte cet ordre partout ; aucune transaction ne
-     verrouille un sujet après une ligne de rang supérieur).
+     candidat, demande OTP, tentative, session, génération, identité
+     (core.auth_f2.service respecte cet ordre partout ; aucune transaction
+     ne verrouille une ligne de rang inférieur après une ligne de rang
+     supérieur). L'heure de décision est lue APRÈS tous les verrous.
 
-  Toute transaction principale prend ses verrous dans un ordre total
-  commun : aucun cycle d'attente n'est possible.
+  Une rotation ou un retrait ne prend QUE le verrou consultatif
+  EXCLUSIF de l'état de clé, puis la ligne d'état.
+  Toute transaction prend ses verrous dans un ordre total commun : aucun
+  cycle d'attente n'est possible.
 
-Rotation sans remise à zéro ni contournement. Deux transactions
-concurrentes lisent l'état de clé en début de transaction (READ
-COMMITTED). Une rotation (rotate_abuse_key) fait passer {v1} à
-{v2 courante, v1 précédente} : l'ancien ensemble est inclus dans le
-nouveau, donc deux transactions partagent toujours le sujet v1 de la
-portée et se sérialisent sur lui ; chacune compte v1 et, si elle connaît
-le nouvel état, v2. Le retrait (retire_previous_abuse_key) n'est permis
-qu'ABUSE_KEY_RETENTION (90 min) après la rétrogradation : plus aucun
-événement de fenêtre active (1 h au plus, blocage 15 min) n'est sous v1,
-et les transactions qui lisaient l'ancien état enregistrent sous v2,
-version commune. Deux trousseaux sans version commune ne peuvent pas
-coexister : l'état en base l'interdit.
+Rotation sans remise à zéro ni contournement (correctif d'audit P1).
+Une simple lecture de l'état suivie des verrous de sujets ne suffit pas :
+T1 lit {v1}, une rotation committe {v2, v1}, T2 enregistre sous v2 et
+committe, puis T1 verrouille seulement v1 et ne voit pas l'événement de
+T2 (sous-comptage). Désormais chaque transaction de décision prend le
+verrou consultatif de transaction KEY_STATE_LOCK_KEY en mode PARTAGÉ
+AVANT de lire les versions et le garde jusqu'à son COMMIT ;
+rotate_abuse_key / retire_previous_abuse_key le prennent en mode EXCLUSIF
+avant de modifier la ligne :
+
+  - aucune rotation ne peut committer pendant une décision en cours : la
+    décision compte et enregistre sous un ensemble de versions stable ;
+  - une décision qui commence après le COMMIT d'une rotation lit le
+    nouvel ensemble (READ COMMITTED : FOR SHARE relit la dernière version
+    committée), qui contient l'ancienne version courante : tout
+    événement enregistré avant la rotation est compté ;
+  - un retrait n'intervient qu'ABUSE_KEY_RETENTION (90 min) après la
+    rétrogradation ; depuis celle-ci, aucune décision n'a pu enregistrer
+    sous l'ancienne version (elles ont toutes lu le nouvel état), donc
+    aucun événement de fenêtre active (1 h au plus, blocage 15 min) n'est
+    oublié.
+
+Pourquoi un verrou consultatif plutôt que FOR SHARE sur la ligne
+singleton : les deux sont sûrs, mais un FOR SHARE de ligne compatible
+n'attend pas derrière une rotation déjà en attente du verrou exclusif
+(constaté par tests/test_f2_audit_corrections.py) ; sous trafic continu,
+une rotation pourrait ne jamais aboutir. Le gestionnaire de verrous de
+PostgreSQL met en file une demande partagée derrière une demande
+exclusive en attente : la rotation passe dès la fin des décisions en
+cours, les décisions suivantes l'attendent (au plus lock_timeout, puis
+refus fermé). Même convention que core/taxonomy_service.py (clé bigint
+figée, dérivée par sha256, jamais hash() Python).
+
+Les pré-contrôles sans verrou et ensure_subjects lisent l'état sans
+verrou : un pré-contrôle ne fait que refuser sur des événements réels
+(jamais admettre), et un sujet manquant pour une version apparue entre-
+temps fait rejouer la transaction (SubjectsMissing).
 
 Marqueurs de refus bornés. Un refus de quota n'appelle aucun fournisseur
 et n'insère qu'un marqueur otp_request_refused / otp_verification_refused
@@ -84,6 +115,10 @@ from core.auth_f2.policy import (
     VERIFY_IP_WINDOW,
 )
 from core.auth_f2.txn import pg_clock, transaction
+
+# int.from_bytes(sha256(b"oryx:f2:auth_abuse_key_state").digest()[:8], "big",
+# signed=True) : constante figée, plage bigint PostgreSQL.
+KEY_STATE_LOCK_KEY = -8112447256766139957
 
 EMAIL = "email"
 IP = "ip"
@@ -146,8 +181,24 @@ class Subjects:
 # --------------------------------------------------------------------------
 
 def load_key_state(conn, keyring: Keyring) -> KeyState:
+    """Lecture SANS verrou : pré-contrôles (refus seulement) et création
+    des sujets. Une décision utilise lock_key_state."""
+    return _key_state(conn, keyring, "")
+
+
+def lock_key_state(conn, keyring: Keyring) -> KeyState:
+    """Étape 2 de l'ordre global : verrou consultatif PARTAGÉ jusqu'au
+    COMMIT, puis lecture de l'état (instantané pris après l'obtention du
+    verrou, donc après le COMMIT de toute rotation qui le détenait) ;
+    aucune rotation ne peut changer les versions comptées pendant la
+    décision."""
+    conn.execute(sa.text("SELECT pg_advisory_xact_lock_shared(:k)"), {"k": KEY_STATE_LOCK_KEY})
+    return _key_state(conn, keyring, "")
+
+
+def _key_state(conn, keyring: Keyring, lock: str) -> KeyState:
     row = conn.execute(sa.text(
-        "SELECT current_version, previous_version, previous_demoted_at FROM auth_abuse_key_state WHERE id = 1"
+        "SELECT current_version, previous_version, previous_demoted_at FROM auth_abuse_key_state WHERE id = 1" + lock
     )).first()
     if row is None:
         raise AbuseUnavailable("état de clé anti-abus absent")
@@ -340,6 +391,7 @@ def rotate_abuse_key(engine, keyring: Keyring, new_version: str, *, clock=pg_clo
     if not keyring.has("abuse", new_version):
         raise AbuseUnavailable("nouvelle version anti-abus inconnue du trousseau")
     with transaction(engine) as conn:
+        conn.execute(sa.text("SELECT pg_advisory_xact_lock(:k)"), {"k": KEY_STATE_LOCK_KEY})
         row = conn.execute(sa.text(
             "SELECT current_version, previous_version FROM auth_abuse_key_state WHERE id = 1 FOR UPDATE"
         )).first()
@@ -362,6 +414,7 @@ def retire_previous_abuse_key(engine, *, clock=pg_clock) -> None:
     """Cesse de compter la version précédente, au plus tôt 90 minutes après
     sa rétrogradation (aucune fenêtre active ne dépend plus d'elle)."""
     with transaction(engine) as conn:
+        conn.execute(sa.text("SELECT pg_advisory_xact_lock(:k)"), {"k": KEY_STATE_LOCK_KEY})
         row = conn.execute(sa.text(
             "SELECT previous_version, previous_demoted_at FROM auth_abuse_key_state WHERE id = 1 FOR UPDATE"
         )).first()
