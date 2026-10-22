@@ -37,7 +37,7 @@ toute activation.
 ## 3. Protocole transactionnel (C.2.1 §9)
 
 1. Pré-contrôle des quotas **sans verrou** : un refus n'écrit qu'un marqueur
-   borné (§5) et n'appelle aucun fournisseur.
+   borné (§4) et n'appelle aucun fournisseur.
 2. Création des sujets anti-abus manquants dans une transaction courte,
    committée (`INSERT … ON CONFLICT DO NOTHING`, ordre trié).
 3. Transaction principale : verrous, horloge PostgreSQL lue **après** les
