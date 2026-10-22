@@ -185,7 +185,7 @@ def test_pg_go_at_0014_and_database_unchanged(pg_url, pg_engine):  # noqa: F811
 
 def test_pg_no_go_once_pr1_is_applied(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR1_0017)  # la tête est 0018 depuis R1 PR 2
     result = _run_preflight(pg_url)
     assert result.returncode == 1
     assert f"révision Alembic {PR1_0017} : une migration de R1 PR 1 est déjà appliquée" in result.stdout
