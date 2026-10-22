@@ -43,6 +43,15 @@ def env(pg_url, schema):  # noqa: F811
     environment.dispose()
 
 
+@pytest.fixture
+def patient_locks(monkeypatch):
+    """Entrelacements déterministes : la suspension de T1 est contrôlée par
+    le test ; la rotation et T2 doivent attendre aussi longtemps qu'elle
+    dure. En production, lock_timeout (5 s) borne cette attente : voir
+    test_rotation_blocked_beyond_lock_timeout_fails_closed."""
+    monkeypatch.setattr("core.auth_f2.txn.LOCK_TIMEOUT", "120s")
+
+
 def both_versions():
     versions = {p: ("t1",) for p in PURPOSES}
     versions["abuse"] = ("v1", "v2")
@@ -50,12 +59,16 @@ def both_versions():
 
 
 def wait_for_waiters(engine, count, timeout=20.0):
+    """pg_stat_activity est un instantané pris au premier accès DANS une
+    transaction : chaque relevé se fait dans sa propre transaction (sinon
+    une attente apparue après le premier relevé n'est jamais vue)."""
     deadline = time.monotonic() + timeout
     with engine.connect() as probe:
         while time.monotonic() < deadline:
             waiting = probe.execute(sa.text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
                 "AND wait_event_type = 'Lock'")).scalar_one()
+            probe.rollback()
             if waiting >= count:
                 return
             time.sleep(0.02)
@@ -113,7 +126,7 @@ def _interleave_rotation(env, keyring):
     return t1, rotation, t2, t1_resume, done, probe_engine
 
 
-def test_rotation_cannot_change_versions_during_a_decision_and_quota_holds(env):
+def test_rotation_cannot_change_versions_during_a_decision_and_quota_holds(env, patient_locks):
     keyring = both_versions()
     svc = env.service(keyring=keyring, init_abuse=False)
     abuse.initialize_abuse_key_state(env.engine, keyring, "v1")
@@ -149,7 +162,7 @@ def test_rotation_cannot_change_versions_during_a_decision_and_quota_holds(env):
     assert late.start_sign_in(email="t3@example.com", client_ip=IP).reason == "quota_ip_issue"
 
 
-def test_control_the_old_unlocked_read_let_the_same_interleaving_exceed_the_quota(env, monkeypatch):
+def test_control_the_old_unlocked_read_let_the_same_interleaving_exceed_the_quota(env, monkeypatch, patient_locks):
     """Témoin : avec une lecture SANS verrou (comportement audité), la
     rotation et T2 passent pendant la suspension de T1, qui ne compte
     ensuite que v1 : 21 émissions pour un quota de 20. Le test ci-dessus
@@ -179,7 +192,7 @@ def test_key_state_lock_key_is_the_documented_constant():
     assert abuse.KEY_STATE_LOCK_KEY == expected == -8112447256766139957
 
 
-def test_concurrent_rotations_one_wins_without_deadlock(env):
+def test_concurrent_rotations_one_wins_without_deadlock(env, patient_locks):
     versions = {p: ("t1",) for p in PURPOSES}
     versions["abuse"] = ("v1", "v2", "v3")
     keyring = make_keyring(versions, {**{p: "t1" for p in PURPOSES}, "abuse": "v1"})
@@ -206,6 +219,29 @@ def test_concurrent_rotations_one_wins_without_deadlock(env):
     assert all(isinstance(e, AbuseUnavailable) and "précédente" in str(e) for e in errors if e is not None)
     state = rows(env.observer, "SELECT * FROM auth_abuse_key_state")[0]
     assert state["previous_version"] == "v1" and state["current_version"] in ("v2", "v3")
+
+
+def test_rotation_blocked_beyond_lock_timeout_fails_closed(env, monkeypatch):
+    """Une rotation qui attend une décision plus longtemps que lock_timeout
+    échoue (à relancer) sans rien modifier ; la décision n'est pas gênée."""
+    monkeypatch.setattr("core.auth_f2.txn.LOCK_TIMEOUT", "300ms")
+    keyring = both_versions()
+    env.service(keyring=keyring, init_abuse=False)
+    abuse.initialize_abuse_key_state(env.engine, keyring, "v1")
+    hook, locked, resume = suspend_first_state_lock()
+    holder = F2AuthService(env.engine, keyring, FakeSupabase(), FakeMailer(), fault_hook=hook)
+    decision = Runner(lambda: holder.start_sign_in(email=ALICE, client_ip=IP1), [], "decision")
+    decision.start()
+    assert locked.wait(20)
+    with pytest.raises(sa.exc.OperationalError, match="lock timeout"):
+        abuse.rotate_abuse_key(env.engine, keyring, "v2")
+    resume.set()
+    decision.join(30)
+    assert decision.error is None and decision.result.status == "issued"
+    state = rows(env.observer, "SELECT * FROM auth_abuse_key_state")[0]
+    assert (state["current_version"], state["previous_version"]) == ("v1", None)
+    abuse.rotate_abuse_key(env.engine, keyring, "v2")  # relancée hors décision : aboutit
+    assert rows(env.observer, "SELECT current_version FROM auth_abuse_key_state")[0]["current_version"] == "v2"
 
 
 # --------------------------------------------------------------------------
