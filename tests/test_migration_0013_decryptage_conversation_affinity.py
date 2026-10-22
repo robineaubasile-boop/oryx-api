@@ -45,6 +45,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0004_drop_company_analyses import (
     PR2_0018,
+    PR2_FILES,
     _without_r1d1_changes,
     PR1_0017,
     PR1_FILES,
@@ -119,7 +120,7 @@ def test_revision_chain_ends_with_0013_as_the_single_head():
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-6:-3] == [f"{R1C2}.py", R1C4_FILE, R1D1_FILE] and files[-3:] == PR1_FILES and len(files) == 17
+    assert files[-7:-4] == [f"{R1C2}.py", R1C4_FILE, R1D1_FILE] and files[-4:] == PR1_FILES + PR2_FILES and len(files) == 18
 
 
 def test_revision_id_is_short_because_alembic_version_is_varchar_32():

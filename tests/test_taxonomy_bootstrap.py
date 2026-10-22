@@ -124,7 +124,7 @@ def test_no_migration_added_by_t4c_head_is_0010():
     assert script.get_revision(T6A).down_revision == T5A
     assert script.get_revision(T5A).down_revision == T4A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-11:-3] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
+    assert files[-12:-4] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
                              R1C4_FILE, R1D1_FILE]
     assert len(files) == 18
 

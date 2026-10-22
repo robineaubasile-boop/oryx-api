@@ -224,12 +224,13 @@ def test_model_does_not_touch_historical_tables():
     # conversation_identities ; R1-C1 (0011, testé à part) la table runtime
     # assistant_deliveries ; R1-C2 (0012, testé à part) la table runtime
     # decryptage_cognitive_links ; R1 PR 1 (0016 / 0017, testées à part) le
-    # registre portefeuille et les onze tables F2.
+    # registre portefeuille et les onze tables F2 ; R1 PR 2 (0018, testée à
+    # part) l'état de clé anti-abus auth_abuse_key_state.
     assert set(Base.metadata.tables) == (HISTORICAL_TABLES - {"company_analyses"}) | {
         "portfolio_write_idempotency", "auth_identities", "invitations", "auth_operations",
         "auth_preauth_candidates", "auth_otp_requests", "auth_otp_verification_attempts",
         "auth_abuse_subjects", "auth_abuse_events", "oryx_sessions", "oryx_session_generations",
-        "auth_operation_results",
+        "auth_operation_results", "auth_abuse_key_state",
         "analysis_sessions", "cognitive_events", "support_traces",
         "observation_evaluation_runs", "pedagogical_observations",
         "pedagogical_taxonomy_releases", "core_capability_definitions",
