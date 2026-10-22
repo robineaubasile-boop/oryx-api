@@ -550,6 +550,43 @@ tables de 0017 ou users.level_revision :
   - level_revision versionne le niveau DÉCLARÉ, jamais la compétence
     réelle ; il ne devient ni preuve ni score pédagogique.
 
+R1 PR 2 : 0018_f2_abuse_journal (EXPAND, variante A de C.2.1-A)
+---------------------------------------------------------------
+
+down_revision = 0017_oryx_auth_foundations ; le fichier 0017 n'est pas
+modifié (empreintes sha256 de 0015 à 0017 vérifiées par
+tests/test_migration_0018_f2_abuse_journal.py).
+
+  - auth_abuse_events : quatre nouveaux types (otp_verification_attempt,
+    admission IP avec ou sans demande ; otp_email_block, blocage durable
+    de 15 minutes ; otp_request_refused / otp_verification_refused,
+    marqueurs de refus), colonne blocked_until TIMESTAMPTZ NULL, CHECK de
+    liaison élargi (sur-ensemble exact de celui de 0017), CHECK de forme du
+    blocage, CHECK d'alignement des marqueurs sur une tranche de 5 minutes
+    et index UNIQUE PARTIEL uq_auth_abuse_events_refusal_bucket (au plus un
+    marqueur par sujet, type et tranche).
+  - auth_abuse_key_state : ligne unique (id = 1) donnant la version de
+    K_abuse d'enregistrement et la version précédente encore comptée
+    pendant une rotation. Aucune clé. Aucune ligne écrite par la migration.
+
+Mêmes garde-fous SET LOCAL que 0015 (5 s / 15 s / 15 s). Le verrou ACCESS
+EXCLUSIVE porte sur auth_abuse_events, vide et lue par aucun code actif.
+Downgrade CONTRÔLÉ : refusé (exception, aucune suppression) si
+auth_abuse_events contient un événement d'un type de 0018 ou si
+auth_abuse_key_state n'est pas vide ; sinon retour exact à 0017. Le SQL
+offline porte le même garde-fou (bloc DO).
+
+Avant tout merge (le pre-deploy applique `alembic upgrade head`), vérifier
+en LECTURE SEULE sur la base de production :
+
+    SELECT version_num FROM alembic_version;                -- 0017_oryx_auth_foundations
+    SELECT to_regclass('public.auth_abuse_key_state');      -- NULL
+    SELECT count(*) FROM auth_abuse_events;                 -- 0 (F2 dormant)
+
+puis suivre les vérifications humaines de R1 PR 1 (sauvegarde, fenêtre,
+Pre-deploy Timeout). Services et blocages avant activation de F2 :
+docs/f2_r1_pr2.md.
+
 Vérifier le SQL sans se connecter (mode offline)
 ------------------------------------------------
 

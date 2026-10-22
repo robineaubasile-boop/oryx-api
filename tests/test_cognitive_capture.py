@@ -65,7 +65,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0003_analysis_session_links import T1B1
-from tests.test_migration_0004_drop_company_analyses import PR1_FILES, PR1_REVISIONS, SESSION_ID, T1C2, _code_tokens
+from tests.test_migration_0004_drop_company_analyses import PR1_FILES, PR1_REVISIONS, PR2_FILES, PR2_REVISIONS, SESSION_ID, T1C2, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, T2A, USER, _upgrade_head_with_users
 
 T3A = "0006_observation_layer"
@@ -78,7 +78,8 @@ R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
-PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL), tête
+PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL)
+PR2_HEAD = "0018_f2_abuse_journal"  # R1 PR 2 (journal anti-abus F2), tête
 R1D1_FILE = "0014_evaluation_run_leases.py"
 
 SERVICE_PATH = REPO_ROOT / "core" / "cognitive_capture.py"
@@ -203,14 +204,14 @@ def test_head_is_0013_after_r1b_r1c1_r1c2_and_r1c4():
     0012 (decryptage_cognitive_links, liens runtime vers les events), R1-C4
     ajoute 0013 (affinité conversationnelle des liens), la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR1_HEAD]
+    assert script.get_heads() == [PR2_HEAD]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
-                                                                 T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS
+                                                                 T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
-        R1C4_FILE, R1D1_FILE] + PR1_FILES
+        R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES
 
 
 def test_public_api_is_exactly_the_capture_functions():

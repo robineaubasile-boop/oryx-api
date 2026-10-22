@@ -27,6 +27,9 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR1_0017_TABLES,
     R1D1,
     _compare_metadata,
+    PR2_0018,
+    PR2_0018_INDEXES,
+    PR2_0018_TABLES,
     _raw_compare_metadata,
     _without_pr1_changes,
 )
@@ -47,6 +50,11 @@ def _expected(applied):
     if applied < 3:
         diff += [("add_table", TABLES[t]) for t in PR1_0017_TABLES] + [("add_index", INDEXES[i])
                                                                       for i in sorted(PR1_0017_INDEXES)]
+    if applied == 3:
+        diff.append(("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.blocked_until))
+    if applied < 4:
+        diff += [("add_table", TABLES[t]) for t in PR2_0018_TABLES] + [("add_index", INDEXES[i])
+                                                                      for i in sorted(PR2_0018_INDEXES)]
     return diff
 
 
@@ -63,12 +71,12 @@ UNEXPECTED = [
 ]
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2, 3])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4])
 def test_only_exact_pending_pr1_changes_are_removed(applied):
     assert _without_pr1_changes(_expected(applied) + UNEXPECTED, applied) == UNEXPECTED
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3])
 def test_a_missing_expected_pr1_change_fails(applied):
     expected = _expected(applied)
     for index in range(len(expected)):
@@ -76,7 +84,7 @@ def test_a_missing_expected_pr1_change_fails(applied):
             _without_pr1_changes(expected[:index] + expected[index + 1:], applied)
 
 
-@pytest.mark.parametrize("applied", [1, 2, 3])
+@pytest.mark.parametrize("applied", [1, 2, 3, 4])
 def test_a_pr1_change_after_its_revision_fails(applied):
     for leftover in _expected(applied - 1)[: len(_expected(applied - 1)) - len(_expected(applied))]:
         with pytest.raises(AssertionError):
@@ -84,9 +92,19 @@ def test_a_pr1_change_after_its_revision_fails(applied):
 
 
 def test_at_head_nothing_is_removed():
-    assert _without_pr1_changes(UNEXPECTED, 3) == UNEXPECTED
+    assert _without_pr1_changes(UNEXPECTED, 4) == UNEXPECTED
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 3)
+        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 4)
+    with pytest.raises(AssertionError):
+        _without_pr1_changes([("add_table", TABLES["auth_abuse_key_state"])], 4)
+
+
+def test_blocked_until_is_removed_only_as_a_pending_0018_column():
+    column = ("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.blocked_until)
+    with pytest.raises(AssertionError):
+        _without_pr1_changes(_expected(2) + [column], 2)
+    with pytest.raises(AssertionError):
+        _without_pr1_changes(_expected(4) + [column], 4)
 
 
 # --------------------------------------------------------------------------
@@ -114,7 +132,7 @@ def test_pg_premature_pr1_object_is_never_hidden(pg_url, pg_engine):  # noqa: F8
         _compare_metadata(pg_engine)
 
 
-@pytest.mark.parametrize("revision", [PR1_0015, PR1_0016, PR1_0017])
+@pytest.mark.parametrize("revision", [PR1_0015, PR1_0016, PR1_0017, PR2_0018])
 def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine, revision):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", revision)
@@ -123,6 +141,7 @@ def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine,
         PR1_0015: "ALTER TABLE users DROP COLUMN level_revision",
         PR1_0016: "DROP TABLE portfolio_write_idempotency",
         PR1_0017: "DROP INDEX ix_auth_operations_user_id",
+        PR2_0018: "DROP INDEX uq_auth_abuse_events_refusal_bucket",
     }[revision]
     with pg_engine.begin() as conn:
         conn.execute(sa.text(statement))

@@ -78,7 +78,8 @@ R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
-PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL), tête
+PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL)
+PR2_HEAD = "0018_f2_abuse_journal"  # R1 PR 2 (journal anti-abus F2), tête
 R1D1_FILE = "0014_evaluation_run_leases.py"
 USER = "user-t1c1"
 TICKER = "MC.PA"
@@ -99,12 +100,12 @@ def test_no_migration_added_by_t1c1_head_is_0013():
     0009 (T6-A), 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
     qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR1_HEAD]
+    assert script.get_heads() == [PR2_HEAD]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert {rev.revision for rev in script.walk_revisions()} == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A,
                                                                  T6A, R1B, R1C1, R1C2, R1C4, R1D1} | {
-        "0015_users_level_revision", "0016_portfolio_idempotency", PR1_HEAD}
+        "0015_users_level_revision", "0016_portfolio_idempotency", PR1_HEAD, PR2_HEAD}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [
         "0001_current_oryx_baseline.py",
@@ -124,6 +125,7 @@ def test_no_migration_added_by_t1c1_head_is_0013():
         "0015_users_level_revision.py",
         "0016_portfolio_idempotency.py",
         "0017_oryx_auth_foundations.py",
+        "0018_f2_abuse_journal.py",
     ]
 
 
@@ -607,7 +609,7 @@ def test_schema_unchanged_and_company_analyses_absent(db, client, claude, pg_eng
                               "user_id": USER, "conversation_key": "conv-apres-suppression"})["success"]
 
     with pg_engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR1_HEAD
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR2_HEAD
         assert "company_analyses" not in sa.inspect(conn).get_table_names()
 
     from alembic.autogenerate import compare_metadata

@@ -2275,27 +2275,53 @@ class AuthAbuseSubject(Base):
 
 class AuthAbuseEvent(Base):
     """Journal en ajout seul des événements anti-abus — R1 PR 1, migration
-    0017. Les budgets glissants (5 échecs par adresse sur 15 minutes,
+    0017, étendu par R1 PR 2, migration 0018 (variante A de C.2.1-A).
+    Les budgets glissants (5 échecs par adresse sur 15 minutes,
     60 secondes entre deux envois, 5 demandes par adresse et par heure,
-    limites IP configurables) sont comptés par le service sur
-    (subject_id, event_kind, occurred_at), sous le verrou du sujet."""
+    20 demandes par IP et par heure, 30 vérifications admises par IP sur
+    5 minutes) sont comptés par le service anti-abus F2 (R1 PR 2) sur
+    (subject_id, event_kind, occurred_at), sous le verrou des sujets.
+
+    0018 : otp_verification_attempt (admission IP, demande facultative),
+    otp_email_block (blocage durable, blocked_until = occurred_at + 15 min),
+    otp_request_refused / otp_verification_refused (marqueurs de refus,
+    occurred_at aligné sur une tranche de 5 minutes, au plus un par sujet,
+    type et tranche : index unique partiel uq_auth_abuse_events_refusal_bucket).
+    Le CHECK de liaison est un sur-ensemble de celui de 0017."""
     __tablename__ = "auth_abuse_events"
     __table_args__ = (
         CheckConstraint(
-            "event_kind IN ('otp_request', 'otp_failure', 'invitation_attempt', 'resume_attempt')",
+            "event_kind IN ('otp_request', 'otp_failure', 'invitation_attempt', 'resume_attempt', "
+            "'otp_verification_attempt', 'otp_email_block', 'otp_request_refused', 'otp_verification_refused')",
             name="ck_auth_abuse_events_event_kind",
         ),
         CheckConstraint(
-            "(event_kind IN ('otp_request', 'otp_failure')) = (otp_request_id IS NOT NULL)",
+            "(event_kind NOT IN ('otp_request', 'otp_failure', 'otp_email_block') OR otp_request_id IS NOT NULL) "
+            "AND (event_kind NOT IN ('invitation_attempt', 'resume_attempt', 'otp_request_refused', "
+            "'otp_verification_refused') OR otp_request_id IS NULL)",
             name="ck_auth_abuse_events_otp_link",
         ),
         CheckConstraint(
             "event_kind <> 'resume_attempt' OR auth_operation_id IS NOT NULL",
             name="ck_auth_abuse_events_resume_link",
         ),
+        CheckConstraint(
+            "(event_kind = 'otp_email_block') = (blocked_until IS NOT NULL) "
+            "AND (blocked_until IS NULL OR blocked_until - occurred_at = interval '15 minutes')",
+            name="ck_auth_abuse_events_block",
+        ),
+        CheckConstraint(
+            "event_kind NOT IN ('otp_request_refused', 'otp_verification_refused') "
+            "OR occurred_at = date_bin(interval '5 minutes', occurred_at, timestamptz '2000-01-01 00:00:00+00')",
+            name="ck_auth_abuse_events_refusal_bucket",
+        ),
         Index("ix_auth_abuse_events_window", "subject_id", "event_kind", "occurred_at"),
         Index("ix_auth_abuse_events_auth_operation_id", "auth_operation_id"),
         Index("ix_auth_abuse_events_otp_request_id", "otp_request_id"),
+        Index(
+            "uq_auth_abuse_events_refusal_bucket", "subject_id", "event_kind", "occurred_at", unique=True,
+            postgresql_where=text("event_kind IN ('otp_request_refused', 'otp_verification_refused')"),
+        ),
     )
 
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -2305,6 +2331,34 @@ class AuthAbuseEvent(Base):
     auth_operation_id = Column(Uuid, ForeignKey("auth_operations.id"), nullable=True)
     otp_request_id = Column(Uuid, ForeignKey("auth_otp_requests.id"), nullable=True)
     policy_version = Column(String, nullable=False)
+    blocked_until = Column(DateTime(timezone=True), nullable=True)
+
+
+class AuthAbuseKeyState(Base):
+    """Version de K_abuse d'enregistrement et version précédente encore
+    comptée — R1 PR 2, migration 0018. Ligne unique (id = 1), sans aucune
+    clé. Le service anti-abus F2 (R1 PR 2) y lit les versions comptées
+    (rotation sans remise à zéro des quotas)."""
+    __tablename__ = "auth_abuse_key_state"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_auth_abuse_key_state_singleton"),
+        CheckConstraint("current_version ~ '^[A-Za-z0-9._-]{1,64}$'", name="ck_auth_abuse_key_state_current_version"),
+        CheckConstraint(
+            "previous_version IS NULL OR previous_version ~ '^[A-Za-z0-9._-]{1,64}$'",
+            name="ck_auth_abuse_key_state_previous_version",
+        ),
+        CheckConstraint(
+            "(previous_version IS NULL) = (previous_demoted_at IS NULL) "
+            "AND (previous_version IS NULL OR previous_version <> current_version)",
+            name="ck_auth_abuse_key_state_previous",
+        ),
+    )
+
+    id = Column(SmallInteger, primary_key=True, autoincrement=False)
+    current_version = Column(String, nullable=False)
+    previous_version = Column(String, nullable=True)
+    previous_demoted_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class OryxSession(Base):

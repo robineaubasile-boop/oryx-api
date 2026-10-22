@@ -44,6 +44,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    PR2_0018,
     _without_r1d1_changes,
     PR1_0017,
     PR1_FILES,
@@ -114,7 +115,7 @@ HEAD_TABLES = EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
 
 def test_revision_chain_ends_with_0013_as_the_single_head():
     script = _script_directory()
-    assert script.get_heads() == [PR1_0017]
+    assert script.get_heads() == [PR2_0018]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))

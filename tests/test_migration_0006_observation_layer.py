@@ -53,6 +53,7 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1, _statements
 from tests.test_migration_0004_drop_company_analyses import (
+    PR2_TABLES,
     PR1_TABLES,
     _without_r1d1_changes,
     R1B_TABLES,
@@ -356,7 +357,7 @@ def test_metadata_declares_the_two_new_tables():
     pedagogical_observations (+ les quatre tables T4-A, les huit tables
     T5-A et les six tables T6-A, testées à part) ; aucune autre table de
     taxonomie ou de capacités."""
-    assert set(Base.metadata.tables) == PR1_TABLES | (REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | {RUNS, OBS} | T4A_TABLES | T5A_TABLES
                                          | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert ObservationEvaluationRun.__table__ is Base.metadata.tables[RUNS]
     assert PedagogicalObservation.__table__ is Base.metadata.tables[OBS]

@@ -806,7 +806,7 @@ def test_not_wired_to_the_runtime():
 
 def test_no_migration_nor_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0017_oryx_auth_foundations.py" and len(versions) == 17
+    assert versions[-1] == "0018_f2_abuse_journal.py" and len(versions) == 18
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Limitation" not in models and "limitation" not in models.lower().replace("limitations", "")
 
