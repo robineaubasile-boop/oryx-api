@@ -53,9 +53,16 @@ toute activation.
 
 ### Ordre de verrouillage global
 
-sujets anti-abus (une instruction, triée par `scope_kind, hash_key_version,
-scope_hmac`) → invitation → profil `users` → opération → candidat →
-demande OTP → tentative → session → génération.
+verrou consultatif partagé de l'état de clé anti-abus (puis lecture de
+`auth_abuse_key_state`) → sujets anti-abus (une instruction, triée par
+`scope_kind, hash_key_version, scope_hmac`) → invitation → profil `users`
+→ opération → candidat → demande OTP → tentative → session → génération
+→ identité. **L'heure de décision (`clock_timestamp()`) est lue après
+tous les verrous et toute attente possible** (correctif d'audit P1) :
+aucun droit n'est jugé valide à un instant antérieur à une attente de
+verrou. `now()` / `transaction_timestamp()` ne sont jamais utilisés pour
+décider ; seuls les pré-contrôles sans verrou, qui ne peuvent que
+refuser, lisent l'heure avant.
 
 - Aucune transaction ne verrouille un rang inférieur après un rang
   supérieur. Les contrôles de FK (FOR KEY SHARE) suivent le même ordre :
@@ -66,8 +73,12 @@ demande OTP → tentative → session → génération.
 - Les insertions de sujets ont lieu dans des transactions séparées, qui ne
   tiennent que leurs propres insertions : elles ne peuvent former de cycle
   ni entre elles (ordre trié) ni avec les transactions principales.
-- Les identités (`auth_identities`) sont lues sans verrou : leurs colonnes
-  `provider, issuer, subject, user_id` sont immuables.
+- Les identités (`auth_identities`) sont lues sans verrou (colonnes
+  `provider, issuer, subject, user_id` immuables), sauf pour la mise à
+  jour de `last_authenticated_at` (FOR NO KEY UPDATE, rang identité).
+  L'insertion d'une identité de liaison (`ON CONFLICT DO NOTHING`, qui
+  peut attendre une insertion concurrente) a lieu AVANT la lecture de
+  l'heure, dans un point de sauvegarde annulé si la revalidation échoue.
 - Un marqueur de refus prend d'abord le sujet en `FOR KEY SHARE`, puis
   insère sa ligne (ordre sujet → marqueur partout). Sans cela, un refus
   sans verrou réservait la clé unique du marqueur puis attendait le sujet
@@ -147,14 +158,61 @@ Procédure :
    avant).
 4. Retirer l'ancienne clé des trousseaux.
 
-Absence de contournement : l'ensemble des versions avant une rotation est
-inclus dans l'ensemble après ; deux transactions concurrentes partagent
-donc toujours au moins le sujet d'une même version et se sérialisent sur
-lui, et chacune compte toutes les versions où des événements actifs
-existent. Le retrait n'intervient qu'après la plus longue fenêtre (1 h) et
-la durée d'un blocage (15 min), avec une marge. Aucune remise à zéro
-(`test_rotation_never_resets_quotas…`), aucun interblocage sous charge
-(`test_rotation_under_concurrent_load…`, `test_rotation_during_concurrent_emissions`).
+### Coordination transactionnelle (correctif d'audit P1)
+
+Défaut corrigé : lire l'état puis verrouiller les sujets ne suffisait pas.
+T1 lisait {v1} ; une rotation committait {v2, v1} ; T2 enregistrait sous
+v2 et committait ; T1 verrouillait seulement les sujets v1 et ne voyait
+pas l'événement de T2 (dépassement de quota, reproduit par le témoin
+`test_control_the_old_unlocked_read_let_the_same_interleaving_exceed_the_quota`).
+
+Correction : toute transaction de décision prend
+`pg_advisory_xact_lock_shared(KEY_STATE_LOCK_KEY)` AVANT de lire l'état et
+le garde jusqu'à son COMMIT ; `rotate_abuse_key` et
+`retire_previous_abuse_key` prennent `pg_advisory_xact_lock(KEY_STATE_LOCK_KEY)`
+(exclusif) avant de modifier la ligne. Donc :
+
+- une rotation ne peut pas committer pendant une décision : chaque
+  décision compte et enregistre sous un ensemble de versions stable ;
+- une décision qui obtient le verrou après une rotation lit le nouvel
+  état (instantané pris après le COMMIT de la rotation), qui contient
+  l'ancienne version courante : rien de ce qui a été enregistré avant
+  n'est oublié ;
+- après la rétrogradation, plus aucune décision n'enregistre sous
+  l'ancienne version ; son retrait, 90 minutes plus tard, ne peut donc
+  oublier aucun événement de fenêtre active (1 h) ni aucun blocage
+  (15 min).
+
+Ordre de verrouillage : ce verrou est le rang 0, avant les sujets ; une
+rotation ne prend que lui puis la ligne d'état : aucun cycle. Tests :
+`test_rotation_cannot_change_versions_during_a_decision_and_quota_holds`
+(entrelacement exact, suspendu par point d'interruption),
+`test_concurrent_rotations_one_wins_without_deadlock`, et les tests
+multi-processus de `tests/test_f2_concurrency.py`.
+
+### Le singleton est nécessaire et suffisant
+
+- **Nécessaire** : sans état partagé en base, une instance ne peut pas
+  savoir sous quelle version les autres enregistrent ; une instance au
+  trousseau périmé sous-compterait sans le savoir. La ligne unique porte
+  les deux versions comptées et la date de rétrogradation qui autorise le
+  retrait (CHECK : singleton, formats, version précédente ≠ courante,
+  précédente ⇔ date de rétrogradation). Aucune clé n'y figure.
+- **Suffisant** : avec le verrou de transaction ci-dessus, il donne à
+  chaque décision un ensemble de versions stable et linéarise les
+  rotations. Aucune autre table, aucun index supplémentaire.
+- **Pourquoi un verrou consultatif plutôt qu'un `FOR SHARE` de la
+  ligne** : les deux sont sûrs, mais un `FOR SHARE` de ligne compatible
+  n'attend pas derrière une rotation déjà en attente de verrou exclusif
+  (constaté pendant les tests) ; sous trafic continu, la rotation pourrait
+  ne jamais aboutir. Le gestionnaire de verrous de PostgreSQL met en file
+  la demande partagée derrière la demande exclusive : la rotation passe
+  dès la fin des décisions en cours, les décisions suivantes l'attendent
+  (au plus `lock_timeout`, puis refus fermé). Clé bigint figée, dérivée par
+  sha256 (convention de `core/taxonomy_service.py`).
+- **Initialisation** : `initialize_abuse_key_state` (idempotente,
+  dormante) ; la migration n'écrit aucune ligne. **Downgrade** : refusé si
+  la ligne existe (aucune suppression silencieuse).
 
 ## 6. Preuve Supabase (option 1)
 
@@ -163,9 +221,25 @@ projet configuré, n'est une preuve que si : HTTP 200, objet `user`,
 `user.id` UUID canonique, `aud = authenticated`, e-mail normalisé égal à
 celui de l'opération, `email_confirmed_at` présent, `access_token` présent.
 Le jeton n'est jamais décodé, journalisé ni persisté. L'issuer enregistré
-est celui de la configuration (`https://<projet>/auth/v1`). Un 4xx est un
-rejet certain ; un 3xx, un 5xx, un 200 non conforme, un délai dépassé ou
-une coupure sont incertains. Identité : `(supabase, issuer, user.id)`.
+est celui de la configuration (`https://<projet>/auth/v1`). Identité :
+`(supabase, issuer, user.id)`.
+
+Classification des erreurs (correctif d'audit P2) : seul un couple
+(statut, code) d'une **liste positive** de refus définitifs documentés est
+un refus certain — `verifyOtp` : `(403, otp_expired)` ; `generateLink` :
+`email_address_invalid` / `validation_failed` en 400 ou 422 ; Resend :
+erreurs de validation, de clé, d'expéditeur et de limitation documentées.
+Tout le reste (401, 403 sans code ou autre code, 429 de Supabase, code
+inconnu, corps absent, non JSON ou mal formé, 3xx, 5xx, 200 non conforme,
+délai, coupure) est **incertain** : jamais une session, jamais un échec de
+saisie (`verify_uncertain`, nouvelle génération explicite requise).
+
+Incertitude de `generateLink` (correctif d'audit P2) : une issue inconnue
+donne `issue_uncertain` (jamais `send_failed`), sans code lié, sans envoi,
+sans renvoi automatique et sans restitution des quotas réservés ; seule
+une nouvelle génération explicite, soumise aux quotas, la remplace
+(`superseded`). Un refus certain de la liste positive, ou une sortie non
+conforme refusée par Oryx, donne `send_failed` (rien n'a été envoyé).
 L'égalité d'e-mail ne fusionne jamais rien ; une identité inconnue ne crée
 jamais de profil.
 
