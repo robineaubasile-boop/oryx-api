@@ -201,7 +201,13 @@ ALLOWED = frozenset({ORIGIN})
     [("sec-fetch-site", "same-origin"), ("host", "oryx.test"), ("referer", "https://oryx.test:443/")],
 ])
 def test_legitimate_provenance(pairs):
-    assert request_origin(Headers(pairs), ALLOWED) == ORIGIN
+    """Origin absent : admis pour le bootstrap seulement (allow_absent_origin)."""
+    assert request_origin(Headers(pairs), ALLOWED, allow_absent_origin=True) == ORIGIN
+    if any(k == "origin" for k, _ in pairs):
+        assert request_origin(Headers(pairs), ALLOWED) == ORIGIN
+    else:
+        with pytest.raises(ProvenanceRejected):
+            request_origin(Headers(pairs), ALLOWED)  # mutation : Origin exigé
 
 
 @pytest.mark.parametrize("pairs", [
@@ -221,8 +227,9 @@ def test_legitimate_provenance(pairs):
     [("sec-fetch-site", "same-origin"), ("host", "oryx.test"), ("host", "oryx.test")],
 ])
 def test_hostile_unknown_or_ambiguous_provenance_is_refused(pairs):
-    with pytest.raises(ProvenanceRejected):
-        request_origin(Headers(pairs), ALLOWED)
+    for allow_absent_origin in (False, True):
+        with pytest.raises(ProvenanceRejected):
+            request_origin(Headers(pairs), ALLOWED, allow_absent_origin=allow_absent_origin)
 
 
 @pytest.mark.parametrize("origins", [[], "https://oryx.test", ["http://oryx.test"], ["https://oryx.test/"],
@@ -241,7 +248,7 @@ def test_bootstrap_without_origin_from_same_origin_page(env):
     assert set(response.json()) == {"csrf_token", "expires_in"}
     (binding,) = set_cookies(response)
     assert binding["name"] == CSRF_BINDING
-    assert binding["attrs"] == {"max-age": "86400", "path": "/", "secure": "", "httponly": "", "samesite": "Lax"}
+    assert binding["attrs"] == {"max-age": "1800", "path": "/", "secure": "", "httponly": "", "samesite": "Lax"}
     assert "domain" not in binding["raw"].lower()
     assert env.service.calls == []
 
@@ -260,7 +267,11 @@ def test_bootstrap_refuses_hostile_or_unknown_provenance(env, origin, headers):
 def test_bootstrap_reuses_the_binding_so_tabs_keep_their_tokens(env):
     first = env.browser.csrf
     binding = env.browser.jar[CSRF_BINDING]
-    env.browser.bootstrap()
+    env.clock.advance(600)
+    response = env.browser.bootstrap()
+    (renewed,) = set_cookies(response)
+    # Même secret reposé pour 30 minutes : la liaison survit au dernier jeton.
+    assert (renewed["value"], renewed["attrs"]["max-age"]) == (binding, "1800")
     assert env.browser.jar[CSRF_BINDING] == binding
     env.service.result = Outcome("rejected", "invalid_email")
     for token in (first, env.browser.csrf):
@@ -268,12 +279,35 @@ def test_bootstrap_reuses_the_binding_so_tabs_keep_their_tokens(env):
         assert env.browser.start("x").status_code == 422
 
 
-def test_mutation_with_origin_absent_but_same_origin_attested(env):
+def test_csrf_binding_lifetime_covers_the_token_it_signs(env):
+    env.clock.advance(0.7)  # instant non entier : exp est arrondi vers le bas
+    response = env.browser.bootstrap()
+    (binding,) = set_cookies(response)
+    expires = int(response.json()["csrf_token"].split(".")[1])
+    # Durées distinctes (constantes séparées), toutes deux de 30 minutes :
+    # la liaison, reposée à chaque bootstrap, expire au plus tôt avec le jeton.
+    assert env.clock.time() + int(binding["attrs"]["max-age"]) >= expires
+    assert expires - env.clock.time() <= 1800
     env.service.result = Outcome("rejected", "invalid_email")
-    response = env.browser.start("x", origin=None, headers={"sec-fetch-site": "same-origin"})
-    assert response.status_code == 422
-    response = env.browser.start("x", origin=None)
-    assert response.status_code == 403
+    env.clock.advance(1799)
+    assert env.browser.start("x").status_code == 422
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/sign-in/start", {"email": "alice@example.com"}), ("/sign-in/resend", REQ),
+    ("/sign-in/verify", {**REQ, "code": "12345678"}), ("/sign-in/resume", REQ),
+    ("/session/resolve", {"generation_id": str(GEN)}), ("/logout", {"generation_id": str(GEN)}),
+])
+@pytest.mark.parametrize("headers", [
+    {}, {"sec-fetch-site": "same-origin"}, {"sec-fetch-site": "same-origin", "referer": ORIGIN + "/web-v2"},
+])
+def test_every_mutation_requires_origin(env, path, body, headers):
+    """Architecture figée : Origin exigé sur tout POST, même lorsque
+    Sec-Fetch-Site et Referer attestent une page de même origine."""
+    env.browser.jar[candidate_name(CAND)] = B1
+    env.browser.jar[active_name(GEN)] = B2
+    env.service.result = Outcome("rejected", "invalid_email")
+    assert_refused(env, env.browser.post(path, body, origin=None, headers=headers), 403, "origin_refused")
 
 
 @pytest.mark.parametrize("origin,headers", [
@@ -384,6 +418,58 @@ def test_start_refuses_to_exceed_the_cookie_limit(env):
     for i in range(15):
         env.browser.jar[candidate_name(uuid.UUID(cid(i)))] = B1
     assert_refused(env, env.browser.start("alice@example.com"), 409, "credential_limit")
+
+
+def test_start_counts_the_active_cookie_each_kept_candidate_may_still_produce(env):
+    # 1 liaison + 7 candidats : 8 cookies, 7 actifs potentiels ; un nouveau
+    # candidat (+1, +1 actif potentiel) porterait le pire cas à 17.
+    for i in range(7):
+        env.browser.jar[candidate_name(uuid.UUID(cid(i)))] = B1
+    assert_refused(env, env.browser.start("alice@example.com"), 409, "credential_limit")
+    del env.browser.jar[candidate_name(uuid.UUID(cid(0)))]
+    env.service.result = Outcome("rejected", "invalid_email")
+    assert env.browser.start("x").status_code == 422  # 7 + 6 + 2 = 15 <= 16
+
+
+def test_kept_candidates_can_never_push_the_browser_beyond_16_cookies(env):
+    """Candidats conservés après succès (P1.1) : quelle que soit la suite de
+    démarrages, vérifications et reprises, le navigateur ne dépasse jamais
+    16 cookies Oryx et aucune requête n'est refusée pour cookies en excès."""
+    granted = {}
+    expires = datetime.fromtimestamp(env.clock.wall, timezone.utc) + timedelta(days=15)
+
+    def answer(kw):
+        if "email" in kw:
+            candidate = CandidateCredential(uuid.uuid4(), secret(len(granted) + 10))
+            granted[candidate.candidate_id] = (uuid.uuid4(), uuid.uuid4())
+            return Outcome("issued", None, granted[candidate.candidate_id][0], candidate)
+        operation, generation = granted[kw["candidate"].candidate_id]
+        status = "authenticated" if "code" in kw else "resumed"
+        return Outcome(status, None, operation, session=issued(
+            status, operation_id=operation, generation_id=generation, absolute_expires_at=expires))
+
+    def oryx_cookies():
+        return len([k for k in env.browser.jar if k.startswith("__Host-oryx-")])
+
+    env.service.result = answer
+    for _ in range(20):
+        start = env.browser.start("alice@example.com")
+        assert oryx_cookies() <= 16
+        if start.status_code == 409:
+            assert start.json() == {"error": "credential_limit"}
+            break
+        body = start.json()
+        for path, extra in (("/sign-in/verify", {"code": "12345678"}), ("/sign-in/resume", {})):
+            response = env.browser.post(path, {"operation_id": body["operation_id"],
+                                               "candidate_id": body["candidate_id"], **extra})
+            assert response.status_code == 200, response.text
+            assert oryx_cookies() <= 16
+    else:
+        pytest.fail("la limite de cookies n'a jamais été appliquée")
+    # Limite atteinte : reprendre et résoudre restent possibles (aucun 400).
+    candidate_id, (operation, generation) = list(granted.items())[-1]
+    response = env.browser.post("/sign-in/resume", {"operation_id": str(operation), "candidate_id": str(candidate_id)})
+    assert response.status_code == 200 and oryx_cookies() <= 16
 
 
 def test_bootstrap_refuses_a_new_binding_beyond_the_limit(env):

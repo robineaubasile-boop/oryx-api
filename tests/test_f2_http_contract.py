@@ -33,10 +33,10 @@ NC, PG, SE, ER = contract.NEW_CANDIDATE, contract.PROGRESS, contract.SESSION, co
 QUOTAS = ("email_blocked", "issue_interval", "quota_email_issue", "quota_ip_issue")
 
 REFERENCE = {
-    **{(e, "issued", None): (200, "code_sent", k) for e, k in ((S, NC), (R, PG))},
-    **{(e, "issue_uncertain", r): (202, "delivery_uncertain", k) for e, k in ((S, NC), (R, PG))
+    **{(e, "issued", None): (202, "code_sent", k) for e, k in ((S, NC), (R, PG))},
+    **{(e, "issue_uncertain", r): (503, "delivery_uncertain", k) for e, k in ((S, NC), (R, PG))
        for r in ("generate_uncertain", None)},
-    **{(e, "send_failed", r): (202, "delivery_failed", k) for e, k in ((S, NC), (R, PG))
+    **{(e, "send_failed", r): (503, "delivery_failed", k) for e, k in ((S, NC), (R, PG))
        for r in ("send_failed", "superseded", None)},
     **{(e, "rejected", "ip_unavailable"): (503, "temporarily_unavailable", ER) for e in (S, R, V)},
     **{(e, "refused", q): (429, "rate_limited", ER) for e in (S, R) for q in QUOTAS},
@@ -55,8 +55,8 @@ REFERENCE = {
     (V, "rejected", "request_exhausted"): (409, "code_exhausted", ER),
     (V, "rejected", "code_not_ready"): (409, "code_not_ready", ER),
     (V, "rejected", "verification_in_progress"): (409, "verification_in_progress", ER),
-    (V, "rejected", "verification_uncertain"): (409, "verification_uncertain", ER),
-    (V, "uncertain", "provider_uncertain"): (409, "verification_uncertain", ER),
+    (V, "rejected", "verification_uncertain"): (503, "verification_uncertain", ER),
+    (V, "uncertain", "provider_uncertain"): (503, "verification_uncertain", ER),
     (V, "rejected", "code_malformed"): (401, "code_incorrect", ER),
     (V, "rejected", "code_incorrect"): (401, "code_incorrect", ER),
     (V, "rejected", "code_replaced"): (401, "code_replaced", ER),
@@ -242,17 +242,23 @@ def test_each_matrix_entry_through_the_route(stub, key):
         assert body == {"error": code}
         assert names == []
     elif kind == NC:
-        assert body == {"status": code, "operation_id": str(OP), "candidate_id": str(CAND)}
+        key = "status" if http_status < 400 else "error"
+        assert body == {key: code, "operation_id": str(OP), "candidate_id": str(CAND)}
         assert names == [candidate_name(CAND)]
     elif kind == PG:
-        assert body == {"status": code, "operation_id": str(OP), "candidate_id": str(CAND)}
+        key = "status" if http_status < 400 else "error"
+        assert body == {key: code, "operation_id": str(OP), "candidate_id": str(CAND)}
         assert names == []
     else:
         assert body["status"] == code and body["generation_id"] == str(GEN) and set(body) == {
             "status", "generation_id", "expires_in"}
         assert names == [active_name(GEN)]
         assert browser.jar[active_name(GEN)] == secret(9).reveal()
-        assert candidate_name(CAND) not in browser.jar  # candidat effacé, lui seul
+        # Candidat conservé tel quel : ni effacé, ni renouvelé (reprise possible).
+        assert [c["name"] for c in set_cookies(response)] == [active_name(GEN)]
+        assert browser.jar[candidate_name(CAND)] == secret(5).reveal()
+    if code in ("code_sent", "delivery_uncertain", "delivery_failed"):
+        assert ("code_sent" in response.text) is (code == "code_sent")  # jamais « envoyé » si incertain
 
 
 @pytest.mark.parametrize("key", sorted((k for k, v in REFERENCE.items() if v[2] != SE), key=repr), ids=lambda k: "|".join(

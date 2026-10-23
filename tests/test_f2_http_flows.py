@@ -16,6 +16,7 @@ plusieurs appareils, révocation ciblée, concurrence et réponses tardives.
 """
 import asyncio
 import json
+import re
 import threading
 import uuid
 from datetime import timedelta
@@ -111,7 +112,7 @@ def env(pg_url, schema):  # noqa: F811
 
 def sign_in(env, browser, email=ALICE):
     start = browser.start(email)
-    assert start.status_code == 200, start.text
+    assert start.status_code == 202, start.text
     body = start.json()
     verify = browser.verify(body, env.mailer.last_code(email))
     assert verify.status_code == 200, verify.text
@@ -133,7 +134,7 @@ def test_sign_in_end_to_end_through_http(env):
     browser = env.browser(env.app())
     start = browser.start(ALICE)
     body = start.json()
-    assert start.status_code == 200 and body["status"] == "code_sent"
+    assert start.status_code == 202 and body["status"] == "code_sent"
     (candidate,) = set_cookies(start)
     assert candidate["name"] == candidate_name(body["candidate_id"])
     assert candidate["attrs"].keys() == {"max-age", "path", "secure", "httponly", "samesite"}
@@ -149,7 +150,10 @@ def test_sign_in_end_to_end_through_http(env):
     (active,) = active_cookies_set(verify)
     assert active["name"] == active_name(result["generation_id"])
     assert 15 * 86400 - 10 <= int(active["attrs"]["max-age"]) == result["expires_in"] <= 15 * 86400
-    assert browser.candidates() == {}  # candidat effacé avec la pose du cookie actif
+    # Candidat conservé (ni effacé ni renouvelé) : reprise possible si la
+    # réponse de succès est perdue.
+    assert [c["name"] for c in set_cookies(verify)] == [active["name"]]
+    assert browser.candidates() == {candidate["name"]: secret}
     session = rows(env.observer, "SELECT s.*, g.delivery_status FROM oryx_sessions s JOIN oryx_session_generations g "
                                  "ON g.session_id = s.id")[0]
     assert session["user_id"] == user_id and session["delivery_status"] == "pending"
@@ -240,7 +244,7 @@ def test_wrong_and_malformed_codes_are_counted_by_the_engine(env):
 
 def test_issue_interval_is_enforced_without_provider_call(env):
     browser = env.browser(env.app())
-    assert browser.start(ALICE).status_code == 200
+    assert browser.start(ALICE).status_code == 202
     response = browser.start(ALICE)
     assert (response.status_code, response.json()) == (429, {"error": "rate_limited"})
     assert set_cookies(response) == []
@@ -271,7 +275,8 @@ def test_uncertain_generation_keeps_the_candidate_and_needs_an_explicit_resend(e
     env.supabase.generate_script.append(ProviderUncertain("http_503"))
     start = browser.start(ALICE)
     body = start.json()
-    assert (start.status_code, body["status"]) == (202, "delivery_uncertain")
+    assert (start.status_code, body["error"]) == (503, "delivery_uncertain")
+    assert set(body) == {"error", "operation_id", "candidate_id"}
     assert "sent" not in start.text
     assert [c["name"] for c in set_cookies(start)] == [candidate_name(body["candidate_id"])]
     assert env.supabase.generate_calls == [ALICE] and env.mailer.sent == []  # aucune relance automatique
@@ -289,7 +294,8 @@ def test_uncertain_mail_send_is_never_announced_as_sent(env):
     browser = env.browser(env.app())
     env.mailer.script.append(ProviderUncertain("http_500"))
     start = browser.start(ALICE)
-    assert (start.status_code, start.json()["status"]) == (202, "delivery_uncertain")
+    assert (start.status_code, start.json()["error"]) == (503, "delivery_uncertain")
+    assert "sent" not in start.text and browser.candidates()
     assert len(env.mailer.sent) == 1 and len(env.supabase.generate_calls) == 1
 
 
@@ -297,7 +303,8 @@ def test_certain_generation_failure_keeps_the_candidate(env):
     browser = env.browser(env.app())
     env.supabase.generate_script.append(ProviderRejected("email_address_invalid"))
     start = browser.start(ALICE)
-    assert (start.status_code, start.json()["status"]) == (202, "delivery_failed")
+    assert (start.status_code, start.json()["error"]) == (503, "delivery_failed")
+    assert "sent" not in start.text
     assert browser.candidates() and env.mailer.sent == []
 
 
@@ -307,9 +314,9 @@ def test_uncertain_verification_never_issues_a_session(env):
     start = browser.start(ALICE).json()
     env.supabase.verify_script.append(ProviderUncertain("transport"))
     response = browser.verify(start, env.mailer.last_code(ALICE))
-    assert (response.status_code, response.json()) == (409, {"error": "verification_uncertain"})
+    assert (response.status_code, response.json()) == (503, {"error": "verification_uncertain"})
     response = browser.verify(start, env.mailer.last_code(ALICE))
-    assert (response.status_code, response.json()) == (409, {"error": "verification_uncertain"})
+    assert (response.status_code, response.json()) == (503, {"error": "verification_uncertain"})
     assert env.count("oryx_sessions") == 0 and browser.actives() == {}
     assert len(env.supabase.verify_calls) == 1
 
@@ -335,7 +342,8 @@ def test_lost_verify_response_is_resumed_exactly_without_provider_call(env):
     assert int(cookie["attrs"]["max-age"]) <= int(lost_cookie["attrs"]["max-age"]) - 300
     assert (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent)) == calls
     assert env.count("oryx_sessions") == 1 and env.count("oryx_session_generations") == 1
-    assert browser.candidates() == {}
+    assert browser.candidates() and candidate_name(start["candidate_id"]) not in [
+        c["name"] for c in set_cookies(resumed)]  # candidat ni effacé ni renouvelé
     # Une reprise ne sélectionne rien : la session n'est utilisée que sur
     # désignation explicite de sa génération.
     assert browser.resolve(resumed.json()["generation_id"]).json()["status"] == "active"
@@ -633,3 +641,211 @@ def test_real_provider_adapters_through_mock_transports(env):
     for response in (start, verify):
         no_secret_in(response, "04815162", "tok", subject, "svc", "re_test")
 
+
+
+# --------------------------------------------------------------------------
+# Correctif d'audit P1.1 : le cookie candidat survit au succès
+# --------------------------------------------------------------------------
+
+def _candidate_cookie(response):
+    return [c for c in set_cookies(response) if c["name"].startswith("__Host-oryx-candidate-")]
+
+
+def test_successful_verification_keeps_the_candidate_cookie_unchanged(env):
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    browser = env.browser(env.app())
+    start = browser.start(ALICE)
+    (issued,) = _candidate_cookie(start)
+    verify = browser.verify(start.json(), env.mailer.last_code(ALICE))
+    assert verify.json()["status"] == "authenticated"
+    assert _candidate_cookie(verify) == []  # ni effacé, ni renouvelé
+    assert browser.candidates() == {issued["name"]: issued["value"]}
+
+
+def test_partially_used_success_response_can_still_be_resumed(env):
+    """Réponse reçue mais exploitée partiellement (cookie actif perdu par le
+    navigateur ou le frontend) : la reprise canonique rend exactement la
+    même session, sans appel fournisseur."""
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    browser = env.browser(env.app())
+    start = browser.start(ALICE).json()
+    verify = browser.verify(start, env.mailer.last_code(ALICE))
+    (active,) = active_cookies_set(verify)
+    del browser.jar[active["name"]]
+    calls = (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent))
+    resumed = browser.resume(start)
+    assert resumed.json()["status"] == "resumed"
+    assert resumed.json()["generation_id"] == verify.json()["generation_id"]
+    assert browser.jar[active["name"]] == active["value"]
+    assert (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent)) == calls
+    assert env.count("oryx_sessions") == 1
+
+
+def test_successful_resume_keeps_the_candidate_and_repeats_exactly(env):
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    browser = env.browser(env.app())
+    start = browser.start(ALICE).json()
+    lost = browser.verify(start, env.mailer.last_code(ALICE), store=False)
+    (expected,) = active_cookies_set(lost)
+    calls = (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent))
+    first = browser.resume(start, store=False)  # cette réponse-là aussi est perdue
+    second = browser.resume(start)
+    for response in (first, second):
+        assert response.json()["status"] == "resumed"
+        (cookie,) = active_cookies_set(response)
+        assert (cookie["name"], cookie["value"]) == (expected["name"], expected["value"])
+        assert _candidate_cookie(response) == []
+    assert browser.candidates()
+    assert (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent)) == calls
+    assert env.count("oryx_sessions") == 1 and env.count("oryx_session_generations") == 1
+
+
+def test_expired_resume_window_grants_nothing_more(env):
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    browser = env.browser(env.app(fixed_clock=True))
+    start = browser.start(ALICE).json()
+    code = env.mailer.last_code(ALICE)
+    assert browser.verify(start, code).json()["status"] == "authenticated"
+    committed = rows(env.observer, "SELECT committed_at FROM auth_operation_results")[0]["committed_at"]
+    env.clock.now = committed + timedelta(minutes=5)
+    calls = (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent))
+    assert browser.candidates()  # le cookie est encore là, mais ne vaut plus rien
+    for response in (browser.resume(start), browser.verify(start, code), browser.resend(start)):
+        assert response.status_code == 409, response.text
+        assert active_cookies_set(response) == [] and _candidate_cookie(response) == []
+    assert (len(env.supabase.generate_calls), len(env.supabase.verify_calls), len(env.mailer.sent)) == calls
+    assert env.count("oryx_sessions") == 1 and env.count("oryx_session_generations") == 1
+
+
+def test_candidate_cookie_is_set_once_and_never_extended(env):
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    browser = env.browser(env.app(fixed_clock=True))
+    start = browser.start(ALICE)
+    body = start.json()
+    env.clock.advance(seconds=61)
+    responses = [start, browser.resend(body)]
+    responses.append(browser.verify(body, env.mailer.last_code(ALICE)))
+    generation = responses[-1].json()["generation_id"]
+    responses += [browser.resume(body), browser.resolve(generation), browser.bootstrap(), browser.logout(generation)]
+    issued = [c for r in responses for c in _candidate_cookie(r)]
+    assert len(issued) == 1 and issued[0]["name"] == candidate_name(body["candidate_id"])
+    assert int(issued[0]["attrs"]["max-age"]) <= 900
+    # Après déconnexion, la reprise est refusée (session révoquée) malgré le cookie.
+    response = browser.resume(body)
+    assert (response.status_code, response.json()) == (409, {"error": "resume_unavailable"})
+
+
+# --------------------------------------------------------------------------
+# Correctif d'audit P1.2 : réponses comparées, identité liée ou non
+# --------------------------------------------------------------------------
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _shape(response):
+    """Statut, corps (UUID masqués), taille, en-têtes pertinents, cookies
+    (noms sans identifiant, attributs) : ce qu'un observateur compare."""
+    headers = {k: v for k, v in response.headers.items() if k not in ("date", "set-cookie")}
+    cookies = sorted((UUID_RE.sub("<id>", c["name"]), tuple(sorted(c["attrs"].items()))) for c in set_cookies(response))
+    return response.status_code, UUID_RE.sub("<id>", response.text), len(response.content), headers, cookies
+
+
+def _operation(env, operation_id):
+    op = rows(env.observer, "SELECT status FROM auth_operations WHERE id = :i", i=operation_id)[0]
+    request = rows(env.observer, "SELECT status, failure_count FROM auth_otp_requests WHERE auth_operation_id = :i "
+                                 "ORDER BY code_generation DESC LIMIT 1", i=operation_id)[0]
+    return op["status"], request["status"], request["failure_count"]
+
+
+@pytest.fixture
+def pair(env):
+    """Deux navigateurs, deux adresses : l'une liée à un profil Oryx, l'autre
+    non. Même IP de test : seuls l'adresse et l'état d'identité diffèrent."""
+    create_profile_with_identity(env.engine, env.supabase, ALICE)
+    app = env.app(fixed_clock=True)
+    linked, unknown = env.browser(app), env.browser(app)
+    return env, {"linked": (linked, ALICE), "unknown": (unknown, NOBODY)}
+
+
+def _start_both(pair):
+    env, browsers = pair
+    starts = {k: b.start(email) for k, (b, email) in browsers.items()}
+    assert _shape(starts["linked"]) == _shape(starts["unknown"])  # démarrage : identique
+    return {k: r.json() for k, r in starts.items()}
+
+
+@pytest.mark.parametrize("code", ["wrong", "abc", "1" * 100, ""])
+def test_wrong_or_malformed_code_does_not_depend_on_identity(pair, code):
+    env, browsers = pair
+    starts = _start_both(pair)
+    responses, states = {}, {}
+    for key, (browser, email) in browsers.items():
+        good = env.mailer.last_code(email)
+        submitted = f"{(int(good) + 1) % 100000000:08d}" if code == "wrong" else code
+        responses[key] = browser.verify(starts[key], submitted)
+        states[key] = _operation(env, starts[key]["operation_id"])
+    assert _shape(responses["linked"]) == _shape(responses["unknown"])
+    assert (responses["linked"].status_code, responses["linked"].json()) == (401, {"error": "code_incorrect"})
+    assert states["linked"] == states["unknown"] == ("pending", "issued", 1)  # compteur PR 2 conservé
+    env.clock.advance(seconds=61)
+    resends = {k: b.resend(starts[k]) for k, (b, _) in browsers.items()}
+    assert _shape(resends["linked"]) == _shape(resends["unknown"])
+    assert resends["linked"].status_code == 202
+    assert env.supabase.verify_calls == []
+
+
+def test_uncertain_provider_answer_does_not_depend_on_identity(pair):
+    env, browsers = pair
+    starts = _start_both(pair)
+    responses = {}
+    for key, (browser, email) in browsers.items():
+        env.supabase.verify_script.append(ProviderUncertain("transport"))
+        responses[key] = browser.verify(starts[key], env.mailer.last_code(email))
+    assert _shape(responses["linked"]) == _shape(responses["unknown"])
+    assert (responses["linked"].status_code, responses["linked"].json()) == (503, {"error": "verification_uncertain"})
+    assert {_operation(env, s["operation_id"])[:2] for s in starts.values()} == {("pending", "verify_uncertain")}
+    assert env.count("oryx_sessions") == 0
+
+
+@pytest.mark.parametrize("answer", ["provider_rejected", "proof_not_applicable"])
+def test_certain_provider_refusals_do_not_depend_on_identity(pair, answer):
+    env, browsers = pair
+    starts = _start_both(pair)
+    responses = {}
+    for key, (browser, email) in browsers.items():
+        env.supabase.verify_script.append(
+            ProviderRejected("otp_expired") if answer == "provider_rejected"
+            else VerifiedIdentity(subject=env.supabase.subject_for("other@example.com"), email="other@example.com"))
+        responses[key] = browser.verify(starts[key], env.mailer.last_code(email))
+    assert _shape(responses["linked"]) == _shape(responses["unknown"])
+    assert (responses["linked"].status_code, responses["linked"].json()) == (401, {"error": "sign_in_failed"})
+    assert {_operation(env, s["operation_id"])[:2] for s in starts.values()} == {("pending", "expired")}
+    assert env.count("oryx_sessions") == 0
+
+
+def test_correct_code_without_identity_matches_a_provider_refusal_then_diverges(pair):
+    """Code correct : identité liée -> session ; identité inconnue -> même
+    réponse publique qu'un refus fournisseur certain. Divergence ULTÉRIEURE
+    héritée de PR 2 (moteur non modifié, arbitrage au §10 de
+    docs/f2_r1_pr3.md) : l'opération sans identité est close, un renvoi est
+    refusé ; après un refus fournisseur, elle reste ouverte."""
+    env, browsers = pair
+    starts = _start_both(pair)
+    linked, _ = browsers["linked"]
+    unknown, _ = browsers["unknown"]
+    no_identity = unknown.verify(starts["unknown"], env.mailer.last_code(NOBODY))
+    env.supabase.verify_script.append(ProviderRejected("otp_expired"))
+    rejected = linked.verify(starts["linked"], env.mailer.last_code(ALICE))
+    assert _shape(no_identity) == _shape(rejected)
+    assert (no_identity.status_code, no_identity.json()) == (401, {"error": "sign_in_failed"})
+    assert env.count("oryx_sessions") == 0 and env.count("users") == 1  # aucun profil implicite
+    assert _operation(env, starts["unknown"]["operation_id"])[0] == "failed"
+    assert _operation(env, starts["linked"]["operation_id"])[0] == "pending"
+    env.clock.advance(seconds=61)
+    after_no_identity = unknown.resend(starts["unknown"])
+    after_rejected = linked.resend(starts["linked"])
+    assert (after_no_identity.status_code, after_no_identity.json()) == (409, {"error": "operation_unavailable"})
+    assert after_rejected.status_code == 202
+    # Code correct et identité liée : seul cas qui délivre une session.
+    ok = linked.verify(starts["linked"], env.mailer.last_code(ALICE))
+    assert ok.json()["status"] == "authenticated" and len(active_cookies_set(ok)) == 1

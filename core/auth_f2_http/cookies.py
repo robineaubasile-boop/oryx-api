@@ -46,7 +46,13 @@ MAX_ORYX_COOKIES = 16
 # un commit au plus tard). Jamais renouvelée par un renvoi ; n'étend
 # jamais les échéances PostgreSQL (le moteur les juge seul).
 CANDIDATE_COOKIE_TTL = timedelta(minutes=15)
-CSRF_BINDING_TTL = timedelta(hours=24)
+# Liaison CSRF : 30 minutes (valeur proposée par l'architecture), durée
+# DISTINCTE de celle du jeton (csrf.TOKEN_TTL_SECONDS, 30 minutes). Chaque
+# bootstrap repose le MÊME secret avec une nouvelle durée de 30 minutes :
+# la liaison survit toujours au dernier jeton émis (et donc à tous les
+# jetons encore valides des autres onglets), puis disparaît 30 minutes au
+# plus après le dernier bootstrap.
+CSRF_BINDING_TTL = timedelta(minutes=30)
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 

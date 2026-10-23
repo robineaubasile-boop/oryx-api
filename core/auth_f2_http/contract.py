@@ -33,8 +33,13 @@ dynamiques) :
 Confidentialité : identity_not_linked n'est jamais exposé ; il partage
 avec provider_rejected, proof_not_applicable, verification_superseded et
 resume_unavailable (rejeu de vérification) EXACTEMENT la même réponse
-(401 sign_in_failed : statut, corps, en-têtes). Les erreurs ne portent
-qu'un code ; aucun identifiant fournisseur, user_id, OTP ni secret.
+(401 sign_in_failed : statut, corps, en-têtes). code_incorrect et
+code_malformed (un seul code public, code_incorrect) sont jugés AVANT tout
+appel fournisseur et toute lecture d'identité : leur réponse ne dépend pas
+de l'existence d'une identité Oryx (tests comparatifs, docs/f2_r1_pr3.md
+§10). Les erreurs ne portent qu'un code (et, pour delivery_uncertain /
+delivery_failed, les sélecteurs non secrets) ; aucun identifiant
+fournisseur, user_id, OTP ni secret.
 """
 import uuid
 from dataclasses import dataclass
@@ -69,12 +74,15 @@ ISSUE_QUOTAS = ("email_blocked", "issue_interval", "quota_email_issue", "quota_i
 
 def _issue_rules(endpoint: str, kind: str) -> dict:
     rules = {
-        (endpoint, "issued", None): Rule(200, "code_sent", kind),
-        (endpoint, "issue_uncertain", "generate_uncertain"): Rule(202, "delivery_uncertain", kind),
-        (endpoint, "issue_uncertain", None): Rule(202, "delivery_uncertain", kind),
-        (endpoint, "send_failed", "send_failed"): Rule(202, "delivery_failed", kind),
-        (endpoint, "send_failed", "superseded"): Rule(202, "delivery_failed", kind),
-        (endpoint, "send_failed", None): Rule(202, "delivery_failed", kind),
+        # Architecture figée : démarrage réussi en 202 ; émission incertaine et
+        # échec d'envoi en 503 portant les sélecteurs (et, au démarrage, le
+        # cookie candidat) pour un renvoi explicite, jamais « code envoyé ».
+        (endpoint, "issued", None): Rule(202, "code_sent", kind),
+        (endpoint, "issue_uncertain", "generate_uncertain"): Rule(503, "delivery_uncertain", kind),
+        (endpoint, "issue_uncertain", None): Rule(503, "delivery_uncertain", kind),
+        (endpoint, "send_failed", "send_failed"): Rule(503, "delivery_failed", kind),
+        (endpoint, "send_failed", "superseded"): Rule(503, "delivery_failed", kind),
+        (endpoint, "send_failed", None): Rule(503, "delivery_failed", kind),
         (endpoint, "rejected", "ip_unavailable"): UNAVAILABLE,
     }
     rules.update({(endpoint, "refused", reason): RATE_LIMITED for reason in ISSUE_QUOTAS})
@@ -103,8 +111,10 @@ MATRIX = {
     (VERIFY, "rejected", "request_exhausted"): Rule(409, "code_exhausted", ERROR),
     (VERIFY, "rejected", "code_not_ready"): Rule(409, "code_not_ready", ERROR),
     (VERIFY, "rejected", "verification_in_progress"): Rule(409, "verification_in_progress", ERROR),
-    (VERIFY, "rejected", "verification_uncertain"): Rule(409, "verification_uncertain", ERROR),
-    (VERIFY, "uncertain", "provider_uncertain"): Rule(409, "verification_uncertain", ERROR),
+    # Vérification fournisseur incertaine (réponse en cours ou état persisté
+    # verify_uncertain) : 503 selon l'architecture figée, jamais une session.
+    (VERIFY, "rejected", "verification_uncertain"): Rule(503, "verification_uncertain", ERROR),
+    (VERIFY, "uncertain", "provider_uncertain"): Rule(503, "verification_uncertain", ERROR),
     (VERIFY, "rejected", "code_malformed"): Rule(401, "code_incorrect", ERROR),
     (VERIFY, "rejected", "code_incorrect"): Rule(401, "code_incorrect", ERROR),
     (VERIFY, "rejected", "code_replaced"): Rule(401, "code_replaced", ERROR),

@@ -9,7 +9,7 @@
   POST /logout           {"generation_id"}
 
 Ordre des contrôles de chaque mutation, TOUS avant le moteur F2 :
-provenance (provenance.py) -> en-tête Cookie (cookies.py) -> CSRF
+provenance (provenance.py ; Origin exigé sur tout POST) -> en-tête Cookie (cookies.py) -> CSRF
 (csrf.py) -> Content-Type et corps JSON (4 Ko, clés exactes, types,
 UUID canoniques) -> cookie désigné par l'identifiant exact du corps ->
 IP client (client_ip.py, seulement pour start / resend / verify). Le code
@@ -17,8 +17,16 @@ OTP n'est contrôlé que comme chaîne JSON : sa forme est jugée par le
 moteur, qui compte les échecs (PR 2, code mal formé).
 
 Réponses : JSON, Cache-Control: no-store, aucune donnée secrète ; les
-erreurs ne portent qu'un code. Toute exception du moteur donne 503
-temporarily_unavailable, sans cookie. Les durées des cookies sont bornées
+erreurs ne portent qu'un code, sauf delivery_uncertain / delivery_failed
+(503) qui portent aussi les sélecteurs non secrets operation_id /
+candidate_id pour un renvoi explicite. Toute exception du moteur donne 503
+temporarily_unavailable, sans cookie.
+
+Le cookie candidat n'est posé qu'au démarrage et n'est jamais renouvelé
+ni effacé par un renvoi, une vérification ou une reprise, y compris après
+un succès : il expire à l'échéance fixée à son émission, ce qui garde la
+reprise canonique possible si la réponse de succès est perdue (le moteur
+borne seul la reprise à 5 minutes après le commit). Les durées des cookies sont bornées
 sans dépendre de l'horloge de l'application quand c'est possible
 (horloge monotone depuis l'entrée de la requête) :
 
@@ -100,6 +108,12 @@ def json_response(http_status: int, body: dict, cookies=()) -> Response:
     return response
 
 
+def _status_key(rule) -> str:
+    """« status » pour un succès, « error » pour un statut d'erreur (503
+    delivery_uncertain / delivery_failed portent aussi les sélecteurs)."""
+    return "status" if rule.http_status < 400 else "error"
+
+
 def error_response(http_status: int, code: str, cookies=()) -> Response:
     return json_response(http_status, {"error": code}, cookies)
 
@@ -145,6 +159,17 @@ async def read_json(request: Request, keys: frozenset) -> dict:
     return data
 
 
+def _room_for(cookies, added: int, *, new_candidates: int = 0) -> bool:
+    """Borne de 16 cookies Oryx garantie par construction. Seuls bootstrap
+    (liaison) et start (candidat) ajoutent un cookie sans en désigner un
+    existant ; chaque candidat, conservé jusqu'à son échéance, peut encore
+    produire au plus UN cookie actif (une génération par candidat, même nom
+    à la reprise). Compte prudent : chaque candidat présent est supposé
+    pouvoir en produire un, même si son actif existe déjà."""
+    potential = len(cookies.candidates) + new_candidates
+    return cookies.count + added + potential <= MAX_ORYX_COOKIES
+
+
 def _uuid_field(data: dict, key: str):
     value = canonical_uuid(data[key])
     if value is None:
@@ -165,10 +190,11 @@ def build_router(deps: Dependencies) -> APIRouter:
     def now_seconds() -> int:
         return math.floor(deps.wall_clock())
 
-    def guard(request: Request):
-        """Provenance, cookies, CSRF : (origine, cookies) ou Refusal."""
+    def guard(request: Request, *, allow_absent_origin: bool = False):
+        """Provenance puis cookies : (origine, cookies) ou Refusal. Origin
+        absent admis seulement pour le bootstrap (provenance.py)."""
         try:
-            origin = request_origin(request.headers, deps.allowed_origins)
+            origin = request_origin(request.headers, deps.allowed_origins, allow_absent_origin=allow_absent_origin)
         except ProvenanceRejected:
             raise Refusal(403, "origin_refused") from None
         try:
@@ -238,18 +264,21 @@ def build_router(deps: Dependencies) -> APIRouter:
             if max_age < 1:
                 return render(endpoint, contract.Decision(contract.UNAVAILABLE), started)
             cookies = [set_cookie(candidate_name(cand.candidate_id), cand.secret.reveal(), max_age)]
-            body = {"status": rule.code, "operation_id": str(decision.operation_id),
+            body = {_status_key(rule): rule.code, "operation_id": str(decision.operation_id),
                     "candidate_id": str(cand.candidate_id)}
         elif rule.kind == contract.PROGRESS:
             cookies = []
-            body = {"status": rule.code, "operation_id": str(decision.operation_id), "candidate_id": str(candidate_id)}
+            body = {_status_key(rule): rule.code, "operation_id": str(decision.operation_id),
+                    "candidate_id": str(candidate_id)}
         else:
             session = decision.session
             max_age = math.floor(active_max_age(session, started))
             if max_age < 1:
                 return render(endpoint, contract.Decision(contract.UNAVAILABLE), started)
-            cookies = [set_cookie(active_name(session.generation_id), session.active_secret.reveal(), max_age),
-                       clear_cookie(candidate_name(candidate_id))]
+            # Le cookie candidat est CONSERVÉ (ni effacé, ni renouvelé) : si
+            # cette réponse est perdue ou partiellement exploitée, la reprise
+            # canonique reste possible jusqu'à son échéance d'émission.
+            cookies = [set_cookie(active_name(session.generation_id), session.active_secret.reveal(), max_age)]
             body = {"status": rule.code, "generation_id": str(session.generation_id), "expires_in": max_age}
         logger.info("f2 http %s status=%s outcome=%s", endpoint, rule.http_status, rule.code)
         return json_response(rule.http_status, body, cookies)
@@ -261,10 +290,10 @@ def build_router(deps: Dependencies) -> APIRouter:
     @router.get("/csrf/bootstrap", include_in_schema=False)
     async def csrf_bootstrap(request: Request):
         try:
-            origin, cookies = guard(request)
+            origin, cookies = guard(request, allow_absent_origin=True)
             binding = cookies.csrf_binding
             if binding is None:
-                if cookies.count >= MAX_ORYX_COOKIES:
+                if not _room_for(cookies, 1):
                     raise Refusal(409, "credential_limit")
                 binding = csrf.new_binding()
             token = csrf.issue_token(deps.csrf_keyring, binding, origin, now_seconds())
@@ -279,7 +308,7 @@ def build_router(deps: Dependencies) -> APIRouter:
         try:
             cookies, data = await mutation(request, frozenset({"email"}))
             email = _string_field(data, "email", EMAIL_MAX_CHARS)
-            if cookies.count >= MAX_ORYX_COOKIES:
+            if not _room_for(cookies, 1, new_candidates=1):
                 raise Refusal(409, "credential_limit")
             outcome = await call(deps.service.start_sign_in, email=email, client_ip=client_ip(request))
         except Refusal as refusal:
