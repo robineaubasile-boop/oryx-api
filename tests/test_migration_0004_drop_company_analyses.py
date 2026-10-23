@@ -149,6 +149,18 @@ PR1_0017_INDEXES = {
     "ix_oryx_sessions_user_id",
 }
 PR1_TABLES = set(PR1_0016_TABLES + PR1_0017_TABLES)
+# R1 PR 2 (0018, testée à part) : journal anti-abus F2 étendu (colonne
+# auth_abuse_events.blocked_until, index unique partiel des marqueurs de
+# refus, CHECK étendus) et table singleton auth_abuse_key_state. Tête.
+PR2_0018 = "0018_f2_abuse_journal"
+PR2_0018_FILE = "0018_f2_abuse_journal.py"
+PR2_FILES = [PR2_0018_FILE]
+PR2_REVISIONS = {PR2_0018}
+PR2_0018_TABLES = ("auth_abuse_key_state",)
+PR2_0018_INDEXES = {"uq_auth_abuse_events_refusal_bucket"}
+PR2_0018_EVENT_COLUMN = "blocked_until"
+PR2_TABLES = set(PR2_0018_TABLES)
+HEAD = PR2_0018
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -253,7 +265,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == PR1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
@@ -379,19 +391,22 @@ def _indexes(engine, table) -> list:
 
 
 def _pr1_revisions_applied(engine) -> int:
-    """Nombre de révisions R1 PR 1 (0015, 0016, 0017) présentes en base."""
+    """Nombre de révisions R1 PR 1 (0015, 0016, 0017) puis R1 PR 2 (0018)
+    présentes en base."""
     with engine.connect() as conn:
         if conn.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar() is None:
             return 0
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3}.get(version, 0)
+    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4}.get(version, 0)
 
 
 def _without_pr1_changes(diff, applied: int) -> list:
     """Retire du diff compare_metadata EXACTEMENT les écarts des révisions
-    R1 PR 1 non encore appliquées (users.level_revision, tables et index de
-    0016 / 0017), et échoue si l'un d'eux manque ou si un écart PR 1 apparaît
-    alors que sa révision est appliquée. Retourne le reste."""
+    R1 PR 1 et R1 PR 2 non encore appliquées (users.level_revision, tables
+    et index de 0016 / 0017, puis table, colonne et index de 0018), et
+    échoue si l'un d'eux manque ou si un écart apparaît alors que sa
+    révision est appliquée. Retourne le reste. Avant 0017, la colonne
+    blocked_until arrive avec la table auth_abuse_events (add_table)."""
     expected = []
     if applied < 1:
         expected.append(("add_column", "users.level_revision"))
@@ -399,14 +414,22 @@ def _without_pr1_changes(diff, applied: int) -> list:
         expected += [("add_table", t) for t in PR1_0016_TABLES]
     if applied < 3:
         expected += [("add_table", t) for t in PR1_0017_TABLES] + [("add_index", i) for i in PR1_0017_INDEXES]
+    if applied < 4:
+        expected += [("add_table", t) for t in PR2_0018_TABLES] + [("add_index", i) for i in PR2_0018_INDEXES]
+    if applied == 3:
+        expected.append(("add_column", f"auth_abuse_events.{PR2_0018_EVENT_COLUMN}"))
     found, rest = [], []
     for d in diff:
         key = None
         if isinstance(d, tuple) and d[0] == "add_column" and d[2] == "users" and d[3].name == "level_revision":
             key = ("add_column", "users.level_revision")
-        elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in PR1_0016_TABLES + PR1_0017_TABLES:
+        elif (isinstance(d, tuple) and d[0] == "add_column" and d[2] == "auth_abuse_events"
+              and d[3].name == PR2_0018_EVENT_COLUMN and d[3].nullable):
+            key = ("add_column", f"auth_abuse_events.{PR2_0018_EVENT_COLUMN}")
+        elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in (
+                PR1_0016_TABLES + PR1_0017_TABLES + PR2_0018_TABLES):
             key = ("add_table", d[1].name)
-        elif isinstance(d, tuple) and d[0] == "add_index" and d[1].name in PR1_0017_INDEXES:
+        elif isinstance(d, tuple) and d[0] == "add_index" and d[1].name in PR1_0017_INDEXES | PR2_0018_INDEXES:
             key = ("add_index", d[1].name)
         if key:
             found.append(key)
@@ -417,9 +440,10 @@ def _without_pr1_changes(diff, applied: int) -> list:
 
 
 def _compare_metadata(engine) -> list:
-    """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1 des
-    révisions 0015 à 0017 pas encore appliquées (retirés exactement par
-    _without_pr1_changes). À la tête, aucun écart n'est retiré."""
+    """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1 et
+    R1 PR 2 des révisions 0015 à 0018 pas encore appliquées (retirés
+    exactement par _without_pr1_changes). À la tête, aucun écart n'est
+    retiré."""
     return _without_pr1_changes(_raw_compare_metadata(engine), _pr1_revisions_applied(engine))
 
 

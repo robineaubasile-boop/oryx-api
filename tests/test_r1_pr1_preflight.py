@@ -27,7 +27,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_engine,  # noqa: F401 — fixture
     pg_url,  # noqa: F401 — fixture
 )
-from tests.test_migration_0004_drop_company_analyses import PR1_0015, PR1_0017, R1D1, _data
+from tests.test_migration_0004_drop_company_analyses import PR1_0015, PR1_0017, PR2_TABLES, R1D1, _data
 
 SCRIPT = REPO_ROOT / "scripts" / "r1_pr1_preflight.py"
 
@@ -104,7 +104,7 @@ def test_expected_objects_match_the_pr1_migrations():
     from core.db import Base
     from core import models  # noqa: F401
     pr1_tables = {"portfolio_write_idempotency"} | {
-        t for t in Base.metadata.tables if t.startswith(("auth_", "oryx_session")) or t == "invitations"}
+        t for t in Base.metadata.tables if t.startswith(("auth_", "oryx_session")) or t == "invitations"} - PR2_TABLES
     assert set(preflight.PR1_TABLES) == pr1_tables and len(preflight.PR1_TABLES) == 12
 
 
@@ -185,7 +185,7 @@ def test_pg_go_at_0014_and_database_unchanged(pg_url, pg_engine):  # noqa: F811
 
 def test_pg_no_go_once_pr1_is_applied(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR1_0017)  # la tête est 0018 depuis R1 PR 2
     result = _run_preflight(pg_url)
     assert result.returncode == 1
     assert f"révision Alembic {PR1_0017} : une migration de R1 PR 1 est déjà appliquée" in result.stdout

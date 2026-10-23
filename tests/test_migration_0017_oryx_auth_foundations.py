@@ -47,6 +47,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR1_0017,
     PR1_0017_FILE,
     PR1_0017_TABLES,
+    PR2_0018,
     R1D1,
     _compare_metadata,
     _data,
@@ -80,13 +81,16 @@ def h(label: str) -> str:
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0017_to_0016_and_is_the_head():
+def test_revision_links_0017_to_0016_and_is_the_parent_of_0018():
+    """0017 était la tête de R1 PR 1 ; R1 PR 2 ajoute 0018 au-dessus, sans
+    modifier ce fichier (tests/test_migration_0018_f2_abuse_journal.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR1_0017]
+    assert script.get_heads() == [PR2_0018]
     assert script.get_revision(PR1_0017).down_revision == PR1_0016
+    assert script.get_revision(PR2_0018).down_revision == PR1_0017
     assert PR1_0017_FILE == f"{PR1_0017}.py" and len(PR1_0017) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 17 and files[-1] == PR1_0017_FILE
+    assert len(files) == 18 and files[-2] == PR1_0017_FILE
     assert tuple(CREATION_ORDER) == PR1_0017_TABLES
 
 

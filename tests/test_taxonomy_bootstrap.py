@@ -88,7 +88,8 @@ R1C2 = "0012_decryptage_cognitive_links"
 R1C4 = "0013_decryptage_conv_affinity"  # R1-C4 (fichier : R1C4_FILE, identifiant court)
 R1C4_FILE = "0013_decryptage_conversation_affinity.py"
 R1D1 = "0014_evaluation_run_leases"  # R1-D1 (lease des runs d'évaluation)
-PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL), tête
+PR1_HEAD = "0017_oryx_auth_foundations"  # R1 PR 1 (fondations PostgreSQL)
+PR2_HEAD = "0018_f2_abuse_journal"  # R1 PR 2 (journal anti-abus F2), tête
 R1D1_FILE = "0014_evaluation_run_leases.py"
 
 MODULE_PATH = REPO_ROOT / "core" / "pedagogy" / "taxonomy_bootstrap.py"
@@ -114,7 +115,7 @@ def test_no_migration_added_by_t4c_head_is_0010():
     tests/test_migration_0009_competency_inference_state.py et
     tests/test_migration_0010_r1b_event_idempotence.py."""
     script = _script_directory()
-    assert script.get_heads() == [PR1_HEAD]
+    assert script.get_heads() == [PR2_HEAD]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert script.get_revision(R1C2).down_revision == R1C1
@@ -123,9 +124,9 @@ def test_no_migration_added_by_t4c_head_is_0010():
     assert script.get_revision(T6A).down_revision == T5A
     assert script.get_revision(T5A).down_revision == T4A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-11:-3] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
+    assert files[-12:-4] == [f"{T4A}.py", f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py",
                              R1C4_FILE, R1D1_FILE]
-    assert len(files) == 17
+    assert len(files) == 18
 
 
 def test_public_api_is_exactly_bootstrap_verify_activate():
