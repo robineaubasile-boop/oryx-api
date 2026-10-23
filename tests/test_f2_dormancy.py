@@ -1,8 +1,11 @@
 """Dormance de R1 PR 2 : les services F2 existent mais ne sont reliés à
 rien.
 
-- Aucun module applicatif (api.py, core hors core/auth_f2, scripts,
-  workers, alembic/env.py, frontends) ne référence core.auth_f2.
+- Aucun module applicatif (api.py, core hors core/auth_f2 et
+  core/auth_f2_http, scripts, workers, alembic/env.py, frontends) ne
+  référence core.auth_f2. La couche HTTP de R1 PR 3 (core/auth_f2_http,
+  composition isolée de test) est le seul autre paquet qui l'importe, et
+  rien ne l'importe à son tour (tests/test_f2_http_dormancy.py).
 - Les routes, middlewares et points de démarrage d'api.py sont exactement
   ceux de main (a8d5b60) : aucune route publique ajoutée ou modifiée.
 - core/auth_f2 ne lit aucune variable d'environnement, ne pose aucun
@@ -18,6 +21,7 @@ import sys
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 PACKAGE = REPO_ROOT / "core" / "auth_f2"
+HTTP_PACKAGE = REPO_ROOT / "core" / "auth_f2_http"
 MAIN_ROUTES = [
     ("get", "/health"), ("post", "/analyze"), ("post", "/analyze-etf"), ("post", "/pedagogie/lookup"),
     ("post", "/decryptage"), ("post", "/api/runtime/assistant-deliveries/{assistant_turn_id}/ack"),
@@ -62,7 +66,7 @@ def test_no_application_module_references_the_f2_package():
     for root in roots:
         paths = [root] if root.is_file() else [p for p in root.rglob("*") if p.is_file()]
         for path in paths:
-            if PACKAGE in path.parents or "__pycache__" in path.parts or path.suffix not in (".py", ".js", ".html",
+            if PACKAGE in path.parents or HTTP_PACKAGE in path.parents or "__pycache__" in path.parts or path.suffix not in (".py", ".js", ".html",
                                                                                             ".ts", ".json"):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
