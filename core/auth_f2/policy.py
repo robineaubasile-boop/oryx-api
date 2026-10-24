@@ -55,3 +55,39 @@ STATEMENT_TIMEOUT = "10s"
 # Longueur maximale d'un code soumis examinée (au-delà : mal formé, sans
 # autre traitement).
 SUBMITTED_CODE_MAX_CHARS = 64
+
+# --------------------------------------------------------------------------
+# R1 PR 4 (C.4.5 §2.2 et §2.4) : admission HTTP et quotas métier.
+# --------------------------------------------------------------------------
+
+# Version de politique des événements écrits par PR 4 (probes d'admission
+# HTTP et resume_attempt) ; les événements PR 2 gardent POLICY_VERSION.
+HTTP_POLICY_VERSION = "f2-pr4-http-v1"
+
+# Sept actions HTTP (liste fermée, CHECK de 0019).
+HTTP_ACTIONS = (
+    "invitation_begin", "invitation_complete", "invitation_resume", "email_link_start", "email_link_resend",
+    "email_link_verify", "email_link_result",
+)
+# Budget commun : tous les probes d'une même IP, toutes actions confondues.
+HTTP_COMMON_LIMIT = 60
+HTTP_COMMON_WINDOW = timedelta(minutes=5)
+# Budgets propres à une action (filtre http_action) ; les trois routes OTP
+# de liaison n'en ont pas, elles gardent en plus les quotas OTP de PR 2.
+HTTP_ACTION_BUDGETS = {
+    "invitation_begin": (20, timedelta(hours=1)),
+    "invitation_complete": (30, timedelta(minutes=5)),
+    "invitation_resume": (30, timedelta(minutes=5)),
+    "email_link_result": (30, timedelta(minutes=5)),
+}
+
+# Ouvertures d'une invitation reconnue (opérations invitation_activation
+# conservées, quel que soit leur statut).
+INVITATION_OPEN_WINDOW = timedelta(hours=1)
+INVITATION_OPEN_WINDOW_LIMIT = 3
+INVITATION_OPEN_TOTAL_LIMIT = 12
+
+# Reprise d'activation et consultation du résultat de liaison : admissions
+# par opération (resume_attempt), toutes IP et versions de clé confondues.
+OPERATION_RESUME_WINDOW = timedelta(minutes=5)
+OPERATION_RESUME_LIMIT = 10

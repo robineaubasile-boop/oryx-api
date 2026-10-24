@@ -2287,18 +2287,26 @@ class AuthAbuseEvent(Base):
     otp_request_refused / otp_verification_refused (marqueurs de refus,
     occurred_at aligné sur une tranche de 5 minutes, au plus un par sujet,
     type et tranche : index unique partiel uq_auth_abuse_events_refusal_bucket).
-    Le CHECK de liaison est un sur-ensemble de celui de 0017."""
+    Le CHECK de liaison est un sur-ensemble de celui de 0017.
+
+    0019 (R1 PR 4) : auth_http_probe_attempt (admission HTTP par IP, une
+    ligne par admission), discriminant http_action (une des sept routes
+    PR 4, renseigné pour un probe et pour lui seul) ; un probe n'a ni
+    opération, ni demande OTP, ni blocage, et porte la version de
+    politique f2-pr4-http-v1. CHECK de type et de liaison : sur-ensembles
+    stricts de ceux de 0018."""
     __tablename__ = "auth_abuse_events"
     __table_args__ = (
         CheckConstraint(
             "event_kind IN ('otp_request', 'otp_failure', 'invitation_attempt', 'resume_attempt', "
-            "'otp_verification_attempt', 'otp_email_block', 'otp_request_refused', 'otp_verification_refused')",
+            "'otp_verification_attempt', 'otp_email_block', 'otp_request_refused', 'otp_verification_refused', "
+            "'auth_http_probe_attempt')",
             name="ck_auth_abuse_events_event_kind",
         ),
         CheckConstraint(
             "(event_kind NOT IN ('otp_request', 'otp_failure', 'otp_email_block') OR otp_request_id IS NOT NULL) "
             "AND (event_kind NOT IN ('invitation_attempt', 'resume_attempt', 'otp_request_refused', "
-            "'otp_verification_refused') OR otp_request_id IS NULL)",
+            "'otp_verification_refused', 'auth_http_probe_attempt') OR otp_request_id IS NULL)",
             name="ck_auth_abuse_events_otp_link",
         ),
         CheckConstraint(
@@ -2314,6 +2322,15 @@ class AuthAbuseEvent(Base):
             "event_kind NOT IN ('otp_request_refused', 'otp_verification_refused') "
             "OR occurred_at = date_bin(interval '5 minutes', occurred_at, timestamptz '2000-01-01 00:00:00+00')",
             name="ck_auth_abuse_events_refusal_bucket",
+        ),
+        CheckConstraint(
+            "(event_kind = 'auth_http_probe_attempt') = (http_action IS NOT NULL) "
+            "AND (http_action IS NULL OR http_action IN ('invitation_begin', 'invitation_complete', "
+            "'invitation_resume', 'email_link_start', 'email_link_resend', 'email_link_verify', "
+            "'email_link_result')) "
+            "AND (event_kind <> 'auth_http_probe_attempt' OR (auth_operation_id IS NULL AND otp_request_id IS NULL "
+            "AND blocked_until IS NULL AND policy_version = 'f2-pr4-http-v1'))",
+            name="ck_auth_abuse_events_http_probe",
         ),
         Index("ix_auth_abuse_events_window", "subject_id", "event_kind", "occurred_at"),
         Index("ix_auth_abuse_events_auth_operation_id", "auth_operation_id"),
@@ -2332,6 +2349,7 @@ class AuthAbuseEvent(Base):
     otp_request_id = Column(Uuid, ForeignKey("auth_otp_requests.id"), nullable=True)
     policy_version = Column(String, nullable=False)
     blocked_until = Column(DateTime(timezone=True), nullable=True)
+    http_action = Column(String, nullable=True)
 
 
 class AuthAbuseKeyState(Base):

@@ -19,7 +19,10 @@ Modules :
                   attestée par Sec-Fetch-Site) ;
 - client_ip.py  : résolveurs d'IP injectables, refus fermé ;
 - contract.py   : matrice (endpoint, Outcome.status, Outcome.reason) ;
-- routes.py     : routes /api/auth/f2/* ;
+- contract_pr4.py : matrice distincte des sept routes de R1 PR 4
+                  (invitation, activation, reprise, liaison e-mail) ;
+- routes.py     : routes /api/auth/f2/* (admission HTTP de R1 PR 4 :
+                  core.auth_f2.http_admission, injectée) ;
 - isolated.py   : composition d'application ISOLÉE (tests uniquement).
 
 Dormance : api.py (le véritable point d'entrée) n'importe ni ce paquet ni

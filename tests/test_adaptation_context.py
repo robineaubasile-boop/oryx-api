@@ -918,7 +918,7 @@ def test_32_not_wired_to_api_nor_web_chat_nor_migrated():
                  "PedagogicalProjection", "PEDAGOGICAL_RESPONSE_CONTEXT_SCHEMA_VERSION"):
         assert name not in api, name
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0018_f2_abuse_journal.py" and len(versions) == 18
+    assert versions[-1] == "0019_f2_http_admission.py" and len(versions) == 19
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     # R1-C4 : decryptage_cognitive_links.response_context_event_id (FK T2 vers
     # cognitive_events : event cible de la réponse assistant, provenance) n'est

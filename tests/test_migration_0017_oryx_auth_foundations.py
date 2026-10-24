@@ -43,6 +43,8 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    PR4_0019,
+    PR4_FILES,
     PR1_0016,
     PR1_0017,
     PR1_0017_FILE,
@@ -82,15 +84,17 @@ def h(label: str) -> str:
 # --------------------------------------------------------------------------
 
 def test_revision_links_0017_to_0016_and_is_the_parent_of_0018():
-    """0017 était la tête de R1 PR 1 ; R1 PR 2 ajoute 0018 au-dessus, sans
-    modifier ce fichier (tests/test_migration_0018_f2_abuse_journal.py)."""
+    """0017 était la tête de R1 PR 1 ; R1 PR 2 ajoute 0018 au-dessus, puis
+    R1 PR 4 ajoute 0019, sans modifier ce fichier
+    (tests/test_migration_0018_f2_abuse_journal.py,
+    tests/test_migration_0019_f2_http_admission.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR2_0018]
+    assert script.get_heads() == [PR4_0019]
     assert script.get_revision(PR1_0017).down_revision == PR1_0016
     assert script.get_revision(PR2_0018).down_revision == PR1_0017
     assert PR1_0017_FILE == f"{PR1_0017}.py" and len(PR1_0017) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 18 and files[-2] == PR1_0017_FILE
+    assert len(files) == 19 and files[-3] == PR1_0017_FILE
     assert tuple(CREATION_ORDER) == PR1_0017_TABLES
 
 

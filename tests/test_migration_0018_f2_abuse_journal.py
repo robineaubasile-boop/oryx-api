@@ -37,6 +37,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR2_0018,
     PR2_0018_FILE,
     PR2_TABLES,
+    PR4_0019,
     _compare_metadata,
     _data,
     _statements,
@@ -64,13 +65,16 @@ OFFLINE = "postgresql://offline@localhost/offline"
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0018_to_0017_and_is_the_head():
+def test_revision_links_0018_to_0017_and_is_the_parent_of_0019():
+    """0018 était la tête de R1 PR 2 ; R1 PR 4 ajoute 0019 au-dessus, sans
+    modifier ce fichier (tests/test_migration_0019_f2_http_admission.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR2_0018]
+    assert script.get_heads() == [PR4_0019]
     assert script.get_revision(PR2_0018).down_revision == PR1_0017
+    assert script.get_revision(PR4_0019).down_revision == PR2_0018
     assert PR2_0018_FILE == f"{PR2_0018}.py" and len(PR2_0018) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 18 and files[-1] == PR2_0018_FILE
+    assert len(files) == 19 and files[-2] == PR2_0018_FILE
 
 
 def test_pr1_migration_files_are_unchanged():
@@ -137,11 +141,17 @@ def test_models_match_the_migration_text():
     spec.loader.exec_module(migration)
     events = Base.metadata.tables["auth_abuse_events"]
     checks = {c.name: str(c.sqltext) for c in events.constraints if isinstance(c, sa.CheckConstraint)}
-    assert checks["ck_auth_abuse_events_event_kind"] == migration.NEW_KIND
-    assert checks["ck_auth_abuse_events_otp_link"] == migration.NEW_LINK
+    # Type et liaison OTP : remplacés par 0019 (tête), qui restaure ces
+    # textes exacts au downgrade (tests/test_migration_0019_f2_http_admission.py).
+    spec = importlib.util.spec_from_file_location("m0019", REPO_ROOT / "alembic" / "versions" / f"{PR4_0019}.py")
+    head = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(head)
+    assert (head.OLD_KIND, head.OLD_LINK) == (migration.NEW_KIND, migration.NEW_LINK)
+    assert checks["ck_auth_abuse_events_event_kind"] == head.NEW_KIND
+    assert checks["ck_auth_abuse_events_otp_link"] == head.NEW_LINK
     assert checks["ck_auth_abuse_events_block"] == migration.BLOCK
     assert checks["ck_auth_abuse_events_refusal_bucket"] == migration.BUCKET
-    assert list(events.c.keys())[-1] == "blocked_until" and events.c.blocked_until.nullable
+    assert list(events.c.keys())[-2:] == ["blocked_until", "http_action"] and events.c.blocked_until.nullable
     state = Base.metadata.tables["auth_abuse_key_state"]
     assert [c.name for c in state.columns] == ["id", "current_version", "previous_version", "previous_demoted_at",
                                                "updated_at"]
@@ -236,7 +246,7 @@ def test_pg_upgrade_0017_to_0018_keeps_data_then_exact_downgrade(pg_url, pg_engi
 @pytest.mark.parametrize("payload", ["event", "state"])
 def test_pg_downgrade_is_refused_when_0018_data_exists(pg_url, pg_engine, payload):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR2_0018)
     subject = _seed_0017_events(pg_engine)
     with pg_engine.begin() as conn:
         if payload == "event":
