@@ -69,7 +69,7 @@ from tests.test_longitudinal_service import (  # noqa: F401 — fixtures
 from tests.test_cognitive_capture import capture_event
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_directory
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
-from tests.test_migration_0004_drop_company_analyses import PR2_0018, PR2_FILES, _code_tokens
+from tests.test_migration_0004_drop_company_analyses import PR2_0018, PR2_FILES, PR4_0019, PR4_FILES, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A
@@ -108,7 +108,7 @@ def test_no_migration_added_by_t5c():
     0009 (T6-A), 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
     qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR2_0018]
+    assert script.get_heads() == [PR4_0019]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert script.get_revision(R1C2).down_revision == R1C1
@@ -116,10 +116,10 @@ def test_no_migration_added_by_t5c():
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-11:-4] == [f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE,
+    assert files[-12:-5] == [f"{T5A}.py", f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE,
                              R1D1_FILE]
-    assert files[-4:] == PR1_FILES + PR2_FILES
-    assert len(files) == 18
+    assert files[-5:] == PR1_FILES + PR2_FILES + PR4_FILES
+    assert len(files) == 19
 
 
 def test_no_profile_table_or_model_exists():

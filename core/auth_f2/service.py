@@ -10,6 +10,10 @@ Parcours :
   begin_invitation_activation / complete_invitation_activation.
 - Sessions : resume_result (reprise exacte du résultat committé),
   authenticate_session (preuve de livraison), revoke_session.
+- R1 PR 4 : quotas d'ouverture par invitation (begin_invitation_activation),
+  reprise d'activation sous quota par opération (resume_result avec
+  expected_kind='invitation_activation'), consultation du résultat de
+  liaison par la session initiatrice (read_email_linking_result).
 
 Protocole des opérations sensibles (C.2.1 §9) :
 
@@ -75,7 +79,13 @@ from core.auth_f2.normalize import InvalidClientIp, InvalidEmail, normalize_clie
 from core.auth_f2.policy import (
     CANDIDATE_TTL,
     DELIVERY_PROOF_VERSION,
+    HTTP_POLICY_VERSION,
+    INVITATION_OPEN_TOTAL_LIMIT,
+    INVITATION_OPEN_WINDOW,
+    INVITATION_OPEN_WINDOW_LIMIT,
     INVITATION_TTL,
+    OPERATION_RESUME_LIMIT,
+    OPERATION_RESUME_WINDOW,
     OPERATION_SCHEMA_VERSION,
     OPERATION_TTL,
     OTP_MAX_FAILURES_PER_REQUEST,
@@ -966,11 +976,23 @@ class F2AuthService:
     # Reprise, authentification, révocation
     # ------------------------------------------------------------------
 
-    def resume_result(self, *, operation_id, candidate: CandidateCredential) -> Outcome:
+    def resume_result(self, *, operation_id, candidate: CandidateCredential, expected_kind=None,
+                      client_ip=None) -> Outcome:
         """Reprise du résultat committé : candidat 'bound' seulement, fenêtre
         de 5 minutes, session et génération actives et non expirées. Rend
-        EXACTEMENT la même session, génération et secret ; aucune écriture,
-        aucun droit nouveau."""
+        EXACTEMENT la même session, génération et secret ; aucun droit
+        nouveau.
+
+        expected_kind (R1 PR 4) : None pour l'entrée interne historique
+        (connexion ou invitation, sans écriture) ; SIGN_IN impose une
+        opération de connexion (route /sign-in/resume, sans écriture) ;
+        INVITATION impose une opération d'activation et passe par le quota
+        par opération (client_ip requis, un resume_attempt par admission).
+        Les routes HTTP passent toujours expected_kind."""
+        if expected_kind == INVITATION:
+            return self._log("resume", self._resume_invitation(operation_id, candidate, client_ip))
+        if expected_kind not in (None, SIGN_IN):
+            raise ValueError("reprise : type d'opération attendu inconnu")
         operation_id = _uuid(operation_id)
         if operation_id is None or not isinstance(candidate, CandidateCredential):
             return self._log("resume", Outcome("rejected", "resume_unavailable"))
@@ -978,14 +1000,57 @@ class F2AuthService:
             op = _row(conn, "SELECT * FROM auth_operations WHERE id = :id FOR SHARE", id=operation_id)
             if op is None:
                 return self._log("resume", Outcome("rejected", "resume_unavailable"))
-            return self._log("resume", self._resume_locked(conn, op, candidate))
+            return self._log("resume", self._resume_locked(conn, op, candidate, expected_kind=expected_kind))
 
-    def _resume_locked(self, conn, op, credential: CandidateCredential) -> Outcome:
+    def _resume_invitation(self, operation_id, candidate, client_ip) -> Outcome:
+        """Reprise d'activation sous quota par opération (C.4.5 §2.4 et
+        §3.1). Ordre des verrous : état de clé -> sujets IP -> opération
+        FOR UPDATE (pris d'emblée : deux admissions concurrentes de la même
+        opération se sérialisent, aucune conversion depuis FOR SHARE) ->
+        candidat -> session -> génération -> heure PostgreSQL. Le
+        justificatif candidat et toute la reprise sont validés AVANT le
+        débit : un UUID isolé, un faux secret ou une opération inconnue
+        n'écrivent rien."""
+        operation_id = _uuid(operation_id)
+        if operation_id is None or not isinstance(candidate, CandidateCredential):
+            return Outcome("rejected", "resume_unavailable")
+        try:
+            ip_scope = Scope(IP, normalize_client_ip(client_ip))
+        except InvalidClientIp:
+            return Outcome("rejected", "ip_unavailable")
+
+        def body(conn, subjects):
+            op = _row(conn, "SELECT * FROM auth_operations WHERE id = :id FOR UPDATE", id=operation_id)
+            if op is None:
+                return Outcome("rejected", "resume_unavailable")
+            return self._resume_locked(conn, op, candidate, expected_kind=INVITATION,
+                                       quota=(subjects, ip_scope, "quota_operation_resume"))
+
+        return self._with_subjects([ip_scope], body)
+
+    def _debit_operation(self, conn, quota, operation_id, at):
+        """Quota par opération (10 / 5 min), sous le verrou exclusif de
+        l'opération : compte TOUS les resume_attempt de l'opération (toutes
+        IP, toutes versions de clé), puis en enregistre un sur le sujet IP
+        courant. Rend un refus, ou None si l'admission est enregistrée."""
+        subjects, ip_scope, reason = quota
+        since = at - OPERATION_RESUME_WINDOW
+        if abuse.count_operation_since(conn, operation_id, abuse.RESUME_ATTEMPT, since) >= OPERATION_RESUME_LIMIT:
+            return Outcome("refused", reason, operation_id)
+        abuse.insert_event(conn, subject_id=subjects.recording_id(ip_scope), kind=abuse.RESUME_ATTEMPT, at=at,
+                           operation_id=operation_id, policy_version=HTTP_POLICY_VERSION)
+        return None
+
+    def _resume_locked(self, conn, op, credential: CandidateCredential, *, expected_kind=None,
+                       quota=None) -> Outcome:
         """Opération déjà verrouillée par l'appelant. Verrouille candidat,
         session et génération, PUIS lit l'heure PostgreSQL, PUIS juge
-        révocation et expirations (fenêtre de reprise, session)."""
+        révocation et expirations (fenêtre de reprise, session). quota : le
+        débit par opération n'a lieu qu'après TOUTES les validations."""
         refused = Outcome("rejected", "resume_unavailable", op["id"])
         if op["status"] != "committed" or op["kind"] not in (SIGN_IN, INVITATION):
+            return refused
+        if expected_kind is not None and op["kind"] != expected_kind:
             return refused
         secret = _decode(credential.secret) if isinstance(credential, CandidateCredential) else None
         if secret is None or _uuid(credential.candidate_id) is None:
@@ -1018,6 +1083,10 @@ class F2AuthService:
         if not hashes_equal(active_secret_hash(active_key, session["id"], generation["id"], active),
                             generation["active_secret_hash"]):
             return refused
+        if quota is not None:
+            denied = self._debit_operation(conn, quota, op["id"], at)
+            if denied is not None:
+                return denied
         issued = IssuedSession(op["id"], session["id"], generation["id"], session["user_id"],
                                Redacted(b64url_encode(active)), session["absolute_expires_at"], resumed=True)
         return Outcome("resumed", None, op["id"], session=issued)
@@ -1108,10 +1177,26 @@ class F2AuthService:
             at = self._clock(conn)
             if invitation is None or invitation["status"] != "pending" or at >= invitation["expires_at"]:
                 return self._log("invitation", Outcome("rejected", "invitation_unavailable"))
+            if self._invitation_openings_exhausted(conn, invitation["id"], at):
+                # Même réponse publique qu'une invitation indisponible.
+                logger.info("f2 invitation openings exhausted")
+                return self._log("invitation", Outcome("rejected", "invitation_unavailable"))
             expires = min(at + OPERATION_TTL, invitation["expires_at"])
             operation_id = self._new_operation(conn, INVITATION, at, expires_at=expires, invitation_id=invitation["id"])
             candidate = self._new_candidate(conn, operation_id, INVITATION, at, expires)
         return self._log("invitation", Outcome("candidate_issued", None, operation_id, candidate))
+
+    def _invitation_openings_exhausted(self, conn, invitation_id, at) -> bool:
+        """Plafonds d'ouverture (R1 PR 4) : 3 par heure glissante, 12 sur la
+        vie de l'invitation. Comptés sur les opérations invitation_activation
+        CONSERVÉES (aucune purge ; statut indifférent : expirées, échouées et
+        committées comptent), sous le verrou exclusif de l'invitation tenu
+        par l'appelant, à l'heure lue après ce verrou."""
+        recent, total = conn.execute(sa.text(
+            "SELECT count(*) FILTER (WHERE created_at > :since), count(*) FROM auth_operations "
+            "WHERE invitation_id = :i AND kind = :kind"
+        ), {"i": invitation_id, "kind": INVITATION, "since": at - INVITATION_OPEN_WINDOW}).one()
+        return recent >= INVITATION_OPEN_WINDOW_LIMIT or total >= INVITATION_OPEN_TOTAL_LIMIT
 
     def complete_invitation_activation(self, *, operation_id, candidate: CandidateCredential) -> Outcome:
         """Consommation atomique : invitation 'accepted', profil créé avec un
@@ -1147,3 +1232,96 @@ class F2AuthService:
             op = _row(conn, "SELECT * FROM auth_operations WHERE id = :id", id=op["id"])
             session = self._issue_session(conn, at, op, cand, _decode(candidate.secret), user_id)
         return self._log("invitation", Outcome("invitation_activated", None, op["id"], session=session))
+
+    # ------------------------------------------------------------------
+    # Résultat de liaison (R1 PR 4, C.4.5 §3.2)
+    # ------------------------------------------------------------------
+
+    def read_email_linking_result(self, *, operation_id, session: SessionCredential, client_ip) -> Outcome:
+        """Consultation du résultat durable d'une liaison par la session
+        initiatrice EXACTE. N'appelle ni authenticate_session ni aucune
+        écriture de session : aucune confirmation de livraison, aucune
+        session, identité, opération ni OTP créés ; seule écriture : un
+        resume_attempt par admission (quota par opération).
+
+        Phase 1 (transaction sans verrou, aucune écriture) : la session
+        désignée est jugée seule, SANS lire l'opération ; invalide ->
+        session_invalid, quelle que soit operation_id.
+        Phase 2 (transaction distincte, aucune conservation de verrou depuis
+        la phase 1) : état de clé -> sujets IP -> opération FOR UPDATE ->
+        session -> génération -> heure PostgreSQL ; session réauthentifiée
+        (révocation ou expiration intermédiaires -> session_invalid) ; puis
+        éligibilité (sinon result_unavailable), quota par opération, succès."""
+        with transaction(self._engine) as conn:
+            prevalidated = self._session_prevalidated(conn, session)
+        if not prevalidated:
+            return self._log("result", Outcome("rejected", "session_invalid"))
+        self._hook("result.prevalidated")
+        operation_id = _uuid(operation_id)
+        try:
+            ip_scope = Scope(IP, normalize_client_ip(client_ip))
+        except InvalidClientIp:
+            return self._log("result", Outcome("rejected", "ip_unavailable"))
+
+        def body(conn, subjects):
+            op = _row(conn, "SELECT * FROM auth_operations WHERE id = :id FOR UPDATE",
+                      id=operation_id) if operation_id else None
+            locked = self._lock_session(conn, session, generation_lock="FOR SHARE")
+            result = identity = request = None
+            if op is not None:
+                result = _row(conn, "SELECT * FROM auth_operation_results WHERE operation_id = :id", id=op["id"])
+            if result is not None and result["auth_identity_id"] is not None:
+                identity = _row(conn, "SELECT * FROM auth_identities WHERE id = :id", id=result["auth_identity_id"])
+            if result is not None and result["otp_request_id"] is not None:
+                request = _row(conn, "SELECT * FROM auth_otp_requests WHERE id = :id", id=result["otp_request_id"])
+            at = self._clock(conn)  # après tous les verrous
+            if not self._session_valid(locked, at):
+                return Outcome("rejected", "session_invalid")
+            if not self._linking_result_ok(op, result, identity, request, locked[0], at):
+                return Outcome("rejected", "result_unavailable")
+            denied = self._debit_operation(conn, (subjects, ip_scope, "quota_operation_result"), op["id"], at)
+            if denied is not None:
+                return denied
+            return Outcome("email_linked", None, op["id"])
+
+        return self._log("result", self._with_subjects([ip_scope], body))
+
+    def _session_prevalidated(self, conn, credential) -> bool:
+        """Phase 1 : session et génération désignées, actives, non expirées,
+        secret actif conforme ; lecture seule, sans verrou ni écriture."""
+        if not isinstance(credential, SessionCredential) or _uuid(credential.generation_id) is None:
+            return False
+        secret = _decode(credential.secret)
+        if secret is None:
+            return False
+        generation = _row(conn, "SELECT * FROM oryx_session_generations WHERE id = :g", g=credential.generation_id)
+        if generation is None:
+            return False
+        session = _row(conn, "SELECT * FROM oryx_sessions WHERE id = :s", s=generation["session_id"])
+        return self._session_valid((session, generation, secret), self._clock(conn))
+
+    def _linking_result_ok(self, op, result, identity, request, session, at) -> bool:
+        """Relations exigées entre opération, session initiatrice, résultat
+        durable, identité liée et preuve OTP, à l'instant `at`."""
+        if op is None or op["kind"] != LINKING or op["status"] != "committed" or result is None:
+            return False
+        if (session["id"] != op["initiating_session_id"] or session["user_id"] != op["target_user_id"]
+                or session["auth_method"] != INVITATION or op["initiating_session_method"] != INVITATION):
+            return False
+        if (op["user_id"] != op["target_user_id"] or op["auth_identity_id"] is None
+                or op["identity_resolution"] not in ("new_identity", "existing_identity")):
+            return False
+        if (result["operation_kind"] != LINKING or result["operation_status"] != "committed"
+                or result["result_version"] != RESULT_VERSION
+                or result["result_payload"] != {"outcome": PAYLOAD[LINKING]}
+                or result["committed_at"] != op["committed_at"] or result["auth_identity_id"] != op["auth_identity_id"]
+                or result["session_id"] is not None or result["generation_id"] is not None
+                or result["candidate_id"] is not None or not at < result["resume_until"]):
+            return False
+        if (identity is None or identity["user_id"] != op["target_user_id"]
+                or (identity["provider"], identity["issuer"], identity["subject"])
+                != (op["proven_provider"], op["proven_issuer"], op["proven_subject"])):
+            return False
+        return (request is not None and request["auth_operation_id"] == op["id"] and request["status"] == "verified"
+                and request["verified_at"] == result["otp_verified_at"]
+                and request["expires_at"] == result["otp_expires_at"])

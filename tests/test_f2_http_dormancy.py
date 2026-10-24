@@ -63,7 +63,11 @@ async def probe():
     async with httpx.AsyncClient(transport=transport, base_url="https://oryx.test") as client:
         for method, path in (("GET", "/api/auth/f2/csrf/bootstrap"), ("POST", "/api/auth/f2/sign-in/start"),
                              ("POST", "/api/auth/f2/sign-in/verify"), ("POST", "/api/auth/f2/session/resolve"),
-                             ("POST", "/api/auth/f2/logout"), ("GET", "/health")):
+                             ("POST", "/api/auth/f2/logout"), ("POST", "/api/auth/f2/invitation/begin"),
+                             ("POST", "/api/auth/f2/invitation/complete"), ("POST", "/api/auth/f2/invitation/resume"),
+                             ("POST", "/api/auth/f2/email-link/start"), ("POST", "/api/auth/f2/email-link/resend"),
+                             ("POST", "/api/auth/f2/email-link/verify"), ("POST", "/api/auth/f2/email-link/result"),
+                             ("GET", "/health")):
             r = await client.request(method, path, headers={"origin": "https://oryx.test",
                                                             "content-type": "application/json"},
                                      content=b'{"email":"alice@example.com"}' if method == "POST" else None)
@@ -94,6 +98,8 @@ def test_production_entrypoint_exposes_no_f2_route_whatever_the_environment(case
     assert result["middleware"] == ["CORSMiddleware"]
     assert result["f2_modules"] == []  # ni le moteur ni la couche HTTP ne sont chargés
     assert result["attempts"] == []  # aucun appel fournisseur au démarrage ni aux requêtes
+    # R1 PR 4 : les sept routes d'invitation et de liaison e-mail sont absentes.
+    assert sum(1 for _, path, _, _, _ in result["responses"] if "/invitation/" in path or "/email-link/" in path) == 7
     for method, path, status, cookies, _ in result["responses"]:
         if path.startswith("/api/auth/f2"):
             assert status in (404, 405), (method, path, status)

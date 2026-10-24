@@ -69,12 +69,14 @@ REFERENCE = {
     (U, "rejected", "key_unavailable"): (503, "temporarily_unavailable", ER),
 }
 
-# Motifs et états des parcours hors PR 3 (invitation, liaison e-mail) :
-# jamais dans la matrice, donc 503 s'ils parvenaient à une route de connexion.
+# Motifs et états des parcours hors PR 3 (invitation, liaison e-mail ; R1 PR 4 :
+# résultat de liaison, quotas par opération) : jamais dans la matrice PR 3,
+# donc 503 s'ils parvenaient à une route de connexion (matrice PR 4 :
+# tests/test_f2_pr4_contract.py).
 OUT_OF_SCOPE = {
     ("rejected", "session_invalid"), ("rejected", "profile_already_linked"), ("rejected", "invitation_unavailable"),
     ("rejected", "conflict_other_profile"), ("candidate_issued", None), ("invitation_activated", None),
-    ("email_linked", "dynamic"),
+    ("email_linked", "dynamic"), ("rejected", "result_unavailable"),
 }
 
 
@@ -117,6 +119,8 @@ def test_every_engine_outcome_is_mapped_or_out_of_scope():
         ("rejected", "'verification_uncertain' if request['status'] == 'verify_uncertain' else 'code_not_ready'"),
         ("email_linked", "resolution"),
         ("email_linked", "op['identity_resolution']"),
+        ("refused", "reason"),             # R1 PR 4, _debit_operation : quota_operation_resume |
+                                           # quota_operation_result (hors matrice PR 3)
     }
     for reason in ("send_failed", "superseded"):
         assert (S, "send_failed", reason) in contract.MATRIX and (R, "send_failed", reason) in contract.MATRIX

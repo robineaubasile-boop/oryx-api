@@ -128,6 +128,10 @@ OTP_VERIFICATION_ATTEMPT = "otp_verification_attempt"
 OTP_EMAIL_BLOCK = "otp_email_block"
 OTP_REQUEST_REFUSED = "otp_request_refused"
 OTP_VERIFICATION_REFUSED = "otp_verification_refused"
+# R1 PR 4 (migration 0019) : admission HTTP par IP, et admission par
+# opération (reprise d'activation, consultation du résultat de liaison).
+HTTP_PROBE = "auth_http_probe_attempt"
+RESUME_ATTEMPT = "resume_attempt"
 
 
 class AbuseUnavailable(Exception):
@@ -260,7 +264,7 @@ def select_subjects(conn, keyring: Keyring, state: KeyState, scopes, *, lock: bo
 # Comptages (fenêtres glissantes ]t - W, t])
 # --------------------------------------------------------------------------
 
-def count_since(conn, ids, kind: str, since, *, after=None) -> int:
+def count_since(conn, ids, kind: str, since, *, after=None, http_action=None) -> int:
     if not ids:
         return 0
     sql = ("SELECT count(*) FROM auth_abuse_events WHERE subject_id = ANY(:ids) AND event_kind = :kind "
@@ -269,7 +273,19 @@ def count_since(conn, ids, kind: str, since, *, after=None) -> int:
     if after is not None:
         sql += " AND occurred_at > :after"
         params["after"] = after
+    if http_action is not None:
+        sql += " AND http_action = :action"
+        params["action"] = http_action
     return conn.execute(sa.text(sql), params).scalar_one()
+
+
+def count_operation_since(conn, operation_id, kind: str, since) -> int:
+    """Événements d'une OPÉRATION dans ]since, t], quels que soient le sujet,
+    l'IP et la version de clé (budgets par opération de R1 PR 4)."""
+    return conn.execute(sa.text(
+        "SELECT count(*) FROM auth_abuse_events WHERE auth_operation_id = :op AND event_kind = :kind "
+        "AND occurred_at > :since"
+    ), {"op": operation_id, "kind": kind, "since": since}).scalar_one()
 
 
 def last_event_at(conn, ids, kind: str):
@@ -315,13 +331,17 @@ def verification_ip_exhausted(conn, subjects: Subjects, ip: Scope, at) -> bool:
 # --------------------------------------------------------------------------
 
 def insert_event(conn, *, subject_id, kind: str, at, operation_id=None, otp_request_id=None,
-                 blocked_until=None, event_id=None):
+                 blocked_until=None, event_id=None, policy_version=POLICY_VERSION, http_action=None):
+    """policy_version : POLICY_VERSION (PR 2) par défaut ; les événements de
+    R1 PR 4 passent explicitement HTTP_POLICY_VERSION (et http_action pour
+    un probe, CHECK de 0019)."""
     event_id = event_id or uuid.uuid4()
     conn.execute(sa.text(
         "INSERT INTO auth_abuse_events (id, subject_id, event_kind, occurred_at, auth_operation_id, otp_request_id, "
-        "policy_version, blocked_until) VALUES (:id, :subject, :kind, :at, :op, :req, :policy, :until)"
+        "policy_version, blocked_until, http_action) VALUES (:id, :subject, :kind, :at, :op, :req, :policy, :until, "
+        ":action)"
     ), {"id": event_id, "subject": subject_id, "kind": kind, "at": at, "op": operation_id, "req": otp_request_id,
-        "policy": POLICY_VERSION, "until": blocked_until})
+        "policy": policy_version, "until": blocked_until, "action": http_action})
     return event_id
 
 

@@ -8,6 +8,28 @@
   POST /session/resolve  {"generation_id"}
   POST /logout           {"generation_id"}
 
+R1 PR 4 (C.4.5 et addendum C.4.5-A), sept routes supplémentaires :
+
+  POST /invitation/begin     {"token"}
+  POST /invitation/complete  {"operation_id", "candidate_id"}
+  POST /invitation/resume    {"operation_id", "candidate_id"}
+  POST /email-link/start     {"generation_id", "email"}
+  POST /email-link/resend    {"generation_id", "operation_id"}
+  POST /email-link/verify    {"generation_id", "operation_id", "code"}
+  POST /email-link/result    {"generation_id", "operation_id"}
+
+Ordre commun de ces sept routes : provenance -> en-tête Cookie -> CSRF ->
+Content-Type et corps JSON -> champs dans l'ordre du schéma, puis cookie
+EXACT désigné (candidat ou actif) -> capacité (begin seulement) -> IP
+client fiable (exigée par les sept routes) -> admission HTTP durable
+(core.auth_f2.http_admission, committée ; 429 rate_limited sans probe si
+refusée, 503 si elle échoue ou reste incertaine) -> moteur F2 -> matrice
+fermée core.auth_f2_http.contract_pr4. Un refus de transport ne crée ni
+probe, ni resume_attempt, ni opération, ni cookie, et n'appelle pas le
+moteur. Aucune réponse PR 4 ne porte expires_in ; le cookie candidat
+n'est jamais renouvelé ni effacé ; une liaison e-mail ne pose aucun
+cookie.
+
 Ordre des contrôles de chaque mutation, TOUS avant le moteur F2 :
 provenance (provenance.py ; Origin exigé sur tout POST) -> en-tête Cookie (cookies.py) -> CSRF
 (csrf.py) -> Content-Type et corps JSON (4 Ko, clés exactes, types,
@@ -51,8 +73,8 @@ from starlette.requests import ClientDisconnect
 
 from core.auth_f2.crypto import Redacted
 from core.auth_f2.policy import RESULT_RESUME_WINDOW, SESSION_ABSOLUTE_TTL
-from core.auth_f2.service import CandidateCredential, SessionCredential, SessionPrincipal
-from core.auth_f2_http import contract, csrf
+from core.auth_f2.service import INVITATION, SIGN_IN, CandidateCredential, SessionCredential, SessionPrincipal
+from core.auth_f2_http import contract, contract_pr4, csrf
 from core.auth_f2_http.client_ip import ClientIpUnavailable
 from core.auth_f2_http.cookies import (
     CANDIDATE_COOKIE_TTL,
@@ -98,6 +120,9 @@ class Dependencies:
     allowed_origins: frozenset
     wall_clock: object
     monotonic: object
+    # Admission HTTP de R1 PR 4 (core.auth_f2.http_admission.HttpAdmission) ;
+    # absente : les sept routes PR 4 refusent (503) sans appeler le moteur.
+    admission: object = None
 
 
 def json_response(http_status: int, body: dict, cookies=()) -> Response:
@@ -348,7 +373,8 @@ def build_router(deps: Dependencies) -> APIRouter:
         try:
             cookies, data = await mutation(request, frozenset({"operation_id", "candidate_id"}))
             operation_id, candidate = candidate_from(cookies, data)
-            outcome = await call(deps.service.resume_result, operation_id=operation_id, candidate=candidate)
+            outcome = await call(deps.service.resume_result, operation_id=operation_id, candidate=candidate,
+                                 expected_kind=SIGN_IN)
         except Refusal as refusal:
             return refused(contract.RESUME, refusal)
         decision = contract.translate(contract.RESUME, outcome, operation_id=operation_id)
@@ -392,5 +418,168 @@ def build_router(deps: Dependencies) -> APIRouter:
             return refused("logout", Refusal(401, "session_invalid"), cleared)
         logger.info("f2 http logout status=200")
         return json_response(200, {"status": "logged_out"}, cleared)
+
+    # ------------------------------------------------------------------
+    # R1 PR 4 : invitation, activation, reprise, liaison e-mail
+    # ------------------------------------------------------------------
+
+    def session_cookie(cookies, generation_id) -> SessionCredential:
+        secret = cookies.actives.get(generation_id)
+        if secret is None:
+            raise Refusal(401, "session_invalid")
+        return SessionCredential(generation_id, Redacted(secret))
+
+    async def admit(action: str, ip: str) -> None:
+        """Admission HTTP committée AVANT le moteur ; aucun verrou conservé."""
+        if deps.admission is None:
+            raise Refusal(503, "temporarily_unavailable")
+        admitted = await call(deps.admission.admit, action, ip)
+        if admitted is False:
+            raise Refusal(429, "rate_limited")
+        if admitted is not True:
+            raise Refusal(503, "temporarily_unavailable")
+
+    def render_pr4(endpoint: str, decision: contract.Decision, started: float) -> Response:
+        rule = decision.rule
+        cookies = []
+        if rule.kind == contract_pr4.ERROR:
+            logger.info("f2 http %s status=%s code=%s", endpoint, rule.http_status, rule.code)
+            return error_response(rule.http_status, rule.code)
+        if rule.kind == contract_pr4.CANDIDATE:
+            cand = decision.candidate
+            max_age = CANDIDATE_COOKIE_TTL.total_seconds() - (deps.monotonic() - started)
+            if max_age < 1:
+                return render_pr4(endpoint, contract.Decision(contract.UNAVAILABLE), started)
+            cookies = [set_cookie(candidate_name(cand.candidate_id), cand.secret.reveal(), max_age)]
+            body = {"status": rule.code, "operation_id": str(decision.operation_id),
+                    "candidate_id": str(cand.candidate_id)}
+        elif rule.kind == contract_pr4.OPERATION:
+            body = {_status_key(rule): rule.code, "operation_id": str(decision.operation_id)}
+        else:
+            session = decision.session
+            max_age = math.floor(active_max_age(session, started))
+            if max_age < 1:
+                return render_pr4(endpoint, contract.Decision(contract.UNAVAILABLE), started)
+            # Seul l'actif est posé ; le cookie candidat est CONSERVÉ tel quel.
+            cookies = [set_cookie(active_name(session.generation_id), session.active_secret.reveal(), max_age)]
+            body = {"status": rule.code, "operation_id": str(decision.operation_id),
+                    "generation_id": str(session.generation_id),
+                    "expires_at": contract_pr4.expires_at_text(session.absolute_expires_at)}
+        logger.info("f2 http %s status=%s outcome=%s", endpoint, rule.http_status, rule.code)
+        return json_response(rule.http_status, body, cookies)
+
+    @router.post("/invitation/begin", include_in_schema=False)
+    async def invitation_begin(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"token"}))
+            token = _string_field(data, "token")
+            if not _room_for(cookies, 1, new_candidates=1):
+                raise Refusal(409, "credential_limit")
+            ip = client_ip(request)
+            await admit("invitation_begin", ip)
+            outcome = await call(deps.service.begin_invitation_activation, token=Redacted(token))
+        except Refusal as refusal:
+            return refused(contract_pr4.BEGIN, refusal)
+        return render_pr4(contract_pr4.BEGIN, contract_pr4.translate(contract_pr4.BEGIN, outcome), started)
+
+    @router.post("/invitation/complete", include_in_schema=False)
+    async def invitation_complete(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"operation_id", "candidate_id"}))
+            operation_id, candidate = candidate_from(cookies, data)
+            ip = client_ip(request)
+            await admit("invitation_complete", ip)
+            outcome = await call(deps.service.complete_invitation_activation, operation_id=operation_id,
+                                 candidate=candidate)
+        except Refusal as refusal:
+            return refused(contract_pr4.COMPLETE, refusal)
+        decision = contract_pr4.translate(contract_pr4.COMPLETE, outcome, operation_id=operation_id)
+        return render_pr4(contract_pr4.COMPLETE, decision, started)
+
+    @router.post("/invitation/resume", include_in_schema=False)
+    async def invitation_resume(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"operation_id", "candidate_id"}))
+            operation_id, candidate = candidate_from(cookies, data)
+            ip = client_ip(request)
+            await admit("invitation_resume", ip)
+            outcome = await call(deps.service.resume_result, operation_id=operation_id, candidate=candidate,
+                                 expected_kind=INVITATION, client_ip=ip)
+        except Refusal as refusal:
+            return refused(contract_pr4.RESUME, refusal)
+        decision = contract_pr4.translate(contract_pr4.RESUME, outcome, operation_id=operation_id)
+        return render_pr4(contract_pr4.RESUME, decision, started)
+
+    @router.post("/email-link/start", include_in_schema=False)
+    async def email_link_start(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"generation_id", "email"}))
+            generation_id = _uuid_field(data, "generation_id")
+            email = _string_field(data, "email", EMAIL_MAX_CHARS)
+            session = session_cookie(cookies, generation_id)
+            ip = client_ip(request)
+            await admit("email_link_start", ip)
+            outcome = await call(deps.service.start_email_linking, session=session, email=email, client_ip=ip)
+        except Refusal as refusal:
+            return refused(contract_pr4.LINK_START, refusal)
+        return render_pr4(contract_pr4.LINK_START, contract_pr4.translate(contract_pr4.LINK_START, outcome), started)
+
+    @router.post("/email-link/resend", include_in_schema=False)
+    async def email_link_resend(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"generation_id", "operation_id"}))
+            generation_id = _uuid_field(data, "generation_id")
+            operation_id = _uuid_field(data, "operation_id")
+            session = session_cookie(cookies, generation_id)
+            ip = client_ip(request)
+            await admit("email_link_resend", ip)
+            outcome = await call(deps.service.resend_email_linking_otp, operation_id=operation_id, session=session,
+                                 client_ip=ip)
+        except Refusal as refusal:
+            return refused(contract_pr4.LINK_RESEND, refusal)
+        decision = contract_pr4.translate(contract_pr4.LINK_RESEND, outcome, operation_id=operation_id)
+        return render_pr4(contract_pr4.LINK_RESEND, decision, started)
+
+    @router.post("/email-link/verify", include_in_schema=False)
+    async def email_link_verify(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"generation_id", "operation_id", "code"}))
+            generation_id = _uuid_field(data, "generation_id")
+            operation_id = _uuid_field(data, "operation_id")
+            code = _string_field(data, "code")
+            session = session_cookie(cookies, generation_id)
+            ip = client_ip(request)
+            await admit("email_link_verify", ip)
+            outcome = await call(deps.service.verify_email_linking, operation_id=operation_id, session=session,
+                                 code=code, client_ip=ip)
+        except Refusal as refusal:
+            return refused(contract_pr4.LINK_VERIFY, refusal)
+        decision = contract_pr4.translate(contract_pr4.LINK_VERIFY, outcome, operation_id=operation_id)
+        return render_pr4(contract_pr4.LINK_VERIFY, decision, started)
+
+    @router.post("/email-link/result", include_in_schema=False)
+    async def email_link_result(request: Request):
+        started = deps.monotonic()
+        try:
+            cookies, data = await mutation(request, frozenset({"generation_id", "operation_id"}))
+            generation_id = _uuid_field(data, "generation_id")
+            operation_id = _uuid_field(data, "operation_id")
+            session = session_cookie(cookies, generation_id)
+            ip = client_ip(request)
+            await admit("email_link_result", ip)
+            # Jamais authenticate_session ni authenticated() : la consultation
+            # ne confirme aucune livraison de session.
+            outcome = await call(deps.service.read_email_linking_result, operation_id=operation_id,
+                                 session=session, client_ip=ip)
+        except Refusal as refusal:
+            return refused(contract_pr4.LINK_RESULT, refusal)
+        decision = contract_pr4.translate(contract_pr4.LINK_RESULT, outcome, operation_id=operation_id)
+        return render_pr4(contract_pr4.LINK_RESULT, decision, started)
 
     return router
