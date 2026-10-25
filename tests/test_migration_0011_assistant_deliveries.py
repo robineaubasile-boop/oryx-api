@@ -48,6 +48,8 @@ from tests.test_migration_0002_analysis_sessions import (
 )
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1
 from tests.test_migration_0004_drop_company_analyses import (
+    PR4_0019,
+    PR4_FILES,
     PR2_0018,
     PR2_FILES,
     PR2_TABLES,
@@ -127,19 +129,19 @@ def test_revision_chain_is_exactly_0001_to_0011_then_0012():
     R1-C1. Depuis R1-C2, 0012 (decryptage_cognitive_links) la suit ; depuis
     R1-C4, 0013 (affinité conversationnelle) est la tête unique."""
     script = _script_directory()
-    assert script.get_heads() == [PR2_0018]
+    assert script.get_heads() == [PR4_0019]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
     chain = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
-    assert set(revisions) == set(chain) | {PR1_0015, PR1_0016, PR1_0017, PR2_0018}
+    assert set(revisions) == set(chain) | {PR1_0015, PR1_0016, PR1_0017, PR2_0018, PR4_0019}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
     assert revisions[R1B].down_revision == T6A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES
-    assert len(files) == 18
+    assert files == [f"{rev}.py" for rev in chain[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES
+    assert len(files) == 19
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -315,7 +317,7 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == PR2_0018
+    assert _version(pg_engine) == PR4_0019
     assert _tables(pg_engine) == HEAD_TABLES | PR1_TABLES | PR2_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)

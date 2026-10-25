@@ -17,8 +17,13 @@ l'environnement :
   une clé F2 (indépendance vérifiée ici) ;
 - ip_resolver : résolveur d'IP (core.auth_f2_http.client_ip) ;
 - allowed_origins : origines https exactes ;
-- clock / fault_hook : transmis au moteur (tests de frontières et de
-  panne) ; wall_clock / monotonic : horloges de la couche HTTP.
+- clock / fault_hook : transmis au moteur et à l'admission HTTP de R1 PR 4
+  (tests de frontières et de panne) ; wall_clock / monotonic : horloges de
+  la couche HTTP.
+
+L'admission HTTP de R1 PR 4 (core.auth_f2.http_admission) est construite
+ici avec le même moteur PostgreSQL et le même trousseau que le moteur F2 ;
+elle ne s'applique qu'aux sept routes PR 4.
 
 La construction n'ouvre aucune connexion, n'appelle aucun fournisseur,
 n'écrit rien et N'INITIALISE PAS auth_abuse_key_state : cette
@@ -30,6 +35,7 @@ import time
 import sqlalchemy as sa
 from fastapi import FastAPI
 
+from core.auth_f2.http_admission import HttpAdmission
 from core.auth_f2.keys import PURPOSES, Keyring
 from core.auth_f2.service import F2AuthService
 from core.auth_f2_http.csrf import CsrfKeyring
@@ -92,9 +98,10 @@ def build_isolated_f2_app(*, engine, keyring, supabase, mailer, csrf_keyring, ip
         kwargs["clock"] = clock
     try:
         service = F2AuthService(engine, keyring, supabase, mailer, **kwargs)
+        admission = HttpAdmission(engine, keyring, **kwargs)
     except (TypeError, ValueError) as exc:
         raise F2HttpConfigError(str(exc)) from None
-    return make_app(Dependencies(service, csrf_keyring, ip_resolver, origins, wall_clock, monotonic))
+    return make_app(Dependencies(service, csrf_keyring, ip_resolver, origins, wall_clock, monotonic, admission))
 
 
 def make_app(deps: Dependencies) -> FastAPI:
