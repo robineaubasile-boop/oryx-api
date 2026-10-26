@@ -16,11 +16,17 @@ les tables métiers, absentes de l'ordre F2, viennent après) :
                    oryx_session_generations FOR SHARE ; aucun verrou métier ;
 - USER_MUTATION  : users FOR UPDATE -> oryx_sessions FOR SHARE ->
                    oryx_session_generations FOR SHARE -> verrous métiers de
-                   la commande (lignes filtrées par id ET user_id).
+                   la commande (lignes filtrées par id ET user_id) ;
+- PROFILE_MUTATION (R1 PR 6) : users FOR UPDATE -> oryx_sessions FOR SHARE
+                   -> oryx_session_generations FOR SHARE ; AUCUN verrou
+                   métier (le profil est la ligne users elle-même).
 
-PR 5 ne livre que des lectures et UNE mutation de démonstration interne
-(UpdatePositionQuantity), sans route HTTP : les créations et mutations de
-profil, portefeuille, thèses, Décrypter et ACK relèvent de PR 6 à PR 9.
+PR 5 livre des lectures et UNE mutation de démonstration interne
+(UpdatePositionQuantity), sans route HTTP. R1 PR 6 ajoute la mutation
+versionnée du niveau déclaré (UpdateProfileLevel, CAS sur
+users.level_revision) et la révision dans ProfileView. Le niveau déclaré
+est une préférence de personnalisation, jamais un stade pédagogique. Les
+mutations de portefeuille, thèses, Décrypter et ACK relèvent de PR 7 à PR 9.
 """
 import math
 import uuid
@@ -30,6 +36,9 @@ from datetime import datetime
 MAX_POSITION_ID = 2**31 - 1
 TICKER_MAX_CHARS = 32
 CONVERSATION_KEY_MAX_CHARS = 200
+# R1 PR 6 : niveaux déclarés admis et borne de users.level_revision (BIGINT).
+LEVELS = ("debutant", "avance")
+MAX_LEVEL_REVISION = 2**63 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +50,8 @@ class LockPlan:
 
 READ = LockPlan("read", "FOR KEY SHARE", ())
 USER_MUTATION = LockPlan("user_mutation", "FOR UPDATE", ("portfolio_positions",))
-PLANS = (READ, USER_MUTATION)
+PROFILE_MUTATION = LockPlan("profile_mutation", "FOR UPDATE", ())
+PLANS = (READ, USER_MUTATION, PROFILE_MUTATION)
 SESSION_LOCK = "FOR SHARE"
 GENERATION_LOCK = "FOR SHARE"
 
@@ -62,6 +72,23 @@ def _bounded_text(value, max_chars: int, label: str) -> str:
     if not isinstance(value, str) or not value or len(value) > max_chars or value != value.strip():
         raise ValueError(f"{label} : chaîne non vide, sans blanc de bord, {max_chars} caractères au plus")
     return value
+
+
+def valid_level(value) -> bool:
+    return type(value) is str and value in LEVELS
+
+
+def valid_revision(value) -> bool:
+    """Entier Python EXACT (ni booléen, ni sous-classe), 0 à 2^63 - 1."""
+    return type(value) is int and 0 <= value <= MAX_LEVEL_REVISION
+
+
+def next_revision(revision: int) -> int:
+    """Révision suivante ; jamais de débordement, de recyclage ni de remise
+    à zéro : la révision maximale n'a pas de suivante."""
+    if not valid_revision(revision) or revision == MAX_LEVEL_REVISION:
+        raise ValueError("level_revision : aucune révision suivante")
+    return revision + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,14 +152,40 @@ class UpdatePositionQuantity(Command):
             raise ValueError("quantity : nombre fini strictement positif attendu")
 
 
+@dataclass(frozen=True, slots=True)
+class UpdateProfileLevel(Command):
+    """R1 PR 6 : niveau déclaré si la révision courante vaut EXACTEMENT
+    expected_revision (CAS). Révision périmée : conflit, rien n'est écrit ;
+    niveau inchangé : succès sans écriture ; sinon niveau écrit et révision
+    + 1 dans une seule instruction SQL. Aucun user_id : le profil est celui
+    du principal autorisé."""
+    level: str
+    expected_revision: int
+
+    def __post_init__(self):
+        if not valid_level(self.level):
+            raise ValueError("level : debutant ou avance attendu")
+        if not valid_revision(self.expected_revision):
+            raise ValueError("expected_revision : entier de 0 à 2^63 - 1 attendu")
+
+
 # --------------------------------------------------------------------------
 # Vues rendues (aucune métadonnée privée, aucun secret)
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
 class ProfileView:
+    """level et level_revision lus ENSEMBLE (une requête) ; une vue
+    incohérente ne peut pas exister (refus fermé, jamais de correction)."""
     user_id: str
     level: str
+    level_revision: int
+
+    def __post_init__(self):
+        if not isinstance(self.user_id, str) or not self.user_id:
+            raise ValueError("profil : user_id serveur attendu")
+        if not valid_level(self.level) or not valid_revision(self.level_revision):
+            raise ValueError("profil : niveau ou révision hors contrat")
 
 
 @dataclass(frozen=True, slots=True)

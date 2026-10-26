@@ -43,6 +43,16 @@ substitution) ; UNAVAILABLE (503) pour toute panne (PostgreSQL, délai de
 verrou ou d'instruction, COMMIT en échec, erreur imprévue) et pour un
 profil incohérent avec une session pourtant valide ; NOT_FOUND pour une
 ressource étrangère ou inexistante (même résultat, rien n'est écrit).
+
+R1 PR 6 : REVISION_CONFLICT, résultat métier fermé distinct des quatre
+autres, rendu seulement APRÈS l'autorisation définitive quand la révision
+attendue d'UpdateProfileLevel est périmée : ROLLBACK, aucune écriture, ni
+profil courant ni principal transportés. Le plan PROFILE_MUTATION suit les
+étapes ci-dessus (users FOR UPDATE, session, génération, aucun verrou
+métier). Un changement demandé à la révision maximale rend UNAVAILABLE et
+journalise une alerte interne, sans détail. Un COMMIT en échec ou
+incertain rend UNAVAILABLE : le runner ne prétend jamais que la
+transaction a été annulée et ne rejoue rien.
 """
 import logging
 from dataclasses import dataclass
@@ -62,7 +72,8 @@ AUTHORIZED = "authorized"
 SESSION_INVALID = "session_invalid"
 NOT_FOUND = "not_found"
 UNAVAILABLE = "unavailable"
-STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE)
+REVISION_CONFLICT = "revision_conflict"
+STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT)
 
 # Points d'interruption des tests (aucun en production).
 HOOK_POINTS = ("prevalidated", "locked", "authorized", "executed")
@@ -128,7 +139,10 @@ class AuthorizedTransactionRunner:
         try:
             outcome = self._run(credential, command, spec)
         except Exception as exc:  # refus fermé : aucun détail, aucun secret
-            logger.warning("authz_f2 %s status=%s error=%s", name, UNAVAILABLE, type(exc).__name__)
+            if isinstance(exc, _adapters.RevisionExhausted):
+                logger.error("authz_f2 %s status=%s alert=level_revision_exhausted", name, UNAVAILABLE)
+            else:
+                logger.warning("authz_f2 %s status=%s error=%s", name, UNAVAILABLE, type(exc).__name__)
             return AuthorizationOutcome(UNAVAILABLE)
         logger.info("authz_f2 %s status=%s", name, outcome.status)
         return outcome
@@ -181,6 +195,8 @@ class AuthorizedTransactionRunner:
                 value = spec.execute(conn, context, command, business)
                 if value is _adapters.ABSENT:
                     raise _Refused(NOT_FOUND)
+                if value is _adapters.CONFLICT:
+                    raise _Refused(REVISION_CONFLICT)  # après la décision ; rien n'a été écrit
                 self._hook("executed")
         except _Refused as refused:
             return AuthorizationOutcome(refused.status)

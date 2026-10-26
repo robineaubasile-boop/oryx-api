@@ -15,6 +15,10 @@ Implémentation de C.5.2, C.5.2-A, C.5.2-B et des correctifs BF1 / BF2 :
                  transactions (phase A de pré-validation, phase B
                  d'autorisation définitive sous verrous, commit ou rollback).
 
+R1 PR 6 : ProfileView porte level_revision ; neuvième commande du
+registre fermé, UpdateProfileLevel (CAS sur users.level_revision, plan
+PROFILE_MUTATION) ; résultat fermé REVISION_CONFLICT.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

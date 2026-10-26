@@ -116,16 +116,20 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
     assert set(statements) == {
         "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_READ_PROFILE", "_LIST_POSITIONS",
         "_READ_POSITION", "_LIST_THESES", "_LIST_THESES_FOR_TICKER", "_READ_DELIVERY", "_LIST_CONVERSATION_DELIVERIES",
-        "_LOCK_POSITION", "_UPDATE_POSITION_QUANTITY"}
+        "_LOCK_POSITION", "_UPDATE_POSITION_QUANTITY", "_UPDATE_PROFILE_LEVEL"}
+    updates = {"_UPDATE_POSITION_QUANTITY": "UPDATE portfolio_positions SET",
+               "_UPDATE_PROFILE_LEVEL": "UPDATE users SET level = :l, level_revision = level_revision + 1 "}
     for name, sql in statements.items():
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
-        assert sql.startswith(("SELECT ", "UPDATE portfolio_positions ")), name
-        assert not FORBIDDEN_SQL.search(sql.replace("FOR UPDATE", "").replace("UPDATE portfolio_positions SET", "")), name
+        assert sql.startswith(("SELECT ", updates.get(name, "SELECT "))), name
+        assert not FORBIDDEN_SQL.search(sql.replace("FOR UPDATE", "").replace(updates.get(name, "FOR UPDATE"), "")), name
         assert ":u" in sql, name  # toujours le user_id serveur
         if ":id" in sql:
             assert re.search(r"WHERE id = :id AND user_id = :u", sql), name
         elif "users" not in sql:
             assert "WHERE user_id = :u" in sql, name
+        else:  # profil : toujours la ligne du user_id serveur
+            assert "FROM users WHERE id = :u" in sql or "users SET" in sql and "WHERE id = :u AND " in sql, name
     for table in ("portfolio_positions", "investment_theses", "assistant_deliveries"):
         assert any(table in sql for sql in statements.values()), table
 
@@ -133,13 +137,18 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
 def test_closed_registry_and_lock_plans():
     reads = {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses, c.ListThesesForTicker, c.ReadDelivery,
              c.ListConversationDeliveries}
-    assert set(_adapters.REGISTRY) == reads | {c.UpdatePositionQuantity}
+    mutations = {c.UpdatePositionQuantity: c.USER_MUTATION, c.UpdateProfileLevel: c.PROFILE_MUTATION}
+    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 9
     for command, spec in _adapters.REGISTRY.items():
-        assert spec.plan is (c.USER_MUTATION if command is c.UpdatePositionQuantity else c.READ)
+        assert spec.plan is mutations.get(command, c.READ)
         assert spec.lock.__module__ == spec.execute.__module__ == _adapters.__name__
         assert spec.lock.__name__.startswith("_") and spec.execute.__name__.startswith("_")
     assert c.READ == c.LockPlan("read", "FOR KEY SHARE", ())
     assert c.USER_MUTATION == c.LockPlan("user_mutation", "FOR UPDATE", ("portfolio_positions",))
+    # R1 PR 6 : users FOR UPDATE, session, génération ; aucun verrou métier
+    # (jamais USER_MUTATION, qui verrouille le portefeuille).
+    assert c.PROFILE_MUTATION == c.LockPlan("profile_mutation", "FOR UPDATE", ())
+    assert c.PLANS == (c.READ, c.USER_MUTATION, c.PROFILE_MUTATION)
     assert c.SESSION_LOCK == c.GENERATION_LOCK == "FOR SHARE"
     assert set(_adapters._LOCK_PROFILE) == {plan.users_lock for plan in c.PLANS}
 
@@ -212,7 +221,7 @@ def test_business_locks_match_the_announced_plan():
     assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_POSITION"}
     lock_sql = {"_lock_position": statements["_LOCK_POSITION"]}
     for spec in _adapters.REGISTRY.values():
-        if spec.plan is c.READ:
+        if not spec.plan.business_locks:  # READ et PROFILE_MUTATION
             assert spec.lock is _adapters._no_business_lock
         else:
             tables = set(re.findall(r"FROM (\w+)", lock_sql[spec.lock.__name__]))

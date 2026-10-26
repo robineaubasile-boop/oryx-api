@@ -1,4 +1,4 @@
-"""Provenance des GET personnels (R1 PR 5, C.5.2 §7).
+"""Provenance des requêtes personnelles (R1 PR 5, C.5.2 §7 ; R1 PR 6).
 
 Politique distincte de core.auth_f2_http.provenance (PR 3, inchangée) :
 
@@ -13,6 +13,11 @@ Politique distincte de core.auth_f2_http.provenance (PR 3, inchangée) :
 - Referer présent : une seule fois, https, sans identifiants, d'origine
   égale à l'origine attendue ;
 - tout en-tête de provenance dupliqué est refusé.
+
+Mutations personnelles (R1 PR 6, PUT /api/v2/me/level) : mêmes règles,
+mais Origin est OBLIGATOIRE et exactement égal à l'origine dérivée du Host
+(Sec-Fetch-Site seul ne suffit jamais) ; Sec-Fetch-Site, s'il est présent,
+vaut exclusivement same-origin.
 
 Aucun CORS : la réponse n'est destinée qu'à la même origine.
 """
@@ -44,6 +49,16 @@ def _referer_origin(referer: str):
 
 def personal_get_origin(headers, allowed: frozenset) -> str:
     """Origine attendue de la requête, ou ProvenanceRejected."""
+    return _personal_origin(headers, allowed, origin_required=False)
+
+
+def personal_mutation_origin(headers, allowed: frozenset) -> str:
+    """Origine attendue d'une mutation personnelle (Origin obligatoire), ou
+    ProvenanceRejected."""
+    return _personal_origin(headers, allowed, origin_required=True)
+
+
+def _personal_origin(headers, allowed: frozenset, *, origin_required: bool) -> str:
     host = _single(headers, "host")
     origin = _single(headers, "origin")
     fetch_site = _single(headers, "sec-fetch-site")
@@ -53,6 +68,8 @@ def personal_get_origin(headers, allowed: frozenset) -> str:
     expected = f"https://{host}"
     if expected not in allowed:
         raise ProvenanceRejected("hôte non autorisé")
+    if origin is None and origin_required:
+        raise ProvenanceRejected("Origin exigé")
     if origin is not None and origin != expected:
         raise ProvenanceRejected("Origin différente de l'origine attendue")
     if fetch_site is not None and fetch_site != "same-origin":

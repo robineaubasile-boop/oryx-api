@@ -13,7 +13,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | Opération | Table | Filtre | Verrou |
 |---|---|---|---|
 | lock_profile | users | id | plan (FOR KEY SHARE / FOR UPDATE) |
-| _read_profile | users | id | - |
+| _read_profile | users | id (level ET level_revision, une requête) | - |
 | _list_positions | portfolio_positions | user_id | - |
 | _read_position | portfolio_positions | id ET user_id | - |
 | _list_theses | investment_theses | user_id | - |
@@ -22,10 +22,22 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _list_conversation_deliveries | assistant_deliveries | user_id ET conversation_key | - |
 | _lock_position | portfolio_positions | id ET user_id | FOR UPDATE |
 | _update_position_quantity | portfolio_positions | id ET user_id | (ligne déjà verrouillée) |
+| _update_profile_level | users | id ET level_revision attendue | (ligne déjà verrouillée, plan PROFILE_MUTATION) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
 ABSENT : le filtre SQL porte simultanément l'identifiant et le user_id, la
 ligne d'autrui n'est ni lue ni verrouillée.
+
+R1 PR 6 (CAS sur users.level_revision, ligne users déjà verrouillée FOR
+UPDATE par le plan PROFILE_MUTATION) : profil relu (niveau ET révision,
+une requête) et jugé cohérent, révision comparée AVANT le niveau ;
+révision différente : CONFLICT, rien n'est écrit ; niveau identique :
+profil rendu tel quel, sans UPDATE ; sinon un seul UPDATE conditionnel
+(id ET révision attendue) qui écrit le niveau et incrémente la révision,
+valeurs relues par RETURNING. Aucune ligne retournée après ces contrôles
+sous verrou : invariant rompu (rollback, 503), jamais un faux conflit. À
+la révision maximale, un changement réel est refusé (RevisionExhausted :
+503 et alerte interne), sans débordement ni remise à zéro.
 """
 from dataclasses import dataclass
 from datetime import timezone
@@ -46,15 +58,29 @@ class _Absent:
 ABSENT = _Absent()
 
 
+class _Conflict:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "CONFLICT"
+
+
+CONFLICT = _Conflict()  # révision attendue périmée : aucune écriture
+
+
 class AdapterInvariantBroken(RuntimeError):
     """État impossible constaté sous verrou : la transaction est annulée."""
+
+
+class RevisionExhausted(AdapterInvariantBroken):
+    """Changement demandé à la révision maximale : refus (503) et alerte."""
 
 
 _LOCK_PROFILE = {
     "FOR KEY SHARE": "SELECT id FROM users WHERE id = :u FOR KEY SHARE",
     "FOR UPDATE": "SELECT id FROM users WHERE id = :u FOR UPDATE",
 }
-_READ_PROFILE = "SELECT id, level FROM users WHERE id = :u"
+_READ_PROFILE = "SELECT id, level, level_revision FROM users WHERE id = :u"
 _POSITION_COLUMNS = "SELECT id, ticker, quantity, purchase_price, target_percent, envelope FROM portfolio_positions "
 _LIST_POSITIONS = _POSITION_COLUMNS + "WHERE user_id = :u ORDER BY id"
 _READ_POSITION = _POSITION_COLUMNS + "WHERE id = :id AND user_id = :u"
@@ -67,6 +93,8 @@ _LIST_CONVERSATION_DELIVERIES = _DELIVERY_COLUMNS + "WHERE user_id = :u AND conv
 _LOCK_POSITION = "SELECT id FROM portfolio_positions WHERE id = :id AND user_id = :u FOR UPDATE"
 _UPDATE_POSITION_QUANTITY = ("UPDATE portfolio_positions SET quantity = :q, updated_at = :t "
                              "WHERE id = :id AND user_id = :u")
+_UPDATE_PROFILE_LEVEL = ("UPDATE users SET level = :l, level_revision = level_revision + 1 "
+                         "WHERE id = :u AND level_revision = :r RETURNING id, level, level_revision")
 
 
 def _rows(conn, sql: str, **params):
@@ -103,11 +131,18 @@ def _no_business_lock(conn, owner_id, command):
     return None
 
 
+def _profile(row, user_id) -> c.ProfileView:
+    """Vue du profil, ou AdapterInvariantBroken : profil absent (pourtant
+    verrouillé par lock_profile dans cette transaction), autre identifiant,
+    niveau inconnu ou révision hors contrat. Aucune correction silencieuse."""
+    if (row is None or row["id"] != user_id or not c.valid_level(row["level"])
+            or not c.valid_revision(row["level_revision"])):
+        raise AdapterInvariantBroken("profil incohérent")
+    return c.ProfileView(row["id"], row["level"], row["level_revision"])
+
+
 def _read_profile(conn, ctx, command, locked):
-    row = _first(conn, _READ_PROFILE, u=ctx.principal.user_id)
-    if row is None:  # verrouillé par lock_profile dans cette transaction
-        raise AdapterInvariantBroken("profil verrouillé introuvable")
-    return c.ProfileView(row["id"], row["level"])
+    return _profile(_first(conn, _READ_PROFILE, u=ctx.principal.user_id), ctx.principal.user_id)
 
 
 def _list_positions(conn, ctx, command, locked):
@@ -152,6 +187,24 @@ def _update_position_quantity(conn, ctx, command, locked):
     return _position(_first(conn, _READ_POSITION, id=locked, u=ctx.principal.user_id))
 
 
+def _update_profile_level(conn, ctx, command, locked):
+    user_id = ctx.principal.user_id
+    current = _profile(_first(conn, _READ_PROFILE, u=user_id), user_id)  # ligne users FOR UPDATE (plan)
+    if current.level_revision != command.expected_revision:
+        return CONFLICT  # la révision précède toujours le niveau
+    if current.level == command.level:
+        return current  # aucun UPDATE, aucun incrément
+    if current.level_revision == c.MAX_LEVEL_REVISION:
+        raise RevisionExhausted("révision maximale atteinte")
+    updated = _first(conn, _UPDATE_PROFILE_LEVEL, l=command.level, u=user_id, r=command.expected_revision)
+    if updated is None:
+        raise AdapterInvariantBroken("écriture conditionnelle sans ligne sous verrou")
+    view = _profile(updated, user_id)
+    if view.level != command.level or view.level_revision != c.next_revision(current.level_revision):
+        raise AdapterInvariantBroken("valeurs écrites inattendues")
+    return view
+
+
 @dataclass(frozen=True)
 class Spec:
     plan: c.LockPlan
@@ -170,4 +223,5 @@ REGISTRY = MappingProxyType({
     c.ReadDelivery: Spec(c.READ, _no_business_lock, _read_delivery),
     c.ListConversationDeliveries: Spec(c.READ, _no_business_lock, _list_conversation_deliveries),
     c.UpdatePositionQuantity: Spec(c.USER_MUTATION, _lock_position, _update_position_quantity),
+    c.UpdateProfileLevel: Spec(c.PROFILE_MUTATION, _no_business_lock, _update_profile_level),
 })
