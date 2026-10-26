@@ -56,13 +56,12 @@ from datetime import timezone
 
 import sqlalchemy as sa
 
-from core.auth_f2 import abuse
+from core.auth_f2 import abuse, sessions
 from core.auth_f2.abuse import EMAIL, IP, AbuseUnavailable, Scope, SubjectsMissing
 from core.auth_f2.crypto import (
     CryptoContractError,
     Redacted,
     active_secret_hash,
-    b64url_decode_secret,
     b64url_encode,
     candidate_hash,
     derivation_version,
@@ -221,13 +220,7 @@ def _uuid(value):
     return value if isinstance(value, uuid.UUID) else None
 
 
-def _decode(secret) -> object:
-    if not isinstance(secret, Redacted):
-        return None
-    try:
-        return b64url_decode_secret(secret.reveal())
-    except CryptoContractError:
-        return None
+_decode = sessions.decode_secret
 
 
 class F2AuthService:
@@ -313,35 +306,14 @@ class F2AuthService:
         """Verrous de la session présentée (session FOR SHARE, puis
         génération) SANS décision : (session, génération, secret) ou None.
         La validité se juge ensuite avec _session_valid, à une heure lue
-        après tous les verrous de la transaction."""
-        if not isinstance(credential, SessionCredential) or _uuid(credential.generation_id) is None:
-            return None
-        secret = _decode(credential.secret)
-        if secret is None:
-            return None
-        session_id = conn.execute(sa.text("SELECT session_id FROM oryx_session_generations WHERE id = :g"),
-                                  {"g": credential.generation_id}).scalar()
-        if session_id is None:
-            return None
-        session = _row(conn, "SELECT * FROM oryx_sessions WHERE id = :s FOR SHARE", s=session_id)
-        generation = _row(conn, f"SELECT * FROM oryx_session_generations WHERE id = :g {generation_lock}",
-                          g=credential.generation_id)
-        return session, generation, secret
+        après tous les verrous de la transaction (core.auth_f2.sessions,
+        interface partagée avec R1 PR 5)."""
+        return sessions.lock_session(conn, credential, generation_lock=generation_lock)
 
     def _session_valid(self, locked, at) -> bool:
         """Session et génération actives, non expirées à l'instant `at` (lu
         après les verrous), secret actif conforme à l'empreinte."""
-        if locked is None:
-            return False
-        session, generation, secret = locked
-        if session["status"] != "active" or generation["status"] != "active" or at >= session["absolute_expires_at"]:
-            return False
-        try:
-            key = self._keys.key("active", generation["hash_key_version"])
-        except UnknownKeyVersion:
-            return False
-        return hashes_equal(active_secret_hash(key, session["id"], generation["id"], secret),
-                            generation["active_secret_hash"])
+        return sessions.session_valid(self._keys, locked, at)
 
     def _session_rows(self, conn, credential, *, generation_lock: str):
         """Verrouille puis lit l'heure PostgreSQL, puis juge : (session,
@@ -1289,16 +1261,8 @@ class F2AuthService:
     def _session_prevalidated(self, conn, credential) -> bool:
         """Phase 1 : session et génération désignées, actives, non expirées,
         secret actif conforme ; lecture seule, sans verrou ni écriture."""
-        if not isinstance(credential, SessionCredential) or _uuid(credential.generation_id) is None:
-            return False
-        secret = _decode(credential.secret)
-        if secret is None:
-            return False
-        generation = _row(conn, "SELECT * FROM oryx_session_generations WHERE id = :g", g=credential.generation_id)
-        if generation is None:
-            return False
-        session = _row(conn, "SELECT * FROM oryx_sessions WHERE id = :s", s=generation["session_id"])
-        return self._session_valid((session, generation, secret), self._clock(conn))
+        locked = sessions.read_session(conn, credential)
+        return locked is not None and self._session_valid(locked, self._clock(conn))
 
     def _linking_result_ok(self, op, result, identity, request, session, at) -> bool:
         """Relations exigées entre opération, session initiatrice, résultat

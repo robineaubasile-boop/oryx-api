@@ -12,6 +12,14 @@ rien.
   cookie, n'importe ni FastAPI ni api.py, et n'importe httpx qu'à la
   construction d'un adaptateur HTTP (jamais au chargement).
 - requirements.txt (production) ne gagne aucune dépendance.
+
+R1 PR 5 (C.5.2-B) : la frontière d'autorisation (core/authz_f2) et la
+route personnelle isolée (core/authz_f2_http) importent des modules F2.
+Ces dépendances sont acceptées par une matrice FERMÉE fichier -> imports
+F2 exacts (F2_REFERENCE_MATRIX) : un fichier hors matrice ne peut toujours
+pas mentionner core.auth_f2, un fichier de la matrice ne peut importer que
+ses modules F2 listés, jamais F2AuthService ni la composition F2. Aucun
+paquet n'est exempté en bloc.
 """
 import ast
 import importlib
@@ -32,6 +40,50 @@ MAIN_ROUTES = [
     ("put", "/api/user/{user_id}/portfolio/{position_id}"), ("get", "/api/user/{user_id}/theses"),
     ("delete", "/api/user/{user_id}/theses/{ticker}"), ("post", "/web-v2/portfolio-analyze"),
 ]
+# R1 PR 5 : fichiers hors core/auth_f2 et core/auth_f2_http autorisés à
+# mentionner F2, avec l'ensemble EXACT des modules F2 qu'ils importent.
+F2_REFERENCE_MATRIX = {
+    "core/authz_f2/__init__.py": frozenset(),  # docstring seulement
+    "core/authz_f2/runner.py": frozenset({"core.auth_f2.keys", "core.auth_f2.sessions", "core.auth_f2.txn"}),
+    "core/authz_f2_http/provenance.py": frozenset({"core.auth_f2_http.provenance"}),
+    "core/authz_f2_http/routes.py": frozenset({
+        "core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies", "core.auth_f2_http.provenance",
+        "core.auth_f2_http.routes"}),
+    "core/authz_f2_http/isolated.py": frozenset({"core.auth_f2_http.isolated", "core.auth_f2_http.provenance"}),
+}
+# Noms importables depuis F2 par la matrice (aucun F2AuthService, aucune
+# composition F2, aucun fournisseur, aucune initialisation anti-abus).
+F2_REFERENCE_NAMES = {
+    "core.auth_f2.keys": {"Keyring"},
+    "core.auth_f2.sessions": {"sessions"},
+    "core.auth_f2.txn": {"pg_clock", "transaction"},
+    "core.auth_f2_http.provenance": {"ProvenanceRejected", "validate_allowed_origins"},
+    "core.auth_f2.crypto": {"Redacted"},
+    "core.auth_f2.service": {"SessionCredential"},
+    "core.auth_f2_http.cookies": {"CookieHeaderRejected", "canonical_uuid", "parse_cookie_headers"},
+    "core.auth_f2_http.routes": {"error_response", "json_response"},
+    "core.auth_f2_http.isolated": {"_NoStore"},
+}
+F2_PACKAGES = ("core.auth_f2", "core.auth_f2_http")
+
+
+def f2_imports(path) -> dict:
+    """{module F2 importé : noms importés} d'un fichier (from core.auth_f2
+    import sessions -> core.auth_f2.sessions)."""
+    found = {}
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[:2] in (["core", "auth_f2"], ["core", "auth_f2_http"]):
+                    found.setdefault(alias.name, set()).add("*module*")
+        elif isinstance(node, ast.ImportFrom) and node.module and (
+                node.module in F2_PACKAGES or node.module.startswith(tuple(p + "." for p in F2_PACKAGES))):
+            for alias in node.names:
+                module = f"{node.module}.{alias.name}" if node.module in F2_PACKAGES else node.module
+                found.setdefault(module, set()).add(alias.name)
+    return found
+
+
 MAIN_REQUIREMENTS = ["fastapi==0.110.0", "uvicorn==0.27.0", "pydantic==2.10.0", "requests", "python-dotenv",
                      "yfinance", "anthropic>=0.25.0", "sqlalchemy", "psycopg2-binary", "alembic>=1.13"]
 
@@ -70,9 +122,26 @@ def test_no_application_module_references_the_f2_package():
                                                                                             ".ts", ".json"):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if "auth_f2" in text or "F2AuthService" in text:
+            if ("auth_f2" in text or "F2AuthService" in text) and str(path.relative_to(REPO_ROOT)) not in F2_REFERENCE_MATRIX:
                 offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == []
+
+
+def test_f2_reference_matrix_is_closed_and_exact():
+    """R1 PR 5 : chaque fichier de la matrice existe, importe EXACTEMENT ses
+    modules F2 listés et seulement des noms autorisés ; F2AuthService et la
+    composition F2 n'y apparaissent jamais."""
+    for relative, expected in F2_REFERENCE_MATRIX.items():
+        path = REPO_ROOT / relative
+        assert path.is_file(), relative
+        imports = f2_imports(path)
+        assert set(imports) == expected, relative
+        for module, names in imports.items():
+            assert names <= F2_REFERENCE_NAMES[module], (relative, module, names)
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("F2AuthService", "build_isolated_f2_app", "HttpAdmission", "initialize_abuse_key_state",
+                          "http_providers", "set_cookie", "clear_cookie"):
+            assert forbidden not in text, (relative, forbidden)
 
 
 def test_f2_package_reads_no_configuration_and_sets_no_cookie():
