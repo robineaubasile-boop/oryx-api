@@ -960,6 +960,74 @@ def test_raw_put_without_content_length_but_bounded_stream_is_accepted(env, alic
     assert response.status_code == 200
 
 
+@pytest.fixture
+def body_buffers(monkeypatch):
+    """Tampons créés par _read_body, remplacés par un bytearray qui consigne
+    la longueur après CHAQUE ajout : preuve déterministe (sans mesure
+    mémoire) que la taille est jugée avant l'accumulation."""
+    buffers = []
+
+    class RecordingBuffer(bytearray):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.lengths = []
+            buffers.append(self)
+
+        def __iadd__(self, chunk):
+            result = super().__iadd__(chunk)
+            self.lengths.append(len(self))
+            return result
+
+    monkeypatch.setattr(routes_module, "bytearray", RecordingBuffer, raising=False)
+    return buffers
+
+
+ONE_MIB = b" " * (1024 * 1024)
+
+
+@pytest.mark.parametrize("content_length,status,code", [
+    (None, 413, "request_too_large"),        # sans Content-Length : borne de 4096
+    ("100", 400, "invalid_request"),          # Content-Length valide dépassé : discordance
+    (str(MAX_BODY_BYTES), 400, "invalid_request"),
+])
+def test_single_huge_asgi_chunk_is_refused_before_buffering(env, alice, body_buffers, monkeypatch, content_length,
+                                                            status, code):
+    transactions = []
+    monkeypatch.setattr(runner_module, "transaction",
+                        lambda *a, **k: transactions.append("transaction") or (_ for _ in ()).throw(AssertionError()))
+    before = env.profile()
+    response = raw_put(env, alice, content_length=content_length, chunks=[ONE_MIB])
+    assert_raw_error(response, status, code)
+    (buffer,) = body_buffers
+    assert buffer.lengths == [] and len(buffer) == 0  # le fragment de 1 Mio n'est jamais copié dans le tampon
+    assert transactions == [] and env.hook_calls == []  # runner jamais appelé
+    assert env.profile() == before  # aucune écriture PostgreSQL
+
+
+@pytest.mark.parametrize("content_length,chunks,status,code,lengths", [
+    (None, [b" " * 4000, b" " * 200], 413, "request_too_large", [4000]),
+    (None, [b" " * 4096, b" "], 413, "request_too_large", [4096]),
+    ("4000", [b" " * 3000, ONE_MIB], 400, "invalid_request", [3000]),
+    ("10", [b" " * 10, b" "], 400, "invalid_request", [10]),
+])
+def test_cumulative_size_is_judged_before_each_append(env, alice, body_buffers, content_length, chunks, status, code,
+                                                      lengths):
+    before = env.profile()
+    assert_raw_error(raw_put(env, alice, content_length=content_length, chunks=chunks), status, code)
+    (buffer,) = body_buffers
+    assert buffer.lengths == lengths and max(lengths) <= MAX_BODY_BYTES
+    assert env.hook_calls == [] and env.profile() == before
+
+
+def test_accepted_body_buffer_never_exceeds_the_bound(env, alice, body_buffers):
+    exact = _padded(MAX_BODY_BYTES)
+    response = raw_put(env, alice, content_length=str(MAX_BODY_BYTES), chunks=[exact[:1000], exact[1000:]])
+    assert response.status_code == 200
+    (buffer,) = body_buffers
+    # Le message ASGI final (corps vide) est aussi ajouté : longueur inchangée.
+    assert buffer.lengths[:2] == [1000, MAX_BODY_BYTES] and max(buffer.lengths) == MAX_BODY_BYTES
+
+
 def test_size_refusals_are_judged_after_content_type_and_framing(env, alice):
     big = _padded(5000)
     # Content-Type invalide + taille excessive : 415.

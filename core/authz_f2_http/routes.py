@@ -201,14 +201,18 @@ def _announced_length(request: Request):
 
 
 async def _read_body(request: Request, announced) -> bytes:
+    """Taille cumulée jugée AVANT l'ajout de chaque fragment : le tampon
+    applicatif ne dépasse jamais la longueur annoncée ni 4096 octets (la
+    taille du fragment ASGI déjà reçu relève du serveur)."""
     body = bytearray()
     try:
         async for chunk in request.stream():
-            body += chunk
-            if announced is not None and len(body) > announced:
+            new_size = len(body) + len(chunk)
+            if announced is not None and new_size > announced:
                 raise Refusal(400, "invalid_request")  # discordance de longueur : framing, prioritaire
-            if len(body) > MAX_BODY_BYTES:
+            if new_size > MAX_BODY_BYTES:
                 raise Refusal(413, "request_too_large")
+            body += chunk
     except ClientDisconnect:
         raise Refusal(400, "invalid_request") from None
     if announced is not None and len(body) != announced:
