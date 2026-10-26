@@ -185,11 +185,18 @@ Ordre des contrôles (le premier échec répond) :
 | 1 | méthode / chemin | 405 / 404 |
 | 2 | provenance GET personnelle | 403 `origin_refused` |
 | 3 | en-tête Cookie (parseur strict PR 3) | 400 `invalid_request` |
-| 4 | aucune query | 400 `invalid_request` |
-| 5 | aucun corps (Content-Length ou flux > 4096 octets → 413 `request_too_large` ; tout autre corps, Content-Length dupliqué ou illisible → 400) | 413 / 400 |
-| 6 | `X-Oryx-Generation-Id` unique, UUID canonique | 400 `invalid_request` |
+| 4 | `X-Oryx-Generation-Id` unique, UUID canonique | 400 `invalid_request` |
+| 5 | aucune query | 400 `invalid_request` |
+| 6 | aucun corps (Content-Length ou flux > 4096 octets → 413 `request_too_large` ; tout autre corps, Content-Length dupliqué ou illisible → 400) | 413 / 400 |
 | 7 | cookie actif EXACT désigné | 401 `session_invalid` |
 | 8 | runner + `ReadProfile` | 401 / 503 |
+
+Cet ordre est celui de C.5.2 §7.4 (correction de l'audit de la PR #225 :
+le sélecteur est validé avant la query et le corps). Ainsi un sélecteur
+absent avec un corps de 5 000 octets répond 400 `invalid_request`, jamais
+413 ; aucun refus de transport n'ouvre de transaction PostgreSQL. L'ordre
+réellement exécuté est vérifié par instrumentation
+(`tests/test_authz_f2_http.py::test_check_priorities`).
 
 Provenance : Host unique, canonique, `https://<Host>` parmi les origines
 autorisées ; Origin présent → unique et identique ; Origin absent →

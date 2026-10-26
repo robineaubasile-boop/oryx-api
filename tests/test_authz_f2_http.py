@@ -14,6 +14,8 @@ import sqlalchemy as sa
 
 from core.auth_f2.crypto import b64url_encode
 from core.auth_f2_http.provenance import validate_allowed_origins
+from core.authz_f2 import runner as runner_module
+from core.authz_f2_http import routes as routes_module
 from core.authz_f2_http.isolated import PersonalHttpConfigError, build_isolated_personal_app, make_personal_app
 from core.authz_f2_http.routes import MAX_BODY_BYTES, PersonalDependencies
 from tests.authz_f2_support import (
@@ -240,20 +242,87 @@ def test_designated_cookie_absent_is_session_invalid_without_choosing_another(en
 # Priorités des contrôles
 # --------------------------------------------------------------------------
 
-def test_check_priorities(env, alice):
-    bad_cookie = "__Host-oryx-active-x=y"
+@pytest.fixture
+def trace(monkeypatch):
+    """Ordre RÉELLEMENT exécuté des contrôles de GET /me (provenance,
+    cookies, sélecteur, corps) et transactions ouvertes par le runner : les
+    cas qui partagent un même statut et un même code sont départagés par
+    cette trace, pas par la seule réponse HTTP."""
+    calls = []
+
+    def record(name, fn):
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+            return fn(*args, **kwargs)
+        return wrapper
+
+    def record_async(name, fn):
+        async def wrapper(*args, **kwargs):
+            calls.append(name)
+            return await fn(*args, **kwargs)
+        return wrapper
+
+    monkeypatch.setattr(routes_module, "personal_get_origin", record("provenance", routes_module.personal_get_origin))
+    monkeypatch.setattr(routes_module, "parse_cookie_headers", record("cookies", routes_module.parse_cookie_headers))
+    monkeypatch.setattr(routes_module, "_generation_id", record("selector", routes_module._generation_id))
+    monkeypatch.setattr(routes_module, "_refuse_body", record_async("body", routes_module._refuse_body))
+    monkeypatch.setattr(runner_module, "transaction", record("transaction", runner_module.transaction))
+    return calls
+
+
+BAD_COOKIE = "__Host-oryx-active-x=y"
+BIG = b"x" * 5000
+
+
+def test_check_priorities(env, alice, trace):
+    """Ordre contractuel (C.5.2 §7.4) : provenance -> cookies -> sélecteur
+    -> query -> corps -> cookie désigné -> runner. Le premier contrôle en
+    échec détermine la réponse ; les contrôles suivants ne s'exécutent pas."""
+    good = active_cookie(alice)
+    gen = alice.generation_id
     cases = [
-        # (en-têtes, chemin, corps) -> erreur attendue (la première dans l'ordre figé)
-        (me_headers(None, bad_cookie, fetch_site="cross-site"), ME + "?q", b"x" * 9999, (403, "origin_refused")),
-        (me_headers(None, bad_cookie), ME + "?q", b"x" * 9999, (400, "invalid_request")),
-        (me_headers(None, active_cookie(alice)), ME + "?q", b"x" * 9999, (400, "invalid_request")),
-        (me_headers(None, active_cookie(alice)), ME, b"x" * 9999, (413, "request_too_large")),
-        (me_headers("abc", None), ME, None, (400, "invalid_request")),
-        (me_headers(uuid.uuid4(), None), ME, None, (401, "session_invalid")),
+        # (nom, en-têtes, chemin, corps, réponse attendue, contrôles exécutés)
+        ("provenance+selecteur+corps", me_headers(None, good, fetch_site="cross-site"), ME, BIG,
+         (403, "origin_refused"), ["provenance"]),
+        ("cookie+selecteur", me_headers(None, BAD_COOKIE), ME, None,
+         (400, "invalid_request"), ["provenance", "cookies"]),
+        ("selecteur_absent+corps_trop_grand", me_headers(None, good), ME, BIG,
+         (400, "invalid_request"), ["provenance", "cookies", "selector"]),
+        ("selecteur_invalide+query", me_headers("abc", good), ME + "?user_id=user-b", None,
+         (400, "invalid_request"), ["provenance", "cookies", "selector"]),
+        ("selecteur_valide+query", me_headers(gen, good), ME + "?q", BIG,
+         (400, "invalid_request"), ["provenance", "cookies", "selector"]),
+        ("selecteur_valide+corps_trop_grand", me_headers(gen, good), ME, BIG,
+         (413, "request_too_large"), ["provenance", "cookies", "selector", "body"]),
+        ("selecteur_valide+corps_court", me_headers(gen, good), ME, b"{}",
+         (400, "invalid_request"), ["provenance", "cookies", "selector", "body"]),
+        ("selecteur_valide+cookie_absent", me_headers(uuid.uuid4(), good), ME, None,
+         (401, "session_invalid"), ["provenance", "cookies", "selector", "body"]),
     ]
-    for headers, path, content, (status, code) in cases:
-        assert_error(me_request(personal_app(env), headers=headers, path=path, content=content), status, code)
+    app = personal_app(env)
+    for name, headers, path, content, (status, code), executed in cases:
+        trace.clear()
+        assert_error(me_request(app, headers=headers, path=path, content=content), status, code)
+        assert trace == executed, name  # aucune transaction PostgreSQL pour un refus HTTP
     assert env.hook_calls == []
+
+    trace.clear()
+    response = me_request(app, headers=me_headers(gen, good))
+    assert response.status_code == 200 and response.json() == {"user_id": USER_A, "level": "debutant"}
+    assert_private(response)
+    assert trace == ["provenance", "cookies", "selector", "body", "transaction", "transaction"]  # phases A et B
+
+
+def test_missing_selector_with_oversized_body_is_400_not_413(env, alice, trace):
+    """Régression P1 : provenance valide, cookies valides, sélecteur absent,
+    corps de 5 000 octets -> 400 invalid_request (jamais 413), sans lecture
+    du corps ni transaction PostgreSQL."""
+    response = me_request(personal_app(env), headers=me_headers(None, active_cookie(alice)), content=BIG)
+    assert response.status_code == 400
+    assert response.content == b'{"error":"invalid_request"}'
+    assert_private(response)
+    assert trace == ["provenance", "cookies", "selector"]
+    assert "transaction" not in trace and env.hook_calls == []
 
 
 # --------------------------------------------------------------------------

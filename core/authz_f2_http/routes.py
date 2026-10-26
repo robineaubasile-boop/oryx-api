@@ -5,10 +5,10 @@ Ordre des contrôles, tous avant l'autorisation :
   1. méthode et chemin (routeur : 404 / 405) ;
   2. provenance (provenance.py)                         -> 403 origin_refused ;
   3. en-tête Cookie, parseur strict de PR 3              -> 400 invalid_request ;
-  4. aucune query                                        -> 400 invalid_request ;
-  5. aucun corps : Content-Length > 4096 ou flux > 4096  -> 413 request_too_large ;
+  4. X-Oryx-Generation-Id : un seul, UUID canonique      -> 400 invalid_request ;
+  5. aucune query                                        -> 400 invalid_request ;
+  6. aucun corps : Content-Length > 4096 ou flux > 4096  -> 413 request_too_large ;
      tout autre corps, Content-Length dupliqué ou illisible -> 400 invalid_request ;
-  6. X-Oryx-Generation-Id : un seul, UUID canonique      -> 400 invalid_request ;
   7. cookie __Host-oryx-active-<generation_id> EXACT (jamais choisi
      implicitement parmi d'autres)                       -> 401 session_invalid ;
   8. AuthorizedTransactionRunner + ReadProfile           -> 200, 401
@@ -111,10 +111,10 @@ def build_personal_router(deps: PersonalDependencies) -> APIRouter:
                 cookies = parse_cookie_headers(request.headers.getlist("cookie"))
             except CookieHeaderRejected:
                 raise Refusal(400, "invalid_request") from None
+            generation_id = _generation_id(request)
             if request.scope.get("query_string"):
                 raise Refusal(400, "invalid_request")
             await _refuse_body(request)
-            generation_id = _generation_id(request)
             secret = cookies.actives.get(generation_id)
             if secret is None:
                 raise Refusal(401, "session_invalid")
