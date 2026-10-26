@@ -7,18 +7,21 @@ authenticate_session (même effet que /session/resolve) ; le runner PR 5 les
 juge avec le même trousseau. Aucune clé, aucune URL de production.
 
 compose_test_app réunit l'application F2 isolée (PR 3 / PR 4, inchangée)
-et l'application personnelle isolée (PR 5) derrière un aiguillage par
-préfixe : même PostgreSQL, mêmes clés, mêmes sessions persistantes. Seuls
-les tests construisent cette composition.
+et l'application personnelle isolée (PR 5 / PR 6) derrière un aiguillage
+par préfixe : même PostgreSQL, mêmes clés F2, même trousseau CSRF (le
+bootstrap de PR 3 émet les jetons que PUT /api/v2/me/level vérifie), mêmes
+sessions persistantes. Seuls les tests construisent cette composition.
 """
 import asyncio
 import json
+import time
 import uuid
 
 import sqlalchemy as sa
 
 from core.auth_f2 import abuse
 from core.auth_f2.service import F2AuthService
+from core.auth_f2_http import csrf
 from core.auth_f2_http.isolated import build_isolated_f2_app
 from core.auth_f2_http.routes import NO_STORE_HEADERS
 from core.authz_f2.runner import AuthorizedTransactionRunner
@@ -39,6 +42,7 @@ from tests.f2_support import (
 ALICE, BOB = "alice@example.com", "bob@example.com"
 USER_A, USER_B = "user-a", "user-b"
 ME = "/api/v2/me"
+ME_LEVEL = "/api/v2/me/level"
 F2_PREFIX = "/api/auth/f2"
 V2_PREFIX = "/api/v2"
 
@@ -63,8 +67,8 @@ class AuthzEnv:
         if action is not None:
             action()
 
-    def runner(self, *, clock=None, keyring=None, engine=None):
-        kwargs = {"fault_hook": self.hook}
+    def runner(self, *, clock=None, keyring=None, engine=None, hook=None):
+        kwargs = {"fault_hook": hook or self.hook}
         if clock is not None:
             kwargs["clock"] = clock
         return AuthorizedTransactionRunner(engine or self.engine, keyring or self.keyring, **kwargs)
@@ -102,6 +106,18 @@ class AuthzEnv:
 
     def count(self, table, where="TRUE", **params):
         return scalar(self.observer, f"SELECT count(*) FROM {table} WHERE {where}", **params)
+
+    def profile(self, user_id=USER_A):
+        """(level, level_revision, xmin) : xmin inchangé = aucune écriture."""
+        with self.observer.connect() as conn:
+            row = conn.execute(sa.text("SELECT level, level_revision, xmin::text AS xmin FROM users WHERE id = :u"),
+                               {"u": user_id}).mappings().one()
+        return row["level"], row["level_revision"], row["xmin"]
+
+    def set_profile(self, level, revision, user_id=USER_A):
+        with self.observer.begin() as conn:
+            conn.execute(sa.text("UPDATE users SET level = :l, level_revision = :r WHERE id = :u"),
+                         {"l": level, "r": revision, "u": user_id})
 
     def waiting_on_lock(self) -> int:
         """Connexions du service (application_name) en attente d'un verrou."""
@@ -150,9 +166,10 @@ class AuthzEnv:
 # Applications
 # --------------------------------------------------------------------------
 
-def personal_app(env, *, clock=None):
-    return build_isolated_personal_app(engine=env.engine, keyring=env.keyring, allowed_origins=[ORIGIN], clock=clock,
-                                       fault_hook=env.hook)
+def personal_app(env, *, clock=None, wall_clock=time.time):
+    return build_isolated_personal_app(engine=env.engine, keyring=env.keyring, allowed_origins=[ORIGIN],
+                                       csrf_keyring=csrf_keyring(), clock=clock, fault_hook=env.hook,
+                                       wall_clock=wall_clock)
 
 
 def f2_app(env):
@@ -204,6 +221,51 @@ def active_cookie(issued) -> str:
     return f"__Host-oryx-active-{issued.generation_id}={issued.active_secret.reveal()}"
 
 
+def csrf_pair(origin=ORIGIN, *, now=None, keyring=None):
+    """(cookie de liaison, jeton) émis par le protocole PR 3 pour origin."""
+    binding = csrf.new_binding()
+    token = csrf.issue_token(keyring or csrf_keyring(), binding, origin, int(time.time() if now is None else now))
+    return f"__Host-oryx-csrf-binding={binding}", token
+
+
+def level_body(level="avance", expected_revision="0") -> bytes:
+    return json.dumps({"level": level, "expected_revision": expected_revision}).encode()
+
+
+def level_headers(issued=None, *, generation_id=None, cookie=None, origin=ORIGIN, fetch_site="same-origin",
+                  csrf_token=True, content_type="application/json", extra=None):
+    """En-têtes d'un fetch PUT même origine (Origin, CSRF, sélecteur,
+    cookies actif + liaison CSRF). csrf_token : True (jeton valide émis
+    ici), None (absent) ou une valeur explicite."""
+    binding_cookie, token = csrf_pair()
+    cookies = [binding_cookie]
+    if issued is not None:
+        cookies.insert(0, active_cookie(issued))
+    sent = {}
+    if origin is not None:
+        sent["origin"] = origin
+    if fetch_site is not None:
+        sent["sec-fetch-site"] = fetch_site
+    if csrf_token is True:
+        sent["x-oryx-csrf"] = token
+    elif csrf_token is not None:
+        sent["x-oryx-csrf"] = csrf_token
+    selector = generation_id if generation_id is not None else (issued.generation_id if issued else None)
+    if selector is not None:
+        sent["x-oryx-generation-id"] = str(selector)
+    sent["cookie"] = "; ".join(cookies) if cookie is None else cookie
+    if content_type is not None:
+        sent["content-type"] = content_type
+    sent.update(extra or {})
+    return sent
+
+
+def put_level(app, issued=None, *, body=None, headers=None, path=ME_LEVEL, **kwargs):
+    content = level_body() if body is None else body
+    return me_request(app, method="PUT", path=path, headers=headers or level_headers(issued, **kwargs),
+                      content=content)
+
+
 class PersonalBrowser(Browser):
     """Navigateur simulé sur la composition de test : routes F2 (héritées)
     et GET /api/v2/me avec SA boîte à cookies."""
@@ -215,3 +277,71 @@ class PersonalBrowser(Browser):
         if store:
             self.apply(response)
         return response
+
+    def put_level(self, generation_id, level, expected_revision, *, headers=None, store=True):
+        """PUT /api/v2/me/level avec SA boîte à cookies et le jeton CSRF
+        obtenu par le bootstrap de PR 3 (application F2 de la composition)."""
+        sent = {"origin": ORIGIN, "sec-fetch-site": "same-origin", "x-oryx-generation-id": str(generation_id),
+                "content-type": "application/json", "cookie": self.cookie_header()}
+        if self.csrf is not None:
+            sent["x-oryx-csrf"] = self.csrf
+        sent.update(headers or {})
+        response = me_request(self.app, method="PUT", path=ME_LEVEL, headers=sent, peer=self.peer,
+                              content=level_body(level, expected_revision))
+        if store:
+            self.apply(response)
+        return response
+
+
+class RawResponse:
+    """Réponse d'un appel ASGI brut (en-têtes en minuscules, dans l'ordre)."""
+
+    def __init__(self, status_code, headers, content):
+        self.status_code = status_code
+        self.header_list = headers
+        self.content = content
+
+    def get_list(self, name):
+        return [v for k, v in self.header_list if k == name]
+
+    def json(self):
+        return json.loads(self.content)
+
+
+def raw_request(app, *, method="PUT", path=ME_LEVEL, query=b"", headers=(), chunks=(), disconnect=False):
+    """Appel ASGI direct : les en-têtes et les fragments de corps donnés
+    sont EXACTEMENT ceux que reçoit l'application (aucun Content-Length ni
+    Transfer-Encoding ajouté par un client). disconnect : http.disconnect
+    au lieu de la fin du corps."""
+    async def call():
+        messages = [{"type": "http.request", "body": chunk, "more_body": True} for chunk in chunks]
+        if disconnect:
+            messages.append({"type": "http.disconnect"})
+        else:
+            messages.append({"type": "http.request", "body": b"", "more_body": False})
+        sent = []
+
+        async def receive():
+            return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
+                 "scheme": "https", "path": path, "raw_path": path.encode(), "query_string": query, "root_path": "",
+                 "headers": [(k.lower().encode("latin-1"), v if isinstance(v, bytes) else v.encode("latin-1"))
+                             for k, v in headers],
+                 "client": PEER, "server": ("oryx.test", 443)}
+        await app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        return RawResponse(start["status"], [(k.decode("latin-1").lower(), v.decode("latin-1"))
+                                             for k, v in start["headers"]], body)
+
+    return asyncio.run(call())
+
+
+def raw_level_headers(issued, **kwargs):
+    """En-têtes d'un PUT valide pour raw_request : Host explicite, sans
+    Content-Length (à ajouter par le test)."""
+    return [("host", "oryx.test")] + list(level_headers(issued, **kwargs).items())
