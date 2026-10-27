@@ -162,12 +162,18 @@ PR2_0018_EVENT_COLUMN = "blocked_until"
 PR2_TABLES = set(PR2_0018_TABLES)
 # R1 PR 4 (0019, testée à part) : admission HTTP F2 (colonne
 # auth_abuse_events.http_action, type auth_http_probe_attempt et CHECK
-# étendus ; aucune table, aucun index). Tête.
+# étendus ; aucune table, aucun index).
 PR4_0019 = "0019_f2_http_admission"
 PR4_0019_FILE = "0019_f2_http_admission.py"
 PR4_FILES = [PR4_0019_FILE]
 PR4_0019_EVENT_COLUMN = "http_action"
-HEAD = PR4_0019
+# R1 PR 7 (0020, testée à part) : portfolio_positions.position_revision
+# BIGINT NOT NULL DEFAULT 0 et son CHECK ; aucune table, aucun index. Tête.
+PR7_0020 = "0020_position_revision"
+PR7_0020_FILE = "0020_position_revision.py"
+PR7_FILES = [PR7_0020_FILE]
+PR7_0020_POSITION_COLUMN = "position_revision"
+HEAD = PR7_0020
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -398,20 +404,21 @@ def _indexes(engine, table) -> list:
 
 
 def _pr1_revisions_applied(engine) -> int:
-    """Nombre de révisions R1 PR 1 (0015, 0016, 0017), R1 PR 2 (0018) puis
-    R1 PR 4 (0019) présentes en base."""
+    """Nombre de révisions R1 PR 1 (0015, 0016, 0017), R1 PR 2 (0018),
+    R1 PR 4 (0019) puis R1 PR 7 (0020) présentes en base."""
     with engine.connect() as conn:
         if conn.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar() is None:
             return 0
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4, PR4_0019: 5}.get(version, 0)
+    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4, PR4_0019: 5, PR7_0020: 6}.get(version, 0)
 
 
 def _without_pr1_changes(diff, applied: int) -> list:
     """Retire du diff compare_metadata EXACTEMENT les écarts des révisions
-    R1 PR 1, R1 PR 2 et R1 PR 4 non encore appliquées (users.level_revision,
-    tables et index de 0016 / 0017, puis table, colonne et index de 0018,
-    puis colonne de 0019), et échoue si l'un d'eux manque ou si un écart
+    R1 PR 1, R1 PR 2, R1 PR 4 et R1 PR 7 non encore appliquées
+    (users.level_revision, tables et index de 0016 / 0017, puis table,
+    colonne et index de 0018, puis colonne de 0019, puis
+    portfolio_positions.position_revision de 0020), et échoue si l'un d'eux manque ou si un écart
     apparaît alors que sa révision est appliquée. Retourne le reste. Avant
     0017, les colonnes blocked_until et http_action arrivent avec la table
     auth_abuse_events (add_table)."""
@@ -428,6 +435,8 @@ def _without_pr1_changes(diff, applied: int) -> list:
         expected.append(("add_column", f"auth_abuse_events.{PR2_0018_EVENT_COLUMN}"))
     if 3 <= applied < 5:
         expected.append(("add_column", f"auth_abuse_events.{PR4_0019_EVENT_COLUMN}"))
+    if applied < 6:
+        expected.append(("add_column", f"portfolio_positions.{PR7_0020_POSITION_COLUMN}"))
     found, rest = [], []
     for d in diff:
         key = None
@@ -439,6 +448,9 @@ def _without_pr1_changes(diff, applied: int) -> list:
         elif (isinstance(d, tuple) and d[0] == "add_column" and d[2] == "auth_abuse_events"
               and d[3].name == PR4_0019_EVENT_COLUMN and d[3].nullable):
             key = ("add_column", f"auth_abuse_events.{PR4_0019_EVENT_COLUMN}")
+        elif (isinstance(d, tuple) and d[0] == "add_column" and d[2] == "portfolio_positions"
+              and d[3].name == PR7_0020_POSITION_COLUMN and not d[3].nullable):
+            key = ("add_column", f"portfolio_positions.{PR7_0020_POSITION_COLUMN}")
         elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in (
                 PR1_0016_TABLES + PR1_0017_TABLES + PR2_0018_TABLES):
             key = ("add_table", d[1].name)
@@ -454,7 +466,7 @@ def _without_pr1_changes(diff, applied: int) -> list:
 
 def _compare_metadata(engine) -> list:
     """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1,
-    R1 PR 2 et R1 PR 4 des révisions 0015 à 0019 pas encore appliquées (retirés
+    R1 PR 2, R1 PR 4 et R1 PR 7 des révisions 0015 à 0020 pas encore appliquées (retirés
     exactement par _without_pr1_changes). À la tête, aucun écart n'est
     retiré."""
     return _without_pr1_changes(_raw_compare_metadata(engine), _pr1_revisions_applied(engine))

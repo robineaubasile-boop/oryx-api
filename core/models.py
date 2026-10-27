@@ -26,7 +26,14 @@ class User(Base):
 
 
 class PortfolioPosition(Base):
+    """R1 PR 7 (migration 0020_position_revision) : position_revision BIGINT
+    NOT NULL DEFAULT 0, CHECK >= 0 (server_default : l'ancien backend
+    insère sans connaître la colonne). Seul le contrat F2 versionné la fait
+    avancer ; les anciennes routes écrivent sans l'incrémenter."""
     __tablename__ = "portfolio_positions"
+    __table_args__ = (
+        CheckConstraint("position_revision >= 0", name="ck_portfolio_positions_position_revision_non_negative"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
@@ -37,6 +44,7 @@ class PortfolioPosition(Base):
     envelope = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    position_revision = Column(BigInteger, nullable=False, server_default=text("0"))
 
 
 class InvestmentThesis(Base):

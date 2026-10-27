@@ -35,7 +35,7 @@ from core.auth_f2.service import F2AuthService
 from core.authz_f2 import commands as c
 from core.authz_f2 import runner as runner_module
 from core.authz_f2.runner import AUTHORIZED, SESSION_INVALID
-from tests.authz_f2_support import USER_A, AuthzEnv
+from tests.authz_f2_support import USER_A, AuthzEnv, replace_command
 from tests.f2_support import ISSUER, FakeMailer, FakeSupabase, prepare_schema, rows, scalar
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
 
@@ -136,7 +136,7 @@ def waiting(env, application_name):
 def test_revocation_between_phase_a_and_phase_b_is_refused(env, alice):
     issued, target = alice
     env.hooks["prevalidated"] = lambda: env.service.revoke_session(issued.session_id, "security")
-    outcome = env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 50.0))
+    outcome = env.runner().run(issued.credential(), replace_command(target, quantity="50"))
     assert outcome.status == SESSION_INVALID
     assert quantity(env, target) == 3.0
     assert env.hook_calls == ["prevalidated", "locked"]
@@ -146,7 +146,7 @@ def test_revocation_committed_while_waiting_for_a_lock_is_refused(env, alice):
     issued, target = alice
     blocker = Blocker(env, "SELECT id FROM users WHERE id = :u FOR UPDATE", u=USER_A)
     try:
-        actor = Background(lambda: env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 50.0)))
+        actor = Background(lambda: env.runner().run(issued.credential(), replace_command(target, quantity="50")))
         actor.start()
         wait_until(lambda: env.waiting_on_lock() == 1, message="le runner n'attend pas le verrou users")
         assert env.hook_calls == ["prevalidated"]
@@ -171,7 +171,7 @@ def test_concurrent_revocation_waits_for_an_authorized_mutation_then_nothing_mor
 
     env.hooks["authorized"] = during_authorized
     try:
-        outcome = env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 51.0))
+        outcome = env.runner().run(issued.credential(), replace_command(target, quantity="51"))
         assert outcome.status == AUTHORIZED
         assert revocation.outcome() is True
     finally:
@@ -181,7 +181,7 @@ def test_concurrent_revocation_waits_for_an_authorized_mutation_then_nothing_mor
     updated_at = scalar(env.observer, "SELECT updated_at FROM portfolio_positions WHERE id = :i", i=target)
     assert session["revoked_at"].replace(tzinfo=None) - session["revoked_at"].utcoffset() > updated_at
     env.hooks.clear()
-    again = env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 52.0))
+    again = env.runner().run(issued.credential(), replace_command(target, 1, quantity="52"))
     assert again.status == SESSION_INVALID and quantity(env, target) == 51.0
 
 
@@ -193,7 +193,7 @@ def _expire_while_waiting(env, issued, target, blocker_sql, **params):
     env.expire_at(issued.session_id, "clock_timestamp() + interval '1200 milliseconds'")
     blocker = Blocker(env, blocker_sql, **params)
     try:
-        actor = Background(lambda: env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 60.0)))
+        actor = Background(lambda: env.runner().run(issued.credential(), replace_command(target, quantity="60")))
         actor.start()
         wait_until(lambda: env.waiting_on_lock() == 1, message="le runner n'attend pas")
         hooks_while_waiting = list(env.hook_calls)
@@ -254,7 +254,7 @@ def test_f2_transactions_wait_behind_an_authorized_mutation_without_deadlock(env
 
     env.hooks["authorized"] = during_authorized
     try:
-        assert env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 70.0)).status == AUTHORIZED
+        assert env.runner().run(issued.credential(), replace_command(target, quantity="70")).status == AUTHORIZED
         assert actors["resolve"].outcome().user_id == USER_A
         assert actors["sign_in"].outcome().status == "authenticated"
     finally:
@@ -286,7 +286,7 @@ def test_mutation_waits_behind_an_f2_finalization_holding_the_user_rank(env, ali
     try:
         sign_in.start()
         assert paused.wait(10)
-        mutation = Background(lambda: env.runner().run(issued.credential(), c.UpdatePositionQuantity(target, 71.0)))
+        mutation = Background(lambda: env.runner().run(issued.credential(), replace_command(target, quantity="71")))
         mutation.start()
         wait_until(lambda: env.waiting_on_lock() == 1, message="la mutation n'attend pas le rang users")
         resume.set()
@@ -306,7 +306,9 @@ def test_mixed_load_produces_no_deadlock_and_no_spurious_refusal(env, alice, pg_
 
     def mutate():
         barrier.wait(10)
-        return [runner.run(issued.credential(), c.UpdatePositionQuantity(target, float(i + 1))).status
+        # Acteur unique du portefeuille : chaque remplacement effectif part
+        # de la révision i (CAS) et la fait avancer d'une unité.
+        return [runner.run(issued.credential(), replace_command(target, i, quantity=str(i + 1))).status
                 for i in range(15)]
 
     def read():
@@ -436,7 +438,7 @@ def test_profile_and_position_mutations_in_both_orders_without_deadlock(env, ali
     issued, target = alice
     pause = Pause("executed")
     profile = c.UpdateProfileLevel("avance", 0)
-    position = c.UpdatePositionQuantity(target, 33.0)
+    position = replace_command(target, quantity="33")
     first, second = (profile, position) if profile_first else (position, profile)
     holder = Background(lambda: env.runner(hook=pause).run(issued.credential(), first))
     holder.start()
@@ -637,7 +639,7 @@ def test_mixed_profile_load_produces_no_deadlock_and_only_cas_outcomes(env, alic
 
     def positions():
         barrier.wait(10)
-        return [runner.run(issued.credential(), c.UpdatePositionQuantity(target, float(i + 1))).status
+        return [runner.run(issued.credential(), replace_command(target, i, quantity=str(i + 1))).status
                 for i in range(12)]
 
     def resolve():

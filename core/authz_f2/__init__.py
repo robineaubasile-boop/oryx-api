@@ -19,6 +19,18 @@ R1 PR 6 : ProfileView porte level_revision ; neuvième commande du
 registre fermé, UpdateProfileLevel (CAS sur users.level_revision, plan
 PROFILE_MUTATION) ; résultat fermé REVISION_CONFLICT.
 
+R1 PR 7 : portefeuille versionné et idempotent. Registre fermé à onze
+commandes (UpdatePositionQuantity retirée ; CreatePortfolioPosition,
+ReplacePortfolioPosition, DeletePortfolioPosition ajoutées, plan
+PORTFOLIO_MUTATION sous READ COMMITTED vérifié), résultat fermé
+IDEMPOTENCY_CONFLICT, et trois modules purs :
+
+- portfolio_values.py      : saisie décimale, format binary64-decimal-v1,
+                             diagnostic des lignes historiques ;
+- portfolio_fingerprint.py : trousseau HMAC portefeuille dédié et trame
+                             oryx-portfolio-request-v1 ;
+- portfolio_results.py     : résultats et reçus portfolio-write-result-v1.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

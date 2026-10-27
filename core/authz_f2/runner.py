@@ -53,6 +53,23 @@ métier). Un changement demandé à la révision maximale rend UNAVAILABLE et
 journalise une alerte interne, sans détail. Un COMMIT en échec ou
 incertain rend UNAVAILABLE : le runner ne prétend jamais que la
 transaction a été annulée et ne rejoue rien.
+
+R1 PR 7 (plan PORTFOLIO_MUTATION) : le runner reçoit un trousseau
+portefeuille DÉDIÉ (PortfolioKeyring, facultatif ; absent : toute commande
+portefeuille rend UNAVAILABLE avant toute transaction). Phase B : isolation
+READ COMMITTED vérifiée en premier (_adapters.require_read_committed,
+refus fermé), puis users FOR UPDATE -> session -> génération -> reçu du
+triplet FOR UPDATE -> (sans reçu, PUT / DELETE) position propre FOR UPDATE
+-> T_authorization -> revalidation intégrale -> exécution (reçu restitué,
+conflit, ou mutation + reçu) -> COMMIT. L'état verrouillé est d'un type
+EXACT du registre (Spec.states) ; l'ancien refus d'ABSENT avant
+l'exécution est remplacé par cet état fermé : une position absente n'est
+jugée 404 qu'après l'autorisation et l'examen du reçu. Résultat fermé
+supplémentaire IDEMPOTENCY_CONFLICT (même triplet, autre intention),
+rendu après l'autorisation par ROLLBACK ; REVISION_CONFLICT sert aussi au
+CAS des positions. Un rejeu est soumis exactement aux mêmes contrôles
+qu'une première exécution. Points d'interruption supplémentaires (tests) :
+position_written, receipt_ready, receipt_written.
 """
 import logging
 from dataclasses import dataclass
@@ -64,6 +81,7 @@ from core.auth_f2.keys import Keyring
 from core.auth_f2.txn import pg_clock, transaction
 from core.authz_f2 import _adapters
 from core.authz_f2.commands import GENERATION_LOCK
+from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.principal import AuthorizedContext, AuthorizedPrincipal
 
 logger = logging.getLogger("oryx.authz_f2")
@@ -73,10 +91,12 @@ SESSION_INVALID = "session_invalid"
 NOT_FOUND = "not_found"
 UNAVAILABLE = "unavailable"
 REVISION_CONFLICT = "revision_conflict"
-STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT)
+IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT, IDEMPOTENCY_CONFLICT)
 
 # Points d'interruption des tests (aucun en production).
-HOOK_POINTS = ("prevalidated", "locked", "authorized", "executed")
+HOOK_POINTS = ("prevalidated", "locked", "authorized", "position_written", "receipt_ready", "receipt_written",
+               "executed")
 
 
 class AuthorizationConfigError(ValueError):
@@ -107,21 +127,25 @@ _INCOHERENT = object()
 
 class AuthorizedTransactionRunner:
     """engine : moteur SQLAlchemy PostgreSQL ; keyring : trousseau F2 (le
-    même que le moteur F2) ; clock : horloge PostgreSQL (pg_clock),
+    même que le moteur F2) ; portfolio_keyring : trousseau portefeuille
+    dédié (R1 PR 7, facultatif) ; clock : horloge PostgreSQL (pg_clock),
     remplaçable par les tests de frontières ; fault_hook : points
     d'interruption des tests (HOOK_POINTS)."""
 
-    __slots__ = ("_engine", "_keys", "_clock", "_hook")
+    __slots__ = ("_engine", "_keys", "_portfolio", "_clock", "_hook")
 
-    def __init__(self, engine, keyring, *, clock=pg_clock, fault_hook=None):
+    def __init__(self, engine, keyring, *, portfolio_keyring=None, clock=pg_clock, fault_hook=None):
         if not isinstance(engine, sa.engine.Engine) or engine.dialect.name != "postgresql":
             raise AuthorizationConfigError("moteur PostgreSQL attendu")
         if not isinstance(keyring, Keyring):
             raise AuthorizationConfigError("trousseau F2 attendu")
+        if portfolio_keyring is not None and type(portfolio_keyring) is not PortfolioKeyring:
+            raise AuthorizationConfigError("trousseau portefeuille attendu")
         if not callable(clock) or (fault_hook is not None and not callable(fault_hook)):
             raise AuthorizationConfigError("horloge et point d'interruption appelables attendus")
         self._engine = engine
         self._keys = keyring
+        self._portfolio = portfolio_keyring
         self._clock = clock
         self._hook = fault_hook or (lambda point: None)
 
@@ -136,11 +160,15 @@ class AuthorizedTransactionRunner:
         if spec is None:
             raise UnknownCommand("commande hors du registre fermé")
         name = type(command).__name__
+        if spec.keyed and self._portfolio is None:
+            logger.warning("authz_f2 %s status=%s error=portfolio_keyring_missing", name, UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE)
         try:
             outcome = self._run(credential, command, spec)
         except Exception as exc:  # refus fermé : aucun détail, aucun secret
-            if isinstance(exc, _adapters.RevisionExhausted):
-                logger.error("authz_f2 %s status=%s alert=level_revision_exhausted", name, UNAVAILABLE)
+            alert = getattr(exc, "alert", None) if isinstance(exc, _adapters.AdapterInvariantBroken) else None
+            if alert is not None:
+                logger.error("authz_f2 %s status=%s alert=%s", name, UNAVAILABLE, alert)
             else:
                 logger.warning("authz_f2 %s status=%s error=%s", name, UNAVAILABLE, type(exc).__name__)
             return AuthorizationOutcome(UNAVAILABLE)
@@ -178,9 +206,11 @@ class AuthorizedTransactionRunner:
         self._hook("prevalidated")
         try:
             with transaction(self._engine) as conn:
+                if spec.plan.requires_read_committed:
+                    _adapters.require_read_committed(conn)  # isolation réellement active, avant tout verrou
                 profile_locked = _adapters.lock_profile(conn, candidate_user_id, spec.plan)
                 locked = sessions.lock_session(conn, credential, generation_lock=GENERATION_LOCK)
-                business = spec.lock(conn, candidate_user_id, command) if profile_locked else _adapters.ABSENT
+                business = spec.lock(conn, candidate_user_id, command) if profile_locked else None
                 self._hook("locked")
                 at = self._clock(conn)  # T_authorization : après tous les verrous de la décision
                 principal = self._decide(profile_locked, locked, at, candidate_user_id)
@@ -188,15 +218,20 @@ class AuthorizedTransactionRunner:
                     raise _Refused(SESSION_INVALID)
                 if principal is _INCOHERENT:
                     raise _Refused(UNAVAILABLE)
-                if business is _adapters.ABSENT:
-                    raise _Refused(NOT_FOUND)
+                if type(business) not in spec.states:  # état verrouillé hors du registre fermé
+                    raise _adapters.AdapterInvariantBroken("état verrouillé hors contrat")
                 context = AuthorizedContext(principal, at)
                 self._hook("authorized")
-                value = spec.execute(conn, context, command, business)
+                if spec.keyed:
+                    value = spec.execute(conn, context, command, business, self._portfolio, self._hook)
+                else:
+                    value = spec.execute(conn, context, command, business)
                 if value is _adapters.ABSENT:
-                    raise _Refused(NOT_FOUND)
+                    raise _Refused(NOT_FOUND)  # après la décision ; rien n'a été écrit
                 if value is _adapters.CONFLICT:
                     raise _Refused(REVISION_CONFLICT)  # après la décision ; rien n'a été écrit
+                if value is _adapters.IDEMPOTENCY_CONFLICT:
+                    raise _Refused(IDEMPOTENCY_CONFLICT)  # après la décision ; rien n'a été écrit
                 self._hook("executed")
         except _Refused as refused:
             return AuthorizationOutcome(refused.status)

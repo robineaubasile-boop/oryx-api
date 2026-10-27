@@ -435,7 +435,7 @@ def test_no_academy_or_rallye_owner_model_or_migration():
     for name in ("academy_service.py", "rallye_service.py"):
         assert not (REPO_ROOT / "core" / name).exists(), name
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0019_f2_http_admission.py" and len(versions) == 19
+    assert versions[-1] == "0020_position_revision.py" and len(versions) == 20
     models = _code_tokens((REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8"))
     assert not re.search(r"academy|rallye", models, re.IGNORECASE)
     tokens = _code_tokens(_source()).lower()

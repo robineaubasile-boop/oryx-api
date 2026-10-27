@@ -51,6 +51,10 @@ F2_REFERENCE_MATRIX = {
         "core.auth_f2_http.provenance", "core.auth_f2_http.routes"}),
     "core/authz_f2_http/isolated.py": frozenset({"core.auth_f2.keys", "core.auth_f2_http.csrf",
                                                  "core.auth_f2_http.isolated", "core.auth_f2_http.provenance"}),
+    # R1 PR 7 : routes /api/v2/me/portfolio (mêmes primitives que routes.py).
+    "core/authz_f2_http/portfolio.py": frozenset({
+        "core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies", "core.auth_f2_http.provenance",
+        "core.auth_f2_http.routes"}),
 }
 # Noms importables depuis F2 par la matrice (aucun F2AuthService, aucune
 # composition F2, aucun fournisseur, aucune initialisation anti-abus).
@@ -62,7 +66,8 @@ F2_REFERENCE_NAMES = {
     "core.auth_f2.crypto": {"Redacted"},
     "core.auth_f2.service": {"SessionCredential"},
     "core.auth_f2_http.cookies": {"CookieHeaderRejected", "canonical_uuid", "parse_cookie_headers"},
-    "core.auth_f2_http.routes": {"error_response", "json_response"},
+    # R1 PR 7 : NO_STORE_HEADERS (en-têtes des corps canoniques du portefeuille).
+    "core.auth_f2_http.routes": {"error_response", "json_response", "NO_STORE_HEADERS"},
     "core.auth_f2_http.isolated": {"_NoStore"},
     # R1 PR 6 : protocole CSRF de PR 3 réutilisé (vérification seulement ; le
     # bootstrap reste dans l'application F2 isolée).

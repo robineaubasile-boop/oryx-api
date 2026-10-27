@@ -405,8 +405,13 @@ def test_only_get_me_and_put_level_exist_in_the_personal_application(env, alice,
     assert_private(response)
     assert env.hook_calls == []
     app = personal_app(env)
-    assert sorted((sorted(r.methods), r.path) for r in app.routes if hasattr(r, "methods")) == [
-        (["GET"], ME), (["PUT"], ME_LEVEL)]
+    # R1 PR 7 : plus les cinq routes /api/v2/me/portfolio
+    # (tests/test_authz_f2_portfolio_http.py), aucune autre.
+    portfolio = "/api/v2/me/portfolio"
+    assert sorted((sorted(r.methods), r.path) for r in app.routes if hasattr(r, "methods")) == sorted([
+        (["GET"], ME), (["PUT"], ME_LEVEL), (["GET"], portfolio), (["POST"], portfolio),
+        (["GET"], portfolio + "/{position_id}"), (["PUT"], portfolio + "/{position_id}"),
+        (["DELETE"], portfolio + "/{position_id}")])
 
 
 def test_get_me_creates_nothing_and_confirms_nothing(env, alice):

@@ -15,11 +15,16 @@ Adaptateur HTTP autour de core.authz_f2.AuthorizedTransactionRunner
                   Set-Cookie) et PUT /api/v2/me/level (Origin obligatoire,
                   CSRF oryx-f2-csrf-v1 de PR 3, corps JSON exact, CAS sur
                   level_revision, 409 level_revision_conflict) ;
+- portfolio.py  : R1 PR 7, GET / POST /api/v2/me/portfolio et GET / PUT /
+                  DELETE /api/v2/me/portfolio/{position_id} (CRUD versionné
+                  et idempotent, X-Oryx-Operation-Id, X-Oryx-Expected-Revision,
+                  corps canoniques rejoués octet pour octet) ;
 - isolated.py   : application personnelle ISOLÉE (tests uniquement).
 
-Dormance : api.py n'importe ni ce paquet ni core.authz_f2 ; GET /api/v2/me
-et PUT /api/v2/me/level n'existent dans aucune application publique, quelles que soient les
-variables d'environnement (tests/test_authz_f2_dormancy.py). La
+Dormance : api.py n'importe ni ce paquet ni core.authz_f2 ; GET /api/v2/me,
+PUT /api/v2/me/level et les routes /api/v2/me/portfolio n'existent dans
+aucune application publique, quelles que soient les variables
+d'environnement (tests/test_authz_f2_dormancy.py). La
 composition réunissant les routes F2 et cette route n'existe que dans les
 tests (tests/authz_f2_support.py).
 """
