@@ -15,7 +15,11 @@ d'autorisation (core/authz_f2) ni la route personnelle (core/authz_f2_http) :
   ni core.db, ni core.models, ni fournisseur) ;
 - R1 PR 7 : les cinq routes /api/v2/me/portfolio répondent 404 sur le
   vrai api:app ; une seule migration nouvelle, additive
-  (0020_position_revision, tête), aucune dépendance de production nouvelle.
+  (0020_position_revision, tête), aucune dépendance de production nouvelle ;
+- R1 PR 8 : GET /api/v2/me/analysis-overview, GET /api/v2/me/theses et
+  GET /api/v2/me/theses/{thesis_id} répondent 404 sur le vrai api:app (avec
+  ou sans query, cookie, sélecteur ni variables d'activation) ; aucune
+  migration (tête inchangée 0020_position_revision), aucune dépendance.
 
 Les garanties historiques (routes publiques exactes, middlewares, imports
 interdits, chargement dynamique, réseau au démarrage, variables F2 valides
@@ -63,13 +67,21 @@ IMPORT_MATRIX = {
     "core/authz_f2_http/isolated.py": {"core.auth_f2.keys", "core.auth_f2_http.csrf", "core.auth_f2_http.isolated",
                                        "core.auth_f2_http.provenance", "core.authz_f2.runner",
                                        "core.authz_f2_http.routes", "core.authz_f2.portfolio_fingerprint",
-                                       "core.authz_f2_http.portfolio"},
+                                       "core.authz_f2_http.portfolio", "core.authz_f2_http.consultation"},
     "core/authz_f2_http/portfolio.py": {"core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies",
                                         "core.auth_f2_http.provenance", "core.auth_f2_http.routes",
                                         "core.authz_f2.portfolio_values", "core.authz_f2.commands",
                                         "core.authz_f2.portfolio_fingerprint", "core.authz_f2.portfolio_results",
                                         "core.authz_f2.principal", "core.authz_f2.runner",
                                         "core.authz_f2_http.provenance", "core.authz_f2_http.routes"},
+    # R1 PR 8 : codec pur (commandes et vues seulement) et routeur de lecture.
+    "core/authz_f2_http/consultation_codec.py": {"core.authz_f2.commands"},
+    "core/authz_f2_http/consultation.py": {"core.auth_f2.crypto", "core.auth_f2.service",
+                                           "core.auth_f2_http.cookies", "core.auth_f2_http.provenance",
+                                           "core.auth_f2_http.routes", "core.authz_f2.commands",
+                                           "core.authz_f2.principal", "core.authz_f2.runner",
+                                           "core.authz_f2_http.consultation_codec", "core.authz_f2_http.portfolio",
+                                           "core.authz_f2_http.provenance", "core.authz_f2_http.routes"},
 }
 PACKAGES = ("core.auth_f2", "core.auth_f2_http", "core.authz_f2", "core.authz_f2_http")
 
@@ -113,6 +125,19 @@ CASES = [
     ("DELETE", "/api/v2/me/portfolio/1", {"origin": "https://oryx.test", "x-oryx-generation-id": GEN,
                                           "x-oryx-operation-id": OP, "x-oryx-expected-revision": "0",
                                           "cookie": COOKIE}),
+    # R1 PR 8 : trois lectures des analyses et des thèses, en-têtes plausibles.
+    ("GET", "/api/v2/me/analysis-overview", {}),
+    ("GET", "/api/v2/me/analysis-overview", {"sec-fetch-site": "same-origin", "x-oryx-generation-id": GEN,
+                                             "cookie": COOKIE}),
+    ("GET", "/api/v2/me/analysis-overview?limit=1", {"origin": "https://oryx.test", "x-oryx-generation-id": GEN,
+                                                     "cookie": COOKIE}),
+    ("GET", "/api/v2/me/theses", {}),
+    ("GET", "/api/v2/me/theses", {"sec-fetch-site": "same-origin", "x-oryx-generation-id": GEN, "cookie": COOKIE}),
+    ("GET", "/api/v2/me/theses?ticker=AIR.PA&limit=50", {"sec-fetch-site": "same-origin",
+                                                        "x-oryx-generation-id": GEN, "cookie": COOKIE}),
+    ("GET", "/api/v2/me/theses/1", {}),
+    ("GET", "/api/v2/me/theses/1", {"sec-fetch-site": "same-origin", "x-oryx-generation-id": GEN, "cookie": COOKIE}),
+    ("GET", "/api/v2/me/theses/2147483647", {"origin": "https://oryx.test", "x-oryx-generation-id": GEN}),
 ]
 BODY = b'{"level":"avance","expected_revision":"0"}'
 PORTFOLIO_BODY = (b'{"ticker":"AIR.PA","quantity":"4","purchase_price":null,"target_percent":null,'
@@ -145,6 +170,9 @@ ENVIRONMENTS = {
     # R1 PR 7 : aucune variable n'active le portefeuille F2.
     "pr7_flags": {"ORYX_PORTFOLIO_F2": "1", "ORYX_V2_PORTFOLIO": "true", "ORYX_F2_ENABLED": "1",
                   "ORYX_PORTFOLIO_KEYS": json.dumps({"k1": "A" * 43}), "ORYX_PORTFOLIO_KEY_VERSION": "k1"},
+    # R1 PR 8 : aucune variable n'active les lectures des analyses et thèses.
+    "pr8_flags": {"ORYX_THESES_F2": "1", "ORYX_V2_THESES": "true", "ORYX_ANALYSIS_OVERVIEW_F2": "on",
+                  "ORYX_PR8_ENABLED": "1", "ORYX_F2_ENABLED": "1", "ORYX_AUTHZ_F2": "1"},
 }
 
 
@@ -169,7 +197,7 @@ def test_real_entrypoint_answers_404_on_api_v2_me(case):
                          env=_clean_env(ENVIRONMENTS[case]), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert len(result["responses"]) == 14
+    assert len(result["responses"]) == 23
     for method, path, status, cookies, _ in result["responses"]:
         assert status == 404, (method, path, status)
         assert cookies == [], (method, path)
@@ -188,14 +216,20 @@ def test_api_source_never_mentions_the_authorization_boundary():
                       # R1 PR 7
                       "/api/v2/me/portfolio", "position_revision", "PortfolioKeyring", "CreatePortfolioPosition",
                       "ReplacePortfolioPosition", "DeletePortfolioPosition", "x-oryx-operation-id",
-                      "X-Oryx-Operation-Id", "X-Oryx-Expected-Revision", "portfolio_write_idempotency"):
+                      "X-Oryx-Operation-Id", "X-Oryx-Expected-Revision", "portfolio_write_idempotency",
+                      # R1 PR 8
+                      "/api/v2/me/theses", "/api/v2/me/analysis-overview", "analysis-overview",
+                      "ListAnalysisOverviewPage", "ListThesesPage", "ReadThesis", "consultation",
+                      "thesis_not_found", "next_cursor"):
         assert forbidden not in source, forbidden
 
 
 def test_only_tests_and_docs_reference_the_boundary():
     offenders = []
     markers = ("authz_f2", "AuthorizedTransactionRunner", "build_isolated_personal_app", "/api/v2/me",
-               "PortfolioKeyring", "oryx-portfolio-request-v1", "portfolio-write-result-v1")
+               "PortfolioKeyring", "oryx-portfolio-request-v1", "portfolio-write-result-v1",
+               # R1 PR 8
+               "ListAnalysisOverviewPage", "ListThesesPage", "build_consultation_router")
     for path in REPO_ROOT.rglob("*"):
         if (not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts or "node_modules" in path.parts
                 or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh", ".yml", ".yaml", ".toml",
@@ -243,7 +277,8 @@ def test_importing_the_boundary_opens_nothing():
             "for m in ('core.authz_f2', 'core.authz_f2.runner', 'core.authz_f2.commands', 'core.authz_f2._adapters',\n"
             "          'core.authz_f2.portfolio_values', 'core.authz_f2.portfolio_fingerprint',\n"
             "          'core.authz_f2.portfolio_results', 'core.authz_f2_http', 'core.authz_f2_http.routes',\n"
-            "          'core.authz_f2_http.portfolio', 'core.authz_f2_http.isolated'):\n"
+            "          'core.authz_f2_http.portfolio', 'core.authz_f2_http.consultation_codec',\n"
+            "          'core.authz_f2_http.consultation', 'core.authz_f2_http.isolated'):\n"
             "    importlib.import_module(m)\n"
             "print(' '.join(str(x in sys.modules) for x in ('api', 'httpx', 'core.db', 'core.models')), attempts)\n")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,

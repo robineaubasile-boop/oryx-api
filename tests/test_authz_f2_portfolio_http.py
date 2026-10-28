@@ -119,7 +119,10 @@ def test_personal_application_contains_exactly_its_routes(app):
     assert sorted((sorted(r.methods), r.path) for r in app.routes if hasattr(r, "methods")) == sorted([
         (["GET"], ME), (["PUT"], ME_LEVEL), (["GET"], PORTFOLIO), (["POST"], PORTFOLIO),
         (["GET"], PORTFOLIO + "/{position_id}"), (["PUT"], PORTFOLIO + "/{position_id}"),
-        (["DELETE"], PORTFOLIO + "/{position_id}")])
+        (["DELETE"], PORTFOLIO + "/{position_id}"),
+        # R1 PR 8 : trois lectures (tests/test_authz_f2_consultation_http.py).
+        (["GET"], "/api/v2/me/analysis-overview"), (["GET"], "/api/v2/me/theses"),
+        (["GET"], "/api/v2/me/theses/{thesis_id}")])
 
 
 @pytest.mark.parametrize("method,path,status", [

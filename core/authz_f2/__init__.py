@@ -31,6 +31,11 @@ IDEMPOTENCY_CONFLICT, et trois modules purs :
                              oryx-portfolio-request-v1 ;
 - portfolio_results.py     : résultats et reçus portfolio-write-result-v1.
 
+R1 PR 8 : registre fermé à quatorze commandes (ListAnalysisOverviewPage,
+ListThesesPage, ReadThesis ajoutées sous le plan READ inchangé ;
+ListTheses et ListThesesForTicker conservées) ; une instruction SQL
+métier par lecture, sans verrou métier ni écriture.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

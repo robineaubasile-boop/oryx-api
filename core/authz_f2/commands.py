@@ -39,6 +39,18 @@ financières sont des chaînes décimales canoniques validées
 (core.authz_f2.portfolio_values) ; PositionView porte la révision, les
 valeurs binary64-decimal-v1 et le diagnostic de lecture. Thèses,
 Décrypter et ACK relèvent de PR 8 et PR 9.
+
+R1 PR 8 : trois lectures paginées ou individuelles sous le plan READ
+inchangé (ListAnalysisOverviewPage, ListThesesPage, ReadThesis), données
+gelées sans user_id dont les limites, filtres et bornes de curseur sont
+prévalidés ; ListTheses et ListThesesForTicker sont conservées telles
+quelles. Vues fermées et validées : AnalysisOverviewEntry / Page (synthèse
+par ticker, états de PRÉSENTATION in_progress / thesis_available, jamais
+des stades cognitifs), ThesisListEntry / ThesesPage (sans thesis_text) et
+ThesisDetailView (texte intégral borné, provenance relationnelle). Une
+AnalysisSession, une InvestmentThesis et une preuve pédagogique restent
+trois notions distinctes ; « verified » n'est jamais une preuve de
+compétence.
 """
 import re
 import uuid
@@ -352,3 +364,272 @@ class DeliveryView:
     surface: str
     status: str
     generated_at: datetime
+
+
+# --------------------------------------------------------------------------
+# R1 PR 8 : lectures des analyses et des thèses (plan READ, aucune écriture)
+# --------------------------------------------------------------------------
+
+MAX_THESIS_ID = 2**31 - 1  # investment_theses.id (INTEGER)
+PAGE_LIMIT_MAX = 50
+TICKER_MAX_BYTES = 512  # tout ticker RESTITUÉ (octets UTF-8) ; au-delà : 503, jamais tronqué
+THESIS_TEXT_MAX_BYTES = 131072  # texte brut restituable (le JSON final est revérifié ensuite)
+# Borne de transport d'un ticker de curseur (le curseur encodé fait au plus
+# 1024 caractères) : jamais la validation des nouveaux filtres.
+CURSOR_TICKER_MAX_BYTES = 1024
+# Étapes reconnues de construction_these (core.decryptage_progress, recopiées
+# ici : aucun import applicatif ; égalité vérifiée par les tests).
+ANALYSIS_STEPS = ("business", "moat", "chiffres", "valorisation", "risques", "swot_final")
+IN_PROGRESS = "in_progress"
+THESIS_AVAILABLE = "thesis_available"
+OVERVIEW_STATES = (IN_PROGRESS, THESIS_AVAILABLE)  # présentation, jamais un stade cognitif
+MULTIPLE_ACTIVE_SESSIONS = "multiple_active_sessions"
+INVALID_CURRENT_STEP = "invalid_current_step"
+DIAGNOSTICS = (MULTIPLE_ACTIVE_SESSIONS, INVALID_CURRENT_STEP)  # ordre fermé
+VERIFIED = "verified"
+UNVERIFIED = "unverified"
+
+
+def valid_page_limit(value) -> bool:
+    return type(value) is int and 1 <= value <= PAGE_LIMIT_MAX
+
+
+def page_fetch_size(limit: int) -> int:
+    """limit + 1 lignes lues : la ligne supplémentaire dit seulement qu'une
+    page suivante existe ; elle n'est jamais rendue ni utilisée pour le
+    curseur."""
+    if not valid_page_limit(limit):
+        raise ValueError("limit : entier de 1 à 50 attendu")
+    return limit + 1
+
+
+def valid_thesis_id(value) -> bool:
+    return type(value) is int and 1 <= value <= MAX_THESIS_ID
+
+
+def utf8_length(value):
+    """Longueur UTF-8 d'une chaîne, ou None si elle n'est pas encodable
+    (substitut isolé)."""
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def _storable_text(value) -> bool:
+    """Chaîne Python exacte qu'une colonne text PostgreSQL peut contenir
+    (UTF-8 encodable, sans NUL)."""
+    return type(value) is str and "\x00" not in value and utf8_length(value) is not None
+
+
+def valid_ticker_filter(value) -> bool:
+    """Filtre ticker d'une nouvelle requête : non vide, 32 caractères au
+    plus, sans blanc de bord ; jamais corrigé (ni upper ni strip)."""
+    return _storable_text(value) and 0 < len(value) <= TICKER_MAX_CHARS and value == value.strip()
+
+
+def valid_cursor_ticker(value) -> bool:
+    """Dernier ticker d'un curseur de synthèse : chaîne historique EXACTE,
+    éventuellement vide, soumise aux seules bornes de transport."""
+    return _storable_text(value) and utf8_length(value) <= CURSOR_TICKER_MAX_BYTES
+
+
+def restorable_ticker(value) -> bool:
+    return type(value) is str and utf8_length(value) is not None and utf8_length(value) <= TICKER_MAX_BYTES
+
+
+def historical_timestamp(value) -> bool:
+    """investment_theses.created_at : TIMESTAMP WITHOUT TIME ZONE (UTC
+    historique), datetime naïf exact."""
+    return type(value) is datetime and value.tzinfo is None
+
+
+def session_timestamp(value) -> bool:
+    """analysis_sessions.* : TIMESTAMPTZ, datetime avec fuseau."""
+    return type(value) is datetime and value.tzinfo is not None and value.utcoffset() is not None
+
+
+def thesis_precedes(created_at, thesis_id, other_created_at, other_id) -> bool:
+    """Ordre total des thèses : created_at DESC NULLS LAST, id DESC. True si
+    (created_at, thesis_id) vient STRICTEMENT avant (other_created_at,
+    other_id)."""
+    if created_at is None:
+        return other_created_at is None and thesis_id > other_id
+    if other_created_at is None:
+        return True
+    return created_at > other_created_at or (created_at == other_created_at and thesis_id > other_id)
+
+
+def overview_diagnostics(active_sessions, current_step) -> tuple:
+    """Diagnostics fermés d'une session active retenue, dans l'ordre fermé ;
+    calculés à la lecture, jamais enregistrés ni réparés."""
+    if type(active_sessions) is not int or active_sessions < 1:
+        raise ValueError("nombre de sessions actives hors contrat")
+    if current_step is not None and current_step not in ANALYSIS_STEPS:
+        raise ValueError("étape hors contrat")
+    present = {MULTIPLE_ACTIVE_SESSIONS: active_sessions > 1, INVALID_CURRENT_STEP: current_step is None}
+    return tuple(code for code in DIAGNOSTICS if present[code])
+
+
+@dataclass(frozen=True, slots=True)
+class ListAnalysisOverviewPage(Command):
+    """Une page de la synthèse par ticker du principal (une instruction SQL).
+    after_ticker : None (première page) ou dernier ticker rendu, chaîne
+    historique exacte (éventuellement vide)."""
+    limit: int
+    after_ticker: object
+
+    def __post_init__(self):
+        if not valid_page_limit(self.limit):
+            raise ValueError("limit : entier de 1 à 50 attendu")
+        if self.after_ticker is not None and not valid_cursor_ticker(self.after_ticker):
+            raise ValueError("after_ticker : chaîne exacte attendue")
+
+
+@dataclass(frozen=True, slots=True)
+class ListThesesPage(Command):
+    """Une page des InvestmentThesis du principal (created_at DESC NULLS
+    LAST, id DESC). ticker : filtre exact ou None. Curseur : after_thesis_id
+    None (première page) ou dernier identifiant rendu, avec after_created_at
+    (datetime naïf exact ou None, alors dernière date nulle)."""
+    limit: int
+    ticker: object
+    after_thesis_id: object
+    after_created_at: object
+
+    def __post_init__(self):
+        if not valid_page_limit(self.limit):
+            raise ValueError("limit : entier de 1 à 50 attendu")
+        if self.ticker is not None and not valid_ticker_filter(self.ticker):
+            raise ValueError("ticker : filtre exact attendu")
+        if self.after_thesis_id is None:
+            if self.after_created_at is not None:
+                raise ValueError("curseur : date sans identifiant")
+        elif not valid_thesis_id(self.after_thesis_id):
+            raise ValueError("after_thesis_id : entier de 1 à 2^31 - 1 attendu")
+        if self.after_created_at is not None and not historical_timestamp(self.after_created_at):
+            raise ValueError("after_created_at : TIMESTAMP sans fuseau attendu")
+
+
+@dataclass(frozen=True, slots=True)
+class ReadThesis(Command):
+    """Une InvestmentThesis du principal (id ET user_id) ; étrangère ou
+    inexistante : même ABSENT."""
+    thesis_id: int
+
+    def __post_init__(self):
+        if not valid_thesis_id(self.thesis_id):
+            raise ValueError("thesis_id : entier de 1 à 2^31 - 1 attendu")
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisOverviewEntry:
+    """Entrée fermée de la synthèse : session active retenue (prioritaire)
+    ou, sans session active, dernière thèse enregistrée. Une vue incohérente
+    ne peut pas être construite."""
+    ticker: str
+    state: str
+    analysis_session_id: object  # uuid.UUID (in_progress) ou None
+    current_step: object         # étape reconnue ou None
+    updated_at: object           # TIMESTAMPTZ de la session, created_at naïf de la thèse, ou None
+    latest_thesis_id: object     # entier (thesis_available) ou None
+    diagnostics: tuple
+
+    def __post_init__(self):
+        if not restorable_ticker(self.ticker):
+            raise ValueError("synthèse : ticker non restituable")
+        if type(self.diagnostics) is not tuple or any(type(d) is not str for d in self.diagnostics):
+            raise ValueError("synthèse : diagnostics hors contrat")
+        if self.state == IN_PROGRESS:
+            if (type(self.analysis_session_id) is not uuid.UUID or self.latest_thesis_id is not None
+                    or not session_timestamp(self.updated_at)
+                    or (self.current_step is not None and self.current_step not in ANALYSIS_STEPS)):
+                raise ValueError("synthèse : session active hors contrat")
+            ordered = tuple(d for d in DIAGNOSTICS if d in self.diagnostics)
+            if self.diagnostics != ordered or (INVALID_CURRENT_STEP in self.diagnostics) != (self.current_step is None):
+                raise ValueError("synthèse : diagnostics incohérents")
+        elif self.state == THESIS_AVAILABLE:
+            if (self.analysis_session_id is not None or self.current_step is not None or self.diagnostics != ()
+                    or not valid_thesis_id(self.latest_thesis_id)
+                    or (self.updated_at is not None and not historical_timestamp(self.updated_at))):
+                raise ValueError("synthèse : thèse hors contrat")
+        else:
+            raise ValueError("synthèse : état hors contrat")
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisOverviewPage:
+    """entries : au plus limit entrées, tickers strictement croissants
+    (collation "C" : ordre des points de code) ; has_more : une ligne
+    supplémentaire a été lue."""
+    entries: tuple
+    has_more: bool
+
+    def __post_init__(self):
+        if type(self.entries) is not tuple or type(self.has_more) is not bool \
+                or any(type(e) is not AnalysisOverviewEntry for e in self.entries):
+            raise ValueError("synthèse : page hors contrat")
+        tickers = [e.ticker for e in self.entries]
+        if any(a >= b for a, b in zip(tickers, tickers[1:])):
+            raise ValueError("synthèse : ordre des tickers rompu")
+
+
+@dataclass(frozen=True, slots=True)
+class ThesisListEntry:
+    """Entrée de l'historique : jamais de thesis_text ni d'extrait."""
+    thesis_id: int
+    ticker: str
+    created_at: object  # datetime naïf (UTC historique) ou None
+    provenance_status: str
+
+    def __post_init__(self):
+        if not valid_thesis_id(self.thesis_id) or not restorable_ticker(self.ticker):
+            raise ValueError("thèse : identifiant ou ticker hors contrat")
+        if self.created_at is not None and not historical_timestamp(self.created_at):
+            raise ValueError("thèse : date hors contrat")
+        if self.provenance_status not in (VERIFIED, UNVERIFIED) or type(self.provenance_status) is not str:
+            raise ValueError("thèse : provenance hors contrat")
+
+
+@dataclass(frozen=True, slots=True)
+class ThesesPage:
+    """entries : au plus limit thèses, dans l'ordre total created_at DESC
+    NULLS LAST, id DESC ; has_more : une ligne supplémentaire a été lue."""
+    entries: tuple
+    has_more: bool
+
+    def __post_init__(self):
+        if type(self.entries) is not tuple or type(self.has_more) is not bool \
+                or any(type(e) is not ThesisListEntry for e in self.entries):
+            raise ValueError("thèses : page hors contrat")
+        for a, b in zip(self.entries, self.entries[1:]):
+            if not thesis_precedes(a.created_at, a.thesis_id, b.created_at, b.thesis_id):
+                raise ValueError("thèses : ordre rompu")
+
+
+@dataclass(frozen=True, slots=True)
+class ThesisDetailView:
+    """Thèse complète : texte intégral (jamais tronqué), provenance
+    relationnelle. analysis_session_id n'est porté que si le rattachement
+    est VÉRIFIÉ (même id, même utilisateur, même ticker) ; sinon None, sans
+    raison ni identifiant incohérent."""
+    thesis_id: int
+    ticker: str
+    thesis_text: str
+    created_at: object
+    analysis_session_id: object  # uuid.UUID vérifié ou None
+
+    def __post_init__(self):
+        if not valid_thesis_id(self.thesis_id) or not restorable_ticker(self.ticker):
+            raise ValueError("thèse : identifiant ou ticker hors contrat")
+        length = utf8_length(self.thesis_text) if type(self.thesis_text) is str else None
+        if length is None or length > THESIS_TEXT_MAX_BYTES:
+            raise ValueError("thèse : texte non restituable")
+        if self.created_at is not None and not historical_timestamp(self.created_at):
+            raise ValueError("thèse : date hors contrat")
+        if self.analysis_session_id is not None and type(self.analysis_session_id) is not uuid.UUID:
+            raise ValueError("thèse : provenance hors contrat")
+
+    @property
+    def provenance_status(self) -> str:
+        return UNVERIFIED if self.analysis_session_id is None else VERIFIED
