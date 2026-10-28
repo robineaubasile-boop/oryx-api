@@ -46,7 +46,7 @@ from core.authz_f2.runner import (
     AuthorizedTransactionRunner,
     UnknownCommand,
 )
-from tests.authz_f2_support import BOB, USER_A, USER_B, AuthzEnv
+from tests.authz_f2_support import BOB, USER_A, USER_B, AuthzEnv, replace_command
 from tests.f2_support import SimulatedCrash, fake_key, prepare_schema, rows, scalar
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
 
@@ -246,7 +246,7 @@ def test_foreign_and_missing_individual_resources_are_indistinguishable(env, two
     a, _, ids = two_users
     runner = env.runner()
     own = runner.run(a.credential(), c.ReadPosition(ids[(USER_A, "positions")][0]))
-    assert own.status == AUTHORIZED and own.value.ticker == "AIR.PA" and own.value.quantity == 3.0
+    assert own.status == AUTHORIZED and own.value.ticker == "AIR.PA" and own.value.quantity == "3"
     foreign = runner.run(a.credential(), c.ReadPosition(ids[(USER_B, "positions")][0]))
     missing = runner.run(a.credential(), c.ReadPosition(2**31 - 1))
     assert foreign == missing == AuthorizationOutcome(NOT_FOUND)
@@ -278,12 +278,15 @@ def test_foreign_mutation_writes_nothing_and_locks_nothing(env, two_users):
         tx = blocker.begin()
         blocker.execute(sa.text("SELECT id FROM portfolio_positions WHERE id = :i FOR UPDATE"), {"i": target})
         started = time.monotonic()
-        outcome = env.runner().run(a.credential(), c.UpdatePositionQuantity(target, 99.0))
+        outcome = env.runner().run(a.credential(), replace_command(target, quantity="99"))
         assert time.monotonic() - started < 3
         tx.rollback()
     assert outcome == AuthorizationOutcome(NOT_FOUND)
     assert position(env, target) == before
-    assert env.hook_calls == ["prevalidated", "locked"]  # aucune exécution
+    # R1 PR 7 : l'absence n'est jugée qu'après l'autorisation (état fermé
+    # PositionMissing) ; aucune écriture, aucun reçu.
+    assert env.hook_calls == ["prevalidated", "locked", "authorized"]
+    assert env.count("portfolio_write_idempotency") == 0
 
 
 def test_own_mutation_is_authorized_at_t_authorization(env, two_users):
@@ -295,8 +298,8 @@ def test_own_mutation_is_authorized_at_t_authorization(env, two_users):
         instants.append(conn.execute(sa.text("SELECT clock_timestamp()")).scalar_one())
         return instants[-1]
 
-    outcome = env.runner(clock=clock).run(a.credential(), c.UpdatePositionQuantity(target, 4.5))
-    assert outcome.status == AUTHORIZED and outcome.value.quantity == 4.5
+    outcome = env.runner(clock=clock).run(a.credential(), replace_command(target, quantity="4.5"))
+    assert outcome.status == AUTHORIZED and outcome.value.view.quantity == "4.5"
     row = position(env, target)
     assert row["quantity"] == 4.5
     # updated_at (colonne historique sans fuseau, UTC) = T_authorization.
@@ -310,7 +313,7 @@ def test_missing_profile_is_unavailable_and_never_created(env):
     with env.observer.begin() as conn:
         conn.execute(sa.text("SET LOCAL session_replication_role = replica"))
         conn.execute(sa.text("DELETE FROM users WHERE id = :u"), {"u": USER_A})
-    for command in (c.ReadProfile(), c.ListPositions(), c.UpdatePositionQuantity(1, 1.0)):
+    for command in (c.ReadProfile(), c.ListPositions(), replace_command(1)):
         assert env.runner().run(issued.credential(), command) == AuthorizationOutcome(UNAVAILABLE)
     assert env.count("users", "id = :u", u=USER_A) == 0
 
@@ -323,9 +326,9 @@ def test_commands_carry_no_owner_and_validate_their_fields():
     for bad in (True, 0, -1, 2**31, "1", 1.0, None):
         with pytest.raises(ValueError):
             c.ReadPosition(bad)
-    for bad in (0, -1.0, float("nan"), float("inf"), True, "1"):
+    for bad in ("0", "-1", "nan", "inf", True, 1, 1.0, None):
         with pytest.raises(ValueError):
-            c.UpdatePositionQuantity(1, bad)
+            replace_command(1, quantity=bad)
     for bad in ("", " AIR.PA", "x" * 33, None):
         with pytest.raises(ValueError):
             c.ListThesesForTicker(bad)
@@ -341,8 +344,9 @@ def test_registry_is_closed_and_unknown_commands_are_refused_before_any_transact
     issued = env.confirmed()
     assert set(_adapters.REGISTRY) == {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses,
                                        c.ListThesesForTicker, c.ReadDelivery, c.ListConversationDeliveries,
-                                       c.UpdatePositionQuantity, c.UpdateProfileLevel}
-    assert len(_adapters.REGISTRY) == 9
+                                       c.UpdateProfileLevel, c.CreatePortfolioPosition,
+                                       c.ReplacePortfolioPosition, c.DeletePortfolioPosition}
+    assert len(_adapters.REGISTRY) == 11
     with pytest.raises(TypeError):
         _adapters.REGISTRY[object] = None
 
@@ -354,8 +358,9 @@ def test_registry_is_closed_and_unknown_commands_are_refused_before_any_transact
         conn.execute(sa.text("DELETE FROM portfolio_positions"))
 
     runner = env.runner()
+    # R1 PR 7 : l'ancienne mutation de démonstration (sans CAS) est refusée.
     for command in (operation, lambda conn: None, Smuggled(), "ReadProfile", c.ReadProfile, None,
-                    _adapters.REGISTRY[c.ReadProfile]):
+                    _adapters.REGISTRY[c.ReadProfile], c.UpdatePositionQuantity(1, 1.0)):
         with pytest.raises(UnknownCommand):
             runner.run(issued.credential(), command)
     assert env.hook_calls == []
@@ -381,7 +386,8 @@ def test_commands_see_only_principal_and_t_authorization(env, monkeypatch):
     assert {name for name in dir(env.runner()) if not name.startswith("_")} == {"run"}
 
 
-@pytest.mark.parametrize("point", ["locked", "authorized", "executed"])
+@pytest.mark.parametrize("point", ["locked", "authorized", "position_written", "receipt_ready", "receipt_written",
+                                   "executed"])
 def test_failure_inside_phase_b_rolls_everything_back(env, two_users, point):
     a, _, ids = two_users
     target = ids[(USER_A, "positions")][0]
@@ -391,9 +397,10 @@ def test_failure_inside_phase_b_rolls_everything_back(env, two_users, point):
         raise RuntimeError(f"panne au point {point}")
 
     env.hooks[point] = fail
-    outcome = env.runner().run(a.credential(), c.UpdatePositionQuantity(target, 42.0))
+    outcome = env.runner().run(a.credential(), replace_command(target, quantity="42"))
     assert outcome == AuthorizationOutcome(UNAVAILABLE)
     assert position(env, target) == before
+    assert env.count("portfolio_write_idempotency") == 0
 
 
 def test_crash_after_write_rolls_back(env, two_users):
@@ -408,8 +415,9 @@ def test_crash_after_write_rolls_back(env, two_users):
 
     env.hooks["executed"] = crash
     with pytest.raises(SimulatedCrash):
-        env.runner().run(a.credential(), c.UpdatePositionQuantity(target, 42.0))
+        env.runner().run(a.credential(), replace_command(target, quantity="42"))
     assert position(env, target) == before
+    assert env.count("portfolio_write_idempotency") == 0
     assert env.engine.pool.checkedout() == 0
 
 
@@ -424,8 +432,9 @@ def test_t_authorization_is_read_after_every_decision_lock(env, two_users):
         env.hook_calls.append("clock")
         return conn.execute(sa.text("SELECT clock_timestamp()")).scalar_one()
 
-    env.runner(clock=clock).run(a.credential(), c.UpdatePositionQuantity(ids[(USER_A, "positions")][0], 2.0))
-    assert env.hook_calls == ["clock", "prevalidated", "locked", "clock", "authorized", "executed"]
+    env.runner(clock=clock).run(a.credential(), replace_command(ids[(USER_A, "positions")][0], quantity="2"))
+    assert env.hook_calls == ["clock", "prevalidated", "locked", "clock", "authorized", "position_written",
+                              "receipt_ready", "receipt_written", "executed"]
 
 
 def _scripted_clock(*instants):
@@ -439,10 +448,10 @@ def test_exact_equality_with_absolute_expiry_is_refused(env, two_users):
     expires = scalar(env.observer, "SELECT absolute_expires_at FROM oryx_sessions WHERE id = :s", s=a.session_id)
     before = position(env, target)
     refused = env.runner(clock=_scripted_clock(expires - timedelta(seconds=1), expires))
-    assert refused.run(a.credential(), c.UpdatePositionQuantity(target, 9.0)) == AuthorizationOutcome(SESSION_INVALID)
+    assert refused.run(a.credential(), replace_command(target, quantity="9")) == AuthorizationOutcome(SESSION_INVALID)
     assert position(env, target) == before
     accepted = env.runner(clock=_scripted_clock(expires - timedelta(seconds=1), expires - US))
-    assert accepted.run(a.credential(), c.UpdatePositionQuantity(target, 9.0)).status == AUTHORIZED
+    assert accepted.run(a.credential(), replace_command(target, quantity="9")).status == AUTHORIZED
     assert position(env, target)["quantity"] == 9.0
 
 
@@ -451,7 +460,7 @@ def test_expiry_after_t_authorization_does_not_roll_back(env, two_users):
     target = ids[(USER_A, "positions")][0]
     env.expire_at(a.session_id, "clock_timestamp() + interval '1500 milliseconds'")
     env.hooks["authorized"] = lambda: time.sleep(2.0)  # l'échéance passe APRÈS la décision
-    outcome = env.runner().run(a.credential(), c.UpdatePositionQuantity(target, 11.0))
+    outcome = env.runner().run(a.credential(), replace_command(target, quantity="11"))
     assert outcome.status == AUTHORIZED
     assert position(env, target)["quantity"] == 11.0
     expired = scalar(env.observer, "SELECT absolute_expires_at < clock_timestamp() FROM oryx_sessions WHERE id = :s",
@@ -468,7 +477,7 @@ def test_lock_timeout_is_unavailable(env, two_users):
         tx = blocker.begin()
         blocker.execute(sa.text("SELECT id FROM users WHERE id = :u FOR UPDATE"), {"u": USER_A})
         started = time.monotonic()
-        outcome = env.runner().run(a.credential(), c.UpdatePositionQuantity(target, 5.0))
+        outcome = env.runner().run(a.credential(), replace_command(target, quantity="5"))
         elapsed = time.monotonic() - started
         tx.rollback()
     assert outcome == AuthorizationOutcome(UNAVAILABLE)
@@ -486,7 +495,7 @@ def test_no_network_call_happens_inside_runner_transactions(env, two_users, monk
 
     monkeypatch.setattr(socket.socket, "connect", guard)
     monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: guard(None, args))
-    outcome = env.runner().run(a.credential(), c.UpdatePositionQuantity(ids[(USER_A, "positions")][0], 6.0))
+    outcome = env.runner().run(a.credential(), replace_command(ids[(USER_A, "positions")][0], quantity="6"))
     assert outcome.status == AUTHORIZED and attempts == []
 
 
@@ -578,9 +587,11 @@ def test_conflict_is_decided_after_authorization_and_rolls_back(env):
 
 def test_revision_conflict_is_a_distinct_closed_status():
     assert runner_module.REVISION_CONFLICT == "revision_conflict"
+    # R1 PR 7 : sixième résultat fermé, distinct des cinq autres.
+    assert runner_module.IDEMPOTENCY_CONFLICT == "idempotency_conflict"
     assert runner_module.STATUSES == (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE,
-                                      runner_module.REVISION_CONFLICT)
-    assert len(set(runner_module.STATUSES)) == 5
+                                      runner_module.REVISION_CONFLICT, runner_module.IDEMPOTENCY_CONFLICT)
+    assert len(set(runner_module.STATUSES)) == 6
 
 
 def test_cycle_produces_two_increments_and_stale_retry_conflicts(env):

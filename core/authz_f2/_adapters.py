@@ -20,9 +20,14 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _list_theses_for_ticker | investment_theses | user_id ET ticker | - |
 | _read_delivery | assistant_deliveries | id ET user_id | - |
 | _list_conversation_deliveries | assistant_deliveries | user_id ET conversation_key | - |
-| _lock_position | portfolio_positions | id ET user_id | FOR UPDATE |
-| _update_position_quantity | portfolio_positions | id ET user_id | (ligne déjà verrouillée) |
 | _update_profile_level | users | id ET level_revision attendue | (ligne déjà verrouillée, plan PROFILE_MUTATION) |
+| require_read_committed | - | current_setting('transaction_isolation') | - (plan PORTFOLIO_MUTATION) |
+| _lock_portfolio (reçu) | portfolio_write_idempotency | user_id ET operation_type ET operation_id | FOR UPDATE |
+| _lock_portfolio (position, PUT / DELETE sans reçu) | portfolio_positions | id ET user_id | FOR UPDATE |
+| _create_position | portfolio_positions | INSERT, user_id serveur | (users déjà FOR UPDATE) |
+| _replace_position | portfolio_positions | id ET user_id ET position_revision attendue | (ligne déjà verrouillée) |
+| _delete_position | portfolio_positions | id ET user_id ET position_revision attendue | (ligne déjà verrouillée) |
+| _insert_receipt | portfolio_write_idempotency | INSERT, user_id serveur | (users déjà FOR UPDATE) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
 ABSENT : le filtre SQL porte simultanément l'identifiant et le user_id, la
@@ -38,6 +43,42 @@ valeurs relues par RETURNING. Aucune ligne retournée après ces contrôles
 sous verrou : invariant rompu (rollback, 503), jamais un faux conflit. À
 la révision maximale, un changement réel est refusé (RevisionExhausted :
 503 et alerte interne), sans débordement ni remise à zéro.
+
+R1 PR 7 (plan PORTFOLIO_MUTATION, READ COMMITTED vérifié par
+require_read_committed au début de la phase B) : la mutation de
+démonstration UpdatePositionQuantity et son verrou sont retirés.
+_lock_portfolio rend un ÉTAT FERMÉ, avant T_authorization et sans rien
+conclure : ReceiptFound (reçu du triplet, FOR UPDATE), CreateReady
+(CREATE sans reçu : aucune position verrouillée), PositionFound (PUT /
+DELETE sans reçu : position propre FOR UPDATE) ou PositionMissing. Le reçu
+est TOUJOURS cherché avant la position : une position absente ne devient
+404 qu'en l'absence de reçu. L'absence d'un reçu n'est jamais un verrou :
+deux opérations du même compte sont sérialisées par users FOR UPDATE.
+
+Après la décision, _write_portfolio (trousseau portefeuille et points
+d'interruption transmis par le runner) :
+
+- reçu : structure, versions, statut et payload validés
+  (core.authz_f2.portfolio_results), empreinte recalculée avec la version
+  de canonicalisation et la version de clé ENREGISTRÉES ; identique :
+  résultat d'origine restitué sans écriture ; différente :
+  IDEMPOTENCY_CONFLICT ; reçu, version ou clé invalide :
+  PortfolioUnavailable (503, aucune réexécution) ;
+- position absente ou étrangère : ABSENT (404 indiscernable) ;
+- révision différente : CONFLICT (409, rien n'est écrit) — avant toute
+  comparaison de valeurs ;
+- PUT identique (binary64-decimal-v1) : aucun UPDATE, révision et
+  updated_at inchangés ; PUT effectif : UN UPDATE conditionnel (id,
+  user_id, révision attendue) qui incrémente la révision, relu par
+  RETURNING ; révision maximale : RevisionExhausted (503, alerte) ;
+- DELETE : UN DELETE conditionnel (id, user_id, révision attendue), même
+  à la révision maximale ;
+- résultat construit, validé et sérialisé, puis reçu inséré dans la même
+  transaction ; aucune ligne retournée après des contrôles sous verrou :
+  invariant rompu (rollback, 503), jamais un faux conflit.
+
+Les flottants sont lus par float8send (8 octets IEEE 754), jamais par la
+sortie texte de PostgreSQL (indépendant de extra_float_digits).
 """
 from dataclasses import dataclass
 from datetime import timezone
@@ -46,6 +87,9 @@ from types import MappingProxyType
 import sqlalchemy as sa
 
 from core.authz_f2 import commands as c
+from core.authz_f2 import portfolio_fingerprint as fp
+from core.authz_f2 import portfolio_results as results
+from core.authz_f2 import portfolio_values as pv
 
 
 class _Absent:
@@ -68,12 +112,62 @@ class _Conflict:
 CONFLICT = _Conflict()  # révision attendue périmée : aucune écriture
 
 
+class _IdempotencyConflict:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "IDEMPOTENCY_CONFLICT"
+
+
+IDEMPOTENCY_CONFLICT = _IdempotencyConflict()  # même triplet, autre intention : aucune écriture
+
+
 class AdapterInvariantBroken(RuntimeError):
     """État impossible constaté sous verrou : la transaction est annulée."""
+
+    alert = None  # nom d'alerte interne journalisé par le runner (sans détail)
 
 
 class RevisionExhausted(AdapterInvariantBroken):
     """Changement demandé à la révision maximale : refus (503) et alerte."""
+
+    def __init__(self, message: str, alert: str = "level_revision_exhausted"):
+        super().__init__(message)
+        self.alert = alert
+
+
+class PortfolioUnavailable(AdapterInvariantBroken):
+    """Reçu illisible ou incohérent, version ou clé portefeuille
+    introuvable, isolation non conforme : 503, aucune réexécution."""
+
+    def __init__(self, message: str, alert: str):
+        super().__init__(message)
+        self.alert = alert
+
+
+# États FERMÉS rendus par _lock_portfolio (avant T_authorization).
+@dataclass(frozen=True, slots=True)
+class ReceiptFound:
+    row: dict
+
+
+@dataclass(frozen=True, slots=True)
+class PositionFound:
+    row: dict
+
+
+@dataclass(frozen=True, slots=True)
+class PositionMissing:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class CreateReady:
+    pass
+
+
+PORTFOLIO_STATES = (ReceiptFound, PositionFound, PositionMissing, CreateReady)
+NO_BUSINESS_STATE = (type(None),)
 
 
 _LOCK_PROFILE = {
@@ -81,7 +175,13 @@ _LOCK_PROFILE = {
     "FOR UPDATE": "SELECT id FROM users WHERE id = :u FOR UPDATE",
 }
 _READ_PROFILE = "SELECT id, level, level_revision FROM users WHERE id = :u"
-_POSITION_COLUMNS = "SELECT id, ticker, quantity, purchase_price, target_percent, envelope FROM portfolio_positions "
+# Flottants lus en octets IEEE 754 exacts (float8send), jamais en texte.
+_POSITION_COLUMNS = ("SELECT id, position_revision, ticker, float8send(quantity) AS quantity, "
+                     "float8send(purchase_price) AS purchase_price, float8send(target_percent) AS target_percent, "
+                     "envelope FROM portfolio_positions ")
+_POSITION_RETURNING = ("RETURNING id, position_revision, ticker, float8send(quantity) AS quantity, "
+                       "float8send(purchase_price) AS purchase_price, float8send(target_percent) AS target_percent, "
+                       "envelope")
 _LIST_POSITIONS = _POSITION_COLUMNS + "WHERE user_id = :u ORDER BY id"
 _READ_POSITION = _POSITION_COLUMNS + "WHERE id = :id AND user_id = :u"
 _THESIS_COLUMNS = "SELECT id, ticker, thesis_text, created_at FROM investment_theses "
@@ -90,9 +190,25 @@ _LIST_THESES_FOR_TICKER = _THESIS_COLUMNS + "WHERE user_id = :u AND ticker = :t 
 _DELIVERY_COLUMNS = "SELECT id, conversation_key, surface, status, generated_at FROM assistant_deliveries "
 _READ_DELIVERY = _DELIVERY_COLUMNS + "WHERE id = :id AND user_id = :u"
 _LIST_CONVERSATION_DELIVERIES = _DELIVERY_COLUMNS + "WHERE user_id = :u AND conversation_key = :k ORDER BY generated_at, id"
-_LOCK_POSITION = "SELECT id FROM portfolio_positions WHERE id = :id AND user_id = :u FOR UPDATE"
-_UPDATE_POSITION_QUANTITY = ("UPDATE portfolio_positions SET quantity = :q, updated_at = :t "
-                             "WHERE id = :id AND user_id = :u")
+_TRANSACTION_ISOLATION = "SELECT current_setting('transaction_isolation')"
+_LOCK_RECEIPT = ("SELECT user_id, operation_type, operation_id, fingerprint_version, fingerprint_key_version, "
+                 "request_fingerprint, result_version, result_status, result_payload::text AS result_payload, "
+                 "position_id FROM portfolio_write_idempotency "
+                 "WHERE user_id = :u AND operation_type = :t AND operation_id = :o FOR UPDATE")
+_LOCK_POSITION = _POSITION_COLUMNS + "WHERE id = :id AND user_id = :u FOR UPDATE"
+_CREATE_POSITION = ("INSERT INTO portfolio_positions (user_id, ticker, quantity, purchase_price, target_percent, "
+                    "envelope, created_at, updated_at) VALUES (:u, :ticker, :q, :p, :tp, :e, :at, :at) "
+                    + _POSITION_RETURNING)
+_REPLACE_POSITION = ("UPDATE portfolio_positions SET ticker = :ticker, quantity = :q, purchase_price = :p, "
+                     "target_percent = :tp, envelope = :e, updated_at = :at, "
+                     "position_revision = position_revision + 1 "
+                     "WHERE id = :id AND user_id = :u AND position_revision = :r " + _POSITION_RETURNING)
+_DELETE_POSITION = ("DELETE FROM portfolio_positions WHERE id = :id AND user_id = :u AND position_revision = :r "
+                    "RETURNING id, position_revision")
+_INSERT_RECEIPT = ("INSERT INTO portfolio_write_idempotency (user_id, operation_type, operation_id, "
+                   "fingerprint_version, fingerprint_key_version, request_fingerprint, result_version, "
+                   "result_status, result_payload, position_id, created_at) VALUES (:u, :t, :o, :fv, :kv, :f, "
+                   ":rv, :s, CAST(:payload AS JSONB), :pid, :at)")
 _UPDATE_PROFILE_LEVEL = ("UPDATE users SET level = :l, level_revision = level_revision + 1 "
                          "WHERE id = :u AND level_revision = :r RETURNING id, level, level_revision")
 
@@ -110,9 +226,21 @@ def lock_profile(conn, user_id: str, plan: c.LockPlan) -> bool:
     return _first(conn, _LOCK_PROFILE[plan.users_lock], u=user_id) is not None
 
 
+def _float(raw):
+    return None if raw is None else pv.float_from_float8send(raw)
+
+
 def _position(row) -> c.PositionView:
-    return c.PositionView(row["id"], row["ticker"], row["quantity"], row["purchase_price"], row["target_percent"],
-                          row["envelope"])
+    """Vue diagnostique d'une ligne lue ; structure SQL impossible (type,
+    révision, quantité absente) : AdapterInvariantBroken (503). Les valeurs
+    historiques hors domaine restent lisibles, jamais corrigées."""
+    try:
+        if type(row["ticker"]) is not str or (row["envelope"] is not None and type(row["envelope"]) is not str):
+            raise TypeError("ticker ou enveloppe")
+        return c.position_view(row["id"], row["position_revision"], row["ticker"], _float(row["quantity"]),
+                               _float(row["purchase_price"]), _float(row["target_percent"]), row["envelope"])
+    except (KeyError, TypeError, ValueError):
+        raise AdapterInvariantBroken("position incohérente") from None
 
 
 def _thesis(row) -> c.ThesisView:
@@ -173,19 +301,6 @@ def _list_conversation_deliveries(conn, ctx, command, locked):
                                              k=command.conversation_key))
 
 
-def _lock_position(conn, owner_id, command):
-    row = _first(conn, _LOCK_POSITION, id=command.position_id, u=owner_id)
-    return ABSENT if row is None else row["id"]
-
-
-def _update_position_quantity(conn, ctx, command, locked):
-    updated_at = ctx.authorized_at.astimezone(timezone.utc).replace(tzinfo=None)  # colonne historique sans fuseau
-    result = conn.execute(sa.text(_UPDATE_POSITION_QUANTITY), {"q": float(command.quantity), "t": updated_at,
-                                                                "id": locked, "u": ctx.principal.user_id})
-    if result.rowcount != 1:
-        raise AdapterInvariantBroken("position verrouillée introuvable")
-    return _position(_first(conn, _READ_POSITION, id=locked, u=ctx.principal.user_id))
-
 
 def _update_profile_level(conn, ctx, command, locked):
     user_id = ctx.principal.user_id
@@ -205,11 +320,174 @@ def _update_profile_level(conn, ctx, command, locked):
     return view
 
 
+# --------------------------------------------------------------------------
+# R1 PR 7 : portefeuille versionné et idempotent (plan PORTFOLIO_MUTATION)
+# --------------------------------------------------------------------------
+
+def require_read_committed(conn) -> None:
+    """Début de la phase B d'un plan qui l'exige : isolation réellement
+    active lue dans la transaction ; non conforme : refus fermé (503)."""
+    if conn.execute(sa.text(_TRANSACTION_ISOLATION)).scalar_one() != "read committed":
+        raise PortfolioUnavailable("isolation non conforme", "portfolio_isolation_refused")
+
+
+OPERATION_TYPES = MappingProxyType({
+    c.CreatePortfolioPosition: fp.CREATE,
+    c.ReplacePortfolioPosition: fp.UPDATE,
+    c.DeletePortfolioPosition: fp.DELETE,
+})
+
+
+def _lock_portfolio(conn, owner_id, command):
+    """Reçu du triplet, puis (sans reçu) position propre ; aucune décision."""
+    receipt = _first(conn, _LOCK_RECEIPT, u=owner_id, t=OPERATION_TYPES[type(command)], o=command.operation_id)
+    if receipt is not None:
+        return ReceiptFound(dict(receipt))
+    if type(command) is c.CreatePortfolioPosition:
+        return CreateReady()
+    row = _first(conn, _LOCK_POSITION, id=command.position_id, u=owner_id)
+    return PositionMissing() if row is None else PositionFound(dict(row))
+
+
+def _business(command) -> tuple:
+    if type(command) is c.DeletePortfolioPosition:
+        return None, None, None, None, None
+    return command.ticker, command.quantity, command.purchase_price, command.target_percent, command.envelope
+
+
+def _fingerprint_fields(user_id: str, operation_type: str, command) -> dict:
+    ticker, quantity, purchase_price, target_percent, envelope = _business(command)
+    return {"user_id": user_id, "operation_type": operation_type, "operation_id": command.operation_id,
+            "position_id": getattr(command, "position_id", None),
+            "expected_revision": getattr(command, "expected_revision", None), "ticker": ticker,
+            "quantity": quantity, "purchase_price": purchase_price, "target_percent": target_percent,
+            "envelope": envelope}
+
+
+def _same_values(view, command) -> bool:
+    return (view.ticker, view.quantity, view.purchase_price, view.target_percent, view.envelope) == _business(command)
+
+
+def _replay(row, command, operation_type: str, fields: dict, keys):
+    """Reçu existant : validé ENTIÈREMENT, puis empreinte recalculée selon
+    ses versions enregistrées ; restitué tel quel ou conflit, jamais
+    réexécuté."""
+    try:
+        if (row["user_id"] != fields["user_id"] or row["operation_type"] != operation_type
+                or row["operation_id"] != command.operation_id
+                or type(row["fingerprint_version"]) is not str or type(row["fingerprint_key_version"]) is not str
+                or type(row["request_fingerprint"]) is not str
+                or not fp.FINGERPRINT_RE.fullmatch(row["request_fingerprint"])):
+            raise results.ResultInvalid("reçu incohérent")
+        renderer = results.RENDERERS.get(row["result_version"]) if type(row["result_version"]) is str else None
+        if renderer is None:
+            raise results.ResultInvalid("version de résultat inconnue")
+        result = renderer(operation_type, command.operation_id, row["position_id"],
+                          results.parse_json(row["result_payload"]))
+        if type(row["result_status"]) is not int or row["result_status"] != result.status:
+            raise results.ResultInvalid("statut incohérent")
+    except (KeyError, results.ResultInvalid):
+        raise PortfolioUnavailable("reçu invalide", "portfolio_receipt_invalid") from None
+    try:
+        computed = fp.fingerprint(keys, row["fingerprint_version"], row["fingerprint_key_version"], **fields)
+    except fp.UnknownPortfolioKey:
+        raise PortfolioUnavailable("version ou clé portefeuille introuvable", "portfolio_key_unavailable") from None
+    if not fp.same_fingerprint(computed, row["request_fingerprint"]):
+        return IDEMPOTENCY_CONFLICT
+    # Même intention : le résultat enregistré doit lui correspondre.
+    if operation_type == fp.DELETE:
+        coherent = (result.position_id == command.position_id
+                    and result.deleted_revision == command.expected_revision)
+    else:
+        coherent = _same_values(result.view, command) and result.view.data_status == pv.VALID
+        if operation_type == fp.UPDATE:
+            coherent = coherent and result.position_id == command.position_id and (
+                result.view.position_revision in c.replace_revisions(command.expected_revision))
+    if not coherent:
+        raise PortfolioUnavailable("reçu incohérent avec son intention", "portfolio_receipt_invalid")
+    return result
+
+
+def _write_values(command, at) -> dict:
+    return {"ticker": command.ticker, "q": pv.to_float(command.quantity), "p": pv.to_float(command.purchase_price),
+            "tp": pv.to_float(command.target_percent), "e": command.envelope, "at": at}
+
+
+def _written(row, command, revision: int, position_id=None) -> c.PositionView:
+    if row is None:
+        raise AdapterInvariantBroken("écriture conditionnelle sans ligne sous verrou")
+    view = _position(row)
+    if (view.position_revision != revision or not _same_values(view, command)
+            or (position_id is not None and view.position_id != position_id)):
+        raise AdapterInvariantBroken("valeurs écrites inattendues")
+    return view
+
+
+def _write_portfolio(conn, ctx, command, state, keys, hook):
+    user_id = ctx.principal.user_id
+    operation_type = OPERATION_TYPES[type(command)]
+    fields = _fingerprint_fields(user_id, operation_type, command)
+    kind = type(state)
+    if kind is ReceiptFound:
+        return _replay(state.row, command, operation_type, fields, keys)
+    if kind is PositionMissing and operation_type != fp.CREATE:
+        return ABSENT  # aucun reçu : absente ou étrangère, indiscernables
+    at = ctx.authorized_at.astimezone(timezone.utc).replace(tzinfo=None)  # colonnes historiques sans fuseau
+    view = deleted_revision = None
+    if kind is CreateReady and operation_type == fp.CREATE:
+        view = _written(_first(conn, _CREATE_POSITION, u=user_id, **_write_values(command, at)), command, 0)
+        position_id = view.position_id
+        hook("position_written")
+    elif kind is PositionFound and operation_type != fp.CREATE:
+        current = _position(state.row)
+        position_id = command.position_id
+        if current.position_id != position_id:
+            raise AdapterInvariantBroken("position verrouillée inattendue")
+        if current.position_revision != command.expected_revision:
+            return CONFLICT  # la révision précède toujours les valeurs
+        if operation_type == fp.DELETE:
+            deleted = _first(conn, _DELETE_POSITION, id=position_id, u=user_id, r=command.expected_revision)
+            if deleted is None or (deleted["id"], deleted["position_revision"]) != (position_id,
+                                                                                    command.expected_revision):
+                raise AdapterInvariantBroken("suppression conditionnelle sans ligne sous verrou")
+            deleted_revision = command.expected_revision
+            hook("position_written")
+        elif _same_values(current, command):
+            view = current  # aucun UPDATE, aucun incrément, updated_at inchangé
+        else:
+            if current.position_revision == c.MAX_POSITION_REVISION:
+                raise RevisionExhausted("révision maximale atteinte", "position_revision_exhausted")
+            row = _first(conn, _REPLACE_POSITION, id=position_id, u=user_id, r=command.expected_revision,
+                         **_write_values(command, at))
+            view = _written(row, command, c.next_revision(current.position_revision), position_id)
+            hook("position_written")
+    else:
+        raise AdapterInvariantBroken("état verrouillé inattendu")
+    try:
+        computed = fp.fingerprint(keys, fp.FINGERPRINT_VERSION, keys.current_version, **fields)
+        payload = results.build_payload(operation_type, command.operation_id, position_id, view=view,
+                                        deleted_revision=deleted_revision)
+        result = results.render_v1(operation_type, command.operation_id, position_id, payload)
+    except fp.UnknownPortfolioKey:
+        raise PortfolioUnavailable("clé portefeuille courante introuvable", "portfolio_key_unavailable") from None
+    except results.ResultInvalid:
+        raise AdapterInvariantBroken("résultat hors contrat") from None
+    hook("receipt_ready")
+    conn.execute(sa.text(_INSERT_RECEIPT), {
+        "u": user_id, "t": operation_type, "o": command.operation_id, "fv": fp.FINGERPRINT_VERSION,
+        "kv": keys.current_version, "f": computed, "rv": results.RESULT_VERSION, "s": result.status,
+        "payload": result.body.decode("utf-8"), "pid": position_id, "at": ctx.authorized_at})
+    hook("receipt_written")
+    return result
+
+
 @dataclass(frozen=True)
 class Spec:
     plan: c.LockPlan
-    lock: object     # (conn, owner_id, command) -> état verrouillé | ABSENT ; avant T_authorization
-    execute: object  # (conn, ctx, command, état) -> vue | ABSENT ; après la décision
+    lock: object     # (conn, owner_id, command) -> état verrouillé ; avant T_authorization
+    execute: object  # (conn, ctx, command, état[, keys, hook]) -> vue | ABSENT | CONFLICT | ... ; après la décision
+    states: tuple = NO_BUSINESS_STATE  # types EXACTS d'état verrouillé admis (registre fermé)
+    keyed: bool = False  # True : reçoit le trousseau portefeuille et les points d'interruption
 
 
 # Registre FERMÉ : type exact de commande -> plan et adaptateurs. Toute
@@ -222,6 +500,9 @@ REGISTRY = MappingProxyType({
     c.ListThesesForTicker: Spec(c.READ, _no_business_lock, _list_theses_for_ticker),
     c.ReadDelivery: Spec(c.READ, _no_business_lock, _read_delivery),
     c.ListConversationDeliveries: Spec(c.READ, _no_business_lock, _list_conversation_deliveries),
-    c.UpdatePositionQuantity: Spec(c.USER_MUTATION, _lock_position, _update_position_quantity),
     c.UpdateProfileLevel: Spec(c.PROFILE_MUTATION, _no_business_lock, _update_profile_level),
+    c.CreatePortfolioPosition: Spec(c.PORTFOLIO_MUTATION, _lock_portfolio, _write_portfolio, PORTFOLIO_STATES, True),
+    c.ReplacePortfolioPosition: Spec(c.PORTFOLIO_MUTATION, _lock_portfolio, _write_portfolio, PORTFOLIO_STATES,
+                                     True),
+    c.DeletePortfolioPosition: Spec(c.PORTFOLIO_MUTATION, _lock_portfolio, _write_portfolio, PORTFOLIO_STATES, True),
 })

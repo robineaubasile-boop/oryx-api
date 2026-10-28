@@ -731,7 +731,7 @@ def test_41_not_wired_to_api_web_chat_nor_orchestration():
 
 def test_42_no_migration_no_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0019_f2_http_admission.py" and len(versions) == 19
+    assert versions[-1] == "0020_position_revision.py" and len(versions) == 20
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     for word in ("posture", "Posture", "selection_basis"):
         assert word not in models, word

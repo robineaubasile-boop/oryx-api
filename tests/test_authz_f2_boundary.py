@@ -15,7 +15,8 @@ prétend pas isoler le processus contre du code Python hostile.
 - Plus aucune interface « operation(conn, principal) » ; le runner
   n'expose que run(credential, command).
 - Ordre des verrous du runner : users -> session -> génération -> métier
-  -> T_authorization, compatible avec l'ordre global F2.
+  -> T_authorization, compatible avec l'ordre global F2 ; R1 PR 7 :
+  isolation vérifiée d'abord, puis reçu avant position.
 - Aucun client réseau (Claude, EODHD, Supabase, Resend, HTTP) n'est
   importé par la frontière.
 """
@@ -111,46 +112,88 @@ def _adapter_statements():
     return out
 
 
+# R1 PR 7 : écritures portefeuille admises, chacune exactement préfixée.
+WRITES = {
+    "_UPDATE_PROFILE_LEVEL": "UPDATE users SET level = :l, level_revision = level_revision + 1 ",
+    "_CREATE_POSITION": "INSERT INTO portfolio_positions (user_id, ticker, quantity, purchase_price, target_percent, "
+                        "envelope, created_at, updated_at) VALUES (:u, ",
+    "_REPLACE_POSITION": "UPDATE portfolio_positions SET ticker = :ticker, ",
+    "_DELETE_POSITION": "DELETE FROM portfolio_positions WHERE id = :id AND user_id = :u AND position_revision = :r ",
+    "_INSERT_RECEIPT": "INSERT INTO portfolio_write_idempotency (user_id, ",
+}
+
+
 def test_adapter_statements_are_owner_scoped_and_non_transactional():
-    statements = {k: v for k, v in _adapter_statements().items() if not k.endswith("_COLUMNS")}
+    statements = {k: v for k, v in _adapter_statements().items()
+                  if not k.endswith(("_COLUMNS", "_RETURNING"))}
     assert set(statements) == {
         "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_READ_PROFILE", "_LIST_POSITIONS",
         "_READ_POSITION", "_LIST_THESES", "_LIST_THESES_FOR_TICKER", "_READ_DELIVERY", "_LIST_CONVERSATION_DELIVERIES",
-        "_LOCK_POSITION", "_UPDATE_POSITION_QUANTITY", "_UPDATE_PROFILE_LEVEL"}
-    updates = {"_UPDATE_POSITION_QUANTITY": "UPDATE portfolio_positions SET",
-               "_UPDATE_PROFILE_LEVEL": "UPDATE users SET level = :l, level_revision = level_revision + 1 "}
+        "_UPDATE_PROFILE_LEVEL", "_TRANSACTION_ISOLATION", "_LOCK_RECEIPT", "_LOCK_POSITION", "_CREATE_POSITION",
+        "_REPLACE_POSITION", "_DELETE_POSITION", "_INSERT_RECEIPT"}
+    # Seule requête sans user_id : l'isolation active de la transaction.
+    assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
     for name, sql in statements.items():
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
-        assert sql.startswith(("SELECT ", updates.get(name, "SELECT "))), name
-        assert not FORBIDDEN_SQL.search(sql.replace("FOR UPDATE", "").replace(updates.get(name, "FOR UPDATE"), "")), name
+        prefix = WRITES.get(name, "SELECT ")
+        assert sql.startswith(prefix), name
+        assert not FORBIDDEN_SQL.search(sql.replace("FOR UPDATE", "").replace(prefix, "")), name
         assert ":u" in sql, name  # toujours le user_id serveur
-        if ":id" in sql:
+        if name in ("_CREATE_POSITION", "_INSERT_RECEIPT"):
+            assert "VALUES (:u, " in sql and "WHERE" not in sql, name  # propriétaire = user_id serveur
+        elif ":id" in sql:
             assert re.search(r"WHERE id = :id AND user_id = :u", sql), name
         elif "users" not in sql:
             assert "WHERE user_id = :u" in sql, name
         else:  # profil : toujours la ligne du user_id serveur
             assert "FROM users WHERE id = :u" in sql or "users SET" in sql and "WHERE id = :u AND " in sql, name
-    for table in ("portfolio_positions", "investment_theses", "assistant_deliveries"):
+    # CAS : toute écriture conditionnelle d'une position porte la révision attendue.
+    for name in ("_REPLACE_POSITION", "_DELETE_POSITION"):
+        assert "WHERE id = :id AND user_id = :u AND position_revision = :r " in statements[name], name
+    assert "position_revision = position_revision + 1 WHERE" in statements["_REPLACE_POSITION"]
+    assert statements["_LOCK_RECEIPT"].endswith(
+        "WHERE user_id = :u AND operation_type = :t AND operation_id = :o FOR UPDATE")
+    for name in ("_LIST_POSITIONS", "_READ_POSITION", "_LOCK_POSITION", "_CREATE_POSITION", "_REPLACE_POSITION"):
+        # flottants lus en octets IEEE 754, jamais par la sortie texte
+        assert ("float8send(quantity) AS quantity, float8send(purchase_price) AS purchase_price, "
+                "float8send(target_percent) AS target_percent, envelope") in statements[name], name
+    for table in ("portfolio_positions", "investment_theses", "assistant_deliveries", "portfolio_write_idempotency"):
         assert any(table in sql for sql in statements.values()), table
 
 
 def test_closed_registry_and_lock_plans():
     reads = {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses, c.ListThesesForTicker, c.ReadDelivery,
              c.ListConversationDeliveries}
-    mutations = {c.UpdatePositionQuantity: c.USER_MUTATION, c.UpdateProfileLevel: c.PROFILE_MUTATION}
-    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 9
+    mutations = {c.UpdateProfileLevel: c.PROFILE_MUTATION, c.CreatePortfolioPosition: c.PORTFOLIO_MUTATION,
+                 c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION}
+    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 11
+    # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
+    assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
         assert spec.plan is mutations.get(command, c.READ)
         assert spec.lock.__module__ == spec.execute.__module__ == _adapters.__name__
         assert spec.lock.__name__.startswith("_") and spec.execute.__name__.startswith("_")
+        if spec.plan is c.PORTFOLIO_MUTATION:
+            assert spec.keyed and spec.states == _adapters.PORTFOLIO_STATES
+            assert spec.lock is _adapters._lock_portfolio and spec.execute is _adapters._write_portfolio
+        else:
+            assert not spec.keyed and spec.states == (type(None),)
+    assert _adapters.PORTFOLIO_STATES == (_adapters.ReceiptFound, _adapters.PositionFound, _adapters.PositionMissing,
+                                          _adapters.CreateReady)
     assert c.READ == c.LockPlan("read", "FOR KEY SHARE", ())
-    assert c.USER_MUTATION == c.LockPlan("user_mutation", "FOR UPDATE", ("portfolio_positions",))
-    # R1 PR 6 : users FOR UPDATE, session, génération ; aucun verrou métier
-    # (jamais USER_MUTATION, qui verrouille le portefeuille).
+    # R1 PR 6 : users FOR UPDATE, session, génération ; aucun verrou métier.
     assert c.PROFILE_MUTATION == c.LockPlan("profile_mutation", "FOR UPDATE", ())
-    assert c.PLANS == (c.READ, c.USER_MUTATION, c.PROFILE_MUTATION)
+    assert not c.READ.requires_read_committed and not c.PROFILE_MUTATION.requires_read_committed
+    # R1 PR 7 : reçu puis position, sous READ COMMITTED vérifié.
+    assert c.PORTFOLIO_MUTATION == c.LockPlan("portfolio_mutation", "FOR UPDATE",
+                                              ("portfolio_write_idempotency", "portfolio_positions"), True)
+    assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION)
+    assert not hasattr(c, "USER_MUTATION")
     assert c.SESSION_LOCK == c.GENERATION_LOCK == "FOR SHARE"
     assert set(_adapters._LOCK_PROFILE) == {plan.users_lock for plan in c.PLANS}
+    assert dict(_adapters.OPERATION_TYPES) == {c.CreatePortfolioPosition: "portfolio_position_create",
+                                               c.ReplacePortfolioPosition: "portfolio_position_update",
+                                               c.DeletePortfolioPosition: "portfolio_position_delete"}
 
 
 def test_no_operation_conn_principal_contract_remains():
@@ -170,12 +213,14 @@ def test_no_operation_conn_principal_contract_remains():
                 assert "conn" not in [a.arg for a in node.args.args + node.args.kwonlyargs], (path.name, node.name)
     public_adapters = {n.name for n in _tree(ADAPTERS).body if isinstance(n, ast.FunctionDef)
                        and not n.name.startswith("_")}
-    assert public_adapters == {"lock_profile"}  # seul verrou appelé par le runner hors registre
+    # Seuls appels du runner hors registre : verrou users, isolation (R1 PR 7).
+    assert public_adapters == {"lock_profile", "require_read_committed"}
 
 
 def test_runner_lock_order_and_t_authorization():
     source = inspect.getsource(AuthorizedTransactionRunner._run)
-    order = [source.index(marker) for marker in ("_adapters.lock_profile(", "sessions.lock_session(",
+    order = [source.index(marker) for marker in ("_adapters.require_read_committed(", "_adapters.lock_profile(",
+                                                 "sessions.lock_session(",
                                                  "spec.lock(", 'self._hook("locked")', "self._clock(conn)",
                                                  "self._decide(", 'self._hook("authorized")', "spec.execute(")]
     assert order == sorted(order)
@@ -190,7 +235,8 @@ def test_runner_lock_order_and_t_authorization():
     # génération » sans conflit possible avec l'ordre F2).
     for path in (REPO_ROOT / "core" / "auth_f2").glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        for table in ("portfolio_positions", "investment_theses", "assistant_deliveries"):
+        for table in ("portfolio_positions", "investment_theses", "assistant_deliveries",
+                      "portfolio_write_idempotency"):
             assert table not in text, (path.name, table)
     sessions_source = (REPO_ROOT / "core" / "auth_f2" / "sessions.py").read_text(encoding="utf-8")
     assert "SELECT * FROM oryx_sessions WHERE id = :s FOR SHARE" in sessions_source
@@ -213,16 +259,19 @@ def test_boundary_imports_no_network_client():
 
 def test_business_locks_match_the_announced_plan():
     """Un verrou hors du plan annoncé est refusé par le contrat : seules
-    les commandes USER_MUTATION verrouillent une ligne métier, et seulement
-    dans les tables de leur plan ; les lectures n'en prennent aucun."""
+    les commandes PORTFOLIO_MUTATION verrouillent des lignes métiers, dans
+    l'ordre de leur plan (reçu, puis position) ; les lectures et la
+    mutation de profil n'en prennent aucun."""
     statements = _adapter_statements()
     locking = {name for name, sql in statements.items() if re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b",
                                                                      sql)}
-    assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_POSITION"}
-    lock_sql = {"_lock_position": statements["_LOCK_POSITION"]}
+    assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_RECEIPT", "_LOCK_POSITION"}
+    locked_tables = [re.search(r"FROM (\w+)", statements[name]).group(1) for name in ("_LOCK_RECEIPT",
+                                                                                    "_LOCK_POSITION")]
     for spec in _adapters.REGISTRY.values():
         if not spec.plan.business_locks:  # READ et PROFILE_MUTATION
             assert spec.lock is _adapters._no_business_lock
         else:
-            tables = set(re.findall(r"FROM (\w+)", lock_sql[spec.lock.__name__]))
-            assert tables and tables <= set(spec.plan.business_locks)
+            assert tuple(locked_tables) == spec.plan.business_locks
+    source = inspect.getsource(_adapters._lock_portfolio)
+    assert source.index("_LOCK_RECEIPT") < source.index("CreateReady()") < source.index("_LOCK_POSITION")

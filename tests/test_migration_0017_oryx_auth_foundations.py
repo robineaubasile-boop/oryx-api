@@ -45,6 +45,7 @@ from tests.test_migration_0002_analysis_sessions import (
 from tests.test_migration_0004_drop_company_analyses import (
     PR4_0019,
     PR4_FILES,
+    PR7_0020,
     PR1_0016,
     PR1_0017,
     PR1_0017_FILE,
@@ -89,12 +90,12 @@ def test_revision_links_0017_to_0016_and_is_the_parent_of_0018():
     (tests/test_migration_0018_f2_abuse_journal.py,
     tests/test_migration_0019_f2_http_admission.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR4_0019]
+    assert script.get_heads() == [PR7_0020]
     assert script.get_revision(PR1_0017).down_revision == PR1_0016
     assert script.get_revision(PR2_0018).down_revision == PR1_0017
     assert PR1_0017_FILE == f"{PR1_0017}.py" and len(PR1_0017) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 19 and files[-3] == PR1_0017_FILE
+    assert len(files) == 20 and files[-4] == PR1_0017_FILE
     assert tuple(CREATION_ORDER) == PR1_0017_TABLES
 
 
@@ -409,9 +410,11 @@ def test_pg_full_chain_0014_to_head_and_back_preserves_historical_data(pg_url, p
 
     _run_alembic(pg_url, "upgrade", "head")
     data_head = _data(pg_engine, tables - {"alembic_version"})
-    assert {t: r for t, r in data_head.items() if t != "users"} == {
-        t: r for t, r in data_0014.items() if t != "users"}
+    versioned = {"users", "portfolio_positions"}  # level_revision (0015), position_revision (R1 PR 7, 0020)
+    assert {t: r for t, r in data_head.items() if t not in versioned} == {
+        t: r for t, r in data_0014.items() if t not in versioned}
     assert data_head["users"] == [row + (0,) for row in data_0014["users"]]
+    assert data_head["portfolio_positions"] == [row + (0,) for row in data_0014["portfolio_positions"]]
     _exercise_legacy_backend(pg_engine)
     with pg_engine.begin() as c:
         c.execute(sa.text("DELETE FROM users WHERE id = 'legacy-new'"))

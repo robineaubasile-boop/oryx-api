@@ -11,6 +11,10 @@ et l'application personnelle isolée (PR 5 / PR 6) derrière un aiguillage
 par préfixe : même PostgreSQL, mêmes clés F2, même trousseau CSRF (le
 bootstrap de PR 3 émet les jetons que PUT /api/v2/me/level vérifie), mêmes
 sessions persistantes. Seuls les tests construisent cette composition.
+
+R1 PR 7 : trousseau portefeuille de test (clés FICTIVES k1 / k2 des
+vecteurs normatifs), observation exacte des positions (float8send, xmin)
+et des reçus, en-têtes et corps des routes /api/v2/me/portfolio.
 """
 import asyncio
 import json
@@ -24,9 +28,13 @@ from core.auth_f2.service import F2AuthService
 from core.auth_f2_http import csrf
 from core.auth_f2_http.isolated import build_isolated_f2_app
 from core.auth_f2_http.routes import NO_STORE_HEADERS
+from core.authz_f2 import commands as c
+from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
+from core.authz_f2.portfolio_values import float_from_float8send
 from core.authz_f2.runner import AuthorizedTransactionRunner
 from core.authz_f2_http.isolated import build_isolated_personal_app
 from tests.f2_http_support import ORIGIN, PEER, Browser, StaticIp, _send, csrf_keyring
+from tests.f2_support import rows as select_rows
 from tests.f2_support import (
     APP_NAME,
     FakeMailer,
@@ -43,6 +51,14 @@ ALICE, BOB = "alice@example.com", "bob@example.com"
 USER_A, USER_B = "user-a", "user-b"
 ME = "/api/v2/me"
 ME_LEVEL = "/api/v2/me/level"
+PORTFOLIO = "/api/v2/me/portfolio"
+# Clés FICTIVES des vecteurs HMAC normatifs (jamais une clé réelle).
+K1 = bytes(range(32))
+K2 = bytes(range(31, -1, -1))
+
+
+def portfolio_keyring(keys=None, current="k1") -> PortfolioKeyring:
+    return PortfolioKeyring(keys if keys is not None else {"k1": K1, "k2": K2}, current)
 F2_PREFIX = "/api/auth/f2"
 V2_PREFIX = "/api/v2"
 
@@ -58,6 +74,7 @@ class AuthzEnv:
         self.supabase, self.mailer = FakeSupabase(probe), FakeMailer(probe)
         abuse.initialize_abuse_key_state(self.engine, self.keyring, self.keyring.current_version("abuse"))
         self.service = F2AuthService(self.engine, self.keyring, self.supabase, self.mailer)
+        self.portfolio_keys = portfolio_keyring()
         self.hooks = {}
         self.hook_calls = []
 
@@ -67,8 +84,9 @@ class AuthzEnv:
         if action is not None:
             action()
 
-    def runner(self, *, clock=None, keyring=None, engine=None, hook=None):
-        kwargs = {"fault_hook": hook or self.hook}
+    def runner(self, *, clock=None, keyring=None, engine=None, hook=None, portfolio_keys=False):
+        kwargs = {"fault_hook": hook or self.hook,
+                  "portfolio_keyring": self.portfolio_keys if portfolio_keys is False else portfolio_keys}
         if clock is not None:
             kwargs["clock"] = clock
         return AuthorizedTransactionRunner(engine or self.engine, keyring or self.keyring, **kwargs)
@@ -157,19 +175,77 @@ class AuthzEnv:
                 ids[(user, "conversation")] = key
         return ids
 
+    # -- R1 PR 7 : positions et reçus observés ---------------------------
+
+    def position(self, position_id):
+        """Ligne observée : flottants EXACTS (float8send), révision, dates,
+        xmin (inchangé = aucune écriture) ; None si absente."""
+        found = select_rows(self.observer, "SELECT id, user_id, ticker, float8send(quantity) AS q, "
+                                           "float8send(purchase_price) AS p, float8send(target_percent) AS tp, "
+                                           "envelope, position_revision, created_at, updated_at, xmin::text AS xmin "
+                                           "FROM portfolio_positions WHERE id = :i", i=position_id)
+        if not found:
+            return None
+        row = dict(found[0])
+        for key in ("q", "p", "tp"):
+            row[key] = None if row[key] is None else float_from_float8send(row[key])
+        return row
+
+    def insert_position(self, user_id=USER_A, ticker="AIR.PA", quantity=4.0, purchase_price=None,
+                        target_percent=None, envelope="PEA", revision=0):
+        """Écriture directe (historique ou état forcé) : aucune révision n'avance."""
+        with self.observer.begin() as conn:
+            conn.execute(sa.text("INSERT INTO users (id, level) VALUES (:u, 'debutant') ON CONFLICT DO NOTHING"),
+                         {"u": user_id})
+            return conn.execute(sa.text(
+                "INSERT INTO portfolio_positions (user_id, ticker, quantity, purchase_price, target_percent, envelope, "
+                "position_revision, created_at, updated_at) VALUES (:u, :t, :q, :p, :tp, :e, :r, "
+                "'2026-01-02 03:04:05', '2026-01-02 03:04:05') RETURNING id"),
+                {"u": user_id, "t": ticker, "q": quantity, "p": purchase_price, "tp": target_percent, "e": envelope,
+                 "r": revision}).scalar_one()
+
+    def set_revision(self, position_id, revision):
+        with self.observer.begin() as conn:
+            conn.execute(sa.text("UPDATE portfolio_positions SET position_revision = :r WHERE id = :i"),
+                         {"r": revision, "i": position_id})
+
+    def receipts(self, user_id=USER_A):
+        return [dict(r) for r in select_rows(self.observer, "SELECT *, result_payload::text AS payload_text "
+                                                            "FROM portfolio_write_idempotency WHERE user_id = :u "
+                                                            "ORDER BY created_at, operation_type, operation_id",
+                                             u=user_id)]
+
     def dispose(self):
         self.engine.dispose()
         self.observer.dispose()
+
+
+def create_command(operation_id=None, ticker="AIR.PA", quantity="4", purchase_price=None, target_percent=None,
+                   envelope="PEA"):
+    return c.CreatePortfolioPosition(operation_id or uuid.uuid4(), ticker, quantity, purchase_price, target_percent,
+                                     envelope)
+
+
+def replace_command(position_id, expected_revision=0, operation_id=None, ticker="AIR.PA", quantity="4.5",
+                    purchase_price="100", target_percent="10", envelope="PEA"):
+    return c.ReplacePortfolioPosition(operation_id or uuid.uuid4(), position_id, expected_revision, ticker, quantity,
+                                      purchase_price, target_percent, envelope)
+
+
+def delete_command(position_id, expected_revision=0, operation_id=None):
+    return c.DeletePortfolioPosition(operation_id or uuid.uuid4(), position_id, expected_revision)
 
 
 # --------------------------------------------------------------------------
 # Applications
 # --------------------------------------------------------------------------
 
-def personal_app(env, *, clock=None, wall_clock=time.time):
+def personal_app(env, *, clock=None, wall_clock=time.time, portfolio_keys=False):
     return build_isolated_personal_app(engine=env.engine, keyring=env.keyring, allowed_origins=[ORIGIN],
                                        csrf_keyring=csrf_keyring(), clock=clock, fault_hook=env.hook,
-                                       wall_clock=wall_clock)
+                                       wall_clock=wall_clock,
+                                       portfolio_keyring=env.portfolio_keys if portfolio_keys is False
+                                       else portfolio_keys)
 
 
 def f2_app(env):
@@ -345,3 +421,29 @@ def raw_level_headers(issued, **kwargs):
     """En-têtes d'un PUT valide pour raw_request : Host explicite, sans
     Content-Length (à ajouter par le test)."""
     return [("host", "oryx.test")] + list(level_headers(issued, **kwargs).items())
+
+
+# --------------------------------------------------------------------------
+# R1 PR 7 : routes /api/v2/me/portfolio
+# --------------------------------------------------------------------------
+
+def position_body(ticker="AIR.PA", quantity="4", purchase_price=None, target_percent=None, envelope="PEA") -> bytes:
+    return json.dumps({"ticker": ticker, "quantity": quantity, "purchase_price": purchase_price,
+                       "target_percent": target_percent, "envelope": envelope}).encode()
+
+
+def portfolio_headers(issued=None, *, operation_id=None, expected_revision=None, content_type="application/json",
+                      **kwargs):
+    """En-têtes d'une mutation portefeuille même origine (Origin, CSRF,
+    sélecteur, cookies) ; operation_id / expected_revision : valeur
+    transmise telle quelle (None : en-tête absent)."""
+    sent = level_headers(issued, content_type=content_type, **kwargs)
+    if operation_id is not None:
+        sent["x-oryx-operation-id"] = str(operation_id)
+    if expected_revision is not None:
+        sent["x-oryx-expected-revision"] = str(expected_revision)
+    return sent
+
+
+def portfolio_request(app, method="GET", path=PORTFOLIO, *, headers=None, content=None):
+    return me_request(app, method=method, path=path, headers=headers or {}, content=content)
