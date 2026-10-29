@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 import core.db
 from core import assistant_delivery as ad
+from core import cognitive_capture as cc
 from core import decryptage_cognitive_runtime as dcr
 from core import decryptage_progress as dp
 from core import interaction_identity as ii
@@ -549,6 +550,158 @@ def test_foreign_cognitive_provenance_is_never_locked(benv, alice):
     outcome = run(benv, alice, ack(CONV, mine.assistant_turn_id))
     assert outcome.status == UNAVAILABLE
     assert benv.snapshot() == before
+
+
+# --- Propriété transitive COMPLÈTE (correctif d'audit, V2.2-01) -------------
+
+V1 = "decryptage-cognitive-runtime-v1"
+
+
+def _foreign_material(benv):
+    """Event, SupportTrace et AnalysisSession de Bob (réels, via le pont)."""
+    bob = benv.confirmed(BOB_EMAIL, USER_B)
+    opened = finalize(benv, bob, CONV_B, "business")
+    acknowledge(benv, bob, CONV_B, opened.assistant_turn_id)
+    again = finalize(benv, bob, CONV_B, "business", "Réponse de Bob.", reply="Suite.")
+    assert acknowledge(benv, bob, CONV_B, again.assistant_turn_id).response_action == "continued_event"
+    [trace] = benv.rows("SELECT id, cognitive_event_id FROM support_traces")
+    # Event d'autrui qu'aucun lien n'ouvre (l'index unique d'ouverture
+    # interdit de réutiliser un event ouvert par un lien) : service réel.
+    with benv.Sessions() as db:
+        unopened = cc.open_event_idempotent(
+            db, user_id=USER_B, conversation_key=CONV_B, source_turn_refs=(uuid.uuid4(),), segmentation_ordinal=1,
+            event_origin="education", stimulus_snapshot={}, event_builder_version=cc.EVENT_BUILDER_VERSION,
+            admission_version=cc.ADMISSION_VERSION).id
+        db.commit()
+    return {"event": trace["cognitive_event_id"], "trace": trace["id"], "session": opened.analysis_session_id,
+            "unopened_event": unopened}
+
+
+def _captured(benv, alice, action):
+    """Livraison d'Alice déjà ACK (delivered + captured) : continued_event
+    (réponse = event, trace d'aide) ou transitioned_event (réponse = nouvel
+    event, distinct de la cible figée)."""
+    first = finalize(benv, alice, CONV, "business")
+    acknowledge(benv, alice, CONV, first.assistant_turn_id)
+    if action == "continued_event":
+        done = finalize(benv, alice, CONV, "business", "Ma réponse.", reply="Reformulation.")
+    else:
+        done = finalize(benv, alice, CONV, "moat", "Ma réponse business.")
+    assert acknowledge(benv, alice, CONV, done.assistant_turn_id).response_action == action
+    return done.assistant_turn_id
+
+
+def _refused_without_lock(benv, alice, turn_id, foreign_table, foreign_id, caplog):
+    """ACK (premier ou rejoué) refusé AVANT tout verrou de capture : la ligne
+    d'autrui est tenue FOR UPDATE par un tiers pendant l'appel et le refus
+    est la relecture de propriété (alerte), jamais un délai de verrou ;
+    ROLLBACK intégral (état inchangé, xmin compris)."""
+    before = benv.snapshot()
+    blocker = benv.observer.connect()
+    tx = blocker.begin()
+    blocker.execute(sa.text(f"SELECT 1 FROM {foreign_table} WHERE id = :i FOR UPDATE"), {"i": foreign_id})
+    try:
+        outcome = run(benv, alice, ack(CONV, turn_id))
+    finally:
+        tx.rollback()
+        blocker.close()
+    assert (outcome.status, outcome.value, outcome.principal) == (UNAVAILABLE, None, None)
+    assert "alert=decryptage_bridge_provenance_incoherent" in caplog.text
+    assert "OperationalError" not in caplog.text
+    assert benv.snapshot() == before
+
+
+def _set(benv, table, key, value, **columns):
+    assignments = ", ".join(f"{name} = :{name}" for name in columns)
+    with benv.observer.begin() as conn:
+        conn.execute(sa.text(f"UPDATE {table} SET {assignments} WHERE {key} = :k"), {"k": value, **columns})
+
+
+def test_replayed_ack_with_a_foreign_response_event_is_refused(benv, alice, caplog):
+    """response_event_id (distinct de la cible figée pour une transition)
+    n'était pas relu avant le correctif."""
+    foreign = _foreign_material(benv)
+    turn_id = _captured(benv, alice, "transitioned_event")
+    _set(benv, "decryptage_cognitive_links", "assistant_delivery_id", turn_id,
+         response_event_id=foreign["unopened_event"])
+    _refused_without_lock(benv, alice, turn_id, "cognitive_events", foreign["unopened_event"], caplog)
+
+
+def test_replayed_ack_with_a_foreign_support_trace_is_refused(benv, alice, caplog):
+    foreign = _foreign_material(benv)
+    turn_id = _captured(benv, alice, "continued_event")
+    _set(benv, "decryptage_cognitive_links", "assistant_delivery_id", turn_id, support_trace_id=foreign["trace"])
+    _refused_without_lock(benv, alice, turn_id, "support_traces", foreign["trace"], caplog)
+
+
+def test_replayed_ack_whose_support_trace_has_a_foreign_parent_is_refused(benv, alice, caplog):
+    foreign = _foreign_material(benv)
+    turn_id = _captured(benv, alice, "continued_event")
+    [link] = benv.rows("SELECT support_trace_id FROM decryptage_cognitive_links WHERE assistant_delivery_id = :d",
+                       d=turn_id)
+    _set(benv, "support_traces", "id", link["support_trace_id"], cognitive_event_id=foreign["event"],
+         sequence_no=99)
+    _refused_without_lock(benv, alice, turn_id, "cognitive_events", foreign["event"], caplog)
+
+
+def test_replayed_ack_whose_event_belongs_to_a_foreign_analysis_session_is_refused(benv, alice, caplog):
+    foreign = _foreign_material(benv)
+    turn_id = _captured(benv, alice, "transitioned_event")
+    [link] = benv.rows("SELECT response_event_id FROM decryptage_cognitive_links WHERE assistant_delivery_id = :d",
+                       d=turn_id)
+    _set(benv, "cognitive_events", "id", link["response_event_id"], analysis_session_id=foreign["session"])
+    _refused_without_lock(benv, alice, turn_id, "analysis_sessions", foreign["session"], caplog)
+
+
+@pytest.mark.parametrize("action", ["continued_event", "transitioned_event"])
+def test_coherent_replayed_ack_is_still_idempotent(benv, alice, action):
+    turn_id = _captured(benv, alice, action)
+    before = benv.snapshot()
+    assert acknowledge(benv, alice, CONV, turn_id).response_action == action
+    assert benv.snapshot() == before
+
+
+def _v1_pending(benv, alice):
+    """Livraison V1 encore pending (données historiques decryptage-cognitive-
+    runtime-v1, aucune conversion par le code) : runtime et lien réécrits
+    selon le contrat de 0013 (pas de contexte figé ni de progression)."""
+    first = finalize(benv, alice, CONV, "business")
+    acknowledge(benv, alice, CONV, first.assistant_turn_id)
+    pending = finalize(benv, alice, "conv-pr9a-v1", "business")
+    with benv.observer.begin() as conn:
+        conn.execute(sa.text("UPDATE assistant_deliveries SET private_metadata = jsonb_set(private_metadata, "
+                             "'{cognitive_runtime_version}', to_jsonb(CAST(:v AS text))) WHERE id = :d"),
+                     {"v": V1, "d": pending.assistant_turn_id})
+        conn.execute(sa.text("UPDATE decryptage_cognitive_links SET capture_version = :v, "
+                             "response_context_event_id = NULL, product_progress_action = NULL "
+                             "WHERE assistant_delivery_id = :d"), {"v": V1, "d": pending.assistant_turn_id})
+    [own_event] = benv.rows("SELECT id FROM cognitive_events WHERE user_id = :u", u=USER_A)
+    return pending.assistant_turn_id, own_event["id"]
+
+
+def test_v1_ack_with_an_owned_context_exit_event_is_captured(benv, alice):
+    turn_id, own_event = _v1_pending(benv, alice)
+    _set(benv, "decryptage_cognitive_links", "assistant_delivery_id", turn_id,
+         input_action="event_closed_context_change", context_exit_event_id=own_event)
+    outcome = run(benv, alice, ack("conv-pr9a-v1", turn_id))
+    assert outcome.status == AUTHORIZED
+    assert outcome.value.delivery_status == "delivered"  # sémantique R1-C2 (V1) d'origine
+
+
+def test_v1_ack_with_a_foreign_context_exit_event_is_refused(benv, alice, caplog):
+    """context_exit_event_id (V1 seulement) n'était pas relu avant le
+    correctif."""
+    foreign = _foreign_material(benv)
+    turn_id, _ = _v1_pending(benv, alice)
+    _set(benv, "decryptage_cognitive_links", "assistant_delivery_id", turn_id,
+         input_action="event_closed_context_change", context_exit_event_id=foreign["event"])
+    before = benv.snapshot()
+    outcome = run(benv, alice, ack("conv-pr9a-v1", turn_id))
+    assert outcome.status == UNAVAILABLE
+    assert "alert=decryptage_bridge_provenance_incoherent" in caplog.text
+    assert benv.snapshot() == before
+    [delivery] = [d for d in benv.deliveries() if d["id"] == turn_id]
+    assert delivery["status"] == "pending"
 
 
 def test_unknown_schema_version_is_refused_closed(benv, alice):

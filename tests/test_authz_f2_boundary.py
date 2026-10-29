@@ -84,7 +84,7 @@ def test_sql_is_executed_only_by_the_audited_adapters():
             owner = _function(tree, "_require_owned_provenance")
             assert {id(n) for n in executes} == {id(n) for n in _calls(owner) if isinstance(n.func, ast.Attribute)
                                                 and n.func.attr == "execute"}
-            assert len(executes) == 3
+            assert len(executes) == 4  # lien, SupportTrace, events, AnalysisSessions
             for call in executes:
                 (statement,) = call.args
                 assert isinstance(statement, ast.Call) and ast.unparse(statement).startswith("select("), path.name

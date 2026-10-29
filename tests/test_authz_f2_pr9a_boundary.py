@@ -337,7 +337,34 @@ def test_owner_centric_primitive_filters_inside_the_locking_statement():
 def test_the_provenance_check_reads_without_locking():
     source = ast.unparse(_functions(BRIDGE)["_require_owned_provenance"])
     assert "with_for_update" not in source and "populate_existing" not in source
-    assert source.count("db.execute(") == 3
+    assert source.count("db.execute(") == 4
+
+
+def test_the_provenance_check_covers_every_cognitive_reference_of_a_link():
+    """Toute FK de decryptage_cognitive_links vers cognitive_events ou
+    support_traces (modèle réel) est relue par la vérification de propriété
+    transitive ; le parent de la SupportTrace et les AnalysisSessions des
+    events aussi. Une nouvelle colonne de référence ferait échouer ce test."""
+    from core.models import DecryptageCognitiveLink
+
+    targets = {}
+    for fk in DecryptageCognitiveLink.__table__.foreign_keys:
+        targets.setdefault(fk.column.table.name, set()).add(fk.parent.name)
+    assert targets == {
+        "assistant_deliveries": {"assistant_delivery_id"},
+        "cognitive_events": {"input_event_id", "input_context_event_id", "response_context_event_id",
+                             "context_exit_event_id", "response_event_id"},
+        "support_traces": {"support_trace_id"},
+    }
+    assert {col.key for col in bridge._LINK_EVENT_COLUMNS} == targets["cognitive_events"]
+    assert bridge._LINK_TRACE_COLUMN.key == "support_trace_id"
+    source = ast.unparse(_functions(BRIDGE)["_require_owned_provenance"])
+    assert "select(*_LINK_EVENT_COLUMNS, _LINK_TRACE_COLUMN)" in source
+    assert "select(SupportTrace.cognitive_event_id).where(SupportTrace.id == trace_id)" in source
+    assert "events.add(parent)" in source
+    # Ordre : trace (et son parent) avant les events, events avant les sessions.
+    order = ["SupportTrace.cognitive_event_id", "CognitiveEvent.user_id", "AnalysisSession.user_id"]
+    assert [source.index(m) for m in order] == sorted(source.index(m) for m in order)
 
 
 # --------------------------------------------------------------------------

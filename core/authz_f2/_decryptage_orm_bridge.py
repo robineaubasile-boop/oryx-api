@@ -49,7 +49,7 @@ Inventaire FERMÉ des opérations (types exacts -> point d'entrée privé) :
 | Opération | Services appelés (dans cet ordre) |
 |---|---|
 | TurnFinalization | claim_delivery ; si créée : capture_user_turn, answered_step (contribution), apply_construction_these_progress (construction_these + marqueur), bind_locked_analysis_session, record_turn_progress |
-| DeliveryAcknowledgement | lock_owned_delivery ; provenance relue SANS verrou ; capture_delivered_response ; acknowledge_locked_delivery |
+| DeliveryAcknowledgement | lock_owned_delivery ; provenance COMPLÈTE relue SANS verrou (5 events, SupportTrace et son event, AnalysisSessions) ; capture_delivered_response ; acknowledge_locked_delivery |
 
 Le propriétaire est TOUJOURS AuthorizedContext.principal.user_id : une
 opération ne porte aucun user_id, aucune Session, connexion, fonction ni
@@ -77,7 +77,7 @@ from core import decryptage_progress as dp
 from core.authz_f2 import _adapters
 from core.authz_f2 import commands as c
 from core.authz_f2.principal import AuthorizedContext
-from core.models import AnalysisSession, CognitiveEvent, DecryptageCognitiveLink
+from core.models import AnalysisSession, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
 
 logger = logging.getLogger("oryx.authz_f2.decryptage_bridge")
 
@@ -297,17 +297,44 @@ def _finalize_turn(db, user_id: str, operation: TurnFinalization):
                          progress.action if progress is not None else None, delivery.analysis_session_id)
 
 
+# Toutes les références cognitives d'un lien (FK vers cognitive_events et
+# support_traces, migrations 0012 et 0013), V1 comme V2 : la liste est
+# comparée aux FK réelles du modèle par tests/test_authz_f2_pr9a_boundary.py.
+_LINK_EVENT_COLUMNS = (
+    DecryptageCognitiveLink.input_event_id,
+    DecryptageCognitiveLink.input_context_event_id,
+    DecryptageCognitiveLink.response_context_event_id,
+    DecryptageCognitiveLink.context_exit_event_id,
+    DecryptageCognitiveLink.response_event_id,
+)
+_LINK_TRACE_COLUMN = DecryptageCognitiveLink.support_trace_id
+
+
 def _require_owned_provenance(db, delivery, user_id: str) -> None:
     """Propriété transitive, AVANT tout verrou de capture : le lien (enfant
-    de la livraison verrouillée), ses events et les AnalysisSessions qu'ils
-    désignent appartiennent au principal. Lectures simples, sans verrou :
-    une ligne d'autrui (donnée incohérente) n'est jamais verrouillée."""
+    de la livraison verrouillée) et TOUTES ses références non nulles — les
+    cinq events (entrée, contexte d'entrée, contexte de réponse, sortie de
+    contexte V1, réponse), la SupportTrace et son event parent — ainsi que
+    les AnalysisSessions désignées par la livraison et par chacun de ces
+    events appartiennent au principal. Lectures simples, sans verrou, dans
+    un ordre indifférent pour les verrous (aucune ligne n'est verrouillée) :
+    une ligne d'autrui (donnée incohérente) n'est jamais verrouillée ; tout
+    écart (propriétaire différent, référence introuvable) lève
+    ProvenanceIncoherent, donc refus fermé et ROLLBACK intégral. Couvre
+    aussi un ACK rejoué (livraison delivered, lien captured)."""
     link = db.execute(
-        select(DecryptageCognitiveLink.input_event_id, DecryptageCognitiveLink.input_context_event_id,
-               DecryptageCognitiveLink.response_context_event_id)
+        select(*_LINK_EVENT_COLUMNS, _LINK_TRACE_COLUMN)
         .where(DecryptageCognitiveLink.assistant_delivery_id == delivery.id)
     ).one_or_none()
-    events = {e for e in (link or ()) if e is not None}
+    events = {e for e in (link[:len(_LINK_EVENT_COLUMNS)] if link is not None else ()) if e is not None}
+    trace_id = link[len(_LINK_EVENT_COLUMNS)] if link is not None else None
+    if trace_id is not None:
+        parent = db.execute(
+            select(SupportTrace.cognitive_event_id).where(SupportTrace.id == trace_id)
+        ).scalar_one_or_none()
+        if parent is None:
+            raise ProvenanceIncoherent("SupportTrace de provenance introuvable")
+        events.add(parent)  # event parent de l'aide : même contrôle que les autres
     sessions = {delivery.analysis_session_id} - {None}
     if events:
         rows = db.execute(

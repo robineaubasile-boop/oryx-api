@@ -159,7 +159,7 @@ code (hypothèse de lecture, recoupée par les tests de concurrence).
 | Runner phase B, plan READ | users : KEY SHARE → oryx_sessions : SHARE → génération : SHARE | — | attend un `FOR UPDATE` de users (profil / portefeuille F2, liaison F2) | PR5 / PR8 | inchangé |
 | Runner, PROFILE_MUTATION / PORTFOLIO_MUTATION | users : UPDATE → session : SHARE → génération : SHARE → (portefeuille) reçu : UPDATE → position : UPDATE | users (déjà détenue) | attend / bloque Décrypter F2 au rang users | `test_profile_and_portfolio_mutations_wait_coherently` (4 ordres) | attente au rang `users`, les deux aboutissent |
 | **Runner, DECRYPTAGE_MUTATION — finalisation d'un tour** (pont `TurnFinalization`) | users : NO KEY UPDATE → session : SHARE → génération : SHARE → T_auth → [conversation_identities : INSERT en SAVEPOINT si neuve] → assistant_deliveries : INSERT en SAVEPOINT → lien (aucun existant) → analysis_sessions active : UPDATE → events open de la session + ancre : UPDATE (une instruction triée par id) → lien : INSERT → progression (analysis_sessions déjà détenue) : UPDATE, INSERT user_statements / investment_theses / analysis_facts | users, conversation_identities, analysis_sessions, events référencés (déjà UPDATE) | attend une analysis_sessions détenue par un ACK ou un /decryptage historiques ; attend l'index unique (tour ou conversation concurrents) | `test_measured_lock_profile_of_a_contribution_turn_and_of_its_ack` | **mesuré** : users NO KEY UPDATE, oryx_sessions SHARE, génération SHARE, conversation_identities KEY SHARE (FK), analysis_sessions UPDATE, event d'ancrage UPDATE |
-| **Runner, DECRYPTAGE_MUTATION — ACK** (pont `DeliveryAcknowledgement`) | users : NO KEY UPDATE → session : SHARE → génération : SHARE → T_auth → assistant_deliveries **propre** : UPDATE (id ET user_id ET conversation_key) → lectures sans verrou de la provenance → lien : UPDATE → analysis_sessions : UPDATE → events open : UPDATE (trié) → support_traces : INSERT / event fermé : UPDATE / event ouvert : INSERT en SAVEPOINT → lien, livraison : UPDATE | users, conversation_identities, analysis_sessions, cognitive_events | attend une livraison détenue par un ACK historique ; attend analysis_sessions | idem | **mesuré** : users NO KEY UPDATE, livraison UPDATE, lien UPDATE, analysis_sessions UPDATE, event fermé UPDATE |
+| **Runner, DECRYPTAGE_MUTATION — ACK** (pont `DeliveryAcknowledgement`) | users : NO KEY UPDATE → session : SHARE → génération : SHARE → T_auth → assistant_deliveries **propre** : UPDATE (id ET user_id ET conversation_key) → lectures sans verrou de TOUTE la provenance (lien, trace, events, AnalysisSessions) → lien : UPDATE → analysis_sessions : UPDATE → events open : UPDATE (trié) → support_traces : INSERT / event fermé : UPDATE / event ouvert : INSERT en SAVEPOINT → lien, livraison : UPDATE | users, conversation_identities, analysis_sessions, cognitive_events | attend une livraison détenue par un ACK historique ; attend analysis_sessions | idem | **mesuré** : users NO KEY UPDATE, livraison UPDATE, lien UPDATE, analysis_sessions UPDATE, event fermé UPDATE |
 | `/decryptage` historique (phase B) | assistant_deliveries : INSERT (SAVEPOINT) → lien → analysis_sessions : UPDATE → events : UPDATE (trié) → lien : INSERT → progression → livraison propre : UPDATE (bind) | users, conversation_identities, analysis_sessions, events | attend analysis_sessions détenue par la finalisation F2 ; **jamais** users (KEY SHARE compatible avec NO KEY UPDATE) | `test_f2_finalization_against_legacy_decryptage_preserves_integrity` (2 ordres) | attente sur `analysis_sessions`, une seule avancée, aucun interblocage |
 | ACK historique | livraison : UPDATE (UUID seul) → lien : UPDATE → analysis_sessions : UPDATE → events : UPDATE → support_traces / events | idem | attend la livraison détenue par l'ACK F2 ; attend analysis_sessions | `test_f2_ack_against_legacy_ack_captures_once`, `test_f2_finalization_against_legacy_ack` (2 ordres chacun) | attente sur `assistant_deliveries` (ACK contre ACK) ou `analysis_sessions` (finalisation contre ACK) ; capture unique |
 | Révocation F2 | oryx_sessions : UPDATE → générations : UPDATE (triées) | — | attend le SHARE de session d'une transaction autorisée | `test_revocation_after_authorization_waits_for_the_commit` | attend le COMMIT, puis `True` |
@@ -212,11 +212,28 @@ rend `NOT_FOUND` sans aucune attente de verrou (constaté en continu dans
 primitive historique `lock_delivery_for_ack` (UUID d'abord) attend ce
 verrou et échoue en `55P03` sous `lock_timeout = 300ms`.
 
-Propriété transitive : le lien est l'enfant de la livraison verrouillée ;
-avant toute capture, le pont relit **sans verrou** le lien, ses events et
-les AnalysisSessions désignées et exige le même propriétaire
-(`ProvenanceIncoherent`, 503 et alerte sinon ; testé avec une donnée
-incohérente : rien n'est verrouillé ni écrit). La finalisation n'atteint
+Propriété transitive (complétée après l'audit indépendant du HEAD
+`28af014`) : le lien est l'enfant de la livraison verrouillée ; avant toute
+capture, premier ACK comme ACK rejoué, V1 comme V2, le pont relit **sans
+verrou** TOUTES les références cognitives non nulles du lien —
+`input_event_id`, `input_context_event_id`, `response_context_event_id`,
+`context_exit_event_id` (V1), `response_event_id`, `support_trace_id` et
+l'event parent de cette SupportTrace —, puis les AnalysisSessions de la
+livraison et de chacun de ces events, et exige le même propriétaire.
+Référence d'autrui ou introuvable : `ProvenanceIncoherent` (503, alerte
+`decryptage_bridge_provenance_incoherent`), ROLLBACK intégral. La liste
+des colonnes est comparée aux FK réelles du modèle
+(`test_the_provenance_check_covers_every_cognitive_reference_of_a_link`) :
+une future colonne de référence non couverte ferait échouer les tests.
+Testé sur PostgreSQL (la ligne d'autrui tenue `FOR UPDATE` par un tiers
+pendant l'appel : refus par la relecture, jamais une attente de verrou ;
+état inchangé, xmin compris) : `response_event_id` d'un ACK
+`transitioned_event` rejoué, `support_trace_id` et parent de trace d'un
+ACK `continued_event` rejoué, event rattaché à l'AnalysisSession d'autrui,
+`context_exit_event_id` d'une livraison V1 ; cas cohérents (rejeux V2,
+V1 avec sortie de contexte propre) toujours acceptés. Ces cinq refus
+échouaient sur l'ancienne fonction (contre-épreuve exécutée). Aucun
+verrou ajouté, aucun ordre historique modifié. La finalisation n'atteint
 que des lignes filtrées par `user_id` (services historiques) ou créées
 dans la transaction.
 
@@ -338,7 +355,9 @@ rappel n'est passé au pont.
 
 Exécutions locales (images CI épinglées, 16.15 et 18.6) des trois
 fichiers PR9-A : **101 tests verts sur chaque version, trois fois de
-suite**. Suite Python complète : voir la description de la PR (résultats
+suite** (HEAD `28af014`) ; après le correctif de propriété transitive,
+**110 tests PR9-A** (131 avec les contrôles BF1 et de dormance) verts
+sur chaque version. Suite Python complète : voir la description de la PR (résultats
 locaux) et les contrôles GitHub `ci / postgres-16` et `ci / postgres-18`.
 
 ## 17. Résultats des tests de sécurité
@@ -354,7 +373,7 @@ locaux) et les contrôles GitHub `ci / postgres-16` et `ci / postgres-18`.
 | G — COMMIT rejeté par PostgreSQL (trigger différé) | 503, rien d'écrit, opération exécutée une seule fois |
 | G — COMMIT abouti mais signalé en erreur (perte simulée) | 503 (`OperationalError` journalisé), **état incertain** pour l'appelant : ni succès ni annulation prétendus, aucun rejeu ; l'état réel ne se constate que par lecture, un rejeu du même tour est idempotent (`created = False`) |
 | Autorisation | justificatif invalide, expiré, révoqué, génération révoquée, livraison non confirmée, erreur à T_authorization : aucun point d'entrée du pont appelé, rien d'écrit |
-| Propriété | livraison étrangère, absente, d'une autre conversation : même `NOT_FOUND` sans valeur ni principal ; conversation d'autrui : `NOT_FOUND`, rien d'écrit ; provenance incohérente : 503 ; version inconnue : 503 |
+| Propriété | livraison étrangère, absente, d'une autre conversation : même `NOT_FOUND` sans valeur ni principal ; conversation d'autrui : `NOT_FOUND`, rien d'écrit ; provenance incohérente (toute référence du lien, trace et son parent, AnalysisSessions ; V1, V2, rejeu) : 503 sans verrou ni écriture ; version inconnue : 503 |
 | Registre | sous-classe, opération brute, commande inconnue : `UnknownCommand` avant toute transaction |
 
 ## 18. Limitations et risques résiduels
@@ -378,8 +397,9 @@ locaux) et les contrôles GitHub `ci / postgres-16` et `ci / postgres-18`.
   existants, pas par `FOR NO KEY UPDATE`.
 - COMMIT incertain : aucune réparation automatique ; la résolution
   repose sur l'identité idempotente du tour.
-- Performances : chaque exécution du pont ajoute une Session ORM, trois
-  lectures de provenance (ACK) et une sonde ; non mesuré sous charge.
+- Performances : chaque exécution du pont ajoute une Session ORM, quatre
+  lectures de provenance au plus (ACK) et une sonde ; non mesuré sous
+  charge.
 
 ## 19. Maintien des 14 commandes
 
