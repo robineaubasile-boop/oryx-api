@@ -19,7 +19,13 @@ d'autorisation (core/authz_f2) ni la route personnelle (core/authz_f2_http) :
 - R1 PR 8 : GET /api/v2/me/analysis-overview, GET /api/v2/me/theses et
   GET /api/v2/me/theses/{thesis_id} répondent 404 sur le vrai api:app (avec
   ou sans query, cookie, sélecteur ni variables d'activation) ; aucune
-  migration (tête inchangée 0020_position_revision), aucune dépendance.
+  migration (tête inchangée 0020_position_revision), aucune dépendance ;
+- R1 PR 9-A : le pont ORM privé (core/authz_f2/_decryptage_orm_bridge.py)
+  entre dans la matrice fermée avec ses imports exacts (services Décrypter
+  historiques et core.models, donc core.db indirectement) ; aucun module de
+  production ne l'importe, le vrai api:app ne le charge pas, aucune
+  migration (tête 0020_position_revision) ; ses imports transitifs et leur
+  absence de réseau sont vérifiés par tests/test_authz_f2_pr9a_boundary.py.
 
 Les garanties historiques (routes publiques exactes, middlewares, imports
 interdits, chargement dynamique, réseau au démarrage, variables F2 valides
@@ -74,6 +80,12 @@ IMPORT_MATRIX = {
                                         "core.authz_f2.portfolio_fingerprint", "core.authz_f2.portfolio_results",
                                         "core.authz_f2.principal", "core.authz_f2.runner",
                                         "core.authz_f2_http.provenance", "core.authz_f2_http.routes"},
+    # R1 PR 9-A : pont ORM privé, seul module de la frontière qui importe
+    # des services métier et core.models (exception nominative, V2.2-03).
+    "core/authz_f2/_decryptage_orm_bridge.py": {"core.assistant_delivery", "core.decryptage_cognitive_runtime",
+                                                "core.decryptage_progress", "core.authz_f2._adapters",
+                                                "core.authz_f2.commands", "core.authz_f2.principal",
+                                                "core.models"},
     # R1 PR 8 : codec pur (commandes et vues seulement) et routeur de lecture.
     "core/authz_f2_http/consultation_codec.py": {"core.authz_f2.commands"},
     "core/authz_f2_http/consultation.py": {"core.auth_f2.crypto", "core.auth_f2.service",
@@ -187,7 +199,7 @@ def _core_imports(path) -> set:
             found |= {a.name for a in node.names if a.name.startswith("core")}
         elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("core"):
             for alias in node.names:
-                found.add(f"{node.module}.{alias.name}" if node.module in PACKAGES else node.module)
+                found.add(f"{node.module}.{alias.name}" if node.module in PACKAGES + ("core",) else node.module)
     return found
 
 

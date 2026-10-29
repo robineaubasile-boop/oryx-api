@@ -12,7 +12,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 
 | Opération | Table | Filtre | Verrou |
 |---|---|---|---|
-| lock_profile | users | id | plan (FOR KEY SHARE / FOR UPDATE) |
+| lock_profile | users | id | plan (FOR KEY SHARE / FOR UPDATE / FOR NO KEY UPDATE) |
 | _read_profile | users | id (level ET level_revision, une requête) | - |
 | _list_positions | portfolio_positions | user_id | - |
 | _read_position | portfolio_positions | id ET user_id | - |
@@ -21,7 +21,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _read_delivery | assistant_deliveries | id ET user_id | - |
 | _list_conversation_deliveries | assistant_deliveries | user_id ET conversation_key | - |
 | _update_profile_level | users | id ET level_revision attendue | (ligne déjà verrouillée, plan PROFILE_MUTATION) |
-| require_read_committed | - | current_setting('transaction_isolation') | - (plan PORTFOLIO_MUTATION) |
+| require_read_committed | - | current_setting('transaction_isolation') | - (plans PORTFOLIO_MUTATION, DECRYPTAGE_MUTATION) |
 | _lock_portfolio (reçu) | portfolio_write_idempotency | user_id ET operation_type ET operation_id | FOR UPDATE |
 | _lock_portfolio (position, PUT / DELETE sans reçu) | portfolio_positions | id ET user_id | FOR UPDATE |
 | _create_position | portfolio_positions | INSERT, user_id serveur | (users déjà FOR UPDATE) |
@@ -104,6 +104,13 @@ ET même ticker sous "C" ET user_id serveur) ; l'identifiant de session
 n'est projeté que vérifié, jamais l'identifiant brut de la thèse. Une
 valeur non restituable lève ConsultationUnrepresentable (503 et alerte
 interne sans détail) ; aucune correction, aucune réparation.
+
+R1 PR 9-A : verrou users FOR NO KEY UPDATE du plan DECRYPTAGE_MUTATION
+(même instruction fermée, autre mode) ; require_read_committed reçoit le
+plan pour journaliser une alerte propre (portfolio_isolation_refused
+inchangée). Aucune commande ni instruction métier nouvelle ici : les
+opérations Décrypter passent par le pont ORM privé
+core.authz_f2._decryptage_orm_bridge, absent du registre de production.
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -209,6 +216,8 @@ NO_BUSINESS_STATE = (type(None),)
 _LOCK_PROFILE = {
     "FOR KEY SHARE": "SELECT id FROM users WHERE id = :u FOR KEY SHARE",
     "FOR UPDATE": "SELECT id FROM users WHERE id = :u FOR UPDATE",
+    # R1 PR 9-A : plan DECRYPTAGE_MUTATION.
+    "FOR NO KEY UPDATE": "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE",
 }
 _READ_PROFILE = "SELECT id, level, level_revision FROM users WHERE id = :u"
 # Flottants lus en octets IEEE 754 exacts (float8send), jamais en texte.
@@ -560,11 +569,19 @@ def _update_profile_level(conn, ctx, command, locked):
 # R1 PR 7 : portefeuille versionné et idempotent (plan PORTFOLIO_MUTATION)
 # --------------------------------------------------------------------------
 
-def require_read_committed(conn) -> None:
+# Alerte interne d'une isolation refusée, par plan qui exige READ COMMITTED.
+ISOLATION_ALERTS = MappingProxyType({
+    c.PORTFOLIO_MUTATION.name: "portfolio_isolation_refused",
+    c.DECRYPTAGE_MUTATION.name: "decryptage_isolation_refused",  # R1 PR 9-A
+})
+
+
+def require_read_committed(conn, plan: c.LockPlan) -> None:
     """Début de la phase B d'un plan qui l'exige : isolation réellement
-    active lue dans la transaction ; non conforme : refus fermé (503)."""
+    active lue dans la transaction ; non conforme : refus fermé (503),
+    alerte propre au plan."""
     if conn.execute(sa.text(_TRANSACTION_ISOLATION)).scalar_one() != "read committed":
-        raise PortfolioUnavailable("isolation non conforme", "portfolio_isolation_refused")
+        raise PortfolioUnavailable("isolation non conforme", ISOLATION_ALERTS[plan.name])
 
 
 OPERATION_TYPES = MappingProxyType({

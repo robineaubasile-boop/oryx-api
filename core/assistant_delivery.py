@@ -14,8 +14,9 @@ jamais lu, compris, regardé, mémorisé ni utilisé cognitivement.
 
 API publique : preflight_delivery, claim_delivery, bind_analysis_session,
 lock_delivery_for_ack, acknowledge_delivery, decryptage_request_fingerprint,
-visible_content_fingerprint. Aucune fonction générique de mise à jour, de
-suppression ni de listing.
+visible_content_fingerprint ; R1 PR 9-A : lock_owned_delivery,
+acknowledge_locked_delivery, bind_locked_analysis_session. Aucune fonction
+générique de mise à jour, de suppression ni de listing.
 
 R1-C2 : ce module reste la seule vérité de livraison et n'appelle toujours
 aucun service T2+. La capture cognitive d'une livraison R1-C2 est orchestrée
@@ -65,6 +66,19 @@ Invariants :
 - Données : les messages d'erreur ne contiennent que des identifiants
   techniques et des noms de champs, jamais de texte utilisateur, de
   response_payload ni de private_metadata.
+
+R1 PR 9-A (V2.2-01, verrouillage propriétaire-centré) : _lock_delivery
+verrouille par UUID AVANT de vérifier le propriétaire ; il reste celui des
+routes historiques, inchangées (erreurs, statuts, idempotence). Le chemin
+F2 (pont ORM privé de la frontière d'autorisation) n'y passe jamais :
+lock_owned_delivery porte id, user_id ET conversation_key dans la requête
+FOR UPDATE elle-même, si bien qu'une livraison étrangère, d'une autre
+conversation ou absente n'est ni lue ni verrouillée (même
+AssistantDeliveryNotFound, sans détail). Les mutations sur une livraison
+déjà verrouillée sont extraites sans changement de comportement :
+acknowledge_locked_delivery (pending -> delivered, appelée aussi par
+acknowledge_delivery) et bind_locked_analysis_session (appelée aussi par
+bind_analysis_session).
 """
 import hashlib
 import json
@@ -381,6 +395,37 @@ def _lock_delivery(db, delivery_id) -> AssistantDelivery:
     return delivery
 
 
+def _bind_locked(db, delivery: AssistantDelivery, analysis_session_id: uuid.UUID) -> AssistantDelivery:
+    """Règles de liaison sur une livraison DÉJÀ verrouillée par l'appelant
+    (voir bind_analysis_session)."""
+    owner = db.execute(
+        select(AnalysisSession.user_id).where(AnalysisSession.id == analysis_session_id)
+    ).scalar_one_or_none()
+    if owner is None:
+        raise AnalysisSessionBindingConflict(f"analysis_session {analysis_session_id} inconnue")
+    if owner != delivery.user_id:
+        raise AnalysisSessionBindingConflict(
+            f"analysis_session {analysis_session_id} n'appartient pas au propriétaire de {delivery.id}")
+    if delivery.analysis_session_id == analysis_session_id:
+        return delivery
+    if delivery.analysis_session_id is not None:
+        raise AnalysisSessionBindingConflict(f"assistant turn {delivery.id} déjà lié à une autre analysis_session")
+    delivery.analysis_session_id = analysis_session_id
+    db.flush()
+    return delivery
+
+
+def _mark_delivered(db, delivery: AssistantDelivery) -> AssistantDelivery:
+    """pending -> delivered sur une livraison DÉJÀ verrouillée et dont le
+    propriétaire est vérifié ; delivered : no-op idempotent."""
+    if delivery.status == DELIVERED:
+        return delivery
+    delivery.status = DELIVERED
+    delivery.delivered_at = _utcnow()
+    db.flush()
+    return delivery
+
+
 # --------------------------------------------------------------------------
 # API publique
 # --------------------------------------------------------------------------
@@ -515,21 +560,7 @@ def bind_analysis_session(
     _require_uuid(delivery_id, "delivery_id")
     _require_uuid(analysis_session_id, "analysis_session_id")
     delivery = _lock_delivery(db, delivery_id)
-    owner = db.execute(
-        select(AnalysisSession.user_id).where(AnalysisSession.id == analysis_session_id)
-    ).scalar_one_or_none()
-    if owner is None:
-        raise AnalysisSessionBindingConflict(f"analysis_session {analysis_session_id} inconnue")
-    if owner != delivery.user_id:
-        raise AnalysisSessionBindingConflict(
-            f"analysis_session {analysis_session_id} n'appartient pas au propriétaire de {delivery.id}")
-    if delivery.analysis_session_id == analysis_session_id:
-        return delivery
-    if delivery.analysis_session_id is not None:
-        raise AnalysisSessionBindingConflict(f"assistant turn {delivery.id} déjà lié à une autre analysis_session")
-    delivery.analysis_session_id = analysis_session_id
-    db.flush()
-    return delivery
+    return _bind_locked(db, delivery, analysis_session_id)
 
 
 def lock_delivery_for_ack(
@@ -576,9 +607,76 @@ def acknowledge_delivery(
     mutés. Flush sans commit."""
     delivery = lock_delivery_for_ack(db, assistant_turn_id=assistant_turn_id, user_id=user_id,
                                      conversation_key=conversation_key)
-    if delivery.status == DELIVERED:
-        return delivery
-    delivery.status = DELIVERED
-    delivery.delivered_at = _utcnow()
-    db.flush()
+    return _mark_delivered(db, delivery)
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-A : chemin F2 propriétaire-centré (pont ORM privé, dormant)
+# --------------------------------------------------------------------------
+
+def lock_owned_delivery(
+    db,
+    *,
+    assistant_turn_id: uuid.UUID,
+    user_id: str,
+    conversation_key: str,
+) -> AssistantDelivery:
+    """SELECT ... FOR UPDATE de la livraison filtrée par id ET user_id ET
+    conversation_key DANS la requête de verrouillage : la propriété est
+    décidée par PostgreSQL avant toute prise de verrou exclusif. Une
+    livraison absente, étrangère ou d'une autre conversation n'est ni
+    verrouillée ni lue : même AssistantDeliveryNotFound, sans détail.
+    populate_existing : un objet déjà présent dans la Session est rechargé
+    (état commité vu après l'attente du verrou, READ COMMITTED). Version de
+    schéma inconnue : UnsupportedAssistantDeliverySchema (refus fermé).
+    Aucune mutation, aucune réparation."""
+    _require_uuid(assistant_turn_id, "assistant_turn_id")
+    _require_identifier(user_id, "user_id")
+    _require_identifier(conversation_key, "conversation_key")
+    delivery = db.execute(
+        select(AssistantDelivery)
+        .where(
+            AssistantDelivery.id == assistant_turn_id,
+            AssistantDelivery.user_id == user_id,
+            AssistantDelivery.conversation_key == conversation_key,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if delivery is None:
+        raise AssistantDeliveryNotFound("assistant turn introuvable pour ce propriétaire")
+    _require_schema_version(delivery.delivery_schema_version)
     return delivery
+
+
+def _require_owned(delivery, user_id: str) -> AssistantDelivery:
+    """Défense en profondeur des mutations sur livraison déjà verrouillée :
+    jamais une livraison d'un autre propriétaire (invariant de l'appelant)."""
+    if type(delivery) is not AssistantDelivery:
+        raise InvalidAssistantDeliveryInput("delivery : AssistantDelivery verrouillée attendue")
+    _require_identifier(user_id, "user_id")
+    if delivery.user_id != user_id:
+        raise AssistantDeliveryOwnershipConflict(f"assistant turn {delivery.id} : propriétaire différent")
+    _require_schema_version(delivery.delivery_schema_version)
+    return delivery
+
+
+def acknowledge_locked_delivery(db, *, delivery: AssistantDelivery, user_id: str) -> AssistantDelivery:
+    """pending -> delivered (delivered : no-op idempotent) d'une livraison
+    déjà verrouillée par lock_owned_delivery dans la transaction courante.
+    Mêmes règles qu'acknowledge_delivery ; flush sans commit."""
+    return _mark_delivered(db, _require_owned(delivery, user_id))
+
+
+def bind_locked_analysis_session(
+    db,
+    *,
+    delivery: AssistantDelivery,
+    user_id: str,
+    analysis_session_id: uuid.UUID,
+) -> AssistantDelivery:
+    """Liaison analysis_session (mêmes règles que bind_analysis_session)
+    d'une livraison déjà verrouillée ou créée dans la transaction courante
+    par claim_delivery pour user_id ; flush sans commit."""
+    _require_uuid(analysis_session_id, "analysis_session_id")
+    return _bind_locked(db, _require_owned(delivery, user_id), analysis_session_id)
