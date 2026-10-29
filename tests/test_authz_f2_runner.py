@@ -345,8 +345,9 @@ def test_registry_is_closed_and_unknown_commands_are_refused_before_any_transact
     assert set(_adapters.REGISTRY) == {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses,
                                        c.ListThesesForTicker, c.ReadDelivery, c.ListConversationDeliveries,
                                        c.UpdateProfileLevel, c.CreatePortfolioPosition,
-                                       c.ReplacePortfolioPosition, c.DeletePortfolioPosition}
-    assert len(_adapters.REGISTRY) == 11
+                                       c.ReplacePortfolioPosition, c.DeletePortfolioPosition,
+                                       c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis}  # R1 PR 8
+    assert len(_adapters.REGISTRY) == 14
     with pytest.raises(TypeError):
         _adapters.REGISTRY[object] = None
 

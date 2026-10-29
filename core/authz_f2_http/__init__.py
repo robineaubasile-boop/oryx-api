@@ -1,5 +1,6 @@
-"""Routes personnelles isolées GET /api/v2/me (R1 PR 5) et
-PUT /api/v2/me/level (R1 PR 6) — DORMANTES.
+"""Routes personnelles isolées GET /api/v2/me (R1 PR 5),
+PUT /api/v2/me/level (R1 PR 6), portefeuille (R1 PR 7) et lectures des
+analyses et des thèses (R1 PR 8) — DORMANTES.
 
 Adaptateur HTTP autour de core.authz_f2.AuthorizedTransactionRunner
 (C.5.2 §7) :
@@ -19,12 +20,19 @@ Adaptateur HTTP autour de core.authz_f2.AuthorizedTransactionRunner
                   DELETE /api/v2/me/portfolio/{position_id} (CRUD versionné
                   et idempotent, X-Oryx-Operation-Id, X-Oryx-Expected-Revision,
                   corps canoniques rejoués octet pour octet) ;
+- consultation.py, consultation_codec.py : R1 PR 8, GET
+                  /api/v2/me/analysis-overview, GET /api/v2/me/theses et GET
+                  /api/v2/me/theses/{thesis_id} (lectures seules, plan READ,
+                  query stricte, curseurs versionnés Base64URL canoniques,
+                  bornes de restitution 131072 / 512 octets, aucune
+                  troncature) ;
 - isolated.py   : application personnelle ISOLÉE (tests uniquement).
 
 Dormance : api.py n'importe ni ce paquet ni core.authz_f2 ; GET /api/v2/me,
-PUT /api/v2/me/level et les routes /api/v2/me/portfolio n'existent dans
-aucune application publique, quelles que soient les variables
-d'environnement (tests/test_authz_f2_dormancy.py). La
+PUT /api/v2/me/level, les routes /api/v2/me/portfolio,
+/api/v2/me/analysis-overview et /api/v2/me/theses n'existent dans aucune
+application publique, quelles que soient les variables d'environnement
+(tests/test_authz_f2_dormancy.py). La
 composition réunissant les routes F2 et cette route n'existe que dans les
 tests (tests/authz_f2_support.py).
 """

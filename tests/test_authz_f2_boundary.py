@@ -19,6 +19,11 @@ prétend pas isoler le processus contre du code Python hostile.
   isolation vérifiée d'abord, puis reçu avant position.
 - Aucun client réseau (Claude, EODHD, Supabase, Resend, HTTP) n'est
   importé par la frontière.
+- R1 PR 8 : registre fermé à quatorze commandes ; trois lectures sous le
+  plan READ inchangé, sans verrou métier ni écriture ; instructions
+  fermées (une par page ou par thèse), toujours filtrées par le user_id
+  serveur, tickers sous COLLATE "C", thesis_text jamais lu hors du détail
+  et projeté sous borne, provenance jointe sur id ET user_id ET ticker.
 """
 import ast
 import inspect
@@ -130,7 +135,11 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_READ_PROFILE", "_LIST_POSITIONS",
         "_READ_POSITION", "_LIST_THESES", "_LIST_THESES_FOR_TICKER", "_READ_DELIVERY", "_LIST_CONVERSATION_DELIVERIES",
         "_UPDATE_PROFILE_LEVEL", "_TRANSACTION_ISOLATION", "_LOCK_RECEIPT", "_LOCK_POSITION", "_CREATE_POSITION",
-        "_REPLACE_POSITION", "_DELETE_POSITION", "_INSERT_RECEIPT"}
+        "_REPLACE_POSITION", "_DELETE_POSITION", "_INSERT_RECEIPT",
+        # R1 PR 8 : une instruction fermée par page ou par thèse.
+        "_ANALYSIS_OVERVIEW_PAGE[first]", "_ANALYSIS_OVERVIEW_PAGE[after]", "_THESES_PAGE[first]",
+        "_THESES_PAGE[first+ticker]", "_THESES_PAGE[after_date]", "_THESES_PAGE[after_date+ticker]",
+        "_THESES_PAGE[after_null]", "_THESES_PAGE[after_null+ticker]", "_READ_THESIS"}
     # Seule requête sans user_id : l'isolation active de la transaction.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
     for name, sql in statements.items():
@@ -163,10 +172,12 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
 
 def test_closed_registry_and_lock_plans():
     reads = {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses, c.ListThesesForTicker, c.ReadDelivery,
-             c.ListConversationDeliveries}
+             c.ListConversationDeliveries,
+             # R1 PR 8
+             c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis}
     mutations = {c.UpdateProfileLevel: c.PROFILE_MUTATION, c.CreatePortfolioPosition: c.PORTFOLIO_MUTATION,
                  c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION}
-    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 11
+    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 14
     # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
     assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
@@ -275,3 +286,56 @@ def test_business_locks_match_the_announced_plan():
             assert tuple(locked_tables) == spec.plan.business_locks
     source = inspect.getsource(_adapters._lock_portfolio)
     assert source.index("_LOCK_RECEIPT") < source.index("CreateReady()") < source.index("_LOCK_POSITION")
+
+
+def test_pr8_statements_are_closed_collated_and_bounded():
+    """R1 PR 8 : instructions fermées des trois lectures (plan READ, aucune
+    écriture ni verrou), tickers comparés, partitionnés, joints et triés
+    sous COLLATE "C", prédicats keyset fermés, thesis_text absent de la
+    synthèse et de la liste, provenance jointe sur id ET user_id ET ticker
+    ET user_id serveur, valeurs restituées sous borne."""
+    overview = _adapters._ANALYSIS_OVERVIEW_PAGE
+    theses = _adapters._THESES_PAGE
+    assert set(overview) == {"first", "after"}
+    assert set(theses) == {"first", "first+ticker", "after_date", "after_date+ticker", "after_null",
+                           "after_null+ticker"}
+    pr8 = list(overview.values()) + list(theses.values()) + [_adapters._READ_THESIS]
+    for sql in pr8:
+        assert sql.startswith("SELECT ") and not re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b", sql)
+        assert "CASE WHEN octet_length(ticker) <= 512 THEN ticker END AS ticker" in sql or \
+            "CASE WHEN octet_length(k.ticker) <= 512 THEN k.ticker END AS ticker" in sql
+        # Hors de la projection bornée, toute référence à un ticker (égalité,
+        # union, partition, jointure, keyset, tri) est sous collation "C".
+        stripped = sql
+        for alias in ("k.", ""):
+            stripped = stripped.replace(f"CASE WHEN octet_length({alias}ticker) <= 512 THEN {alias}ticker END AS ticker, "
+                                        f"octet_length({alias}ticker) AS ticker_bytes", "")
+        stripped = stripped.replace(" AS ticker,", ",").replace(" AS ticker ", " ")
+        references = list(re.finditer(r"\b(?:\w+\.)?ticker\b", stripped))
+        assert references, sql
+        for match in references:
+            assert stripped[match.end():].startswith(' COLLATE "C"'), stripped[match.start() - 40:match.end() + 20]
+    for sql in list(overview.values()) + list(theses.values()):
+        assert "thesis_text" not in sql
+    for sql in overview.values():
+        assert sql.count("WHERE user_id = :u") == 4  # union (2) + session active + dernière thèse
+        assert "ORDER BY started_at DESC, updated_at DESC, id DESC" in sql
+        assert "ORDER BY created_at DESC NULLS LAST, id DESC" in sql
+        assert sql.endswith('ORDER BY k.ticker COLLATE "C" ASC LIMIT :n')
+    assert 'WHERE k.ticker COLLATE "C" > CAST(:a AS text) COLLATE "C" ' in overview["after"]
+    provenance = ("WHERE s.id = investment_theses.analysis_session_id AND s.user_id = investment_theses.user_id "
+                  'AND s.user_id = :u AND s.ticker COLLATE "C" = investment_theses.ticker COLLATE "C"')
+    for name, sql in theses.items():
+        assert provenance in sql and sql.endswith(
+            "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n"), name
+        assert ('ticker COLLATE "C" = CAST(:t AS text) COLLATE "C"' in sql) == name.endswith("+ticker"), name
+        assert ("(created_at < :d OR (created_at = :d AND id < :i) OR created_at IS NULL)" in sql) == (
+            name.startswith("after_date")), name
+        assert ("(created_at IS NULL AND id < :i)" in sql) == name.startswith("after_null"), name
+    assert provenance in _adapters._READ_THESIS
+    assert "CASE WHEN octet_length(thesis_text) <= 131072 THEN thesis_text END" in _adapters._READ_THESIS
+    assert _adapters._READ_THESIS.endswith("FROM investment_theses WHERE id = :id AND user_id = :u")
+    # L'identifiant brut analysis_session_id n'est jamais projeté : il ne
+    # sert qu'à la comparaison de la provenance relationnelle.
+    for sql in pr8:
+        assert "analysis_session_id" not in sql.replace("s.id = investment_theses.analysis_session_id", "")

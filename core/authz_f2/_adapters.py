@@ -28,6 +28,9 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _replace_position | portfolio_positions | id ET user_id ET position_revision attendue | (ligne déjà verrouillée) |
 | _delete_position | portfolio_positions | id ET user_id ET position_revision attendue | (ligne déjà verrouillée) |
 | _insert_receipt | portfolio_write_idempotency | INSERT, user_id serveur | (users déjà FOR UPDATE) |
+| _analysis_overview_page (R1 PR 8) | analysis_sessions + investment_theses | user_id (chaque sous-requête), keyset ticker | - |
+| _theses_page (R1 PR 8) | investment_theses (+ analysis_sessions pour la provenance) | user_id [ET ticker], keyset | - |
+| _read_thesis (R1 PR 8) | investment_theses (+ analysis_sessions pour la provenance) | id ET user_id | - |
 
 Une ressource étrangère et une ressource inexistante rendent le même
 ABSENT : le filtre SQL porte simultanément l'identifiant et le user_id, la
@@ -79,9 +82,31 @@ d'interruption transmis par le runner) :
 
 Les flottants sont lus par float8send (8 octets IEEE 754), jamais par la
 sortie texte de PostgreSQL (indépendant de extra_float_digits).
+
+R1 PR 8 (plan READ inchangé, aucune écriture, aucun verrou métier) : une
+SEULE instruction SQL métier par page ou par thèse, exécutée après
+l'autorisation définitive ; sous READ COMMITTED, chaque instruction voit
+un instantané cohérent pris à son début (aucune garantie entre deux
+pages). Égalités, unicité, partitions, jointures, keyset et tris des
+tickers sous COLLATE "C" (chaînes historiques exactes, jamais
+normalisées). Bornes de restitution dans la projection : ticker rendu
+seulement s'il fait au plus 512 octets, texte de thèse seulement s'il fait
+au plus 131072 octets (longueur toujours projetée : valeur admissible et
+valeur hors borne explicitement distinguées, jamais d'extrait) ; date
+rendue seulement si elle tient dans les années 0001 à 9999 UTC, avec un
+indicateur explicite (psycopg2 convertirait silencieusement ±infinity en
+datetime.max / datetime.min et échouerait sur une année hors bornes, même
+pour la ligne supplémentaire d'une page) ; TIMESTAMPTZ projeté en UTC par
+PostgreSQL (AT TIME ZONE 'UTC'), TIMESTAMP historique tel quel. thesis_text
+n'est jamais lu par la synthèse ni par la liste. Provenance : sous-requête
+corrélée sur analysis_sessions (id = analysis_session_id ET même user_id
+ET même ticker sous "C" ET user_id serveur) ; l'identifiant de session
+n'est projeté que vérifié, jamais l'identifiant brut de la thèse. Une
+valeur non restituable lève ConsultationUnrepresentable (503 et alerte
+interne sans détail) ; aucune correction, aucune réparation.
 """
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from types import MappingProxyType
 
 import sqlalchemy as sa
@@ -143,6 +168,17 @@ class PortfolioUnavailable(AdapterInvariantBroken):
     def __init__(self, message: str, alert: str):
         super().__init__(message)
         self.alert = alert
+
+
+class ConsultationUnrepresentable(AdapterInvariantBroken):
+    """R1 PR 8 : valeur historique non restituable dans la vue fermée
+    (ticker > 512 octets, texte > 131072 octets, date infinie ou hors
+    représentation) : 503 pour la requête, aucune troncature, aucune
+    correction, donnée intacte."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.alert = "consultation_value_unrepresentable"
 
 
 # États FERMÉS rendus par _lock_portfolio (avant T_authorization).
@@ -211,6 +247,88 @@ _INSERT_RECEIPT = ("INSERT INTO portfolio_write_idempotency (user_id, operation_
                    ":rv, :s, CAST(:payload AS JSONB), :pid, :at)")
 _UPDATE_PROFILE_LEVEL = ("UPDATE users SET level = :l, level_revision = level_revision + 1 "
                          "WHERE id = :u AND level_revision = :r RETURNING id, level, level_revision")
+
+# R1 PR 8. Synthèse par ticker : une instruction. k = union des tickers des
+# sessions in_progress et des thèses du principal ; s = session active
+# retenue (started_at DESC, updated_at DESC, id DESC) et nombre de sessions
+# actives du ticker ; t = dernière thèse (created_at DESC NULLS LAST, id
+# DESC), sans thesis_text. Keyset appliqué APRÈS l'agrégation.
+_ANALYSIS_OVERVIEW_COLUMNS = (
+    "SELECT CASE WHEN octet_length(k.ticker) <= 512 THEN k.ticker END AS ticker, "
+    "octet_length(k.ticker) AS ticker_bytes, s.id AS session_id, "
+    "CASE WHEN octet_length(s.current_step) <= 32 THEN s.current_step END AS current_step, "
+    "CASE WHEN s.updated_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00' "
+    "AND s.updated_at < TIMESTAMPTZ '10000-01-01 00:00:00+00' THEN s.updated_at AT TIME ZONE 'UTC' END "
+    "AS session_updated_at, (s.updated_at >= TIMESTAMPTZ '0001-01-01 00:00:00+00' "
+    "AND s.updated_at < TIMESTAMPTZ '10000-01-01 00:00:00+00') AS session_updated_at_representable, "
+    "s.active_sessions, t.id AS thesis_id, "
+    "CASE WHEN t.created_at >= TIMESTAMP '0001-01-01 00:00:00' AND t.created_at < TIMESTAMP '10000-01-01 00:00:00' "
+    "THEN t.created_at END AS thesis_created_at, (t.created_at IS NULL OR (t.created_at >= TIMESTAMP "
+    "'0001-01-01 00:00:00' AND t.created_at < TIMESTAMP '10000-01-01 00:00:00')) AS thesis_created_at_representable "
+    "FROM (SELECT ticker COLLATE \"C\" AS ticker FROM analysis_sessions "
+    "WHERE user_id = :u AND status = 'in_progress' "
+    "UNION SELECT ticker COLLATE \"C\" AS ticker FROM investment_theses WHERE user_id = :u) k "
+    "LEFT JOIN (SELECT ticker COLLATE \"C\" AS ticker, id, current_step, updated_at, "
+    "count(*) OVER (PARTITION BY ticker COLLATE \"C\") AS active_sessions, "
+    "row_number() OVER (PARTITION BY ticker COLLATE \"C\" ORDER BY started_at DESC, updated_at DESC, id DESC) "
+    "AS ordinal FROM analysis_sessions WHERE user_id = :u AND status = 'in_progress') s "
+    "ON s.ticker COLLATE \"C\" = k.ticker COLLATE \"C\" AND s.ordinal = 1 "
+    "LEFT JOIN (SELECT ticker COLLATE \"C\" AS ticker, id, created_at, "
+    "row_number() OVER (PARTITION BY ticker COLLATE \"C\" ORDER BY created_at DESC NULLS LAST, id DESC) "
+    "AS ordinal FROM investment_theses WHERE user_id = :u) t "
+    "ON t.ticker COLLATE \"C\" = k.ticker COLLATE \"C\" AND t.ordinal = 1 ")
+_ANALYSIS_OVERVIEW_PAGE = {
+    "first": _ANALYSIS_OVERVIEW_COLUMNS + "ORDER BY k.ticker COLLATE \"C\" ASC LIMIT :n",
+    "after": _ANALYSIS_OVERVIEW_COLUMNS + "WHERE k.ticker COLLATE \"C\" > CAST(:a AS text) COLLATE \"C\" "
+                                          "ORDER BY k.ticker COLLATE \"C\" ASC LIMIT :n",
+}
+# Historique des thèses : jamais thesis_text ; provenance vérifiée par
+# sous-requête corrélée (même id, même utilisateur, même ticker sous "C").
+_THESES_PAGE_COLUMNS = (
+    "SELECT id, CASE WHEN octet_length(ticker) <= 512 THEN ticker END AS ticker, "
+    "octet_length(ticker) AS ticker_bytes, "
+    "CASE WHEN created_at >= TIMESTAMP '0001-01-01 00:00:00' AND created_at < TIMESTAMP '10000-01-01 00:00:00' "
+    "THEN created_at END AS created_at, (created_at IS NULL OR (created_at >= TIMESTAMP '0001-01-01 00:00:00' "
+    "AND created_at < TIMESTAMP '10000-01-01 00:00:00')) AS created_at_representable, "
+    "EXISTS (SELECT 1 FROM analysis_sessions s WHERE s.id = investment_theses.analysis_session_id "
+    "AND s.user_id = investment_theses.user_id AND s.user_id = :u "
+    "AND s.ticker COLLATE \"C\" = investment_theses.ticker COLLATE \"C\") AS verified FROM investment_theses ")
+# Prédicats keyset fermés (created_at DESC NULLS LAST, id DESC) : dernière
+# date non nulle, ou dernière date nulle ; filtre ticker exact sous "C".
+# ORDER BY qualifié : un nom nu y désignerait d'abord la colonne de SORTIE
+# created_at (projection bornée, NULL pour une date non représentable),
+# alors que WHERE et le contrat trient sur la colonne réelle.
+_THESES_PAGE = {
+    "first": _THESES_PAGE_COLUMNS + "WHERE user_id = :u "
+                                    "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+    "first+ticker": _THESES_PAGE_COLUMNS + "WHERE user_id = :u AND ticker COLLATE \"C\" = CAST(:t AS text) COLLATE \"C\" "
+                                           "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+    "after_date": _THESES_PAGE_COLUMNS + "WHERE user_id = :u "
+                                         "AND (created_at < :d OR (created_at = :d AND id < :i) OR created_at IS NULL) "
+                                         "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+    "after_date+ticker": _THESES_PAGE_COLUMNS + "WHERE user_id = :u AND ticker COLLATE \"C\" = CAST(:t AS text) "
+                                                "COLLATE \"C\" "
+                                                "AND (created_at < :d OR (created_at = :d AND id < :i) OR created_at IS NULL) "
+                                                "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+    "after_null": _THESES_PAGE_COLUMNS + "WHERE user_id = :u AND (created_at IS NULL AND id < :i) "
+                                         "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+    "after_null+ticker": _THESES_PAGE_COLUMNS + "WHERE user_id = :u AND ticker COLLATE \"C\" = CAST(:t AS text) "
+                                                "COLLATE \"C\" AND (created_at IS NULL AND id < :i) "
+                                                "ORDER BY investment_theses.created_at DESC NULLS LAST, investment_theses.id DESC LIMIT :n",
+}
+# Détail : texte transféré seulement s'il respecte la borne brute.
+_READ_THESIS = (
+    "SELECT id, CASE WHEN octet_length(ticker) <= 512 THEN ticker END AS ticker, "
+    "octet_length(ticker) AS ticker_bytes, "
+    "CASE WHEN octet_length(thesis_text) <= 131072 THEN thesis_text END AS thesis_text, "
+    "octet_length(thesis_text) AS thesis_text_bytes, "
+    "CASE WHEN created_at >= TIMESTAMP '0001-01-01 00:00:00' AND created_at < TIMESTAMP '10000-01-01 00:00:00' "
+    "THEN created_at END AS created_at, (created_at IS NULL OR (created_at >= TIMESTAMP '0001-01-01 00:00:00' "
+    "AND created_at < TIMESTAMP '10000-01-01 00:00:00')) AS created_at_representable, "
+    "(SELECT s.id FROM analysis_sessions s WHERE s.id = investment_theses.analysis_session_id "
+    "AND s.user_id = investment_theses.user_id AND s.user_id = :u "
+    "AND s.ticker COLLATE \"C\" = investment_theses.ticker COLLATE \"C\") AS verified_session_id "
+    "FROM investment_theses WHERE id = :id AND user_id = :u")
 
 
 def _rows(conn, sql: str, **params):
@@ -299,6 +417,124 @@ def _read_delivery(conn, ctx, command, locked):
 def _list_conversation_deliveries(conn, ctx, command, locked):
     return tuple(_delivery(r) for r in _rows(conn, _LIST_CONVERSATION_DELIVERIES, u=ctx.principal.user_id,
                                              k=command.conversation_key))
+
+
+# --------------------------------------------------------------------------
+# R1 PR 8 : synthèse des analyses et historique des thèses (plan READ)
+# --------------------------------------------------------------------------
+
+def _restorable_ticker(row) -> str:
+    """Ticker rendu par la projection bornée ; hors borne : non restituable."""
+    if type(row["ticker_bytes"]) is not int or row["ticker_bytes"] > c.TICKER_MAX_BYTES:
+        raise ConsultationUnrepresentable("ticker non restituable")
+    if type(row["ticker"]) is not str:
+        raise AdapterInvariantBroken("ticker incohérent")
+    return row["ticker"]
+
+
+def _representable(row, value: str, flag: str):
+    """Date projetée seulement si elle tient dans le contrat public (années
+    0001 à 9999 UTC ; ±infinity et dates hors bornes exclues), avec son
+    indicateur (vrai aussi pour NULL) ; jamais lue ni convertie sinon."""
+    if row[flag] is not True:
+        raise ConsultationUnrepresentable("date non restituable")
+    return row[value]
+
+
+def _session_instant(row):
+    """TIMESTAMPTZ projeté en UTC par PostgreSQL (AT TIME ZONE 'UTC') :
+    indépendant du fuseau de la connexion."""
+    at = _representable(row, "session_updated_at", "session_updated_at_representable")
+    if type(at) is not datetime or at.tzinfo is not None:
+        raise AdapterInvariantBroken("date de session incohérente")
+    return at.replace(tzinfo=timezone.utc)
+
+
+def _overview_entry(row) -> c.AnalysisOverviewEntry:
+    """Session active prioritaire, sinon dernière thèse ; jamais d'étape de
+    substitution ni d'état completed inféré d'une thèse."""
+    try:
+        ticker = _restorable_ticker(row)
+        if row["session_id"] is not None:
+            step = row["current_step"] if row["current_step"] in c.ANALYSIS_STEPS else None
+            return c.AnalysisOverviewEntry(ticker, c.IN_PROGRESS, row["session_id"], step,
+                                           _session_instant(row), None,
+                                           c.overview_diagnostics(row["active_sessions"], step))
+        if row["thesis_id"] is None:
+            raise AdapterInvariantBroken("ticker sans session active ni thèse")
+        return c.AnalysisOverviewEntry(ticker, c.THESIS_AVAILABLE, None, None,
+                                       _representable(row, "thesis_created_at", "thesis_created_at_representable"),
+                                       row["thesis_id"], ())
+    except (KeyError, TypeError, ValueError):
+        raise AdapterInvariantBroken("synthèse incohérente") from None
+
+
+def _analysis_overview_page(conn, ctx, command, locked):
+    params = {"u": ctx.principal.user_id, "n": c.page_fetch_size(command.limit)}
+    if command.after_ticker is None:
+        found = _rows(conn, _ANALYSIS_OVERVIEW_PAGE["first"], **params)
+    else:
+        found = _rows(conn, _ANALYSIS_OVERVIEW_PAGE["after"], a=command.after_ticker, **params)
+    # La ligne supplémentaire ne dit que l'existence d'une page suivante.
+    entries = tuple(_overview_entry(r) for r in found[:command.limit])
+    try:
+        return c.AnalysisOverviewPage(entries, len(found) > command.limit)
+    except ValueError:
+        raise AdapterInvariantBroken("page de synthèse incohérente") from None
+
+
+def _thesis_entry(row) -> c.ThesisListEntry:
+    try:
+        ticker = _restorable_ticker(row)
+        if type(row["verified"]) is not bool:
+            raise TypeError("provenance")
+        return c.ThesisListEntry(row["id"], ticker, _representable(row, "created_at", "created_at_representable"),
+                                 c.VERIFIED if row["verified"] else c.UNVERIFIED)
+    except (KeyError, TypeError, ValueError):
+        raise AdapterInvariantBroken("thèse incohérente") from None
+
+
+def _theses_statement(command) -> str:
+    """Clé de l'instruction fermée : première page, après une date non
+    nulle ou après une date nulle ; avec ou sans filtre ticker."""
+    filtered = command.ticker is not None
+    if command.after_thesis_id is None:
+        return "first+ticker" if filtered else "first"
+    if command.after_created_at is None:
+        return "after_null+ticker" if filtered else "after_null"
+    return "after_date+ticker" if filtered else "after_date"
+
+
+def _theses_page(conn, ctx, command, locked):
+    params = {"u": ctx.principal.user_id, "n": c.page_fetch_size(command.limit)}
+    if command.ticker is not None:
+        params["t"] = command.ticker
+    if command.after_thesis_id is not None:
+        params["i"] = command.after_thesis_id
+    if command.after_created_at is not None:
+        params["d"] = command.after_created_at  # TIMESTAMP exact, sans conversion de fuseau
+    found = _rows(conn, _THESES_PAGE[_theses_statement(command)], **params)
+    entries = tuple(_thesis_entry(r) for r in found[:command.limit])
+    try:
+        return c.ThesesPage(entries, len(found) > command.limit)
+    except ValueError:
+        raise AdapterInvariantBroken("page de thèses incohérente") from None
+
+
+def _read_thesis(conn, ctx, command, locked):
+    row = _first(conn, _READ_THESIS, id=command.thesis_id, u=ctx.principal.user_id)
+    if row is None:
+        return ABSENT  # étrangère ou inexistante : indiscernables
+    try:
+        ticker = _restorable_ticker(row)
+        if type(row["thesis_text_bytes"]) is not int or row["thesis_text_bytes"] > c.THESIS_TEXT_MAX_BYTES:
+            raise ConsultationUnrepresentable("texte non restituable")
+        if type(row["thesis_text"]) is not str:
+            raise AdapterInvariantBroken("texte incohérent")
+        return c.ThesisDetailView(row["id"], ticker, row["thesis_text"],
+                                  _representable(row, "created_at", "created_at_representable"), row["verified_session_id"])
+    except (KeyError, TypeError, ValueError):
+        raise AdapterInvariantBroken("thèse incohérente") from None
 
 
 
@@ -505,4 +741,8 @@ REGISTRY = MappingProxyType({
     c.ReplacePortfolioPosition: Spec(c.PORTFOLIO_MUTATION, _lock_portfolio, _write_portfolio, PORTFOLIO_STATES,
                                      True),
     c.DeletePortfolioPosition: Spec(c.PORTFOLIO_MUTATION, _lock_portfolio, _write_portfolio, PORTFOLIO_STATES, True),
+    # R1 PR 8 : lectures sous le plan READ, sans verrou métier.
+    c.ListAnalysisOverviewPage: Spec(c.READ, _no_business_lock, _analysis_overview_page),
+    c.ListThesesPage: Spec(c.READ, _no_business_lock, _theses_page),
+    c.ReadThesis: Spec(c.READ, _no_business_lock, _read_thesis),
 })

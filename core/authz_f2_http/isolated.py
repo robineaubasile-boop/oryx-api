@@ -1,8 +1,10 @@
-"""Application personnelle ISOLÉE (R1 PR 5, R1 PR 6, R1 PR 7) — tests seulement.
+"""Application personnelle ISOLÉE (R1 PR 5, R1 PR 6, R1 PR 7, R1 PR 8) — tests seulement.
 
 build_isolated_personal_app construit une application FastAPI NEUVE qui ne
-contient que GET /api/v2/me, PUT /api/v2/me/level et les cinq routes
-/api/v2/me/portfolio de R1 PR 7. Elle n'est importée
+contient que GET /api/v2/me, PUT /api/v2/me/level, les cinq routes
+/api/v2/me/portfolio de R1 PR 7 et les trois lectures de R1 PR 8 (GET
+/api/v2/me/analysis-overview, GET /api/v2/me/theses, GET
+/api/v2/me/theses/{thesis_id}). Elle n'est importée
 par aucun module applicatif : api.py reste sans ces routes, quelles que
 soient les variables d'environnement (tests/test_authz_f2_dormancy.py). La
 composition qui la réunit aux routes /api/auth/f2/* de PR 3 / PR 4
@@ -32,6 +34,7 @@ from core.auth_f2_http.isolated import _NoStore
 from core.auth_f2_http.provenance import validate_allowed_origins
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.runner import AuthorizationConfigError, AuthorizedTransactionRunner
+from core.authz_f2_http.consultation import build_consultation_router
 from core.authz_f2_http.portfolio import build_portfolio_router
 from core.authz_f2_http.routes import PersonalDependencies, build_personal_router
 
@@ -82,11 +85,13 @@ def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyrin
 
 def make_personal_app(deps: PersonalDependencies) -> FastAPI:
     """Application neuve ne contenant que GET /api/v2/me, PUT
-    /api/v2/me/level et les routes /api/v2/me/portfolio (aucune
-    documentation OpenAPI, aucun CORS, en-têtes no-store sur toute réponse
-    y compris 404 / 405)."""
+    /api/v2/me/level, les routes /api/v2/me/portfolio et les lectures
+    /api/v2/me/analysis-overview et /api/v2/me/theses (aucune documentation
+    OpenAPI, aucun CORS, en-têtes no-store sur toute réponse y compris
+    404 / 405)."""
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.include_router(build_personal_router(deps))
     app.include_router(build_portfolio_router(deps))
+    app.include_router(build_consultation_router(deps))
     app.add_middleware(_NoStore)
     return app
