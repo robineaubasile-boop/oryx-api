@@ -24,6 +24,12 @@ prétend pas isoler le processus contre du code Python hostile.
   fermées (une par page ou par thèse), toujours filtrées par le user_id
   serveur, tickers sous COLLATE "C", thesis_text jamais lu hors du détail
   et projeté sous borne, provenance jointe sur id ET user_id ET ticker.
+- R1 PR 9-A : plan DECRYPTAGE_MUTATION (users FOR NO KEY UPDATE, instruction
+  fermée) sans aucune commande de production ; exception NOMINATIVE pour le
+  seul pont ORM privé core/authz_f2/_decryptage_orm_bridge.py (Session
+  sur la connexion du runner, rollback_only), chacune de ses capacités
+  étant bornée ici et dans tests/test_authz_f2_pr9a_boundary.py ; les
+  autres modules restent soumis à toutes les interdictions.
 """
 import ast
 import inspect
@@ -38,6 +44,8 @@ AUTHZ = REPO_ROOT / "core" / "authz_f2"
 AUTHZ_HTTP = REPO_ROOT / "core" / "authz_f2_http"
 BOUNDARY_FILES = sorted(list(AUTHZ.glob("*.py")) + list(AUTHZ_HTTP.glob("*.py")))
 ADAPTERS = AUTHZ / "_adapters.py"
+# R1 PR 9-A : unique module privilégié (exception nominative, V2.2-03).
+BRIDGE = AUTHZ / "_decryptage_orm_bridge.py"
 TRANSACTION_METHODS = {"commit", "rollback", "begin", "begin_nested", "connect", "close", "invalidate", "detach",
                        "exec_driver_sql", "execution_options", "raw_connection", "get_transaction"}
 FORBIDDEN_SQL = re.compile(r"\b(COMMIT|ROLLBACK|BEGIN|SAVEPOINT|RELEASE|SET|RESET|LOCK|DELETE|INSERT|TRUNCATE|DROP|"
@@ -56,6 +64,11 @@ def _attr_calls(tree):
     return {n.func.attr for n in _calls(tree) if isinstance(n.func, ast.Attribute)}
 
 
+def _function(tree, name):
+    (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
+    return node
+
+
 def test_sql_is_executed_only_by_the_audited_adapters():
     for path in BOUNDARY_FILES:
         tree = _tree(path)
@@ -64,6 +77,18 @@ def test_sql_is_executed_only_by_the_audited_adapters():
         texts = [n for n in _calls(tree) if isinstance(n.func, ast.Attribute) and n.func.attr == "text"]
         if path == ADAPTERS:
             assert executes and texts
+        elif path == BRIDGE:
+            # Aucun SQL textuel ; seules lectures ORM sans verrou de la
+            # propriété transitive (select(...) construit, jamais du texte).
+            assert texts == [], path.name
+            owner = _function(tree, "_require_owned_provenance")
+            assert {id(n) for n in executes} == {id(n) for n in _calls(owner) if isinstance(n.func, ast.Attribute)
+                                                and n.func.attr == "execute"}
+            assert len(executes) == 4  # lien, SupportTrace, events, AnalysisSessions
+            for call in executes:
+                (statement,) = call.args
+                assert isinstance(statement, ast.Call) and ast.unparse(statement).startswith("select("), path.name
+                assert "with_for_update" not in ast.unparse(statement)
         else:
             assert executes == [] and texts == [], path.name
 
@@ -71,9 +96,25 @@ def test_sql_is_executed_only_by_the_audited_adapters():
 def test_no_boundary_module_controls_a_transaction():
     for path in BOUNDARY_FILES:
         tree = _tree(path)
-        assert not _attr_calls(tree) & TRANSACTION_METHODS, path.name
         names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
             n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        if path == BRIDGE:
+            # Exception nominative R1 PR 9-A : la Session du pont, close() de
+            # son seul nettoyage, begin(nested=True) des SAVEPOINT des
+            # services, get_transaction() du contrôle de la transaction du
+            # runner ; rien d'autre (ni commit, rollback, connect, ...).
+            assert _attr_calls(tree) & TRANSACTION_METHODS == {"close", "begin", "get_transaction"}
+            located = {(n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                       for n in _calls(f) if isinstance(n.func, ast.Attribute) and n.func.attr in TRANSACTION_METHODS}
+            assert located == {("close", "_release"), ("begin", "begin"), ("get_transaction", "_require_live"),
+                               ("get_transaction", "_execute")}
+            for call in _calls(tree):
+                if isinstance(call.func, ast.Attribute) and call.func.attr in ("close", "begin"):
+                    assert ast.unparse(call) in ("super().close()", "super().begin(nested=True)"), ast.unparse(call)
+            assert not names & {"SessionLocal", "get_db", "sessionmaker", "create_engine"}, path.name
+            assert "Session" in names
+            continue
+        assert not _attr_calls(tree) & TRANSACTION_METHODS, path.name
         assert not names & {"SessionLocal", "get_db", "sessionmaker", "Session", "create_engine"}, path.name
     runner_tree = _tree(AUTHZ / "runner.py")
     opened = [n for n in _calls(runner_tree) if isinstance(n.func, ast.Name) and n.func.id == "transaction"]
@@ -132,7 +173,8 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
     statements = {k: v for k, v in _adapter_statements().items()
                   if not k.endswith(("_COLUMNS", "_RETURNING"))}
     assert set(statements) == {
-        "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_READ_PROFILE", "_LIST_POSITIONS",
+        "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_PROFILE[FOR NO KEY UPDATE]",
+        "_READ_PROFILE", "_LIST_POSITIONS",
         "_READ_POSITION", "_LIST_THESES", "_LIST_THESES_FOR_TICKER", "_READ_DELIVERY", "_LIST_CONVERSATION_DELIVERIES",
         "_UPDATE_PROFILE_LEVEL", "_TRANSACTION_ISOLATION", "_LOCK_RECEIPT", "_LOCK_POSITION", "_CREATE_POSITION",
         "_REPLACE_POSITION", "_DELETE_POSITION", "_INSERT_RECEIPT",
@@ -147,6 +189,7 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         prefix = WRITES.get(name, "SELECT ")
         assert sql.startswith(prefix), name
         assert not FORBIDDEN_SQL.search(sql.replace("FOR UPDATE", "").replace(prefix, "")), name
+        assert "NO KEY" not in sql or sql == "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE", name
         assert ":u" in sql, name  # toujours le user_id serveur
         if name in ("_CREATE_POSITION", "_INSERT_RECEIPT"):
             assert "VALUES (:u, " in sql and "WHERE" not in sql, name  # propriétaire = user_id serveur
@@ -198,7 +241,15 @@ def test_closed_registry_and_lock_plans():
     # R1 PR 7 : reçu puis position, sous READ COMMITTED vérifié.
     assert c.PORTFOLIO_MUTATION == c.LockPlan("portfolio_mutation", "FOR UPDATE",
                                               ("portfolio_write_idempotency", "portfolio_positions"), True)
-    assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION)
+    # R1 PR 9-A : users FOR NO KEY UPDATE, aucun verrou métier préparatoire,
+    # READ COMMITTED exigé ; aucune commande de production ne l'utilise.
+    assert c.DECRYPTAGE_MUTATION == c.LockPlan("decryptage_mutation", "FOR NO KEY UPDATE", (), True)
+    assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
+    assert all(spec.plan is not c.DECRYPTAGE_MUTATION for spec in _adapters.REGISTRY.values())
+    assert _adapters._LOCK_PROFILE["FOR NO KEY UPDATE"] == "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE"
+    assert dict(_adapters.ISOLATION_ALERTS) == {"portfolio_mutation": "portfolio_isolation_refused",
+                                                "decryptage_mutation": "decryptage_isolation_refused"}
+    assert {plan.name for plan in c.PLANS if plan.requires_read_committed} == set(_adapters.ISOLATION_ALERTS)
     assert not hasattr(c, "USER_MUTATION")
     assert c.SESSION_LOCK == c.GENERATION_LOCK == "FOR SHARE"
     assert set(_adapters._LOCK_PROFILE) == {plan.users_lock for plan in c.PLANS}
@@ -219,9 +270,14 @@ def test_no_operation_conn_principal_contract_remains():
     for path in BOUNDARY_FILES:
         if path == ADAPTERS:
             continue
+        receiving = set()
         for node in ast.walk(_tree(path)):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                assert "conn" not in [a.arg for a in node.args.args + node.args.kwonlyargs], (path.name, node.name)
+                if "conn" in [a.arg for a in node.args.args + node.args.kwonlyargs]:
+                    receiving.add(node.name)
+        # R1 PR 9-A : seules trois fonctions PRIVÉES du pont reçoivent la
+        # connexion du runner (point d'entrée, contrôle, Session du pont).
+        assert receiving == ({"_execute", "_require_live", "__init__"} if path == BRIDGE else set()), path.name
     public_adapters = {n.name for n in _tree(ADAPTERS).body if isinstance(n, ast.FunctionDef)
                        and not n.name.startswith("_")}
     # Seuls appels du runner hors registre : verrou users, isolation (R1 PR 7).
@@ -276,7 +332,8 @@ def test_business_locks_match_the_announced_plan():
     statements = _adapter_statements()
     locking = {name for name, sql in statements.items() if re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b",
                                                                      sql)}
-    assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_RECEIPT", "_LOCK_POSITION"}
+    assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_PROFILE[FOR NO KEY UPDATE]",
+                       "_LOCK_RECEIPT", "_LOCK_POSITION"}
     locked_tables = [re.search(r"FROM (\w+)", statements[name]).group(1) for name in ("_LOCK_RECEIPT",
                                                                                     "_LOCK_POSITION")]
     for spec in _adapters.REGISTRY.values():

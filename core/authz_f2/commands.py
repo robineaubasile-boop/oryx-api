@@ -23,6 +23,10 @@ les tables métiers, absentes de l'ordre F2, viennent après) :
                    UPDATE -> si aucun reçu, position propre FOR UPDATE
                    (PUT / DELETE ; CREATE n'en verrouille aucune). Exige
                    READ COMMITTED, vérifié au début de la phase B.
+- DECRYPTAGE_MUTATION (R1 PR 9-A) : users FOR NO KEY UPDATE -> oryx_sessions
+                   FOR SHARE -> oryx_session_generations FOR SHARE ; aucun
+                   verrou métier préparatoire ; READ COMMITTED vérifié.
+                   Aucune commande du registre de production ne l'utilise.
 
 PR 5 livrait des lectures et UNE mutation de démonstration interne
 (UpdatePositionQuantity, sans CAS) : R1 PR 7 la RETIRE du registre fermé
@@ -85,7 +89,14 @@ READ = LockPlan("read", "FOR KEY SHARE", ())
 PROFILE_MUTATION = LockPlan("profile_mutation", "FOR UPDATE", ())
 PORTFOLIO_MUTATION = LockPlan("portfolio_mutation", "FOR UPDATE",
                               ("portfolio_write_idempotency", "portfolio_positions"), True)
-PLANS = (READ, PROFILE_MUTATION, PORTFOLIO_MUTATION)
+# R1 PR 9-A (A-01) : futures mutations Décrypter F2, jamais les lectures.
+# users FOR NO KEY UPDATE sérialise deux mutations Décrypter d'un même
+# compte, reste compatible avec le FOR KEY SHARE des contrôles de FK et
+# entre en conflit avec FOR UPDATE (mutations de profil et de portefeuille).
+# Aucun verrou métier préparatoire : les verrous d'exécution sont ceux des
+# services métier, pris après T_authorization (core.authz_f2._decryptage_orm_bridge).
+DECRYPTAGE_MUTATION = LockPlan("decryptage_mutation", "FOR NO KEY UPDATE", (), True)
+PLANS = (READ, PROFILE_MUTATION, PORTFOLIO_MUTATION, DECRYPTAGE_MUTATION)
 SESSION_LOCK = "FOR SHARE"
 GENERATION_LOCK = "FOR SHARE"
 

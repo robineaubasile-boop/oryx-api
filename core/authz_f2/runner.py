@@ -70,6 +70,14 @@ rendu après l'autorisation par ROLLBACK ; REVISION_CONFLICT sert aussi au
 CAS des positions. Un rejeu est soumis exactement aux mêmes contrôles
 qu'une première exécution. Points d'interruption supplémentaires (tests) :
 position_written, receipt_ready, receipt_written.
+
+R1 PR 9-A (plan DECRYPTAGE_MUTATION) : même séquence de phase B, inchangée
+(READ COMMITTED vérifié, users FOR NO KEY UPDATE, session, génération,
+aucun verrou métier préparatoire, T_authorization, décision) ; le plan est
+seulement transmis à require_read_committed pour l'alerte. Aucune commande
+du registre de production n'utilise ce plan : il n'est exercé que par le
+banc d'essai isolé des tests (registre fermé de test composé et restauré
+par une fixture, pont ORM privé core.authz_f2._decryptage_orm_bridge).
 """
 import logging
 from dataclasses import dataclass
@@ -207,7 +215,7 @@ class AuthorizedTransactionRunner:
         try:
             with transaction(self._engine) as conn:
                 if spec.plan.requires_read_committed:
-                    _adapters.require_read_committed(conn)  # isolation réellement active, avant tout verrou
+                    _adapters.require_read_committed(conn, spec.plan)  # isolation réellement active, avant tout verrou
                 profile_locked = _adapters.lock_profile(conn, candidate_user_id, spec.plan)
                 locked = sessions.lock_session(conn, credential, generation_lock=GENERATION_LOCK)
                 business = spec.lock(conn, candidate_user_id, command) if profile_locked else None

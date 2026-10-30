@@ -36,6 +36,12 @@ ListThesesPage, ReadThesis ajoutées sous le plan READ inchangé ;
 ListTheses et ListThesesForTicker conservées) ; une instruction SQL
 métier par lecture, sans verrou métier ni écriture.
 
+R1 PR 9-A : plan DECRYPTAGE_MUTATION (users FOR NO KEY UPDATE) et pont
+ORM privé _decryptage_orm_bridge.py (seul module autorisé à construire une
+Session, sur la connexion du runner, join_transaction_mode rollback_only),
+sans aucune commande de production : le registre reste à quatorze
+commandes ; le pont n'est exercé que par le banc d'essai isolé des tests.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

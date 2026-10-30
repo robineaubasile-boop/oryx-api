@@ -77,6 +77,10 @@ PUBLIC_API = {
     "bind_analysis_session",
     "lock_delivery_for_ack",
     "acknowledge_delivery",
+    # R1 PR 9-A : chemin F2 propriétaire-centré (pont ORM privé, dormant).
+    "lock_owned_delivery",
+    "acknowledge_locked_delivery",
+    "bind_locked_analysis_session",
     "decryptage_request_fingerprint",
     "visible_content_fingerprint",
 }
@@ -158,6 +162,11 @@ def test_public_api_is_exact_and_keyword_only():
         "db", "assistant_turn_id", "user_id", "conversation_key"]
     assert list(inspect.signature(ad.bind_analysis_session).parameters) == [
         "db", "delivery_id", "analysis_session_id"]
+    assert list(inspect.signature(ad.lock_owned_delivery).parameters) == [
+        "db", "assistant_turn_id", "user_id", "conversation_key"]
+    assert list(inspect.signature(ad.acknowledge_locked_delivery).parameters) == ["db", "delivery", "user_id"]
+    assert list(inspect.signature(ad.bind_locked_analysis_session).parameters) == [
+        "db", "delivery", "user_id", "analysis_session_id"]
     assert list(inspect.signature(dp.apply_construction_these_progress).parameters) == [
         "db", "user_id", "ticker", "step", "thesis_text", "data", "user_contribution", "answered_step"]
 

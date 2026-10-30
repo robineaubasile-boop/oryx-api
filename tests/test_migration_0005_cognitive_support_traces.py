@@ -437,7 +437,13 @@ def test_t2a_tables_are_not_wired_to_the_application():
                # finalized et de leurs aides (tests/test_r1d1_*.py), et
                # découverte des events éligibles par le worker interne.
                "core/evaluation_input.py",
-               "core/evaluation_runtime.py"}
+               "core/evaluation_runtime.py",
+               # R1 PR 9-A : pont ORM privé F2 (dormant, non importé par
+               # api.py), qui LIT sans verrou le propriétaire des events de
+               # provenance d'une livraison avant l'ACK ; aucune écriture
+               # T2 hors de core/decryptage_cognitive_runtime.py
+               # (tests/test_authz_f2_pr9a_boundary.py).
+               "core/authz_f2/_decryptage_orm_bridge.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):
