@@ -56,6 +56,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR2_0018,
     PR2_FILES,
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_TABLES,
     _without_r1d1_changes,
     PR1_0015,
@@ -227,7 +228,7 @@ def test_offline_sql_of_0012_downgrade_reverts_exactly_r1c2():
 
 
 def test_metadata_declares_exactly_the_links_table_in_addition():
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PRE_R1C2_TABLES | R1C2_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | PRE_R1C2_TABLES | R1C2_TABLES
     assert DecryptageCognitiveLink.__table__ is Base.metadata.tables[LINKS]
 
 
@@ -347,7 +348,7 @@ def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F81
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
     assert _version(pg_engine) == PR9B1_0021
-    assert _tables(pg_engine) == HEAD_TABLES | PR1_TABLES | PR2_TABLES
+    assert _tables(pg_engine) == HEAD_TABLES | PR1_TABLES | PR2_TABLES | PR9B1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)

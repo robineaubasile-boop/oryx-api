@@ -242,7 +242,7 @@ def test_no_migration_added_by_t6b():
     assert script.get_revision(R1B).down_revision == T6A
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-12:-6] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE, R1D1_FILE]
+    assert files[-13:-7] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE, R1D1_FILE]
     assert files[-7:] == PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES
     assert len(files) == 21
 

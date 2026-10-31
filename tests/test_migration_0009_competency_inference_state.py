@@ -78,6 +78,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR2_FILES,
     PR2_REVISIONS,
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_FILES,
     PR1_REVISIONS,
     PR1_TABLES,
@@ -612,7 +613,7 @@ def test_offline_sql_of_0009_downgrade_drops_only_t6a():
 
 
 def test_metadata_declares_exactly_the_six_t6a_tables():
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                          | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     for model, name in zip(T6A_MODELS, TABLES_IN_ORDER):
         assert model.__tablename__ == name

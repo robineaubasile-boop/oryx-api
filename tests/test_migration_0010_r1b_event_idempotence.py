@@ -59,6 +59,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR2_FILES,
     PR2_REVISIONS,
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_FILES,
     PR1_REVISIONS,
     PR1_TABLES,
@@ -215,7 +216,7 @@ def test_offline_sql_of_0010_downgrade_reverts_exactly_r1b():
 def test_metadata_declares_exactly_the_r1b_registry_in_addition():
     """(+ assistant_deliveries de R1-C1 et decryptage_cognitive_links de
     R1-C2, testées à part.)"""
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | ALL_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | ALL_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
     assert ConversationIdentity.__table__ is Base.metadata.tables[CONVERSATIONS]
 
 
@@ -233,7 +234,12 @@ def test_conversation_identity_is_a_minimal_ownership_registry():
     assert [(fk.parent.name, fk.target_fullname, fk.ondelete, fk.onupdate, fk.name)
             for fk in table.foreign_keys] == [("user_id", "users.id", None, None, None)]
     assert not table.indexes
-    assert not [c for c in table.constraints if isinstance(c, (sa.UniqueConstraint, sa.CheckConstraint))]
+    assert not [c for c in table.constraints if isinstance(c, sa.CheckConstraint)]
+    # R1 PR 9-B1 (0021) : seule contrainte ajoutée, l'UNIQUE composite cible de
+    # la FK des réservations ; la clé reste unique à elle seule (PK).
+    assert [(c.name, [col.name for col in c.columns]) for c in table.constraints
+            if isinstance(c, sa.UniqueConstraint)] == [("uq_conversation_identities_key_owner",
+                                                       ["conversation_key", "user_id"])]
 
 
 def test_cognitive_event_r1b_columns_and_unique():
@@ -316,7 +322,7 @@ def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F81
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
     assert _version(pg_engine) == PR9B1_0021
-    assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES | PR1_TABLES | PR2_TABLES
+    assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES | PR1_TABLES | PR2_TABLES | PR9B1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)

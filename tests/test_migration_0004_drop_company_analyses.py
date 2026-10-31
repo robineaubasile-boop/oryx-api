@@ -287,7 +287,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
