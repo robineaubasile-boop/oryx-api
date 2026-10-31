@@ -31,6 +31,14 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _analysis_overview_page (R1 PR 8) | analysis_sessions + investment_theses | user_id (chaque sous-requête), keyset ticker | - |
 | _theses_page (R1 PR 8) | investment_theses (+ analysis_sessions pour la provenance) | user_id [ET ticker], keyset | - |
 | _read_thesis (R1 PR 8) | investment_theses (+ analysis_sessions pour la provenance) | id ET user_id | - |
+| _register_conversation (R1 PR 9-B1) | conversation_identities | lecture : conversation_key (propriété projetée en booléen pour :u) ; INSERT en SAVEPOINT, user_id serveur | - (FK users : KEY SHARE, compatible) |
+| _reserve_turn : verrou | decryptage_turn_reservations | user_id ET conversation_key ET surface ET source_user_turn_id ET delivery_ordinal | FOR UPDATE (après T_authorization) |
+| _reserve_turn / _record_attempt_failure : horloge | - | clock_timestamp() (T_lease_decision, après le verrou) | - |
+| _reserve_turn / _record_attempt_failure : livraison historique | assistant_deliveries | user_id ET identité complète du tour | - |
+| _reserve_turn : livraison liée (finalized) | assistant_deliveries | id ET user_id | - |
+| _insert_reservation | decryptage_turn_reservations | INSERT en SAVEPOINT, user_id serveur | (users déjà FOR NO KEY UPDATE) |
+| _grant_lease / _block_reservation / _release_lease | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch [ET compteur / jeton haché / échéance] | (ligne déjà verrouillée) |
+| _record_attempt_failure : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
 ABSENT : le filtre SQL porte simultanément l'identifiant et le user_id, la
@@ -111,7 +119,43 @@ plan pour journaliser une alerte propre (portfolio_isolation_refused
 inchangée). Aucune commande ni instruction métier nouvelle ici : les
 opérations Décrypter passent par le pont ORM privé
 core.authz_f2._decryptage_orm_bridge, absent du registre de production.
+
+R1 PR 9-B1 (plan DECRYPTAGE_MUTATION INCHANGÉ, spec.lock =
+_no_business_lock : aucun préverrouillage avant T_authorization) : deux
+commandes, ReserveDecryptageTurn et RecordDecryptageAttemptFailure, dont
+l'exécution reçoit le trousseau Décrypter DÉDIÉ (Spec.decryptage_keyed,
+distinct de Spec.keyed qui désigne exclusivement le trousseau
+portefeuille). Les verrous métier sont pris par l'adaptateur d'exécution
+APRÈS l'autorisation positive, dans cet ordre : (conversation : lecture,
+puis INSERT en SAVEPOINT si absente) -> réservation propre FOR UPDATE (ou
+INSERT en SAVEPOINT si absente) -> T_lease_decision = clock_timestamp()
+(instruction distincte, après le verrou) -> lectures de livraison
+historique (sans verrou) -> une seule mutation conditionnelle. Aucune
+AnalysisSession, aucune livraison, aucune ligne cognitive n'est
+verrouillée ni écrite.
+
+Conversation (E1.2) : seconde écriture applicative de
+conversation_identities, inventoriée ici, aux mêmes règles que
+core.interaction_identity : propriété lue avant création ; collision
+résoluble SEULEMENT si SQLSTATE 23505 ET contrainte exactement
+conversation_identities_pkey ou uq_conversation_identities_key_owner ;
+retour au SAVEPOINT, gagnant relu par une NOUVELLE instruction (READ
+COMMITTED), propriétaire vérifié ; même propriétaire : idempotent ; autre :
+ABSENT ; introuvable : refus fermé. Toute autre erreur est propagée.
+
+Réservation : INSERT en SAVEPOINT ; seule la violation 23505 de
+uq_decryptage_turn_reservations_turn est traduite (retour au SAVEPOINT,
+relecture verrouillée par une nouvelle instruction, puis même décision
+qu'un retry) ; toute autre contrainte est propagée. Une réservation
+existante est revérifiée avec ses versions ENREGISTRÉES (empreinte
+divergente : IDEMPOTENCY_CONFLICT, rien n'est écrit ; version ou clé
+introuvable : DecryptageUnavailable, 503). Toutes les mutations portent
+state = 'reserved' et l'epoch lu sous verrou : une ligne terminale n'est
+jamais modifiée ; identité, empreinte, versions et created_at ne sont
+jamais réécrits. Une capacité périmée (état, epoch, jeton ou échéance)
+rend CONFLICT : rien n'est écrit.
 """
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -119,6 +163,8 @@ from types import MappingProxyType
 import sqlalchemy as sa
 
 from core.authz_f2 import commands as c
+from core.authz_f2 import decryptage_fingerprint as dfp
+from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_fingerprint as fp
 from core.authz_f2 import portfolio_results as results
 from core.authz_f2 import portfolio_values as pv
@@ -734,13 +780,354 @@ def _write_portfolio(conn, ctx, command, state, keys, hook):
     return result
 
 
+# --------------------------------------------------------------------------
+# R1 PR 9-B1 : réservation durable des tours Décrypter (plan DECRYPTAGE_MUTATION)
+# --------------------------------------------------------------------------
+
+CONVERSATION_IDENTITY_CONSTRAINTS = ("conversation_identities_pkey", "uq_conversation_identities_key_owner")
+RESERVATION_TURN_CONSTRAINT = "uq_decryptage_turn_reservations_turn"
+UNIQUE_VIOLATION = "23505"
+LEASE_SECONDS = int(dr.LEASE_DURATION.total_seconds())
+
+_CONVERSATION_OWNED = "SELECT user_id = :u AS owned FROM conversation_identities WHERE conversation_key = :k"
+_REGISTER_CONVERSATION = ("INSERT INTO conversation_identities (conversation_key, user_id, created_at) "
+                          "VALUES (:k, :u, :at)")
+_RESERVATION_LIST_COLUMNS = ("id, user_id, conversation_key, surface, source_user_turn_id, delivery_ordinal, "
+                       "fingerprint_version, fingerprint_key_version, request_fingerprint, state, blocked_reason, "
+                       "lease_epoch, lease_token_hash, lease_expires_at, attempts_used, retry_not_before_at, "
+                       "assistant_delivery_id, finalized_at")
+_RESERVATION_COLUMNS = "SELECT " + _RESERVATION_LIST_COLUMNS + " FROM decryptage_turn_reservations "
+_RESERVATION_RETURNING = "RETURNING " + _RESERVATION_LIST_COLUMNS
+_LOCK_RESERVATION_TURN = (_RESERVATION_COLUMNS + "WHERE user_id = :u AND conversation_key = :k AND surface = :s "
+                          "AND source_user_turn_id = :t AND delivery_ordinal = :o FOR UPDATE")
+_LOCK_RESERVATION = _RESERVATION_COLUMNS + "WHERE id = :id AND user_id = :u FOR UPDATE"
+# T_lease_decision : instruction DISTINCTE, exécutée après l'obtention du verrou.
+_LEASE_DECISION_CLOCK = "SELECT clock_timestamp()"
+_LEGACY_DELIVERY = ("SELECT id FROM assistant_deliveries WHERE user_id = :u AND conversation_key = :k "
+                    "AND surface = :s AND source_user_turn_id = :t AND delivery_ordinal = :o")
+_LINKED_DELIVERY = ("SELECT id, conversation_key, surface, source_user_turn_id, delivery_ordinal "
+                    "FROM assistant_deliveries WHERE id = :id AND user_id = :u")
+_INSERT_RESERVATION = {
+    # Première attribution : epoch 1, une tentative, jeton haché, échéance
+    # = T_lease_decision + durée figée (arithmétique PostgreSQL).
+    "leased": ("INSERT INTO decryptage_turn_reservations (id, user_id, conversation_key, surface, "
+               "source_user_turn_id, delivery_ordinal, fingerprint_version, fingerprint_key_version, "
+               "request_fingerprint, state, lease_epoch, lease_token_hash, lease_expires_at, attempts_used, "
+               "created_at, updated_at) VALUES (:id, :u, :k, :s, :t, :o, :fv, :kv, :f, 'reserved', 1, :h, "
+               "CAST(:at AS timestamptz) + make_interval(secs => :d), 1, :at, :at) " + _RESERVATION_RETURNING),
+    # Livraison historique préexistante : blocage direct, aucun bail.
+    "blocked": ("INSERT INTO decryptage_turn_reservations (id, user_id, conversation_key, surface, "
+                "source_user_turn_id, delivery_ordinal, fingerprint_version, fingerprint_key_version, "
+                "request_fingerprint, state, blocked_reason, lease_epoch, attempts_used, created_at, updated_at) "
+                "VALUES (:id, :u, :k, :s, :t, :o, :fv, :kv, :f, 'blocked', 'legacy_collision', 0, 0, :at, :at) "
+                + _RESERVATION_RETURNING),
+}
+_GRANT_LEASE = ("UPDATE decryptage_turn_reservations SET lease_epoch = lease_epoch + 1, "
+                "attempts_used = attempts_used + 1, lease_token_hash = :h, "
+                "lease_expires_at = CAST(:at AS timestamptz) + make_interval(secs => :d), "
+                "retry_not_before_at = NULL, updated_at = :at "
+                "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                "AND attempts_used = :a " + _RESERVATION_RETURNING)
+_BLOCK_RESERVATION = ("UPDATE decryptage_turn_reservations SET state = 'blocked', blocked_reason = :reason, "
+                      "lease_token_hash = NULL, lease_expires_at = NULL, retry_not_before_at = NULL, "
+                      "updated_at = :at WHERE id = :id AND user_id = :u AND state = 'reserved' "
+                      "AND lease_epoch = :e AND attempts_used = :a " + _RESERVATION_RETURNING)
+_RELEASE_LEASE = ("UPDATE decryptage_turn_reservations SET lease_token_hash = NULL, lease_expires_at = NULL, "
+                  "retry_not_before_at = CAST(:at AS timestamptz) + make_interval(secs => :b), updated_at = :at "
+                  "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                  "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at "
+                  + _RESERVATION_RETURNING)
+
+
+class DecryptageUnavailable(AdapterInvariantBroken):
+    """Version ou clé Décrypter introuvable, réservation ou lien incohérent,
+    epoch épuisé : 503, rien n'est écrit (ROLLBACK)."""
+
+    def __init__(self, message: str, alert: str):
+        super().__init__(message)
+        self.alert = alert
+
+
+@dataclass(frozen=True, slots=True)
+class _Reservation:
+    """Ligne verrouillée, validée (aucune correction)."""
+    id: uuid.UUID
+    conversation_key: str
+    source_user_turn_id: uuid.UUID
+    fingerprint_version: str
+    fingerprint_key_version: str
+    request_fingerprint: str
+    state: str
+    blocked_reason: object
+    lease_epoch: int
+    lease_token_hash: object
+    lease_expires_at: object
+    attempts_used: int
+    retry_not_before_at: object
+    assistant_delivery_id: object
+    finalized_at: object
+
+
+def _sqlstate_and_constraint(exc) -> tuple:
+    diag = getattr(exc.orig, "diag", None)
+    return getattr(diag, "sqlstate", None), getattr(diag, "constraint_name", None)
+
+
+def _owned(row) -> bool:
+    if type(row["owned"]) is not bool:
+        raise AdapterInvariantBroken("propriété de conversation illisible")
+    return row["owned"]
+
+
+def _register_conversation(conn, user_id: str, conversation_key: str, at) -> bool:
+    """True : conversation du principal (lue ou créée) ; False : d'autrui."""
+    found = _first(conn, _CONVERSATION_OWNED, u=user_id, k=conversation_key)
+    if found is not None:
+        return _owned(found)
+    try:
+        with conn.begin_nested():  # SAVEPOINT local : seule la collision d'identité est traduite
+            conn.execute(sa.text(_REGISTER_CONVERSATION), {"k": conversation_key, "u": user_id, "at": at})
+    except sa.exc.IntegrityError as exc:
+        sqlstate, constraint = _sqlstate_and_constraint(exc)
+        if sqlstate != UNIQUE_VIOLATION or constraint not in CONVERSATION_IDENTITY_CONSTRAINTS:
+            raise
+        winner = _first(conn, _CONVERSATION_OWNED, u=user_id, k=conversation_key)  # nouvelle instruction
+        if winner is None:
+            raise AdapterInvariantBroken("collision de conversation sans gagnant visible") from None
+        return _owned(winner)
+    return True
+
+
+def _insert_reservation(conn, kind: str, params: dict):
+    """Ligne insérée, ou None si l'identité du tour existe déjà (gagnant
+    concurrent) ; toute autre erreur est propagée."""
+    try:
+        with conn.begin_nested():  # SAVEPOINT local : seule la collision d'identité du tour est traduite
+            return _first(conn, _INSERT_RESERVATION[kind], **params)
+    except sa.exc.IntegrityError as exc:
+        if _sqlstate_and_constraint(exc) != (UNIQUE_VIOLATION, RESERVATION_TURN_CONSTRAINT):
+            raise
+        return None
+
+
+def _lease_clock(conn) -> datetime:
+    at = conn.execute(sa.text(_LEASE_DECISION_CLOCK)).scalar_one()
+    if type(at) is not datetime or at.tzinfo is None:
+        raise AdapterInvariantBroken("horloge PostgreSQL illisible")
+    return at
+
+
+def _aware_or_none(value) -> bool:
+    return value is None or (type(value) is datetime and value.tzinfo is not None)
+
+
+def _reservation(row, user_id: str, turn=None) -> _Reservation:
+    """Contrôle structurel de la ligne verrouillée (défense en profondeur
+    des CHECK) ; tout écart : refus fermé, jamais de réparation."""
+    try:
+        res = _Reservation(row["id"], row["conversation_key"], row["source_user_turn_id"],
+                           row["fingerprint_version"], row["fingerprint_key_version"], row["request_fingerprint"],
+                           row["state"], row["blocked_reason"], row["lease_epoch"], row["lease_token_hash"],
+                           row["lease_expires_at"], row["attempts_used"], row["retry_not_before_at"],
+                           row["assistant_delivery_id"], row["finalized_at"])
+        valid = (type(res.id) is uuid.UUID and row["user_id"] == user_id and row["surface"] == dfp.SURFACE
+                 and row["delivery_ordinal"] == dfp.DELIVERY_ORDINAL and type(res.conversation_key) is str
+                 and type(res.source_user_turn_id) is uuid.UUID
+                 and all(type(v) is str for v in (res.fingerprint_version, res.fingerprint_key_version,
+                                                  res.request_fingerprint))
+                 and type(res.lease_epoch) is int and 0 <= res.lease_epoch <= dr.MAX_EPOCH
+                 and type(res.attempts_used) is int and 0 <= res.attempts_used <= dr.MAX_ATTEMPTS
+                 and all(_aware_or_none(v) for v in (res.lease_expires_at, res.retry_not_before_at,
+                                                     res.finalized_at))
+                 and res.state in dr.STATES)
+        if valid and turn is not None:
+            valid = (res.conversation_key, res.source_user_turn_id) == (turn["k"], turn["t"])
+        if valid and res.state == dr.RESERVED:
+            leased = res.lease_token_hash is not None and res.lease_expires_at is not None
+            released = res.lease_token_hash is None and res.lease_expires_at is None
+            valid = (res.blocked_reason is None and res.assistant_delivery_id is None and res.lease_epoch >= 1
+                     and ((leased and res.retry_not_before_at is None)
+                          or (released and res.retry_not_before_at is not None)))
+        elif valid and res.state == dr.BLOCKED:
+            valid = res.blocked_reason in dr.BLOCKED_REASONS and res.lease_token_hash is None
+        elif valid:  # finalized
+            valid = type(res.assistant_delivery_id) is uuid.UUID and res.finalized_at is not None
+    except KeyError:
+        valid = False
+    if not valid:
+        raise DecryptageUnavailable("réservation incohérente", "decryptage_reservation_incoherent")
+    return res
+
+
+def _turn(user_id: str, conversation_key: str, source_user_turn_id: uuid.UUID) -> dict:
+    return {"u": user_id, "k": conversation_key, "s": dfp.SURFACE, "t": source_user_turn_id,
+            "o": dfp.DELIVERY_ORDINAL}
+
+
+def _fingerprint(keys, fingerprint_version, key_version, user_id: str, command) -> str:
+    question, context = command.texts
+    try:
+        return dfp.fingerprint(keys, fingerprint_version, key_version, user_id=user_id,
+                               conversation_key=command.conversation_key,
+                               source_user_turn_id=command.client_turn_id, ticker=command.ticker,
+                               question=question, context=context, last_method_id=command.last_method_id)
+    except dfp.UnknownDecryptageKey:
+        raise DecryptageUnavailable("version ou clé Décrypter introuvable", "decryptage_key_unavailable") from None
+
+
+def _mutated(row, user_id: str, res: _Reservation, state: str, epoch: int, attempts: int) -> _Reservation:
+    """Ligne rendue par une mutation conditionnelle sous verrou : aucune
+    ligne = invariant rompu (jamais un faux conflit)."""
+    if row is None:
+        raise AdapterInvariantBroken("mutation conditionnelle sans ligne sous verrou")
+    out = _reservation(row, user_id)
+    if (out.id, out.state, out.lease_epoch, out.attempts_used) != (res.id, state, epoch, attempts):
+        raise AdapterInvariantBroken("valeurs écrites inattendues")
+    return out
+
+
+def _block(conn, user_id: str, res: _Reservation, reason: str, at) -> _Reservation:
+    row = _first(conn, _BLOCK_RESERVATION, reason=reason, at=at, id=res.id, u=user_id, e=res.lease_epoch,
+                 a=res.attempts_used)
+    return _mutated(row, user_id, res, dr.BLOCKED, res.lease_epoch, res.attempts_used)
+
+
+def _lease(res: _Reservation, token, attempts: int) -> dr.LeaseGranted:
+    return dr.LeaseGranted(dr.DecryptageLease(res.id, res.lease_epoch, token, res.lease_expires_at,
+                                              res.conversation_key, res.source_user_turn_id,
+                                              dfp.DELIVERY_ORDINAL), attempts)
+
+
+def _grant(conn, user_id: str, res: _Reservation, at) -> dr.LeaseGranted:
+    """Nouvelle attribution : epoch et compteur + 1, nouveau jeton, échéance
+    = T_lease_decision + 360 s ; jamais sur le même epoch."""
+    if res.lease_epoch >= dr.MAX_EPOCH or res.attempts_used >= dr.MAX_ATTEMPTS:
+        raise DecryptageUnavailable("epoch ou compteur maximal atteint", "decryptage_epoch_exhausted")
+    token = dr.LeaseToken.generate()
+    row = _first(conn, _GRANT_LEASE, h=token.digest(), at=at, d=LEASE_SECONDS, id=res.id, u=user_id,
+                 e=res.lease_epoch, a=res.attempts_used)
+    out = _mutated(row, user_id, res, dr.RESERVED, dr.next_epoch(res.lease_epoch), dr.next_attempt(res.attempts_used))
+    if not token.matches(out.lease_token_hash) or out.lease_expires_at is None or out.retry_not_before_at is not None:
+        raise AdapterInvariantBroken("bail écrit inattendu")
+    return _lease(out, token, out.attempts_used)
+
+
+def _legacy_delivery(conn, turn: dict) -> bool:
+    return _first(conn, _LEGACY_DELIVERY, **turn) is not None
+
+
+def _finalized(conn, user_id: str, res: _Reservation) -> dr.ReservationFinalized:
+    """Lien de livraison relu (id ET user_id) et identité complète comparée :
+    un état finalized manifestement incohérent n'est jamais présenté."""
+    linked = _first(conn, _LINKED_DELIVERY, id=res.assistant_delivery_id, u=user_id)
+    if linked is None or (linked["conversation_key"], linked["surface"], linked["source_user_turn_id"],
+                          linked["delivery_ordinal"]) != (res.conversation_key, dfp.SURFACE,
+                                                          res.source_user_turn_id, dfp.DELIVERY_ORDINAL):
+        raise DecryptageUnavailable("réservation finalisée incohérente", "decryptage_reservation_incoherent")
+    return dr.ReservationFinalized(res.id, res.assistant_delivery_id)
+
+
+def _decide_reserved(conn, user_id: str, res: _Reservation, turn: dict, at):
+    """Décision sur une réservation 'reserved' verrouillée, à T_lease_decision."""
+    if _legacy_delivery(conn, turn):  # collision prouvée : prévaut sur le bail, le backoff et la reprise
+        return dr.ReservationBlocked(_block(conn, user_id, res, dr.LEGACY_COLLISION, at).id, dr.LEGACY_COLLISION)
+    if res.lease_token_hash is not None:
+        if at < res.lease_expires_at:  # bail actif, même au plafond : aucun second détenteur
+            return dr.ReservationInProgress(res.id, res.lease_epoch, res.lease_expires_at)
+    elif at < res.retry_not_before_at:
+        return dr.ReservationRetryDeferred(res.id, res.retry_not_before_at, res.attempts_used)
+    if res.attempts_used >= dr.MAX_ATTEMPTS:
+        return dr.ReservationBlocked(_block(conn, user_id, res, dr.ATTEMPTS_EXHAUSTED, at).id, dr.ATTEMPTS_EXHAUSTED)
+    return _grant(conn, user_id, res, at)
+
+
+def _reserve_turn(conn, ctx, command, locked, keys):
+    user_id = ctx.principal.user_id
+    if not _register_conversation(conn, user_id, command.conversation_key, ctx.authorized_at):
+        return ABSENT  # conversation d'autrui : rien n'est écrit (ROLLBACK)
+    turn = _turn(user_id, command.conversation_key, command.client_turn_id)
+    row = _first(conn, _LOCK_RESERVATION_TURN, **turn)
+    if row is None:
+        at = _lease_clock(conn)
+        params = {"id": uuid.uuid4(), **turn, "fv": dfp.FINGERPRINT_VERSION, "kv": keys.current_version,
+                  "f": _fingerprint(keys, dfp.FINGERPRINT_VERSION, keys.current_version, user_id, command),
+                  "at": at}
+        if _legacy_delivery(conn, turn):
+            inserted = _insert_reservation(conn, "blocked", params)
+            if inserted is not None:
+                created = _reservation(inserted, user_id, turn)
+                if (created.state, created.blocked_reason, created.lease_epoch, created.attempts_used) != (
+                        dr.BLOCKED, dr.LEGACY_COLLISION, 0, 0):
+                    raise AdapterInvariantBroken("blocage écrit inattendu")
+                return dr.ReservationBlocked(created.id, dr.LEGACY_COLLISION)
+        else:
+            token = dr.LeaseToken.generate()
+            inserted = _insert_reservation(conn, "leased", {**params, "h": token.digest(), "d": LEASE_SECONDS})
+            if inserted is not None:
+                created = _reservation(inserted, user_id, turn)
+                if (created.state, created.lease_epoch, created.attempts_used) != (dr.RESERVED, 1, 1) \
+                        or not token.matches(created.lease_token_hash):
+                    raise AdapterInvariantBroken("bail écrit inattendu")
+                return _lease(created, token, 1)
+        row = _first(conn, _LOCK_RESERVATION_TURN, **turn)  # gagnant relu par une NOUVELLE instruction
+        if row is None:
+            raise AdapterInvariantBroken("collision de réservation sans gagnant visible")
+    at = _lease_clock(conn)  # T_lease_decision : après le verrou de la réservation
+    res = _reservation(row, user_id, turn)
+    computed = _fingerprint(keys, res.fingerprint_version, res.fingerprint_key_version, user_id, command)
+    if not dfp.same_fingerprint(computed, res.request_fingerprint):
+        return IDEMPOTENCY_CONFLICT  # autre intention pour la même identité : rien n'est écrit
+    if res.state == dr.FINALIZED:
+        return _finalized(conn, user_id, res)
+    if res.state == dr.BLOCKED:
+        return dr.ReservationBlocked(res.id, res.blocked_reason)
+    return _decide_reserved(conn, user_id, res, turn, at)
+
+
+def _record_attempt_failure(conn, ctx, command, locked, keys):
+    user_id = ctx.principal.user_id
+    row = _first(conn, _LOCK_RESERVATION, id=command.reservation_id, u=user_id)
+    if row is None:
+        return ABSENT  # absente ou d'autrui : indiscernables, aucun verrou sur la ligne d'autrui
+    at = _lease_clock(conn)  # T_lease_decision : après le verrou
+    res = _reservation(row, user_id)
+    if (res.state != dr.RESERVED or res.lease_epoch != command.lease_epoch or res.lease_token_hash is None
+            or not command.lease_token.matches(res.lease_token_hash) or not at < res.lease_expires_at):
+        return CONFLICT  # capacité périmée (état, epoch, jeton ou échéance) : rien n'est écrit
+    turn = _turn(user_id, res.conversation_key, res.source_user_turn_id)
+    if _legacy_delivery(conn, turn):
+        out = _block(conn, user_id, res, dr.LEGACY_COLLISION, at)
+    elif res.attempts_used >= dr.MAX_ATTEMPTS:
+        out = _block(conn, user_id, res, dr.ATTEMPTS_EXHAUSTED, at)
+    else:
+        row = _first(conn, _RELEASE_LEASE, at=at, b=int(dr.backoff_after(res.attempts_used).total_seconds()),
+                     id=res.id, u=user_id, e=res.lease_epoch, a=res.attempts_used, h=res.lease_token_hash)
+        out = _mutated(row, user_id, res, dr.RESERVED, res.lease_epoch, res.attempts_used)
+        if out.lease_token_hash is not None or out.retry_not_before_at is None:
+            raise AdapterInvariantBroken("libération écrite inattendue")
+    return dr.AttemptFailureRecorded(out.id, out.state, out.blocked_reason, out.retry_not_before_at,
+                                     out.attempts_used)
+
+
+class SpecError(TypeError):
+    """Spécification de commande hors contrat (registre impossible à construire)."""
+
+
 @dataclass(frozen=True)
 class Spec:
     plan: c.LockPlan
     lock: object     # (conn, owner_id, command) -> état verrouillé ; avant T_authorization
     execute: object  # (conn, ctx, command, état[, keys, hook]) -> vue | ABSENT | CONFLICT | ... ; après la décision
     states: tuple = NO_BUSINESS_STATE  # types EXACTS d'état verrouillé admis (registre fermé)
-    keyed: bool = False  # True : reçoit le trousseau portefeuille et les points d'interruption
+    keyed: bool = False  # True : reçoit le trousseau PORTEFEUILLE et les points d'interruption
+    # R1 PR 9-B1 : True : reçoit le trousseau DÉCRYPTER (jamais les deux familles).
+    decryptage_keyed: bool = False
+
+    def __post_init__(self):
+        if type(self.keyed) is not bool or type(self.decryptage_keyed) is not bool:
+            raise SpecError("familles de clés : booléens attendus")
+        if self.keyed and self.decryptage_keyed:
+            raise SpecError("une commande ne reçoit jamais deux familles de clés")
 
 
 # Registre FERMÉ : type exact de commande -> plan et adaptateurs. Toute
@@ -762,4 +1149,8 @@ REGISTRY = MappingProxyType({
     c.ListAnalysisOverviewPage: Spec(c.READ, _no_business_lock, _analysis_overview_page),
     c.ListThesesPage: Spec(c.READ, _no_business_lock, _theses_page),
     c.ReadThesis: Spec(c.READ, _no_business_lock, _read_thesis),
+    # R1 PR 9-B1 : réservation Décrypter, aucun verrou préparatoire, trousseau Décrypter.
+    c.ReserveDecryptageTurn: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _reserve_turn, decryptage_keyed=True),
+    c.RecordDecryptageAttemptFailure: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _record_attempt_failure,
+                                           decryptage_keyed=True),
 })

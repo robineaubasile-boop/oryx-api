@@ -32,6 +32,22 @@ Invariants :
   quelle, après retour au SAVEPOINT. begin_nested() flushe les écritures
   en attente de l'appelant AVANT d'émettre le SAVEPOINT : celui-ci ne
   contient que l'INSERT du registre et son annulation ne les touche pas.
+
+- R1 PR 9-B1 (E1.2) : la migration 0021 ajoute la contrainte UNIQUE
+  uq_conversation_identities_key_owner (conversation_key, user_id), cible
+  de la FK composite des réservations Décrypter. Une insertion concurrente
+  de la même clé peut être signalée par PostgreSQL sur l'une OU l'autre
+  contrainte (l'ordre de contrôle des index uniques n'est pas un contrat).
+  Une collision n'est donc résoluble que si SQLSTATE vaut 23505
+  (unique_violation) ET que le nom de contrainte rapporté est EXACTEMENT
+  conversation_identities_pkey ou uq_conversation_identities_key_owner ;
+  le gagnant est alors relu par sa clé et son propriétaire vérifié comme
+  avant. Toute autre IntegrityError reste propagée telle quelle. Seul ce
+  prédicat privé change ; interface, SAVEPOINT, relecture, populate_existing
+  et refus de réattribution sont inchangés. Les réservations F2 écrivent le
+  registre par un adaptateur SQL fermé distinct de la frontière
+  d'autorisation F2 (_register_conversation), soumis aux mêmes
+  règles.
 """
 from datetime import datetime, timezone
 
@@ -41,6 +57,10 @@ from sqlalchemy.exc import IntegrityError
 from core.models import ConversationIdentity
 
 PRIMARY_KEY_CONSTRAINT = "conversation_identities_pkey"
+# R1 PR 9-B1 (migration 0021) : seconde contrainte d'identité de la clé.
+OWNER_UNIQUE_CONSTRAINT = "uq_conversation_identities_key_owner"
+IDENTITY_COLLISION_CONSTRAINTS = (PRIMARY_KEY_CONSTRAINT, OWNER_UNIQUE_CONSTRAINT)
+UNIQUE_VIOLATION = "23505"
 
 
 class InteractionIdentityError(Exception):
@@ -68,9 +88,12 @@ def _require_identifier(value, name: str) -> str:
     return value
 
 
-def _is_primary_key_violation(exc: IntegrityError) -> bool:
+def _is_identity_collision(exc: IntegrityError) -> bool:
+    """unique_violation (23505) sur l'une des DEUX contraintes d'identité de
+    la clé, et rien d'autre (FK, NOT NULL, CHECK, autre contrainte : faux)."""
     diag = getattr(exc.orig, "diag", None)
-    return getattr(diag, "constraint_name", None) == PRIMARY_KEY_CONSTRAINT
+    return (getattr(diag, "sqlstate", None) == UNIQUE_VIOLATION
+            and getattr(diag, "constraint_name", None) in IDENTITY_COLLISION_CONSTRAINTS)
 
 
 def _resolve(db, conversation_key: str, user_id: str) -> ConversationIdentity | None:
@@ -103,7 +126,7 @@ def register_or_resolve_conversation(db, *, user_id: str, conversation_key: str)
             db.add(identity)
             db.flush()
     except IntegrityError as exc:
-        if not _is_primary_key_violation(exc):
+        if not _is_identity_collision(exc):
             raise
         winner = _resolve(db, conversation_key, user_id)
         if winner is None:

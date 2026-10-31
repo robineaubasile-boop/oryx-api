@@ -19,7 +19,7 @@ pont) et tests/test_authz_f2_dormancy.py (matrice d'imports) :
    filtré) ;
 5. imports transitifs inventoriés, aucun réseau, aucune connexion à
    l'import (même avec DATABASE_URL) ;
-6. registre de production inchangé (quatorze commandes), runner public
+6. registre de production (seize commandes depuis R1 PR 9-B1), runner public
    inchangé, api:app ne charge pas le pont, aucune migration.
 """
 import ast
@@ -64,7 +64,7 @@ REACHABLE = {
             "_require_existing_user", "_resolve_conversation", "_delivery_by_identity", "_same_request_or_collision",
             "_is_turn_unique_violation", "_utcnow", "_require_text", "_require_owned", "_bind_locked"},
         "core.interaction_identity": {"register_or_resolve_conversation", "_require_identifier", "_resolve",
-                                      "_is_primary_key_violation", "_utcnow"},
+                                      "_is_identity_collision", "_utcnow"},
         "core.decryptage_cognitive_runtime": {
             "runtime_private_metadata", "capture_user_turn", "answered_step", "record_turn_progress",
             "_runtime_version", "_lock_link", "_lock_active_analysis_session", "_conversation_anchor_event_id",
@@ -91,7 +91,7 @@ REACHABLE = {
             "_event_dedup_key", "_check_analysis_session_owner", "_event_by_dedup_key",
             "_same_event_or_collision", "_json_equal", "_json_number", "_is_dedup_violation", "_utcnow"},
         "core.interaction_identity": {"register_or_resolve_conversation", "_require_identifier", "_resolve",
-                                      "_is_primary_key_violation", "_utcnow"},
+                                      "_is_identity_collision", "_utcnow"},
     },
 }
 SAVEPOINT_OWNERS = {("core.assistant_delivery", "claim_delivery"),
@@ -390,7 +390,10 @@ print(json.dumps({"loaded": loaded, "attempts": attempts, "engine": core.db.engi
 '''
 TRANSITIVE_CORE_IMPORTS = [
     "core", "core.assistant_delivery", "core.authz_f2", "core.authz_f2._adapters",
-    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands", "core.authz_f2.portfolio_fingerprint",
+    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands",
+    # R1 PR 9-B1 : modules purs importés par commands / _adapters.
+    "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
+    "core.authz_f2.portfolio_fingerprint",
     "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values", "core.authz_f2.principal",
     "core.cognitive_capture", "core.db", "core.decryptage_cognitive_runtime", "core.decryptage_progress",
     "core.interaction_identity", "core.models"]
@@ -414,14 +417,17 @@ def test_importing_the_bridge_is_inventoried_and_opens_nothing(database_url):
 # 6. Registre de production, runner, api:app, migrations
 # --------------------------------------------------------------------------
 
-def test_production_registry_stays_closed_at_fourteen_commands():
-    assert len(_adapters.REGISTRY) == 14
-    assert all(spec.plan is not c.DECRYPTAGE_MUTATION for spec in _adapters.REGISTRY.values())
+def test_production_registry_stays_closed_at_sixteen_commands():
+    # R1 PR 9-B1 : seize commandes ; les DEUX seules sous DECRYPTAGE_MUTATION
+    # sont les commandes de réservation, exécutées par _adapters (jamais par le pont).
+    assert len(_adapters.REGISTRY) == 16
+    assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}
     assert all(spec.execute.__module__ == _adapters.__name__ for spec in _adapters.REGISTRY.values())
     assert not set(bridge.OPERATIONS) & set(_adapters.REGISTRY)
     assert list(inspect.signature(AuthorizedTransactionRunner.run).parameters) == ["self", "credential", "command"]
     assert list(inspect.signature(AuthorizedTransactionRunner.__init__).parameters) == [
-        "self", "engine", "keyring", "portfolio_keyring", "clock", "fault_hook"]
+        "self", "engine", "keyring", "portfolio_keyring", "decryptage_keyring", "clock", "fault_hook"]
     for path in (REPO_ROOT / "core" / "authz_f2_http").glob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert "DECRYPTAGE_MUTATION" not in text and "TurnFinalization" not in text and "decryptage" not in text.lower()
@@ -446,7 +452,7 @@ def test_bench_commands_are_unknown_outside_the_isolated_fixture():
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().splitlines()[-1] == "14 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
+    assert out.stdout.strip().splitlines()[-1] == "16 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
 
 
 def test_real_entrypoint_never_loads_the_bridge():
@@ -464,9 +470,11 @@ def test_real_entrypoint_never_loads_the_bridge():
 
 
 def test_no_migration_and_no_new_table():
+    # PR 9-A n'avait ajouté aucune migration ; R1 PR 9-B1 ajoute 0021 (tête),
+    # que le pont et le service de livraison ne référencent toujours pas.
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 20 and versions[-1] == "0020_position_revision.py"
-    assert not any("0021" in name for name in versions)
+    assert len(versions) == 21 and versions[-2:] == ["0020_position_revision.py",
+                                                     "0021_decryptage_turn_reservations.py"]
     source = BRIDGE.read_text(encoding="utf-8") + (REPO_ROOT / "core" / "assistant_delivery.py").read_text("utf-8")
     assert "decryptage_turn_reservations" not in source and "__tablename__" not in source
 

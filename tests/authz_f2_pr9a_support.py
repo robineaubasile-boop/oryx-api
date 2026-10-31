@@ -3,12 +3,12 @@ exacts, registre fermé de test, observation des écritures et parcours
 historiques réels.
 
 Le registre de test n'existe que dans ce module de tests : il réunit les
-quatorze commandes de production (inchangées) et deux commandes de banc
+seize commandes de production (R1 PR 9-B1) et deux commandes de banc
 (BenchTurn, BenchAck) dont l'adaptateur d'exécution appelle le VRAI pont
 (core.authz_f2._decryptage_orm_bridge._execute) sous le VRAI runner, plan
 DECRYPTAGE_MUTATION. La fixture `bench` le substitue à
 core.authz_f2._adapters.REGISTRY le temps d'un test (monkeypatch), puis
-vérifie que l'objet de production d'origine (quatorze commandes) est
+vérifie que l'objet de production d'origine (seize commandes) est
 restauré. Aucun paramètre du runner, aucun drapeau ni variable
 d'environnement n'active ces commandes ; hors de cette fixture, le runner
 les refuse (UnknownCommand).
@@ -74,12 +74,12 @@ BENCH_REGISTRY = MappingProxyType({
 @pytest.fixture
 def bench(monkeypatch):
     """Registre fermé de TEST pendant un test, puis registre de production
-    d'origine (même objet, quatorze commandes)."""
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(PRODUCTION_REGISTRY) == 14
+    d'origine (même objet, seize commandes depuis R1 PR 9-B1)."""
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(PRODUCTION_REGISTRY) == 16
     monkeypatch.setattr(_adapters, "REGISTRY", BENCH_REGISTRY)
     yield BENCH_REGISTRY
     monkeypatch.undo()
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 14
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 16
     assert BenchTurn not in _adapters.REGISTRY and BenchAck not in _adapters.REGISTRY
 
 

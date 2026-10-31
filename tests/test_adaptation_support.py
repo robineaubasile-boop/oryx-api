@@ -1467,7 +1467,7 @@ def test_not_wired_to_api_web_chat_nor_migrated():
     for word in ("web_chat", "fastapi", "request_handler", "api"):
         assert word not in tokens.split(), word
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0020_position_revision.py" and len(versions) == 20
+    assert versions[-1] == "0021_decryptage_turn_reservations.py" and len(versions) == 21
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     for word in ("support_plan", "SupportPlan", "operation_allocation", "conceptual_bridge", "posture"):
         assert word not in models, word

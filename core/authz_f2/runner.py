@@ -78,6 +78,23 @@ seulement transmis à require_read_committed pour l'alerte. Aucune commande
 du registre de production n'utilise ce plan : il n'est exercé que par le
 banc d'essai isolé des tests (registre fermé de test composé et restauré
 par une fixture, pont ORM privé core.authz_f2._decryptage_orm_bridge).
+
+R1 PR 9-B1 : deux commandes du registre de production utilisent
+DECRYPTAGE_MUTATION (ReserveDecryptageTurn, RecordDecryptageAttemptFailure),
+séquence de phase B INCHANGÉE (spec.lock = _no_business_lock : aucun
+préverrouillage ; leurs verrous métier sont pris par l'adaptateur
+d'exécution, après la décision). Dépendance facultative DÉDIÉE
+decryptage_keyring (DecryptageKeyring, type exact ; aucune de ses clés ne
+peut être une clé F2 ou portefeuille) : Spec.keyed désigne toujours et
+seulement le trousseau portefeuille, Spec.decryptage_keyed le trousseau
+Décrypter ; les deux à la fois sont refusés à la construction de Spec et,
+par défense, ici (UNAVAILABLE, alerte key_families_conflict, avant toute
+transaction). Absente : les deux commandes Décrypter rendent
+UNAVAILABLE avant toute transaction ; les autres commandes sont
+inchangées. Un résultat AUTHORIZED de ces commandes n'autorise aucun appel
+externe : seul un LeaseGranted (capacité rendue après COMMIT confirmé) le
+permettra à PR 9-B2. Un blocage durable est une vue normale, committée
+(jamais une sentinelle de ROLLBACK).
 """
 import logging
 from dataclasses import dataclass
@@ -85,10 +102,11 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 
 from core.auth_f2 import sessions
-from core.auth_f2.keys import Keyring
+from core.auth_f2.keys import PURPOSES, Keyring
 from core.auth_f2.txn import pg_clock, transaction
 from core.authz_f2 import _adapters
 from core.authz_f2.commands import GENERATION_LOCK
+from core.authz_f2.decryptage_fingerprint import DecryptageKeyring
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.principal import AuthorizedContext, AuthorizedPrincipal
 
@@ -136,24 +154,38 @@ _INCOHERENT = object()
 class AuthorizedTransactionRunner:
     """engine : moteur SQLAlchemy PostgreSQL ; keyring : trousseau F2 (le
     même que le moteur F2) ; portfolio_keyring : trousseau portefeuille
-    dédié (R1 PR 7, facultatif) ; clock : horloge PostgreSQL (pg_clock),
+    dédié (R1 PR 7, facultatif) ; decryptage_keyring : trousseau Décrypter
+    dédié (R1 PR 9-B1, facultatif) ; clock : horloge PostgreSQL (pg_clock),
     remplaçable par les tests de frontières ; fault_hook : points
     d'interruption des tests (HOOK_POINTS)."""
 
-    __slots__ = ("_engine", "_keys", "_portfolio", "_clock", "_hook")
+    __slots__ = ("_engine", "_keys", "_portfolio", "_decryptage", "_clock", "_hook")
 
-    def __init__(self, engine, keyring, *, portfolio_keyring=None, clock=pg_clock, fault_hook=None):
+    def __init__(self, engine, keyring, *, portfolio_keyring=None, decryptage_keyring=None, clock=pg_clock,
+                 fault_hook=None):
         if not isinstance(engine, sa.engine.Engine) or engine.dialect.name != "postgresql":
             raise AuthorizationConfigError("moteur PostgreSQL attendu")
         if not isinstance(keyring, Keyring):
             raise AuthorizationConfigError("trousseau F2 attendu")
         if portfolio_keyring is not None and type(portfolio_keyring) is not PortfolioKeyring:
             raise AuthorizationConfigError("trousseau portefeuille attendu")
+        if decryptage_keyring is not None:
+            if type(decryptage_keyring) is not DecryptageKeyring:
+                raise AuthorizationConfigError("trousseau Décrypter attendu")
+            # Indépendance des trousseaux : aucun repli, aucune clé partagée.
+            for purpose in PURPOSES:
+                for version in keyring.versions(purpose):
+                    if decryptage_keyring.has_key_value(keyring.key(purpose, version)):
+                        raise AuthorizationConfigError("clé Décrypter identique à une clé F2")
+            if portfolio_keyring is not None and any(
+                    portfolio_keyring.has_key_value(decryptage_keyring.key(v)) for v in decryptage_keyring.versions()):
+                raise AuthorizationConfigError("clé Décrypter identique à une clé portefeuille")
         if not callable(clock) or (fault_hook is not None and not callable(fault_hook)):
             raise AuthorizationConfigError("horloge et point d'interruption appelables attendus")
         self._engine = engine
         self._keys = keyring
         self._portfolio = portfolio_keyring
+        self._decryptage = decryptage_keyring
         self._clock = clock
         self._hook = fault_hook or (lambda point: None)
 
@@ -168,8 +200,14 @@ class AuthorizedTransactionRunner:
         if spec is None:
             raise UnknownCommand("commande hors du registre fermé")
         name = type(command).__name__
+        if spec.keyed and spec.decryptage_keyed:  # jamais deux familles de clés (défense : Spec le refuse déjà)
+            logger.error("authz_f2 %s status=%s alert=key_families_conflict", name, UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE)
         if spec.keyed and self._portfolio is None:
             logger.warning("authz_f2 %s status=%s error=portfolio_keyring_missing", name, UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE)
+        if spec.decryptage_keyed and self._decryptage is None:
+            logger.warning("authz_f2 %s status=%s error=decryptage_keyring_missing", name, UNAVAILABLE)
             return AuthorizationOutcome(UNAVAILABLE)
         try:
             outcome = self._run(credential, command, spec)
@@ -232,6 +270,8 @@ class AuthorizedTransactionRunner:
                 self._hook("authorized")
                 if spec.keyed:
                     value = spec.execute(conn, context, command, business, self._portfolio, self._hook)
+                elif spec.decryptage_keyed:
+                    value = spec.execute(conn, context, command, business, self._decryptage)
                 else:
                     value = spec.execute(conn, context, command, business)
                 if value is _adapters.ABSENT:

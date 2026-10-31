@@ -25,7 +25,13 @@ d'autorisation (core/authz_f2) ni la route personnelle (core/authz_f2_http) :
   historiques et core.models, donc core.db indirectement) ; aucun module de
   production ne l'importe, le vrai api:app ne le charge pas, aucune
   migration (tête 0020_position_revision) ; ses imports transitifs et leur
-  absence de réseau sont vérifiés par tests/test_authz_f2_pr9a_boundary.py.
+  absence de réseau sont vérifiés par tests/test_authz_f2_pr9a_boundary.py ;
+- R1 PR 9-B1 : deux modules PURS (decryptage_fingerprint,
+  decryptage_reservation : aucune base, aucun réseau, aucun core.db) entrent
+  dans la matrice ; seize commandes, aucune route ; une seule migration
+  nouvelle, additive (0021_decryptage_reservations, fichier
+  0021_decryptage_turn_reservations.py, tête) ; aucune variable n'active
+  la réservation Décrypter ; api.py ne la mentionne pas.
 
 Les garanties historiques (routes publiques exactes, middlewares, imports
 interdits, chargement dynamique, réseau au démarrage, variables F2 valides
@@ -47,18 +53,24 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 AUTHZ = REPO_ROOT / "core" / "authz_f2"
 AUTHZ_HTTP = REPO_ROOT / "core" / "authz_f2_http"
-HEAD = "0020_position_revision"
+HEAD = "0021_decryptage_reservations"
+HEAD_FILE = "0021_decryptage_turn_reservations.py"
 
 # Matrice fermée : module -> imports core.* exacts.
 IMPORT_MATRIX = {
     "core/authz_f2/__init__.py": set(),
     "core/authz_f2/principal.py": set(),
-    "core/authz_f2/commands.py": {"core.authz_f2.portfolio_values"},
+    "core/authz_f2/commands.py": {"core.authz_f2.portfolio_values", "core.authz_f2.decryptage_fingerprint",
+                                  "core.authz_f2.decryptage_reservation"},
     "core/authz_f2/_adapters.py": {"core.authz_f2.commands", "core.authz_f2.portfolio_fingerprint",
-                                   "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values"},
+                                   "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values",
+                                   "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation"},
     "core/authz_f2/runner.py": {"core.auth_f2.sessions", "core.auth_f2.keys", "core.auth_f2.txn",
                                 "core.authz_f2._adapters", "core.authz_f2.commands", "core.authz_f2.principal",
-                                "core.authz_f2.portfolio_fingerprint"},
+                                "core.authz_f2.portfolio_fingerprint", "core.authz_f2.decryptage_fingerprint"},
+    # R1 PR 9-B1 : modules purs de la réservation Décrypter.
+    "core/authz_f2/decryptage_fingerprint.py": set(),
+    "core/authz_f2/decryptage_reservation.py": set(),
     # R1 PR 7 : modules purs du portefeuille (aucune base, aucun réseau).
     "core/authz_f2/portfolio_values.py": set(),
     "core/authz_f2/portfolio_fingerprint.py": set(),
@@ -183,6 +195,10 @@ ENVIRONMENTS = {
     "pr7_flags": {"ORYX_PORTFOLIO_F2": "1", "ORYX_V2_PORTFOLIO": "true", "ORYX_F2_ENABLED": "1",
                   "ORYX_PORTFOLIO_KEYS": json.dumps({"k1": "A" * 43}), "ORYX_PORTFOLIO_KEY_VERSION": "k1"},
     # R1 PR 8 : aucune variable n'active les lectures des analyses et thèses.
+    # R1 PR 9-B1 : aucune variable n'active la réservation Décrypter.
+    "pr9b1_flags": {"ORYX_DECRYPTAGE_F2": "1", "ORYX_DECRYPTAGE_RESERVATION": "true", "ORYX_PR9B1_ENABLED": "1",
+                    "ORYX_DECRYPTAGE_KEYS": json.dumps({"d1": "A" * 43}), "ORYX_DECRYPTAGE_KEY_VERSION": "d1",
+                    "ORYX_F2_ENABLED": "1", "ORYX_AUTHZ_F2": "1"},
     "pr8_flags": {"ORYX_THESES_F2": "1", "ORYX_V2_THESES": "true", "ORYX_ANALYSIS_OVERVIEW_F2": "on",
                   "ORYX_PR8_ENABLED": "1", "ORYX_F2_ENABLED": "1", "ORYX_AUTHZ_F2": "1"},
 }
@@ -232,7 +248,11 @@ def test_api_source_never_mentions_the_authorization_boundary():
                       # R1 PR 8
                       "/api/v2/me/theses", "/api/v2/me/analysis-overview", "analysis-overview",
                       "ListAnalysisOverviewPage", "ListThesesPage", "ReadThesis", "consultation",
-                      "thesis_not_found", "next_cursor"):
+                      "thesis_not_found", "next_cursor",
+                      # R1 PR 9-B1
+                      "ReserveDecryptageTurn", "RecordDecryptageAttemptFailure", "DecryptageKeyring",
+                      "decryptage_turn_reservations", "LeaseGranted", "LeaseToken", "decryptage_reservation",
+                      "decryptage_fingerprint", "lease_epoch"):
         assert forbidden not in source, forbidden
 
 
@@ -288,7 +308,8 @@ def test_importing_the_boundary_opens_nothing():
             "psycopg2.connect = lambda *a, **k: attempts.append('psycopg2')\n"
             "for m in ('core.authz_f2', 'core.authz_f2.runner', 'core.authz_f2.commands', 'core.authz_f2._adapters',\n"
             "          'core.authz_f2.portfolio_values', 'core.authz_f2.portfolio_fingerprint',\n"
-            "          'core.authz_f2.portfolio_results', 'core.authz_f2_http', 'core.authz_f2_http.routes',\n"
+            "          'core.authz_f2.portfolio_results', 'core.authz_f2.decryptage_fingerprint',\n"
+            "          'core.authz_f2.decryptage_reservation', 'core.authz_f2_http', 'core.authz_f2_http.routes',\n"
             "          'core.authz_f2_http.portfolio', 'core.authz_f2_http.consultation_codec',\n"
             "          'core.authz_f2_http.consultation', 'core.authz_f2_http.isolated'):\n"
             "    importlib.import_module(m)\n"
@@ -298,13 +319,14 @@ def test_importing_the_boundary_opens_nothing():
     assert out.stdout.strip() == "False False False False []"
 
 
-def test_only_the_additive_0020_migration_and_no_new_production_dependency():
-    """R1 PR 7 n'ajoute que 0020_position_revision (tête) ; aucune
-    dépendance de production."""
+def test_only_the_additive_0021_migration_and_no_new_production_dependency():
+    """R1 PR 7 a ajouté 0020_position_revision ; R1 PR 9-B1 n'ajoute que
+    0021_decryptage_reservations (tête) ; aucune dépendance de production."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_revision(HEAD).down_revision == "0019_f2_http_admission"
+    assert script.get_revision("0020_position_revision").down_revision == "0019_f2_http_admission"
+    assert script.get_revision(HEAD).down_revision == "0020_position_revision"
     assert script.get_heads() == [HEAD]
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 20 and versions[-1] == HEAD + ".py"
+    assert len(versions) == 21 and versions[-1] == HEAD_FILE
     lines = [line.strip() for line in (REPO_ROOT / "requirements.txt").read_text().splitlines() if line.strip()]
     assert lines == MAIN_REQUIREMENTS

@@ -101,7 +101,7 @@ from tests.test_longitudinal_service import (  # noqa: F401 — fixture engine
 from tests.test_longitudinal_service import _start as _start_t5
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_directory
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
-from tests.test_migration_0004_drop_company_analyses import PR2_0018, PR2_FILES, PR4_0019, PR4_FILES, PR7_0020, PR7_FILES, T6A_TABLES, _code_tokens
+from tests.test_migration_0004_drop_company_analyses import PR2_0018, PR2_FILES, PR4_0019, PR4_FILES, PR7_0020, PR9B1_0021, PR7_FILES, PR9B1_FILES, T6A_TABLES, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import OTHER_USER, USER
 from tests.test_migration_0008_longitudinal_relations import T5A
 from tests.test_migration_0009_competency_inference_state import T6A, T6A_MODELS
@@ -234,7 +234,7 @@ def test_no_migration_added_by_t6b():
     (R1-C2, liens cognitifs Décrypter) et 0013 (R1-C4, affinité
     conversationnelle), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     assert script.get_revision(R1C2).down_revision == R1C1
@@ -243,8 +243,8 @@ def test_no_migration_added_by_t6b():
     assert script.get_revision(T6A).down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files[-12:-6] == [f"{T6A}.py", f"{R1B}.py", f"{R1C1}.py", f"{R1C2}.py", R1C4_FILE, R1D1_FILE]
-    assert files[-6:] == PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES
-    assert len(files) == 20
+    assert files[-7:] == PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES
+    assert len(files) == 21
 
 
 def test_t6a_schema_files_are_unchanged_by_t6b():

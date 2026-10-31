@@ -204,8 +204,16 @@ class ConversationIdentity(Base):
     texte conversationnel n'est pas une provenance pédagogique.
 
     Table créée par la migration 0010_r1b_event_idempotence ; created_at
-    généré par l'application (aucun server_default)."""
+    généré par l'application (aucun server_default).
+
+    R1 PR 9-B1 (migration 0021) : UNIQUE non différable
+    uq_conversation_identities_key_owner (conversation_key, user_id), cible
+    de la FK composite des réservations Décrypter ; la PK historique reste
+    la défense finale de l'unicité de la clé (aucune réattribution)."""
     __tablename__ = "conversation_identities"
+    __table_args__ = (
+        UniqueConstraint("conversation_key", "user_id", name="uq_conversation_identities_key_owner"),
+    )
 
     conversation_key = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
@@ -2631,3 +2639,87 @@ class AuthOperationResult(Base):
     otp_expires_at = Column(DateTime(timezone=True), nullable=True)
     result_version = Column(String, nullable=False)
     result_payload = Column(JSONB(none_as_null=True), nullable=False)
+
+
+class DecryptageTurnReservation(Base):
+    """Réservation durable d'UN tour Décrypter F2 (R1 PR 9-B1, migration
+    0021_decryptage_reservations) — DORMANTE.
+
+    Identité logique unique (uq_decryptage_turn_reservations_turn) :
+    (user_id, conversation_key, surface, source_user_turn_id,
+    delivery_ordinal), surface 'decryptage' et ordinal 1 imposés. L'empreinte
+    request_fingerprint (HMAC versionné de l'intention, trame
+    oryx-decryptage-reservation-v1) n'est jamais une clé : deux tours
+    différents peuvent avoir la même. Aucun texte de question, de contexte,
+    de prompt ni de réponse n'est stocké.
+
+    États : reserved (bail actif : jeton haché et échéance ; ou libéré :
+    retry_not_before_at), blocked (legacy_collision ou attempts_exhausted,
+    terminal) et finalized (livraison liée, PR 9-C). lease_token_hash est le
+    SHA-256 du jeton de bail, jamais le jeton. resolved_ticker est réservé à
+    PR 9-B2. Seul point d'écriture : les adaptateurs SQL fermés de la
+    frontière d'autorisation F2 ; aucun service ORM ne l'écrit."""
+    __tablename__ = "decryptage_turn_reservations"
+    __table_args__ = (
+        CheckConstraint("surface = 'decryptage'", name="ck_decryptage_turn_reservations_surface"),
+        CheckConstraint("delivery_ordinal = 1", name="ck_decryptage_turn_reservations_delivery_ordinal"),
+        CheckConstraint("fingerprint_version IN ('oryx-decryptage-reservation-v1')",
+                        name="ck_decryptage_turn_reservations_fingerprint_version"),
+        CheckConstraint("fingerprint_key_version ~ '^[a-z0-9][a-z0-9_-]{0,31}$'",
+                        name="ck_decryptage_turn_reservations_fingerprint_key_version"),
+        CheckConstraint("request_fingerprint ~ '^[0-9a-f]{64}$'",
+                        name="ck_decryptage_turn_reservations_request_fingerprint"),
+        CheckConstraint("lease_token_hash IS NULL OR lease_token_hash ~ '^[0-9a-f]{64}$'",
+                        name="ck_decryptage_turn_reservations_lease_token_hash"),
+        CheckConstraint("state IN ('reserved', 'blocked', 'finalized')", name="ck_decryptage_turn_reservations_state"),
+        CheckConstraint("blocked_reason IS NULL OR blocked_reason IN ('legacy_collision', 'attempts_exhausted')",
+                        name="ck_decryptage_turn_reservations_blocked_reason"),
+        CheckConstraint("lease_epoch >= 0 AND attempts_used >= 0", name="ck_decryptage_turn_reservations_counters"),
+        CheckConstraint(
+            "state <> 'reserved' OR (assistant_delivery_id IS NULL AND finalized_at IS NULL AND blocked_reason IS NULL "
+            "AND ((lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL AND retry_not_before_at IS NULL) "
+            "OR (lease_token_hash IS NULL AND lease_expires_at IS NULL AND retry_not_before_at IS NOT NULL)))",
+            name="ck_decryptage_turn_reservations_reserved"),
+        CheckConstraint(
+            "state <> 'blocked' OR (blocked_reason IS NOT NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL "
+            "AND retry_not_before_at IS NULL AND assistant_delivery_id IS NULL AND finalized_at IS NULL)",
+            name="ck_decryptage_turn_reservations_blocked"),
+        CheckConstraint(
+            "state <> 'finalized' OR (assistant_delivery_id IS NOT NULL AND finalized_at IS NOT NULL "
+            "AND lease_token_hash IS NULL AND lease_expires_at IS NULL AND retry_not_before_at IS NULL "
+            "AND blocked_reason IS NULL)",
+            name="ck_decryptage_turn_reservations_finalized"),
+        CheckConstraint("updated_at >= created_at AND (finalized_at IS NULL OR finalized_at >= created_at)",
+                        name="ck_decryptage_turn_reservations_timestamps"),
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="decryptage_turn_reservations_user_id_fkey"),
+        ForeignKeyConstraint(["conversation_key", "user_id"],
+                             ["conversation_identities.conversation_key", "conversation_identities.user_id"],
+                             name="decryptage_turn_reservations_conversation_fkey"),
+        ForeignKeyConstraint(["assistant_delivery_id"], ["assistant_deliveries.id"],
+                             name="decryptage_turn_reservations_assistant_delivery_id_fkey"),
+        UniqueConstraint("user_id", "conversation_key", "surface", "source_user_turn_id", "delivery_ordinal",
+                         name="uq_decryptage_turn_reservations_turn"),
+        UniqueConstraint("assistant_delivery_id", name="uq_decryptage_turn_reservations_assistant_delivery"),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    user_id = Column(Text, nullable=False)
+    conversation_key = Column(Text, nullable=False)
+    surface = Column(Text, nullable=False)
+    source_user_turn_id = Column(Uuid, nullable=False)
+    delivery_ordinal = Column(Integer, nullable=False)
+    fingerprint_version = Column(Text, nullable=False)
+    fingerprint_key_version = Column(Text, nullable=False)
+    request_fingerprint = Column(Text, nullable=False)
+    resolved_ticker = Column(Text, nullable=True)
+    state = Column(Text, nullable=False)
+    blocked_reason = Column(Text, nullable=True)
+    lease_epoch = Column(BigInteger, nullable=False)
+    lease_token_hash = Column(Text, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    attempts_used = Column(Integer, nullable=False)
+    retry_not_before_at = Column(DateTime(timezone=True), nullable=True)
+    assistant_delivery_id = Column(Uuid, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)

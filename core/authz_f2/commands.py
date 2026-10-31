@@ -55,12 +55,27 @@ ThesisDetailView (texte intégral borné, provenance relationnelle). Une
 AnalysisSession, une InvestmentThesis et une preuve pédagogique restent
 trois notions distinctes ; « verified » n'est jamais une preuve de
 compétence.
+
+R1 PR 9-B1 : deux commandes Décrypter sous le plan DECRYPTAGE_MUTATION
+(inchangé), dormantes (aucune route ne les invoque) :
+
+- ReserveDecryptageTurn : entrées métier du tour (conversation_key,
+  client_turn_id, ticker_input, question, context, last_method_id),
+  admises structurellement à la construction (core.authz_f2.
+  decryptage_fingerprint), jamais un propriétaire, un epoch, un jeton, une
+  échéance, un compteur, une empreinte, une version de clé, un état ni un
+  motif de blocage ;
+- RecordDecryptageAttemptFailure : capacité serveur (reservation_id,
+  lease_epoch, jeton de bail brut LeaseToken) et classification FERMÉE de
+  l'échec. Aucune commande force_block / reset / unlock / override.
 """
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+from core.authz_f2 import decryptage_fingerprint as dfp
+from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_values as pv
 
 MAX_POSITION_ID = 2**31 - 1
@@ -644,3 +659,72 @@ class ThesisDetailView:
     @property
     def provenance_status(self) -> str:
         return UNVERIFIED if self.analysis_session_id is None else VERIFIED
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-B1 : réservation durable des tours Décrypter (plan DECRYPTAGE_MUTATION)
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class ReserveDecryptageTurn(Command):
+    """Réserve UN tour Décrypter du principal avant tout appel externe.
+    Identité logique : (principal, conversation_key, 'decryptage',
+    client_turn_id, 1). Admission structurelle complète ICI, avant tout
+    accès SQL ; aucune valeur n'est tronquée ni corrigée (seules les
+    normalisations locales figées de la trame : strip().upper() du ticker,
+    strip() de la question et du contexte)."""
+    conversation_key: str
+    client_turn_id: uuid.UUID
+    ticker_input: str
+    question: str
+    context: str
+    last_method_id: object  # str ou None (None distinct de "")
+
+    def __post_init__(self):
+        try:
+            dfp.admit_conversation_key(self.conversation_key)
+            if type(self.client_turn_id) is not uuid.UUID:
+                raise dfp.TurnRejected("client_turn_id : uuid.UUID attendu")
+            dfp.normalize_ticker(self.ticker_input)
+            dfp.normalize_texts(self.question, self.context)
+            dfp.admit_last_method_id(self.last_method_id)
+        except dfp.TurnRejected as exc:
+            raise ValueError(str(exc)) from None
+
+    @property
+    def ticker(self) -> str:
+        """Ticker saisi, normalisé localement (jamais résolu par EODHD)."""
+        return dfp.normalize_ticker(self.ticker_input)
+
+    @property
+    def texts(self) -> tuple:
+        """(question, contexte) strippés, tels que signés."""
+        return dfp.normalize_texts(self.question, self.context)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordDecryptageAttemptFailure(Command):
+    """Déclare l'échec connu d'une attribution par son détenteur : exige une
+    nouvelle autorisation F2 complète ET la capacité exacte (réservation
+    propre, epoch, jeton, bail non expiré). repr() ne révèle jamais le
+    jeton."""
+    reservation_id: uuid.UUID
+    lease_epoch: int
+    lease_token: dr.LeaseToken
+    failure: str
+
+    def __post_init__(self):
+        if type(self.reservation_id) is not uuid.UUID:
+            raise ValueError("reservation_id : uuid.UUID attendu")
+        if type(self.lease_epoch) is not int or not 1 <= self.lease_epoch <= dr.MAX_EPOCH:
+            raise ValueError("lease_epoch : entier de 1 à 2^63 - 1 attendu")
+        if type(self.lease_token) is not dr.LeaseToken:
+            raise ValueError("lease_token : jeton de bail serveur attendu")
+        if type(self.failure) is not str or self.failure not in dr.FAILURE_CLASSES:
+            raise ValueError("failure : classification fermée attendue")
+
+    @classmethod
+    def from_lease(cls, lease: dr.DecryptageLease, failure: str) -> "RecordDecryptageAttemptFailure":
+        if type(lease) is not dr.DecryptageLease:
+            raise ValueError("capacité de bail attendue")
+        return cls(lease.reservation_id, lease.lease_epoch, lease.token, failure)
