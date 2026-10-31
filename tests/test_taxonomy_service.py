@@ -743,7 +743,7 @@ def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, e
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR7_0020
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR9B1_0021
     assert tax.get_active_release(db) is None
 
 
