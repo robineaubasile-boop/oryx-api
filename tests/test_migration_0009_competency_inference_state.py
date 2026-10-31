@@ -71,11 +71,14 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR4_0019,
     PR4_FILES,
     PR7_0020,
+    PR9B1_0021,
     PR7_FILES,
+    PR9B1_FILES,
     PR2_0018,
     PR2_FILES,
     PR2_REVISIONS,
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_FILES,
     PR1_REVISIONS,
     PR1_TABLES,
@@ -417,12 +420,12 @@ def test_revision_chain_is_exactly_0001_to_0009():
     T6-A. Seules 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
     testées à part, ont été ajoutées depuis : 0013 est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020, PR9B1_0021}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
@@ -432,7 +435,7 @@ def test_revision_chain_is_exactly_0001_to_0009():
 
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
-        R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES
+        R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -610,7 +613,7 @@ def test_offline_sql_of_0009_downgrade_drops_only_t6a():
 
 
 def test_metadata_declares_exactly_the_six_t6a_tables():
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                          | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     for model, name in zip(T6A_MODELS, TABLES_IN_ORDER):
         assert model.__tablename__ == name

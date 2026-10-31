@@ -52,11 +52,14 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR4_0019,
     PR4_FILES,
     PR7_0020,
+    PR9B1_0021,
     PR7_FILES,
+    PR9B1_FILES,
     PR2_0018,
     PR2_FILES,
     PR2_REVISIONS,
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_FILES,
     PR1_REVISIONS,
     PR1_TABLES,
@@ -131,11 +134,11 @@ def test_revision_chain_is_exactly_0001_to_0010_then_0011_0012():
     tests/test_migration_0012_decryptage_cognitive_links.py et
     tests/test_migration_0013_decryptage_conversation_affinity.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020, PR9B1_0021}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B
@@ -143,7 +146,7 @@ def test_revision_chain_is_exactly_0001_to_0010_then_0011_0012():
     assert revisions[T6A].down_revision == T5A
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert files == [f"{rev}.py" for rev in (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2)] + [
-        R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES
+        R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES
 
 
 def test_revision_id_fits_alembic_version_column():
@@ -213,7 +216,7 @@ def test_offline_sql_of_0010_downgrade_reverts_exactly_r1b():
 def test_metadata_declares_exactly_the_r1b_registry_in_addition():
     """(+ assistant_deliveries de R1-C1 et decryptage_cognitive_links de
     R1-C2, testées à part.)"""
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | ALL_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | ALL_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES
     assert ConversationIdentity.__table__ is Base.metadata.tables[CONVERSATIONS]
 
 
@@ -231,7 +234,12 @@ def test_conversation_identity_is_a_minimal_ownership_registry():
     assert [(fk.parent.name, fk.target_fullname, fk.ondelete, fk.onupdate, fk.name)
             for fk in table.foreign_keys] == [("user_id", "users.id", None, None, None)]
     assert not table.indexes
-    assert not [c for c in table.constraints if isinstance(c, (sa.UniqueConstraint, sa.CheckConstraint))]
+    assert not [c for c in table.constraints if isinstance(c, sa.CheckConstraint)]
+    # R1 PR 9-B1 (0021) : seule contrainte ajoutée, l'UNIQUE composite cible de
+    # la FK des réservations ; la clé reste unique à elle seule (PK).
+    assert [(c.name, [col.name for col in c.columns]) for c in table.constraints
+            if isinstance(c, sa.UniqueConstraint)] == [("uq_conversation_identities_key_owner",
+                                                       ["conversation_key", "user_id"])]
 
 
 def test_cognitive_event_r1b_columns_and_unique():
@@ -313,8 +321,8 @@ def conn(pg_url, pg_engine):  # noqa: F811
 def test_pg_upgrade_from_empty_database_to_head(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == PR7_0020
-    assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES | PR1_TABLES | PR2_TABLES
+    assert _version(pg_engine) == PR9B1_0021
+    assert _tables(pg_engine) == EXISTING | R1B_TABLES | R1C1_TABLES | R1C2_TABLES | PR1_TABLES | PR2_TABLES | PR9B1_TABLES
     assert _compare_metadata(pg_engine) == []
     catalog = _global_catalog(pg_engine)
     assert (catalog["enums"], catalog["triggers"], catalog["functions"]) == (0, 0, 0)
@@ -334,8 +342,10 @@ def test_pg_catalog_of_the_r1b_objects(pg_url, pg_engine):  # noqa: F811
         "constraints": [
             ("conversation_identities_pkey", "p", "PRIMARY KEY (conversation_key)", " ", " "),
             ("conversation_identities_user_id_fkey", "f", "FOREIGN KEY (user_id) REFERENCES users(id)", "a", "a"),
+            # R1 PR 9-B1 (0021, à la tête) : UNIQUE composite non différable, PK inchangée.
+            ("uq_conversation_identities_key_owner", "u", "UNIQUE (conversation_key, user_id)", " ", " "),
         ],
-        "indexes": ["conversation_identities_pkey"],
+        "indexes": ["conversation_identities_pkey", "uq_conversation_identities_key_owner"],
     }
     columns = {name: (data_type, nullable, default) for name, data_type, nullable, default
                in catalog[EVENTS]["columns"]}

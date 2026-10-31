@@ -42,6 +42,21 @@ Session, sur la connexion du runner, join_transaction_mode rollback_only),
 sans aucune commande de production : le registre reste à quatorze
 commandes ; le pont n'est exercé que par le banc d'essai isolé des tests.
 
+R1 PR 9-B1 : réservation durable des tours Décrypter. Registre fermé à
+seize commandes (ReserveDecryptageTurn, RecordDecryptageAttemptFailure,
+plan DECRYPTAGE_MUTATION inchangé, sans verrou préparatoire), table
+decryptage_turn_reservations (migration 0021), bail, epoch et fencing ;
+dépendance facultative et dédiée decryptage_keyring du runner
+(Spec.decryptage_keyed, distinct de Spec.keyed). Deux modules purs :
+
+- decryptage_fingerprint.py : DecryptageKeyring dédié, trame
+                              oryx-decryptage-reservation-v1, admission
+                              structurelle ;
+- decryptage_reservation.py : politique de bail figée, LeaseToken,
+                              capacité DecryptageLease et vues fermées.
+
+Aucune route, aucun appel Claude ni EODHD, aucune écriture cognitive.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

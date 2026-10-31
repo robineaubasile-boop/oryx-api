@@ -30,6 +30,15 @@ prétend pas isoler le processus contre du code Python hostile.
   sur la connexion du runner, rollback_only), chacune de ses capacités
   étant bornée ici et dans tests/test_authz_f2_pr9a_boundary.py ; les
   autres modules restent soumis à toutes les interdictions.
+- R1 PR 9-B1 : registre fermé à SEIZE commandes (ReserveDecryptageTurn,
+  RecordDecryptageAttemptFailure sous DECRYPTAGE_MUTATION, sans verrou
+  préparatoire, trousseau Décrypter par Spec.decryptage_keyed) ; exception
+  NOMINATIVE dans _adapters.py : deux SAVEPOINT locaux (conn.begin_nested()
+  dans _register_conversation et _insert_reservation, chacun ne traduisant
+  qu'une violation 23505 de contraintes nommées) ; instructions fermées de
+  conversation_identities (seconde écriture applicative, inventoriée) et de
+  decryptage_turn_reservations, toutes filtrées par le user_id serveur ;
+  seule instruction sans :u ajoutée : l'horloge T_lease_decision.
 """
 import ast
 import inspect
@@ -114,7 +123,18 @@ def test_no_boundary_module_controls_a_transaction():
             assert not names & {"SessionLocal", "get_db", "sessionmaker", "create_engine"}, path.name
             assert "Session" in names
             continue
-        assert not _attr_calls(tree) & TRANSACTION_METHODS, path.name
+        if path == ADAPTERS:
+            # Exception nominative R1 PR 9-B1 : deux SAVEPOINT locaux, rien d'autre.
+            assert _attr_calls(tree) & TRANSACTION_METHODS == {"begin_nested"}
+            located = sorted((n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                             for n in _calls(f) if isinstance(n.func, ast.Attribute)
+                             and n.func.attr in TRANSACTION_METHODS)
+            assert located == [("begin_nested", "_insert_reservation"), ("begin_nested", "_register_conversation")]
+            withs = [ast.unparse(item.context_expr) for n in ast.walk(tree) if isinstance(n, ast.With)
+                     for item in n.items]
+            assert withs == ["conn.begin_nested()", "conn.begin_nested()"]
+        else:
+            assert not _attr_calls(tree) & TRANSACTION_METHODS, path.name
         assert not names & {"SessionLocal", "get_db", "sessionmaker", "Session", "create_engine"}, path.name
     runner_tree = _tree(AUTHZ / "runner.py")
     opened = [n for n in _calls(runner_tree) if isinstance(n.func, ast.Name) and n.func.id == "transaction"]
@@ -166,6 +186,31 @@ WRITES = {
     "_REPLACE_POSITION": "UPDATE portfolio_positions SET ticker = :ticker, ",
     "_DELETE_POSITION": "DELETE FROM portfolio_positions WHERE id = :id AND user_id = :u AND position_revision = :r ",
     "_INSERT_RECEIPT": "INSERT INTO portfolio_write_idempotency (user_id, ",
+    # R1 PR 9-B1 : registre des conversations et réservations Décrypter.
+    "_REGISTER_CONVERSATION": "INSERT INTO conversation_identities (conversation_key, user_id, created_at) ",
+    "_INSERT_RESERVATION[leased]": "INSERT INTO decryptage_turn_reservations (id, user_id, ",
+    "_INSERT_RESERVATION[blocked]": "INSERT INTO decryptage_turn_reservations (id, user_id, ",
+    "_GRANT_LEASE": "UPDATE decryptage_turn_reservations SET ",
+    "_BLOCK_RESERVATION": "UPDATE decryptage_turn_reservations SET ",
+    "_RELEASE_LEASE": "UPDATE decryptage_turn_reservations SET ",
+}
+# R1 PR 9-B1 : instructions fermées, chacune avec son filtre propriétaire exact.
+PR9B1_FILTERS = {
+    "_CONVERSATION_OWNED": "SELECT user_id = :u AS owned FROM conversation_identities WHERE conversation_key = :k",
+    "_REGISTER_CONVERSATION": "VALUES (:k, :u, :at)",
+    "_LOCK_RESERVATION_TURN": "WHERE user_id = :u AND conversation_key = :k AND surface = :s "
+                              "AND source_user_turn_id = :t AND delivery_ordinal = :o FOR UPDATE",
+    "_LOCK_RESERVATION": "WHERE id = :id AND user_id = :u FOR UPDATE",
+    "_LEGACY_DELIVERY": "WHERE user_id = :u AND conversation_key = :k AND surface = :s "
+                        "AND source_user_turn_id = :t AND delivery_ordinal = :o",
+    "_LINKED_DELIVERY": "FROM assistant_deliveries WHERE id = :id AND user_id = :u",
+    "_INSERT_RESERVATION[leased]": "VALUES (:id, :u, :k, :s, :t, :o, :fv, :kv, :f, 'reserved', 1, :h, ",
+    "_INSERT_RESERVATION[blocked]": "VALUES (:id, :u, :k, :s, :t, :o, :fv, :kv, :f, 'blocked', 'legacy_collision', 0, 0, ",
+    "_GRANT_LEASE": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e AND attempts_used = :a ",
+    "_BLOCK_RESERVATION": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                          "AND attempts_used = :a ",
+    "_RELEASE_LEASE": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                      "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at ",
 }
 
 
@@ -181,9 +226,28 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         # R1 PR 8 : une instruction fermée par page ou par thèse.
         "_ANALYSIS_OVERVIEW_PAGE[first]", "_ANALYSIS_OVERVIEW_PAGE[after]", "_THESES_PAGE[first]",
         "_THESES_PAGE[first+ticker]", "_THESES_PAGE[after_date]", "_THESES_PAGE[after_date+ticker]",
-        "_THESES_PAGE[after_null]", "_THESES_PAGE[after_null+ticker]", "_READ_THESIS"}
-    # Seule requête sans user_id : l'isolation active de la transaction.
+        "_THESES_PAGE[after_null]", "_THESES_PAGE[after_null+ticker]", "_READ_THESIS",
+        # R1 PR 9-B1
+        "_CONVERSATION_OWNED", "_REGISTER_CONVERSATION", "_LOCK_RESERVATION_TURN", "_LOCK_RESERVATION",
+        "_LEASE_DECISION_CLOCK", "_LEGACY_DELIVERY", "_LINKED_DELIVERY", "_INSERT_RESERVATION[leased]",
+        "_INSERT_RESERVATION[blocked]", "_GRANT_LEASE", "_BLOCK_RESERVATION", "_RELEASE_LEASE"}
+    # Seules requêtes sans user_id : l'isolation active de la transaction et
+    # (R1 PR 9-B1) l'horloge T_lease_decision lue après le verrou.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
+    assert statements.pop("_LEASE_DECISION_CLOCK") == "SELECT clock_timestamp()"
+    for name in PR9B1_FILTERS:
+        sql = statements.pop(name)
+        assert ";" not in sql and "--" not in sql and "/*" not in sql, name
+        assert sql.startswith(WRITES.get(name, "SELECT ")) and PR9B1_FILTERS[name] in sql, name
+        assert sql.count(":u") == 1, name  # un seul propriétaire : le user_id serveur
+        rest = sql.replace("FOR UPDATE", "").replace(WRITES.get(name, "SELECT "), "")
+        assert not FORBIDDEN_SQL.search(rest), (name, FORBIDDEN_SQL.search(rest))
+        if sql.startswith("UPDATE"):
+            assigned = sql[sql.index(" SET ") + 5:sql.index(" WHERE ")]
+            columns = {part.split("=")[0].strip() for part in assigned.split(", ")}
+            # Identité, empreinte, versions et created_at ne sont jamais réécrits.
+            assert columns <= {"lease_epoch", "attempts_used", "lease_token_hash", "lease_expires_at",
+                               "retry_not_before_at", "updated_at", "state", "blocked_reason"}, (name, columns)
     for name, sql in statements.items():
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
         prefix = WRITES.get(name, "SELECT ")
@@ -219,8 +283,11 @@ def test_closed_registry_and_lock_plans():
              # R1 PR 8
              c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis}
     mutations = {c.UpdateProfileLevel: c.PROFILE_MUTATION, c.CreatePortfolioPosition: c.PORTFOLIO_MUTATION,
-                 c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION}
-    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 14
+                 c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION,
+                 # R1 PR 9-B1
+                 c.ReserveDecryptageTurn: c.DECRYPTAGE_MUTATION,
+                 c.RecordDecryptageAttemptFailure: c.DECRYPTAGE_MUTATION}
+    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 16
     # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
     assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
@@ -228,10 +295,16 @@ def test_closed_registry_and_lock_plans():
         assert spec.lock.__module__ == spec.execute.__module__ == _adapters.__name__
         assert spec.lock.__name__.startswith("_") and spec.execute.__name__.startswith("_")
         if spec.plan is c.PORTFOLIO_MUTATION:
-            assert spec.keyed and spec.states == _adapters.PORTFOLIO_STATES
+            assert spec.keyed and not spec.decryptage_keyed and spec.states == _adapters.PORTFOLIO_STATES
             assert spec.lock is _adapters._lock_portfolio and spec.execute is _adapters._write_portfolio
+        elif spec.plan is c.DECRYPTAGE_MUTATION:
+            # R1 PR 9-B1 : trousseau Décrypter seul, aucun verrou préparatoire.
+            assert spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
+            assert spec.lock is _adapters._no_business_lock
+            assert spec.execute is {c.ReserveDecryptageTurn: _adapters._reserve_turn,
+                                    c.RecordDecryptageAttemptFailure: _adapters._record_attempt_failure}[command]
         else:
-            assert not spec.keyed and spec.states == (type(None),)
+            assert not spec.keyed and not spec.decryptage_keyed and spec.states == (type(None),)
     assert _adapters.PORTFOLIO_STATES == (_adapters.ReceiptFound, _adapters.PositionFound, _adapters.PositionMissing,
                                           _adapters.CreateReady)
     assert c.READ == c.LockPlan("read", "FOR KEY SHARE", ())
@@ -245,7 +318,8 @@ def test_closed_registry_and_lock_plans():
     # READ COMMITTED exigé ; aucune commande de production ne l'utilise.
     assert c.DECRYPTAGE_MUTATION == c.LockPlan("decryptage_mutation", "FOR NO KEY UPDATE", (), True)
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
-    assert all(spec.plan is not c.DECRYPTAGE_MUTATION for spec in _adapters.REGISTRY.values())
+    assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}  # R1 PR 9-B1
     assert _adapters._LOCK_PROFILE["FOR NO KEY UPDATE"] == "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE"
     assert dict(_adapters.ISOLATION_ALERTS) == {"portfolio_mutation": "portfolio_isolation_refused",
                                                 "decryptage_mutation": "decryptage_isolation_refused"}
@@ -333,7 +407,14 @@ def test_business_locks_match_the_announced_plan():
     locking = {name for name, sql in statements.items() if re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b",
                                                                      sql)}
     assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_PROFILE[FOR NO KEY UPDATE]",
-                       "_LOCK_RECEIPT", "_LOCK_POSITION"}
+                       "_LOCK_RECEIPT", "_LOCK_POSITION",
+                       # R1 PR 9-B1 : verrous d'EXÉCUTION (après T_authorization),
+                       # jamais dans spec.lock ; réservation propre seulement.
+                       "_LOCK_RESERVATION_TURN", "_LOCK_RESERVATION"}
+    for name in ("_LOCK_RESERVATION_TURN", "_LOCK_RESERVATION"):
+        assert re.search(r"FROM (\w+)", statements[name]).group(1) == "decryptage_turn_reservations"
+    for function in (_adapters._no_business_lock, _adapters._lock_portfolio):
+        assert "RESERVATION" not in inspect.getsource(function)
     locked_tables = [re.search(r"FROM (\w+)", statements[name]).group(1) for name in ("_LOCK_RECEIPT",
                                                                                     "_LOCK_POSITION")]
     for spec in _adapters.REGISTRY.values():

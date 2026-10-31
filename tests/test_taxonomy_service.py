@@ -82,7 +82,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0003_analysis_session_links import T1B1
-from tests.test_migration_0004_drop_company_analyses import PR1_FILES, PR1_REVISIONS, PR2_FILES, PR2_REVISIONS, PR4_0019, PR4_FILES, PR7_0020, PR7_FILES, T1C2, T4A_TABLES, _code_tokens
+from tests.test_migration_0004_drop_company_analyses import PR1_FILES, PR1_REVISIONS, PR2_FILES, PR2_REVISIONS, PR4_0019, PR4_FILES, PR7_0020, PR9B1_0021, PR7_FILES, PR9B1_FILES, T1C2, T4A_TABLES, _code_tokens
 from tests.test_migration_0005_cognitive_support_traces import T2A, _upgrade_head_with_users
 from tests.test_migration_0006_observation_layer import T3A
 from tests.test_migration_0007_pedagogical_taxonomy import (
@@ -169,13 +169,13 @@ def test_no_migration_added_by_t4b_head_is_0013():
     ajoutées depuis sont 0008 (T5-A), 0009 (T6-A), 0010 (R1-B), 0011 (R1-C1),
     0012 (R1-C2) et 0013 (R1-C4), qui est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_revision(R1C4).down_revision == R1C2
     revisions = (BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1)
-    assert {rev.revision for rev in script.walk_revisions()} == set(revisions) | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020}
+    assert {rev.revision for rev in script.walk_revisions()} == set(revisions) | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020, PR9B1_0021}
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files == [f"{rev}.py" for rev in revisions[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES
+    assert files == [f"{rev}.py" for rev in revisions[:-2]] + [R1C4_FILE, R1D1_FILE] + PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES
 
 
 def test_public_api_is_exactly_the_eight_operations():
@@ -743,7 +743,7 @@ def test_pg_fresh_head_has_empty_taxonomy_tables_and_no_active_release(pg_url, e
     for table in sorted(T4A_TABLES):
         assert _count(engine, table) == 0, table
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR7_0020
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == PR9B1_0021
     assert tax.get_active_release(db) is None
 
 
