@@ -431,7 +431,8 @@ def _without_pr1_changes(diff, applied: int) -> list:
     composite de 0021), et échoue si l'un d'eux manque ou si un écart
     apparaît alors que sa révision est appliquée. Retourne le reste. Avant
     0017, les colonnes blocked_until et http_action arrivent avec la table
-    auth_abuse_events (add_table)."""
+    auth_abuse_events (add_table) ; avant 0010, l'UNIQUE composite de 0021
+    arrive avec la table conversation_identities (add_table)."""
     expected = []
     if applied < 1:
         expected.append(("add_column", "users.level_revision"))
@@ -448,7 +449,12 @@ def _without_pr1_changes(diff, applied: int) -> list:
     if applied < 6:
         expected.append(("add_column", f"portfolio_positions.{PR7_0020_POSITION_COLUMN}"))
     if applied < 7:
-        expected += [("add_table", t) for t in PR9B1_0021_TABLES] + [("add_constraint", PR9B1_0021_OWNER_UNIQUE)]
+        expected += [("add_table", t) for t in PR9B1_0021_TABLES]
+        # Avant 0010, conversation_identities n'existe pas : la contrainte
+        # composite arrive avec la table (add_table, non retiré ici).
+        if not any(isinstance(d, tuple) and d[0] == "add_table" and d[1].name == "conversation_identities"
+                   for d in diff):
+            expected.append(("add_constraint", PR9B1_0021_OWNER_UNIQUE))
     found, rest = [], []
     for d in diff:
         key = None

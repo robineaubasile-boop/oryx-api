@@ -342,8 +342,10 @@ def test_pg_catalog_of_the_r1b_objects(pg_url, pg_engine):  # noqa: F811
         "constraints": [
             ("conversation_identities_pkey", "p", "PRIMARY KEY (conversation_key)", " ", " "),
             ("conversation_identities_user_id_fkey", "f", "FOREIGN KEY (user_id) REFERENCES users(id)", "a", "a"),
+            # R1 PR 9-B1 (0021, à la tête) : UNIQUE composite non différable, PK inchangée.
+            ("uq_conversation_identities_key_owner", "u", "UNIQUE (conversation_key, user_id)", " ", " "),
         ],
-        "indexes": ["conversation_identities_pkey"],
+        "indexes": ["conversation_identities_pkey", "uq_conversation_identities_key_owner"],
     }
     columns = {name: (data_type, nullable, default) for name, data_type, nullable, default
                in catalog[EVENTS]["columns"]}
