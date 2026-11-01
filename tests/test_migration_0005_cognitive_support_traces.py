@@ -46,6 +46,7 @@ from tests.test_migration_0002_analysis_sessions import (
 from tests.test_migration_0003_analysis_session_links import T1A_SHA256, T1B1, _statements
 from tests.test_migration_0004_drop_company_analyses import (
     PR2_TABLES,
+    PR9B1_TABLES,
     PR1_TABLES,
     R1B_DEDUP_UNIQUE,
     R1B_EVENT_COLUMNS,
@@ -214,7 +215,7 @@ def test_offline_sql_of_0005_downgrade_drops_only_the_two_tables():
 def test_metadata_declares_the_two_new_tables():
     """(4) Base.metadata = tables de 0004 + cognitive_events + support_traces
     (+ les tables de T3-A, T4-A, T5-A et T6-A, testées à part)."""
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                          | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert CognitiveEvent.__table__ is Base.metadata.tables[EVENTS]
     assert SupportTrace.__table__ is Base.metadata.tables[TRACES]

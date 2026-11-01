@@ -39,6 +39,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR2_TABLES,
     PR4_0019,
     PR7_0020,
+    PR9B1_0021,
     _compare_metadata,
     _data,
     _statements,
@@ -70,12 +71,12 @@ def test_revision_links_0018_to_0017_and_is_the_parent_of_0019():
     """0018 était la tête de R1 PR 2 ; R1 PR 4 ajoute 0019 au-dessus, sans
     modifier ce fichier (tests/test_migration_0019_f2_http_admission.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(PR2_0018).down_revision == PR1_0017
     assert script.get_revision(PR4_0019).down_revision == PR2_0018
     assert PR2_0018_FILE == f"{PR2_0018}.py" and len(PR2_0018) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 20 and files[-3] == PR2_0018_FILE
+    assert len(files) == 21 and files[-4] == PR2_0018_FILE
 
 
 def test_pr1_migration_files_are_unchanged():

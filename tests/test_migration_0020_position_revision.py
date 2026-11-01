@@ -40,6 +40,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR4_0019,
     PR7_0020,
     PR7_0020_FILE,
+    PR9B1_0021,
     _compare_metadata,
     _data,
     _statements,
@@ -70,13 +71,16 @@ def _m0020():
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0020_to_0019_and_is_the_head():
+def test_revision_links_0020_to_0019_and_is_the_parent_of_0021():
+    """0020 était la tête de R1 PR 7 ; R1 PR 9-B1 ajoute 0021 au-dessus, sans
+    modifier ce fichier (tests/test_migration_0021_decryptage_turn_reservations.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR7_0020]
+    assert script.get_heads() == [PR9B1_0021]
     assert script.get_revision(PR7_0020).down_revision == PR4_0019
+    assert script.get_revision(PR9B1_0021).down_revision == PR7_0020
     assert PR7_0020_FILE == f"{PR7_0020}.py" and len(PR7_0020) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 20 and files[-1] == PR7_0020_FILE
+    assert len(files) == 21 and files[-2] == PR7_0020_FILE
 
 
 def test_migrations_0001_to_0019_are_unchanged():
@@ -183,20 +187,20 @@ def test_pg_upgrade_0019_to_0020_keeps_every_row_then_exact_downgrade(pg_url, pg
     assert _snapshot(pg_engine, tables) == schema_0019 and _catalog(pg_engine, tables) == catalog_0019
     assert _global_catalog(pg_engine) == global_0019
     assert _data(pg_engine, tables - {"alembic_version"}) == data_0019
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     assert _compare_metadata(pg_engine) == []
 
 
 def test_pg_downgrade_of_a_blank_database(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     _run_alembic(pg_url, "downgrade", PR4_0019)
     assert _version(pg_engine) == PR4_0019 and _compare_metadata(pg_engine) == []
 
 
 def test_pg_check_default_and_legacy_insert(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     with pg_engine.begin() as conn:
         assert_disposable_connection(conn)
         conn.execute(sa.text("INSERT INTO users (id, level) VALUES ('legacy-anon-1', 'debutant')"))
@@ -221,7 +225,7 @@ def test_pg_check_default_and_legacy_insert(pg_url, pg_engine):  # noqa: F811
 @pytest.mark.parametrize("blocking", ["receipt", "revision"])
 def test_pg_downgrade_is_refused_when_versioned_data_exists(pg_url, pg_engine, blocking):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     _seed_historical(pg_engine)
     with pg_engine.begin() as conn:
         if blocking == "receipt":
@@ -245,7 +249,7 @@ def test_pg_downgrade_is_refused_when_versioned_data_exists(pg_url, pg_engine, b
 
 def test_pg_offline_guard_passes_on_unversioned_data(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     _seed_historical(pg_engine)
     guard = next(s for s in _statements(_run_alembic(OFFLINE, "downgrade", f"{PR7_0020}:{PR4_0019}", "--sql").stdout)
                  if s.startswith("DO $$"))
@@ -258,7 +262,7 @@ def test_pg_downgrade_waits_for_a_writer_and_fails_closed(pg_url, pg_engine):  #
     downgrade (ACCESS EXCLUSIVE) : lock_timeout de 5 s, échec, rien n'est
     modifié."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     _seed_historical(pg_engine)
     with pg_engine.connect() as writer:
         tx = writer.begin()
@@ -277,7 +281,7 @@ def test_pg_downgrade_locks_exclude_concurrent_receipts_and_position_writes(pg_u
     """Pendant le contrôle du downgrade (verrous de la migration détenus),
     aucune insertion de reçu ni écriture de position n'est admise."""
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR7_0020)  # R1 PR 9-B1 : 0021 au-dessus, testée à part
     _seed_historical(pg_engine)
     m = _m0020()
     with pg_engine.connect() as maintenance:

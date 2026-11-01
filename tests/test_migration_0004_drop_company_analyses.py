@@ -168,12 +168,21 @@ PR4_0019_FILE = "0019_f2_http_admission.py"
 PR4_FILES = [PR4_0019_FILE]
 PR4_0019_EVENT_COLUMN = "http_action"
 # R1 PR 7 (0020, testée à part) : portfolio_positions.position_revision
-# BIGINT NOT NULL DEFAULT 0 et son CHECK ; aucune table, aucun index. Tête.
+# BIGINT NOT NULL DEFAULT 0 et son CHECK ; aucune table, aucun index.
 PR7_0020 = "0020_position_revision"
 PR7_0020_FILE = "0020_position_revision.py"
 PR7_FILES = [PR7_0020_FILE]
 PR7_0020_POSITION_COLUMN = "position_revision"
-HEAD = PR7_0020
+# R1 PR 9-B1 (0021, testée à part) : table decryptage_turn_reservations et
+# UNIQUE composite uq_conversation_identities_key_owner. Identifiant de
+# révision raccourci (VARCHAR(32)), fichier au nom autorisé. Tête.
+PR9B1_0021 = "0021_decryptage_reservations"
+PR9B1_0021_FILE = "0021_decryptage_turn_reservations.py"
+PR9B1_FILES = [PR9B1_0021_FILE]
+PR9B1_0021_TABLES = ("decryptage_turn_reservations",)
+PR9B1_0021_OWNER_UNIQUE = "uq_conversation_identities_key_owner"
+PR9B1_TABLES = set(PR9B1_0021_TABLES)
+HEAD = PR9B1_0021
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -278,7 +287,7 @@ def test_offline_sql_of_0004_downgrade_recreates_only_company_analyses():
 
 def test_metadata_no_longer_declares_company_analyses():
     assert DROPPED not in Base.metadata.tables
-    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
+    assert set(Base.metadata.tables) == PR1_TABLES | PR2_TABLES | PR9B1_TABLES | (REMAINING_TABLES | T2A_TABLES | T3A_TABLES | T4A_TABLES | T5A_TABLES
                                         | T6A_TABLES | R1B_TABLES | R1C1_TABLES | R1C2_TABLES)
     assert not hasattr(core.models, "CompanyAnalysis")
     for table in Base.metadata.tables.values():
@@ -405,12 +414,12 @@ def _indexes(engine, table) -> list:
 
 def _pr1_revisions_applied(engine) -> int:
     """Nombre de révisions R1 PR 1 (0015, 0016, 0017), R1 PR 2 (0018),
-    R1 PR 4 (0019) puis R1 PR 7 (0020) présentes en base."""
+    R1 PR 4 (0019), R1 PR 7 (0020) puis R1 PR 9-B1 (0021) présentes en base."""
     with engine.connect() as conn:
         if conn.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar() is None:
             return 0
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4, PR4_0019: 5, PR7_0020: 6}.get(version, 0)
+    return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4, PR4_0019: 5, PR7_0020: 6, PR9B1_0021: 7}.get(version, 0)
 
 
 def _without_pr1_changes(diff, applied: int) -> list:
@@ -418,10 +427,12 @@ def _without_pr1_changes(diff, applied: int) -> list:
     R1 PR 1, R1 PR 2, R1 PR 4 et R1 PR 7 non encore appliquées
     (users.level_revision, tables et index de 0016 / 0017, puis table,
     colonne et index de 0018, puis colonne de 0019, puis
-    portfolio_positions.position_revision de 0020), et échoue si l'un d'eux manque ou si un écart
+    portfolio_positions.position_revision de 0020, puis table et UNIQUE
+    composite de 0021), et échoue si l'un d'eux manque ou si un écart
     apparaît alors que sa révision est appliquée. Retourne le reste. Avant
     0017, les colonnes blocked_until et http_action arrivent avec la table
-    auth_abuse_events (add_table)."""
+    auth_abuse_events (add_table) ; avant 0010, l'UNIQUE composite de 0021
+    arrive avec la table conversation_identities (add_table)."""
     expected = []
     if applied < 1:
         expected.append(("add_column", "users.level_revision"))
@@ -437,6 +448,13 @@ def _without_pr1_changes(diff, applied: int) -> list:
         expected.append(("add_column", f"auth_abuse_events.{PR4_0019_EVENT_COLUMN}"))
     if applied < 6:
         expected.append(("add_column", f"portfolio_positions.{PR7_0020_POSITION_COLUMN}"))
+    if applied < 7:
+        expected += [("add_table", t) for t in PR9B1_0021_TABLES]
+        # Avant 0010, conversation_identities n'existe pas : la contrainte
+        # composite arrive avec la table (add_table, non retiré ici).
+        if not any(isinstance(d, tuple) and d[0] == "add_table" and d[1].name == "conversation_identities"
+                   for d in diff):
+            expected.append(("add_constraint", PR9B1_0021_OWNER_UNIQUE))
     found, rest = [], []
     for d in diff:
         key = None
@@ -451,8 +469,12 @@ def _without_pr1_changes(diff, applied: int) -> list:
         elif (isinstance(d, tuple) and d[0] == "add_column" and d[2] == "portfolio_positions"
               and d[3].name == PR7_0020_POSITION_COLUMN and not d[3].nullable):
             key = ("add_column", f"portfolio_positions.{PR7_0020_POSITION_COLUMN}")
+        elif (isinstance(d, tuple) and d[0] == "add_constraint" and isinstance(d[1], sa.UniqueConstraint)
+              and d[1].name == PR9B1_0021_OWNER_UNIQUE and d[1].table.name == "conversation_identities"
+              and [col.name for col in d[1].columns] == ["conversation_key", "user_id"]):
+            key = ("add_constraint", PR9B1_0021_OWNER_UNIQUE)
         elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in (
-                PR1_0016_TABLES + PR1_0017_TABLES + PR2_0018_TABLES):
+                PR1_0016_TABLES + PR1_0017_TABLES + PR2_0018_TABLES + PR9B1_0021_TABLES):
             key = ("add_table", d[1].name)
         elif isinstance(d, tuple) and d[0] == "add_index" and d[1].name in PR1_0017_INDEXES | PR2_0018_INDEXES:
             key = ("add_index", d[1].name)
@@ -466,7 +488,7 @@ def _without_pr1_changes(diff, applied: int) -> list:
 
 def _compare_metadata(engine) -> list:
     """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1,
-    R1 PR 2, R1 PR 4 et R1 PR 7 des révisions 0015 à 0020 pas encore appliquées (retirés
+    R1 PR 2, R1 PR 4, R1 PR 7 et R1 PR 9-B1 des révisions 0015 à 0021 pas encore appliquées (retirés
     exactement par _without_pr1_changes). À la tête, aucun écart n'est
     retiré."""
     return _without_pr1_changes(_raw_compare_metadata(engine), _pr1_revisions_applied(engine))

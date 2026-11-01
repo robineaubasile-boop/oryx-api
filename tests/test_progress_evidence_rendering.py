@@ -830,7 +830,7 @@ def test_not_wired_to_api_runtime_or_any_module_but_its_renderer():
 
 def test_no_migration_nor_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0020_position_revision.py" and len(versions) == 20
+    assert versions[-1] == "0021_decryptage_turn_reservations.py" and len(versions) == 21
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     for word in ("Rendering", "rendered", "progress_evidence", "ProgressWhy"):
         assert word not in models, word

@@ -205,9 +205,9 @@ def test_no_migration_and_no_t3_in_the_hardened_modules():
     """R1-C3 n'a ajouté aucune migration (0013 est celle de R1-C4, 0014 celle
     de R1-D1)."""
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-9:-6] == ["0012_decryptage_cognitive_links.py", "0013_decryptage_conversation_affinity.py",
+    assert files[-10:-7] == ["0012_decryptage_cognitive_links.py", "0013_decryptage_conversation_affinity.py",
                             "0014_evaluation_run_leases.py"]
-    assert len(files) == 20
+    assert len(files) == 21
     for path in ("core/decryptage_progress.py", "core/decryptage_engine.py"):
         tree = ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
         imported = set()

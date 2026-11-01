@@ -1049,7 +1049,7 @@ def test_101_to_103_no_orm_no_migration_no_database():
                  "no_autoflush", "column", "base", "mapped_column", "load_current_focus_taxonomy"):
         assert word not in identifiers, word
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0020_position_revision.py" and len(versions) == 20
+    assert versions[-1] == "0021_decryptage_turn_reservations.py" and len(versions) == 21
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Focus" not in models and "Classifier" not in models
 
