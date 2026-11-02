@@ -68,12 +68,25 @@ R1 PR 9-B1 : deux commandes Décrypter sous le plan DECRYPTAGE_MUTATION
 - RecordDecryptageAttemptFailure : capacité serveur (reservation_id,
   lease_epoch, jeton de bail brut LeaseToken) et classification FERMÉE de
   l'échec. Aucune commande force_block / reset / unlock / override.
+
+R1 PR 9-B2 : UNE lecture Décrypter sous le plan READ inchangé (aucun plan
+nouveau, aucun verrou métier, aucune écriture), dormante :
+
+- ReadDecryptagePreparationContext : capacité serveur du bail B1
+  (reservation_id, lease_epoch, LeaseToken brut), entrées ORIGINALES du tour
+  telles que réservées (revérifiées par le HMAC d'intention B1 enregistré,
+  trousseau Décrypter du dispatch existant Spec.decryptage_keyed) et ticker
+  RÉSOLU (core.authz_f2.decryptage_context.RESOLVED_TICKER_RE). Jamais un
+  user_id, une Session, une connexion ni un callable. Résultat fermé :
+  DecryptagePreparationView ou DecryptagePreparationRefused
+  (core.authz_f2.decryptage_context).
 """
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_fingerprint as dfp
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_values as pv
@@ -728,3 +741,73 @@ class RecordDecryptageAttemptFailure(Command):
         if type(lease) is not dr.DecryptageLease:
             raise ValueError("capacité de bail attendue")
         return cls(lease.reservation_id, lease.lease_epoch, lease.token, failure)
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-B2 : lecture de préparation d'un tour Décrypter (plan READ)
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class ReadDecryptagePreparationContext(Command):
+    """Lit, en UNE instruction et sans écriture, le contexte d'un tour
+    Décrypter du principal détenteur d'un bail B1 : réservation propre (id ET
+    user_id), état reserved, epoch exact, jeton exact (temps constant) et bail
+    non échu à l'instant de la lecture ; identité du tour et intention
+    revérifiées par le HMAC B1 enregistré ; puis profil (level ET
+    level_revision), ancre conversationnelle R1-C4, AnalysisSession active du
+    ticker RÉSOLU, faits, contributions et thèse historique, bornés.
+
+    Admission structurelle complète ICI, avant tout accès SQL (mêmes règles
+    que ReserveDecryptageTurn pour les entrées ; jamais de troncature).
+    repr() ne révèle jamais le jeton (LeaseToken masqué)."""
+    reservation_id: uuid.UUID
+    lease_epoch: int
+    lease_token: dr.LeaseToken
+    conversation_key: str
+    client_turn_id: uuid.UUID
+    ticker_input: str
+    question: str
+    context: str
+    last_method_id: object  # str ou None (None distinct de "")
+    resolved_ticker: str
+
+    def __post_init__(self):
+        if type(self.reservation_id) is not uuid.UUID:
+            raise ValueError("reservation_id : uuid.UUID attendu")
+        if type(self.lease_epoch) is not int or not 1 <= self.lease_epoch <= dr.MAX_EPOCH:
+            raise ValueError("lease_epoch : entier de 1 à 2^63 - 1 attendu")
+        if type(self.lease_token) is not dr.LeaseToken:
+            raise ValueError("lease_token : jeton de bail serveur attendu")
+        try:
+            dfp.admit_conversation_key(self.conversation_key)
+            if type(self.client_turn_id) is not uuid.UUID:
+                raise dfp.TurnRejected("client_turn_id : uuid.UUID attendu")
+            dfp.normalize_ticker(self.ticker_input)
+            dfp.normalize_texts(self.question, self.context)
+            dfp.admit_last_method_id(self.last_method_id)
+        except dfp.TurnRejected as exc:
+            raise ValueError(str(exc)) from None
+        if not dc.valid_resolved_ticker(self.resolved_ticker):
+            raise ValueError("resolved_ticker : ticker résolu canonique attendu")
+
+    @property
+    def ticker(self) -> str:
+        """Ticker SAISI normalisé (trame HMAC B1), jamais le ticker résolu."""
+        return dfp.normalize_ticker(self.ticker_input)
+
+    @property
+    def texts(self) -> tuple:
+        return dfp.normalize_texts(self.question, self.context)
+
+    @classmethod
+    def from_lease(cls, lease: dr.DecryptageLease, reservation: ReserveDecryptageTurn,
+                   resolved_ticker: str) -> "ReadDecryptagePreparationContext":
+        """Capacité B1 + entrées ORIGINALES de la réservation (même tour)."""
+        if type(lease) is not dr.DecryptageLease or type(reservation) is not ReserveDecryptageTurn:
+            raise ValueError("capacité de bail et réservation originale attendues")
+        if (lease.conversation_key, lease.source_user_turn_id) != (reservation.conversation_key,
+                                                                   reservation.client_turn_id):
+            raise ValueError("le bail ne correspond pas au tour réservé")
+        return cls(lease.reservation_id, lease.lease_epoch, lease.token, reservation.conversation_key,
+                   reservation.client_turn_id, reservation.ticker_input, reservation.question, reservation.context,
+                   reservation.last_method_id, resolved_ticker)

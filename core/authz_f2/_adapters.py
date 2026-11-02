@@ -39,6 +39,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _insert_reservation | decryptage_turn_reservations | INSERT en SAVEPOINT, user_id serveur | (users déjà FOR NO KEY UPDATE) |
 | _grant_lease / _block_reservation / _release_lease | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch [ET compteur / jeton haché / échéance] | (ligne déjà verrouillée) |
 | _record_attempt_failure : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
+| _read_preparation_context (R1 PR 9-B2) | UNE instruction : decryptage_turn_reservations, users, conversation_identities, assistant_deliveries + decryptage_cognitive_links (ancre), cognitive_events, analysis_sessions, analysis_facts, user_statements, investment_theses | user_id serveur (unique paramètre :u, propagé par la CTE o) ET id de réservation / conversation / ticker résolu | - (plan READ, aucune écriture) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
 ABSENT : le filtre SQL porte simultanément l'identifiant et le user_id, la
@@ -154,6 +155,27 @@ state = 'reserved' et l'epoch lu sous verrou : une ligne terminale n'est
 jamais modifiée ; identité, empreinte, versions et created_at ne sont
 jamais réécrits. Une capacité périmée (état, epoch, jeton ou échéance)
 rend CONFLICT : rien n'est écrit.
+
+R1 PR 9-B2 (plan READ INCHANGÉ, aucun verrou métier, aucune écriture) :
+ReadDecryptagePreparationContext reçoit le trousseau Décrypter par le
+dispatch EXISTANT (Spec.decryptage_keyed) pour revérifier l'intention B1.
+UNE SEULE instruction (_PREPARATION_CONTEXT, CTE) : tout le contexte est lu
+sous le même instantané d'instruction (READ COMMITTED : un instantané par
+instruction, jamais entre deux instructions). L'unique paramètre de
+propriétaire :u est propagé par la CTE o ; chaque table est filtrée par ce
+user_id serveur ; les lignes d'autrui rattachées à la session active sont
+seulement COMPTÉES (refus fermé, jamais lues). Ordre de décision :
+réservation absente ou d'autrui : ABSENT ; identité du tour, état, epoch,
+jeton ou échéance (clock_timestamp() de l'instruction) : CONFLICT ;
+intention HMAC divergente : IDEMPOTENCY_CONFLICT ; version ou clé
+introuvable, profil, conversation, ancre ou provenance incohérents :
+AdapterInvariantBroken (503) ; puis refus métier fermés
+(DecryptagePreparationRefused) : sessions actives multiples, étape ouverte
+invalide, conversation obsolète (même sémantique que
+core.decryptage_cognitive_runtime.precheck_conversation_context), contenus
+hors bornes, valeur non finie. Contenus bornés DANS la projection (texte
+transféré seulement sous sa borne, longueur toujours projetée ; 65 lignes au
+plus pour 64 admises) ; flottants lus par float8send.
 """
 import uuid
 from dataclasses import dataclass
@@ -163,6 +185,7 @@ from types import MappingProxyType
 import sqlalchemy as sa
 
 from core.authz_f2 import commands as c
+from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_fingerprint as dfp
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_fingerprint as fp
@@ -1109,6 +1132,255 @@ def _record_attempt_failure(conn, ctx, command, locked, keys):
                                      out.attempts_used)
 
 
+# --------------------------------------------------------------------------
+# R1 PR 9-B2 : lecture de préparation d'un tour Décrypter (plan READ)
+# --------------------------------------------------------------------------
+
+# UNE instruction : un seul instantané pour tout le contexte. Bornes en
+# constantes (égalité avec core.authz_f2.decryptage_context vérifiée par les
+# tests) : 2 sessions actives lues au plus (détection d'anomalie), 65 faits /
+# contributions (64 admis), étape 32 octets, type de fait 64 octets,
+# contribution 16384 octets, thèse 32768 octets.
+_PREPARATION_CONTEXT = (
+    "WITH o AS (SELECT CAST(:u AS text) AS u, CAST(:t AS text) COLLATE \"C\" AS t, CAST(:k AS text) AS k, "
+    "clock_timestamp() AS at), "
+    "r AS (SELECT " + _RESERVATION_LIST_COLUMNS + " FROM decryptage_turn_reservations, o WHERE id = :rid AND user_id = o.u), "
+    "p AS (SELECT users.level, users.level_revision FROM users, o WHERE users.id = o.u), "
+    "cv AS (SELECT ci.user_id = o.u AS owned FROM conversation_identities ci, o WHERE ci.conversation_key = o.k), "
+    "an AS (SELECT l.response_action, l.response_event_id FROM decryptage_cognitive_links l "
+    "JOIN assistant_deliveries d ON d.id = l.assistant_delivery_id CROSS JOIN o "
+    "WHERE d.user_id = o.u AND d.conversation_key = o.k AND d.surface = 'decryptage' AND d.status = 'delivered' "
+    "AND l.capture_state = 'captured' AND l.capture_version = 'decryptage-cognitive-runtime-v2' "
+    "ORDER BY l.captured_at DESC, d.delivered_at DESC, d.generated_at DESC, d.id DESC LIMIT 1), "
+    "ae AS (SELECT e.status, e.analysis_session_id, e.user_id = o.u AS owned FROM cognitive_events e, an, o "
+    "WHERE e.id = an.response_event_id), "
+    "asx AS (SELECT s.user_id = o.u AS owned, s.ticker COLLATE \"C\" = o.t AS same_ticker "
+    "FROM analysis_sessions s, ae, o WHERE s.id = ae.analysis_session_id), "
+    "act AS (SELECT s.id, CASE WHEN octet_length(s.current_step) <= 32 THEN s.current_step END AS current_step "
+    "FROM analysis_sessions s, o WHERE s.user_id = o.u AND s.ticker COLLATE \"C\" = o.t "
+    "AND s.status = 'in_progress' ORDER BY s.started_at DESC, s.updated_at DESC, s.id DESC LIMIT 2), "
+    "sel AS (SELECT act.id, act.current_step FROM act WHERE (SELECT count(*) FROM act) = 1), "
+    "fa AS (SELECT f.id, CASE WHEN octet_length(f.fact_type) <= 64 THEN f.fact_type END AS fact_type, "
+    "octet_length(f.fact_type) AS type_bytes, encode(float8send(f.fact_value), 'hex') AS value_hex, "
+    "row_number() OVER (ORDER BY f.fact_date ASC, f.id ASC) AS ordinal "
+    "FROM analysis_facts f, sel, o WHERE f.analysis_session_id = sel.id AND f.user_id = o.u "
+    "ORDER BY f.fact_date ASC, f.id ASC LIMIT 65), "
+    "st AS (SELECT x.id, CASE WHEN octet_length(x.step) <= 32 THEN x.step END AS step, "
+    "octet_length(x.step) AS step_bytes, "
+    "CASE WHEN octet_length(x.statement_text) <= 16384 THEN x.statement_text END AS statement_text, "
+    "octet_length(x.statement_text) AS text_bytes, "
+    "row_number() OVER (ORDER BY x.statement_date ASC, x.id ASC) AS ordinal "
+    "FROM user_statements x, sel, o WHERE x.analysis_session_id = sel.id AND x.user_id = o.u "
+    "ORDER BY x.statement_date ASC, x.id ASC LIMIT 65), "
+    "th AS (SELECT i.id, CASE WHEN octet_length(i.thesis_text) <= 32768 THEN i.thesis_text END AS thesis_text, "
+    "octet_length(i.thesis_text) AS text_bytes, (i.created_at IS NULL OR (i.created_at >= TIMESTAMP "
+    "'0001-01-01 00:00:00' AND i.created_at < TIMESTAMP '10000-01-01 00:00:00')) AS date_representable, "
+    "CASE WHEN i.created_at >= TIMESTAMP '0001-01-01 00:00:00' AND i.created_at < TIMESTAMP "
+    "'10000-01-01 00:00:00' THEN to_char(i.created_at, 'DD/MM/YYYY') END AS date_label "
+    "FROM investment_theses i, o WHERE i.user_id = o.u AND i.ticker COLLATE \"C\" = o.t "
+    "AND NOT EXISTS (SELECT 1 FROM act) ORDER BY i.created_at DESC NULLS LAST, i.id DESC LIMIT 1) "
+    "SELECT o.at AS read_at, r.*, (SELECT count(*) FROM r) AS reservation_rows, "
+    "(SELECT count(*) FROM p) AS profile_rows, (SELECT p.level FROM p) AS profile_level, "
+    "(SELECT p.level_revision FROM p) AS profile_level_revision, "
+    "(SELECT count(*) FROM cv) AS conversation_rows, (SELECT cv.owned FROM cv) AS conversation_owned, "
+    "(SELECT an.response_action FROM an) AS anchor_action, (SELECT an.response_event_id FROM an) AS anchor_event_id, "
+    "(SELECT count(*) FROM ae) AS anchor_event_rows, (SELECT ae.status FROM ae) AS anchor_status, "
+    "(SELECT ae.owned FROM ae) AS anchor_owned, (SELECT ae.analysis_session_id FROM ae) AS anchor_session_id, "
+    "(SELECT count(*) FROM asx) AS anchor_session_rows, (SELECT asx.owned FROM asx) AS anchor_session_owned, "
+    "(SELECT asx.same_ticker FROM asx) AS anchor_same_ticker, "
+    "(SELECT count(*) FROM act) AS active_sessions, (SELECT sel.id FROM sel) AS active_session_id, "
+    "(SELECT sel.current_step FROM sel) AS active_current_step, "
+    "(SELECT count(*) FROM analysis_facts f, sel, o WHERE f.analysis_session_id = sel.id AND f.user_id <> o.u) "
+    "AS foreign_facts, "
+    "(SELECT count(*) FROM user_statements x, sel, o WHERE x.analysis_session_id = sel.id AND x.user_id <> o.u) "
+    "AS foreign_statements, "
+    "(SELECT coalesce(jsonb_agg(jsonb_build_object('id', fa.id, 'fact_type', fa.fact_type, 'type_bytes', "
+    "fa.type_bytes, 'value_hex', fa.value_hex) ORDER BY fa.ordinal), '[]'::jsonb) FROM fa) AS facts, "
+    "(SELECT coalesce(jsonb_agg(jsonb_build_object('id', st.id, 'step', st.step, 'step_bytes', st.step_bytes, "
+    "'text', st.statement_text, 'text_bytes', st.text_bytes) ORDER BY st.ordinal), '[]'::jsonb) FROM st) "
+    "AS statements, "
+    "(SELECT count(*) FROM th) AS thesis_rows, (SELECT th.id FROM th) AS thesis_id, "
+    "(SELECT th.thesis_text FROM th) AS thesis_text, (SELECT th.text_bytes FROM th) AS thesis_text_bytes, "
+    "(SELECT th.date_representable FROM th) AS thesis_date_representable, "
+    "(SELECT th.date_label FROM th) AS thesis_date_label "
+    "FROM o LEFT JOIN r ON TRUE")
+
+# Actions de réponse V2 qui ancrent une conversation (core.decryptage_cognitive_runtime,
+# recopiées : égalité vérifiée par les tests).
+ANCHORING_RESPONSE_ACTIONS = ("opened_event", "continued_event", "continued_without_boundary_signal",
+                              "transitioned_event")
+NON_ANCHORING_RESPONSE_ACTIONS = ("closed_terminal", "no_cognitive_action", "stale_delivery")
+COGNITIVE_OPEN = "open"
+
+
+class _OutOfBounds(Exception):
+    """Contenu historique hors des bornes de la vue : refus fermé."""
+
+
+class _NonFinite(Exception):
+    """Valeur numérique historique non finie : refus fermé."""
+
+
+def _incoherent(message: str) -> DecryptageUnavailable:
+    return DecryptageUnavailable(message, "decryptage_preparation_incoherent")
+
+
+def _count(row, key: str, upper: int) -> int:
+    value = row[key]
+    if type(value) is not int or not 0 <= value <= upper:
+        raise _incoherent("compte hors contrat")
+    return value
+
+
+def _anchor(row, user_id: str) -> dc.PreparationAnchor:
+    """Ancre R1-C4 : dernière livraison V2 delivered + captured, jamais plus
+    loin ; action ancrante sans event (ou l'inverse), event ou AnalysisSession
+    d'autrui ou introuvable : invariant rompu (503)."""
+    action, event_id = row["anchor_action"], row["anchor_event_id"]
+    if action is None:
+        if event_id is not None or _count(row, "anchor_event_rows", 0) != 0:
+            raise _incoherent("ancre incohérente")
+        return dc.PreparationAnchor(dc.ANCHOR_NONE, None, None)
+    if action in NON_ANCHORING_RESPONSE_ACTIONS:
+        if event_id is not None:
+            raise _incoherent("action non ancrante avec event")
+        return dc.PreparationAnchor(dc.ANCHOR_NONE, None, None)
+    if action not in ANCHORING_RESPONSE_ACTIONS or type(event_id) is not uuid.UUID:
+        raise _incoherent("action ancrante sans event")
+    if _count(row, "anchor_event_rows", 1) != 1 or row["anchor_owned"] is not True:
+        raise _incoherent("event d'ancrage introuvable ou d'autrui")
+    session_id = row["anchor_session_id"]
+    if session_id is None:
+        if _count(row, "anchor_session_rows", 0) != 0:
+            raise _incoherent("ancre incohérente")
+        return dc.PreparationAnchor(dc.ANCHOR_UNBOUND, event_id, None)
+    if _count(row, "anchor_session_rows", 1) != 1 or row["anchor_session_owned"] is not True \
+            or type(row["anchor_same_ticker"]) is not bool:
+        raise _incoherent("AnalysisSession d'ancrage introuvable ou d'autrui")
+    state = dc.ANCHOR_CURRENT if row["anchor_same_ticker"] else dc.ANCHOR_OTHER_TICKER
+    return dc.PreparationAnchor(state, event_id, session_id)
+
+
+def _preparation_facts(raw) -> tuple:
+    if type(raw) is not list:
+        raise _incoherent("faits illisibles")
+    if len(raw) > dc.MAX_FACTS:
+        raise _OutOfBounds()
+    facts = []
+    for item in raw:
+        if type(item) is not dict or type(item.get("type_bytes")) is not int:
+            raise _incoherent("fait illisible")
+        if item["type_bytes"] > dc.FACT_TYPE_MAX_BYTES:
+            raise _OutOfBounds()
+        hex_value = item.get("value_hex")
+        value = None
+        if hex_value is not None:
+            if type(hex_value) is not str or len(hex_value) != 16:
+                raise _incoherent("valeur de fait illisible")
+            value = pv.float_from_float8send(bytes.fromhex(hex_value))
+            if value != value or value in (float("inf"), float("-inf")):
+                raise _NonFinite()
+        facts.append(dc.PreparationFact(item.get("id"), item.get("fact_type"), value))
+    return tuple(facts)
+
+
+def _preparation_statements(raw) -> tuple:
+    if type(raw) is not list:
+        raise _incoherent("contributions illisibles")
+    if len(raw) > dc.MAX_STATEMENTS:
+        raise _OutOfBounds()
+    statements, total = [], 0
+    for item in raw:
+        if type(item) is not dict or type(item.get("text_bytes")) is not int:
+            raise _incoherent("contribution illisible")
+        step_bytes = item.get("step_bytes")
+        if item["text_bytes"] > dc.STATEMENT_TEXT_MAX_BYTES or (
+                step_bytes is not None and (type(step_bytes) is not int or step_bytes > dc.STEP_MAX_BYTES)):
+            raise _OutOfBounds()
+        total += item["text_bytes"]
+        if total > dc.STATEMENTS_TOTAL_MAX_BYTES:
+            raise _OutOfBounds()
+        statements.append(dc.PreparationStatement(item.get("id"), item.get("step"), item.get("text")))
+    return tuple(statements)
+
+
+def _preparation_thesis(row):
+    rows = _count(row, "thesis_rows", 1)
+    if rows == 0:
+        return None
+    if type(row["thesis_text_bytes"]) is not int:
+        raise _incoherent("thèse illisible")
+    if row["thesis_text_bytes"] > dc.THESIS_TEXT_MAX_BYTES or row["thesis_date_representable"] is not True:
+        raise _OutOfBounds()
+    return dc.PreparationThesis(row["thesis_id"], row["thesis_text"], row["thesis_date_label"])
+
+
+def _preparation(row, res: _Reservation, user_id: str, command, at):
+    """Vue ou refus fermé ; toute structure impossible : 503."""
+    profile = row["profile_level"], row["profile_level_revision"]
+    if _count(row, "profile_rows", 1) != 1 or not c.valid_level(profile[0]) or not c.valid_revision(profile[1]):
+        raise _incoherent("profil incohérent")
+    if _count(row, "conversation_rows", 1) != 1 or row["conversation_owned"] is not True:
+        raise _incoherent("conversation de la réservation introuvable ou d'autrui")
+    anchor = _anchor(row, user_id)
+    active_count = _count(row, "active_sessions", 2)
+    if active_count == 2:
+        return dc.DecryptagePreparationRefused(dc.MULTIPLE_ACTIVE_SESSIONS)  # jamais la plus récente
+    active = None
+    if active_count == 1:
+        if type(row["active_session_id"]) is not uuid.UUID:
+            raise _incoherent("session active illisible")
+        if row["active_current_step"] not in dc.TASK_STEPS:
+            return dc.DecryptagePreparationRefused(dc.ACTIVE_SESSION_STEP_INVALID)
+        active = dc.PreparationActiveSession(row["active_session_id"], row["active_current_step"])
+    # R1-C4 : même ticker que l'ancre et état cognitif obsolète => stale (avant tout appel coûteux).
+    if anchor.state == dc.ANCHOR_CURRENT and (row["anchor_status"] != COGNITIVE_OPEN or active is None
+                                              or active.analysis_session_id != anchor.analysis_session_id):
+        return dc.DecryptagePreparationRefused(dc.STALE_CONVERSATION_CONTEXT)
+    if active is None:
+        if row["facts"] != [] or row["statements"] != []:
+            raise _incoherent("faits ou contributions sans session active")
+        facts = statements = ()
+    else:
+        if _count(row, "foreign_facts", dr.MAX_EPOCH) or _count(row, "foreign_statements", dr.MAX_EPOCH):
+            raise _incoherent("faits ou contributions d'autrui rattachés à la session active")
+        facts, statements = _preparation_facts(row["facts"]), _preparation_statements(row["statements"])
+    thesis = _preparation_thesis(row)
+    if active is not None and thesis is not None:
+        raise _incoherent("thèse lue avec une session active")
+    return dc.DecryptagePreparationView(
+        dc.CONTRACT_VERSION, res.id, res.lease_epoch, res.attempts_used, res.lease_expires_at, at, user_id,
+        res.conversation_key, res.source_user_turn_id, command.resolved_ticker, profile[0], profile[1], anchor,
+        active, facts, statements, thesis)
+
+
+def _read_preparation_context(conn, ctx, command, locked, keys):
+    user_id = ctx.principal.user_id
+    row = _first(conn, _PREPARATION_CONTEXT, u=user_id, rid=command.reservation_id, k=command.conversation_key,
+                 t=command.resolved_ticker)
+    if row is None or _count(row, "reservation_rows", 1) == 0:
+        return ABSENT  # réservation absente ou d'autrui : indiscernables, rien n'est lu d'autrui
+    at = row["read_at"]
+    if type(at) is not datetime or at.tzinfo is None:
+        raise AdapterInvariantBroken("horloge PostgreSQL illisible")
+    res = _reservation(row, user_id)
+    if (res.conversation_key, res.source_user_turn_id) != (command.conversation_key, command.client_turn_id) \
+            or res.state != dr.RESERVED or res.lease_epoch != command.lease_epoch or res.lease_token_hash is None \
+            or not command.lease_token.matches(res.lease_token_hash) or not at < res.lease_expires_at:
+        return CONFLICT  # capacité périmée ou d'un autre tour : rien n'est lu au-delà
+    computed = _fingerprint(keys, res.fingerprint_version, res.fingerprint_key_version, user_id, command)
+    if not dfp.same_fingerprint(computed, res.request_fingerprint):
+        return IDEMPOTENCY_CONFLICT  # entrées différentes de l'intention réservée
+    try:
+        return _preparation(row, res, user_id, command, at)
+    except _OutOfBounds:
+        return dc.DecryptagePreparationRefused(dc.CONTEXT_OUT_OF_BOUNDS)
+    except _NonFinite:
+        return dc.DecryptagePreparationRefused(dc.CONTEXT_VALUE_INVALID)
+    except (KeyError, TypeError, ValueError):
+        raise _incoherent("contexte de préparation incohérent") from None
+
+
 class SpecError(TypeError):
     """Spécification de commande hors contrat (registre impossible à construire)."""
 
@@ -1153,4 +1425,8 @@ REGISTRY = MappingProxyType({
     c.ReserveDecryptageTurn: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _reserve_turn, decryptage_keyed=True),
     c.RecordDecryptageAttemptFailure: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _record_attempt_failure,
                                            decryptage_keyed=True),
+    # R1 PR 9-B2 : lecture de préparation, plan READ inchangé, trousseau Décrypter
+    # par le dispatch existant (revérification de l'intention B1), aucune écriture.
+    c.ReadDecryptagePreparationContext: Spec(c.READ, _no_business_lock, _read_preparation_context,
+                                             decryptage_keyed=True),
 })

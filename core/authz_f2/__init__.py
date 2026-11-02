@@ -57,6 +57,24 @@ dépendance facultative et dédiée decryptage_keyring du runner
 
 Aucune route, aucun appel Claude ni EODHD, aucune écriture cognitive.
 
+R1 PR 9-B2 : préparation et génération DORMANTES d'un candidat interne.
+Registre fermé à dix-sept commandes (ReadDecryptagePreparationContext,
+plan READ inchangé, trousseau Décrypter par le dispatch existant) ; cinq
+modules :
+
+- decryptage_context.py     : vue de préparation fermée (pure) ;
+- decryptage_instrument.py  : identification de l'instrument (pure) ;
+- decryptage_market_data.py : politique EODHD / FMP fermée (pure, sans
+                              yfinance) ;
+- decryptage_candidate.py   : snapshot versionné, validation de la réponse,
+                              GeneratedDecryptageCandidate ;
+- decryptage_generation.py  : orchestrateur et budget (transports injectés,
+                              aucun réseau importé).
+
+Aucune route, aucune AssistantDelivery, aucune finalisation, aucune écriture
+cognitive ; les transports réels (core/decryptage_providers.py) ne sont
+importés par aucun module applicatif.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

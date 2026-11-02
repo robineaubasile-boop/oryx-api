@@ -96,7 +96,10 @@ def test_dispatch_gives_each_family_only_to_its_commands():
     keyed = {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.keyed}
     decryptage = {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.decryptage_keyed}
     assert keyed == {c.CreatePortfolioPosition, c.ReplacePortfolioPosition, c.DeletePortfolioPosition}
-    assert decryptage == {c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}
+    # R1 PR 9-B2 : la lecture de préparation (plan READ) revérifie l'intention
+    # B1 par le MÊME dispatch ; aucune autre commande ne reçoit ce trousseau.
+    assert decryptage == {c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,
+                          c.ReadDecryptagePreparationContext}
     assert list(inspect.signature(AuthorizedTransactionRunner.run).parameters) == ["self", "credential", "command"]
     assert {n for n in vars(AuthorizedTransactionRunner) if not n.startswith("_")} == {"run"}
     assert "_decryptage" in AuthorizedTransactionRunner.__slots__
@@ -206,4 +209,5 @@ def test_no_application_module_invokes_the_b1_commands():
 def test_failure_classes_and_reasons_are_closed_vocabularies():
     assert dr.FAILURE_CLASSES == ("market_data_unavailable", "generation_unavailable", "generation_unusable")
     assert not hasattr(c, "ForceBlockReservation") and not hasattr(c, "ResetReservation")
-    assert {n for n in dir(c) if "Decryptage" in n} == {"ReserveDecryptageTurn", "RecordDecryptageAttemptFailure"}
+    assert {n for n in dir(c) if "Decryptage" in n} == {"ReserveDecryptageTurn", "RecordDecryptageAttemptFailure",
+                                                        "ReadDecryptagePreparationContext"}  # R1 PR 9-B2 : lecture
