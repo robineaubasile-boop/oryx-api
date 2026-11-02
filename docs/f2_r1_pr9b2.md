@@ -357,7 +357,7 @@ Ces tests montrent l'absence d'effet canonique de B2 et le transport des
 | `tests/test_authz_f2_pr9b2_units.py` (sans base) | instrument, données, budget, réponse, snapshot, candidat, commande, transports réels simulés |
 | `tests/test_authz_f2_pr9b2_boundary.py` (sans base) | registre, runner seul accès, graphe d'imports, dormance du vrai `api:app`, import sans réseau, aucune migration |
 | `tests/authz_f2_pr9b2_support.py` | environnement, horloge et transports simulés |
-| Extensions nominatives | BF1 (`_PREPARATION_CONTEXT`, registre 17, lecture à trousseau), matrice d'imports, inventaire transitif du pont, dispatch des trousseaux, vocabulaire des commandes |
+| Extensions nominatives | BF1 (`_PREPARATION_CONTEXT`, aucune CTE modifiante, registre 17, lecture à trousseau), matrice d'imports, inventaire transitif du pont, dispatch des trousseaux, vocabulaire des commandes, liste blanche T2-A de `test_migration_0005` (`_adapters.py` LIT l'event d'ancrage, comme le pont PR9-A) |
 
 Résultats : voir la description de la PR (exécutions locales PostgreSQL
 16.15 et 18.6, images CI épinglées ; contrôles GitHub `ci / *`).

@@ -99,6 +99,15 @@ def test_the_production_registry_has_seventeen_commands_and_one_new_read():
     assert dr.LEASE_DURATION.total_seconds() == 360 and dr.MAX_ATTEMPTS == 3
 
 
+def test_cognitive_tables_are_only_read_by_the_preparation_statement():
+    statements = {k: v for k, v in vars(_adapters).items() if k.startswith("_") and k.isupper() and isinstance(v, str)}
+    readers = {k for k, v in statements.items() if any(t in v for t in ("cognitive_events", "decryptage_cognitive_links",
+                                                                      "user_statements", "analysis_facts"))}
+    assert readers == {"_PREPARATION_CONTEXT"}
+    assert not any(word in statements["_PREPARATION_CONTEXT"].upper().split() for word in
+                   ("UPDATE", "INSERT", "DELETE", "MERGE"))
+
+
 def test_the_orchestrator_reaches_postgresql_only_through_the_runner():
     tree = _tree(AUTHZ / "decryptage_generation.py")
     runner_calls = {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Attribute)

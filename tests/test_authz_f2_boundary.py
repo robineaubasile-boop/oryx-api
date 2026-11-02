@@ -301,6 +301,8 @@ def _check_preparation_statement(sql):
     assert ";" not in sql and "--" not in sql and "/*" not in sql
     assert sql.count(":u") == 1 and sql.count(":rid") == 1 and sql.count(":k") == 1 and sql.count(":t") == 1
     assert not FORBIDDEN_SQL.search(sql)
+    # Aucune CTE modifiante (WITH ... UPDATE / INSERT / DELETE / MERGE).
+    assert not re.search(r"\b(UPDATE|INSERT|DELETE|MERGE|UPSERT)\b", sql, re.I)
     assert not re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b", sql)  # plan READ : aucun verrou
     for owner_filter in PR9B2_OWNER_FILTERS:
         assert owner_filter in sql, owner_filter
