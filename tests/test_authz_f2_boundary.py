@@ -230,11 +230,14 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         # R1 PR 9-B1
         "_CONVERSATION_OWNED", "_REGISTER_CONVERSATION", "_LOCK_RESERVATION_TURN", "_LOCK_RESERVATION",
         "_LEASE_DECISION_CLOCK", "_LEGACY_DELIVERY", "_LINKED_DELIVERY", "_INSERT_RESERVATION[leased]",
-        "_INSERT_RESERVATION[blocked]", "_GRANT_LEASE", "_BLOCK_RESERVATION", "_RELEASE_LEASE"}
+        "_INSERT_RESERVATION[blocked]", "_GRANT_LEASE", "_BLOCK_RESERVATION", "_RELEASE_LEASE",
+        # R1 PR 9-B2 : UNE instruction de lecture de préparation.
+        "_PREPARATION_CONTEXT"}
     # Seules requêtes sans user_id : l'isolation active de la transaction et
     # (R1 PR 9-B1) l'horloge T_lease_decision lue après le verrou.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
     assert statements.pop("_LEASE_DECISION_CLOCK") == "SELECT clock_timestamp()"
+    _check_preparation_statement(statements.pop("_PREPARATION_CONTEXT"))
     for name in PR9B1_FILTERS:
         sql = statements.pop(name)
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
@@ -277,6 +280,41 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         assert any(table in sql for sql in statements.values()), table
 
 
+# R1 PR 9-B2 : chaque table de la lecture de préparation est filtrée par le
+# propriétaire serveur unique (o.u, issu du SEUL paramètre :u).
+PR9B2_OWNER_FILTERS = (
+    "FROM decryptage_turn_reservations, o WHERE id = :rid AND user_id = o.u",
+    "FROM users, o WHERE users.id = o.u",
+    "ci.user_id = o.u AS owned FROM conversation_identities ci, o WHERE ci.conversation_key = o.k",
+    "WHERE d.user_id = o.u AND d.conversation_key = o.k AND d.surface = 'decryptage' AND d.status = 'delivered'",
+    "e.user_id = o.u AS owned FROM cognitive_events e, an, o WHERE e.id = an.response_event_id",
+    "s.user_id = o.u AS owned, s.ticker COLLATE \"C\" = o.t AS same_ticker FROM analysis_sessions s, ae, o",
+    "FROM analysis_sessions s, o WHERE s.user_id = o.u AND s.ticker COLLATE \"C\" = o.t AND s.status = 'in_progress'",
+    "FROM analysis_facts f, sel, o WHERE f.analysis_session_id = sel.id AND f.user_id = o.u",
+    "FROM user_statements x, sel, o WHERE x.analysis_session_id = sel.id AND x.user_id = o.u",
+    "FROM investment_theses i, o WHERE i.user_id = o.u AND i.ticker COLLATE \"C\" = o.t",
+)
+
+
+def _check_preparation_statement(sql):
+    assert sql.startswith("WITH o AS (SELECT CAST(:u AS text) AS u, ")
+    assert ";" not in sql and "--" not in sql and "/*" not in sql
+    assert sql.count(":u") == 1 and sql.count(":rid") == 1 and sql.count(":k") == 1 and sql.count(":t") == 1
+    assert not FORBIDDEN_SQL.search(sql)
+    # Aucune CTE modifiante (WITH ... UPDATE / INSERT / DELETE / MERGE).
+    assert not re.search(r"\b(UPDATE|INSERT|DELETE|MERGE|UPSERT)\b", sql, re.I)
+    assert not re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b", sql)  # plan READ : aucun verrou
+    for owner_filter in PR9B2_OWNER_FILTERS:
+        assert owner_filter in sql, owner_filter
+    tables = set(re.findall(r"\b(?:FROM|JOIN) ([a-z_]+)\b", sql)) - {"o", "r", "p", "cv", "an", "ae", "asx", "act",
+                                                                     "sel", "fa", "st", "th"}
+    assert tables == {"decryptage_turn_reservations", "users", "conversation_identities", "decryptage_cognitive_links",
+                      "assistant_deliveries", "cognitive_events", "analysis_sessions", "analysis_facts",
+                      "user_statements", "investment_theses"}, tables
+    # Lignes d'autrui de la session active : seulement COMPTÉES (refus fermé).
+    assert sql.count("user_id <> o.u") == 2 and sql.count("SELECT count(*) FROM analysis_facts f, sel, o") == 1
+
+
 def test_closed_registry_and_lock_plans():
     reads = {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses, c.ListThesesForTicker, c.ReadDelivery,
              c.ListConversationDeliveries,
@@ -287,7 +325,10 @@ def test_closed_registry_and_lock_plans():
                  # R1 PR 9-B1
                  c.ReserveDecryptageTurn: c.DECRYPTAGE_MUTATION,
                  c.RecordDecryptageAttemptFailure: c.DECRYPTAGE_MUTATION}
-    assert set(_adapters.REGISTRY) == reads | set(mutations) and len(_adapters.REGISTRY) == 16
+    # R1 PR 9-B2 : une lecture sous READ qui reçoit le trousseau Décrypter
+    # (revérification de l'intention B1 par le dispatch existant).
+    keyed_reads = {c.ReadDecryptagePreparationContext}
+    assert set(_adapters.REGISTRY) == reads | keyed_reads | set(mutations) and len(_adapters.REGISTRY) == 17
     # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
     assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
@@ -303,6 +344,9 @@ def test_closed_registry_and_lock_plans():
             assert spec.lock is _adapters._no_business_lock
             assert spec.execute is {c.ReserveDecryptageTurn: _adapters._reserve_turn,
                                     c.RecordDecryptageAttemptFailure: _adapters._record_attempt_failure}[command]
+        elif command in keyed_reads:
+            assert spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
+            assert spec.lock is _adapters._no_business_lock and spec.execute is _adapters._read_preparation_context
         else:
             assert not spec.keyed and not spec.decryptage_keyed and spec.states == (type(None),)
     assert _adapters.PORTFOLIO_STATES == (_adapters.ReceiptFound, _adapters.PositionFound, _adapters.PositionMissing,

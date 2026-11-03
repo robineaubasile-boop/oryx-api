@@ -444,7 +444,13 @@ def test_t2a_tables_are_not_wired_to_the_application():
                # provenance d'une livraison avant l'ACK ; aucune écriture
                # T2 hors de core/decryptage_cognitive_runtime.py
                # (tests/test_authz_f2_pr9a_boundary.py).
-               "core/authz_f2/_decryptage_orm_bridge.py"}
+               "core/authz_f2/_decryptage_orm_bridge.py",
+               # R1 PR 9-B2 : instruction de LECTURE de préparation (dormante,
+               # plan READ, aucune écriture), qui lit statut, propriétaire et
+               # AnalysisSession de l'event d'ancrage R1-C4 d'une conversation
+               # (tests/test_authz_f2_boundary.py, inventaire nominatif
+               # _PREPARATION_CONTEXT ; tests/test_authz_f2_pr9b2.py).
+               "core/authz_f2/_adapters.py"}
     needles = ("CognitiveEvent", "SupportTrace", "cognitive_event", "support_trace")
     checked = 0
     for path in REPO_ROOT.rglob("*"):

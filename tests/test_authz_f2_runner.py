@@ -347,8 +347,9 @@ def test_registry_is_closed_and_unknown_commands_are_refused_before_any_transact
                                        c.UpdateProfileLevel, c.CreatePortfolioPosition,
                                        c.ReplacePortfolioPosition, c.DeletePortfolioPosition,
                                        c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis,  # R1 PR 8
-                                       c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}  # R1 PR 9-B1
-    assert len(_adapters.REGISTRY) == 16
+                                       c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,  # R1 PR 9-B1
+                                       c.ReadDecryptagePreparationContext}  # R1 PR 9-B2
+    assert len(_adapters.REGISTRY) == 17
     with pytest.raises(TypeError):
         _adapters.REGISTRY[object] = None
 

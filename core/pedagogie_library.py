@@ -1026,7 +1026,7 @@ METHODES_PRINCIPALES = [
 ]
 
 
-def lookup_method(question: str, context: Optional[str] = None, last_method_id: Optional[str] = None, allow_these_lock: bool = True) -> Optional[dict]:
+def lookup_method(question: str, context: Optional[str] = None, last_method_id: Optional[str] = None, allow_these_lock: bool = True, *, log: bool = True) -> Optional[dict]:
     """
     Détecte la méthode pédagogique Oryx pertinente pour une question.
 
@@ -1046,13 +1046,18 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
                  rescanner le texte du contexte.
         allow_these_lock: Si False, désactive le verrouillage construction_these
                  (utilisé hors du flux Décrypter, où ce verrou n'a pas de sens).
+        log: (mot-clé uniquement) True par défaut : journalisation historique
+                 inchangée (question comprise). False : AUCUNE impression ni
+                 journalisation, sélection strictement identique (R1 PR 9-B2,
+                 chemin F2 qui ne doit jamais journaliser la question).
 
     Returns:
         dict contenant method_id, title, method_content, example_company,
         keywords_matched, OU None si aucun match.
     """
     if not question:
-        print("[PEDAGOGIE] empty question, no match")
+        if log:
+            print("[PEDAGOGIE] empty question, no match")
         return None
 
     normalized = _normalize(question)
@@ -1066,7 +1071,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
     # à construction_these ensuite).
     if allow_these_lock and last_method_id == "construction_these":
         method = METHODES["construction_these"]
-        print(f"[PEDAGOGIE] '{question}' → method_id='construction_these' (verrouillage thèse en cours)")
+        if log:
+            print(f"[PEDAGOGIE] '{question}' → method_id='construction_these' (verrouillage thèse en cours)")
         return {
             "method_id": "construction_these",
             "title": method["title"],
@@ -1081,7 +1087,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
         method = METHODES[method_id]
         matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, normalized)]
         if matched_keywords:
-            print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
+            if log:
+                print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
             return {
                 "method_id": method_id,
                 "title": method["title"],
@@ -1095,7 +1102,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
         method = METHODES[method_id]
         matched_keywords = [kw for kw in method["keywords"] if _keyword_matches(kw, normalized)]
         if matched_keywords:
-            print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
+            if log:
+                print(f"[PEDAGOGIE] '{question}' → method_id='{method_id}' (matched: {matched_keywords})")
             return {
                 "method_id": method_id,
                 "title": method["title"],
@@ -1106,7 +1114,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
 
     # Question trop courte : pas de matching fiable
     if len(normalized.split()) < 2 and not last_method_id:
-        print(f"[PEDAGOGIE] question too short ('{question}'), no match")
+        if log:
+            print(f"[PEDAGOGIE] question too short ('{question}'), no match")
         return None
 
     # 3. Fallback session : message de continuation → réutilise le dernier method_id actif
@@ -1120,7 +1129,8 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
     )
     if est_continuation and last_method_id and last_method_id in METHODES:
         method = METHODES[last_method_id]
-        print(f"[PEDAGOGIE] '{question}' → method_id='{last_method_id}' (reprise du dernier method_id actif de la session)")
+        if log:
+            print(f"[PEDAGOGIE] '{question}' → method_id='{last_method_id}' (reprise du dernier method_id actif de la session)")
         return {
             "method_id": last_method_id,
             "title": method["title"],
@@ -1131,5 +1141,6 @@ def lookup_method(question: str, context: Optional[str] = None, last_method_id: 
         }
 
     # 4. Aucun match
-    print(f"[PEDAGOGIE] '{question}' → no match, Claude répondra librement")
+    if log:
+        print(f"[PEDAGOGIE] '{question}' → no match, Claude répondra librement")
     return None

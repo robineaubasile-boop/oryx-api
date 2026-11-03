@@ -19,7 +19,7 @@ pont) et tests/test_authz_f2_dormancy.py (matrice d'imports) :
    filtré) ;
 5. imports transitifs inventoriés, aucun réseau, aucune connexion à
    l'import (même avec DATABASE_URL) ;
-6. registre de production (seize commandes depuis R1 PR 9-B1), runner public
+6. registre de production (dix-sept commandes depuis R1 PR 9-B2), runner public
    inchangé, api:app ne charge pas le pont, aucune migration.
 """
 import ast
@@ -392,7 +392,8 @@ TRANSITIVE_CORE_IMPORTS = [
     "core", "core.assistant_delivery", "core.authz_f2", "core.authz_f2._adapters",
     "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands",
     # R1 PR 9-B1 : modules purs importés par commands / _adapters.
-    "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
+    # R1 PR 9-B2 : decryptage_context (vue de préparation, pure).
+    "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
     "core.authz_f2.portfolio_fingerprint",
     "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values", "core.authz_f2.principal",
     "core.cognitive_capture", "core.db", "core.decryptage_cognitive_runtime", "core.decryptage_progress",
@@ -417,10 +418,11 @@ def test_importing_the_bridge_is_inventoried_and_opens_nothing(database_url):
 # 6. Registre de production, runner, api:app, migrations
 # --------------------------------------------------------------------------
 
-def test_production_registry_stays_closed_at_sixteen_commands():
-    # R1 PR 9-B1 : seize commandes ; les DEUX seules sous DECRYPTAGE_MUTATION
-    # sont les commandes de réservation, exécutées par _adapters (jamais par le pont).
-    assert len(_adapters.REGISTRY) == 16
+def test_production_registry_stays_closed_at_seventeen_commands():
+    # R1 PR 9-B1 : les DEUX seules commandes sous DECRYPTAGE_MUTATION sont les
+    # commandes de réservation, exécutées par _adapters (jamais par le pont).
+    # R1 PR 9-B2 : dix-sept commandes (lecture de préparation sous READ).
+    assert len(_adapters.REGISTRY) == 17
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
         c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}
     assert all(spec.execute.__module__ == _adapters.__name__ for spec in _adapters.REGISTRY.values())
@@ -452,7 +454,7 @@ def test_bench_commands_are_unknown_outside_the_isolated_fixture():
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().splitlines()[-1] == "16 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
+    assert out.stdout.strip().splitlines()[-1] == "17 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
 
 
 def test_real_entrypoint_never_loads_the_bridge():
