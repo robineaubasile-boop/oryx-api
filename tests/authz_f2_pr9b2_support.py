@@ -172,14 +172,15 @@ class PreparationEnv(ReservationEnv):
     def read(self, issued, lease, command, ticker=TICKER, **kwargs):
         return self.run(issued, c.ReadDecryptagePreparationContext.from_lease(lease, command, ticker), **kwargs)
 
-    def orchestrator(self, clock=None, *, eodhd=None, fmp=None, claude=None, runner=None):
+    def orchestrator(self, clock=None, *, eodhd=None, fmp=None, claude=None, runner=None, price_recent_max_age=None):
         clock = clock or FakeClock()
         self.clock = clock
         self.eodhd = eodhd or FakeEodhd(clock)
         self.fmp = fmp or FakeFmp(clock)
         self.claude = claude or FakeClaude(clock)
         return DecryptageGenerationOrchestrator(runner or self.b1_runner(), eodhd=self.eodhd, fmp=self.fmp,
-                                                claude=self.claude, model=MODEL, clock=clock)
+                                                claude=self.claude, model=MODEL, clock=clock,
+                                                price_recent_max_age=price_recent_max_age)
 
     def provider_calls(self):
         return self.eodhd.methods() + self.fmp.methods() + self.claude.methods()

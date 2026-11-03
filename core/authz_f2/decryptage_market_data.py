@@ -35,11 +35,12 @@ Les textes fournisseurs (nom, secteur) sont des CONTENUS non fiables :
 bornés, sans caractère de contrôle, jamais des instructions.
 Ne lit aucune variable d'environnement, n'ouvre aucune connexion.
 """
+import dataclasses
 import math
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_instrument as di
@@ -52,6 +53,15 @@ PRESENT = "present"
 ABSENT = "absent"
 CURRENCY_MISMATCH = "currency_mismatch"
 FIELD_STATUSES = (PRESENT, ABSENT, CURRENCY_MISMATCH)
+# Fraîcheur FERMÉE du cours (audit P2-01). Seul PRICE_RECENT peut être
+# présenté comme le cours actuel ; il exige un seuil EXPLICITE fourni par la
+# composition (aucun seuil par défaut : à arbitrer par le fondateur) et une
+# date de cotation fiable, comparée à l'horloge PostgreSQL de la lecture.
+PRICE_RECENT = "recent"            # cours daté, âge vérifié <= seuil explicite
+PRICE_DATED = "dated"              # dernier cours connu, daté, fraîcheur non établie
+PRICE_UNDATED = "undated"          # cours sans date de cotation fiable (FMP profile, timestamp absent)
+PRICE_UNAVAILABLE = "unavailable"  # aucun cours
+PRICE_FRESHNESS = (PRICE_RECENT, PRICE_DATED, PRICE_UNDATED, PRICE_UNAVAILABLE)
 
 # Champ -> (unité, monétaire). Ordre fermé.
 FIELDS = {
@@ -82,14 +92,22 @@ PERIOD_RE = re.compile(r"(?:FY:[0-9]{4}-[0-9]{2}-[0-9]{2}|TTM|REALTIME|PROFILE|"
 
 
 def number(value):
-    """float fini, ou None (absent) : jamais de zéro par défaut."""
-    if type(value) in (int, float):
-        result = float(value)
+    """float fini, ou None (absent) : jamais de zéro par défaut. Un entier
+    non représentable en binary64 (OverflowError de float()) ou une chaîne
+    hors domaine (float() rend ±inf) est absent, jamais une erreur ni un
+    infini (audit P2-02) ; zéro réellement fourni reste 0.0."""
+    if type(value) is int:
+        try:
+            result = float(value)
+        except OverflowError:
+            return None
+    elif type(value) is float:
+        result = value
     elif type(value) is str and NUMBER_RE.fullmatch(value.strip()):
         result = float(value.strip())
     else:
         return None
-    return result if math.isfinite(result) else None
+    return result + 0.0 if math.isfinite(result) else None
 
 
 def label(value, max_chars):
@@ -135,7 +153,11 @@ class FinancialField:
 
 
 def _present(name, value, source, period) -> FinancialField:
-    return FinancialField(name, PRESENT, value, source, period) if value is not None else FinancialField(name, ABSENT)
+    """Champ présent seulement pour une valeur FINIE : un dérivé qui déborde
+    (produit, quotient, arrondi) est absent, jamais un infini (audit P2-02)."""
+    if value is None or not math.isfinite(value):
+        return FinancialField(name, ABSENT)
+    return FinancialField(name, PRESENT, value, source, period)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +181,8 @@ class FinancialSnapshot:
     cash_flow_fy: object
     fields: tuple
     complemented: tuple          # champs complétés par FMP
+    price_freshness: str         # PRICE_FRESHNESS (audit P2-01)
+    price_reference_at: object = None  # instant PostgreSQL de qualification (ISO 8601) ou None
 
     def __post_init__(self):
         if self.version != SNAPSHOT_VERSION or not dc.valid_resolved_ticker(self.ticker):
@@ -179,6 +203,14 @@ class FinancialSnapshot:
                          self.cash_flow_fy):
             if optional is not None and type(optional) is not str:
                 raise ValueError("instantané financier : métadonnée hors contrat")
+        price = self.field("current_price").present
+        expected = (PRICE_UNAVAILABLE,) if not price else (PRICE_UNDATED,) if self.price_as_of is None else (
+            PRICE_DATED, PRICE_RECENT)
+        if self.price_freshness not in expected or (self.price_reference_at is not None
+                                                    and type(self.price_reference_at) is not str):
+            raise ValueError("instantané financier : fraîcheur du cours incohérente")
+        if self.price_freshness == PRICE_RECENT and self.price_reference_at is None:
+            raise ValueError("instantané financier : cours récent sans instant de référence")
 
     def field(self, name: str) -> FinancialField:
         return self.fields[FIELD_NAMES.index(name)]
@@ -193,11 +225,20 @@ class FinancialSnapshot:
     def missing_complementable(self) -> tuple:
         return tuple(n for n in COMPLEMENTABLE if self.field(n).status == ABSENT)
 
+    def public_price(self):
+        """Cours présentable comme ACTUEL (payload, « Prix actuel ») : seulement
+        PRICE_RECENT ; sinon None (le dernier cours connu reste dans le
+        snapshot, avec sa date et sa provenance)."""
+        return self.value("current_price") if self.price_freshness == PRICE_RECENT else None
+
     def prompt_data(self) -> dict:
         """Nouveau dict (copie) au format attendu par
         core.decryptage_engine.build_system_prompt : champs absents = None
-        (affichés N/D) ; nom et secteur omis s'ils sont inconnus."""
+        (affichés N/D) ; nom et secteur omis s'ils sont inconnus ; le moteur
+        affiche current_price comme « Prix actuel » : seul un cours
+        PRICE_RECENT y figure (audit P2-01)."""
         data = {n: self.value(n) for n in FIELD_NAMES}
+        data["current_price"] = self.public_price()
         data["currency"] = self.currency
         if self.name is not None:
             data["name"] = self.name
@@ -213,9 +254,37 @@ class FinancialSnapshot:
                 "fundamentals_updated_at": self.fundamentals_updated_at,
                 "statement_currency": self.statement_currency, "income_fy": self.income_fy,
                 "balance_fy": self.balance_fy, "cash_flow_fy": self.cash_flow_fy,
-                "complemented": list(self.complemented),
+                "complemented": list(self.complemented), "price_freshness": self.price_freshness,
+                "price_reference_at": self.price_reference_at,
                 "fields": [{"name": f.name, "status": f.status, "value": f.value, "source": f.source,
                             "period": f.period, "unit": f.unit} for f in self.fields]}
+
+
+def _freshness(price, as_of) -> str:
+    """Fraîcheur constatée par le parseur (jamais « récente » : seule
+    qualify_price peut l'établir)."""
+    if price is None:
+        return PRICE_UNAVAILABLE
+    return PRICE_UNDATED if as_of is None else PRICE_DATED
+
+
+def qualify_price(snapshot: FinancialSnapshot, reference: datetime, max_age) -> FinancialSnapshot:
+    """Qualifie la fraîcheur du cours à l'instant PostgreSQL `reference`
+    (read_at de la seconde lecture). PRICE_RECENT seulement si max_age est
+    un seuil EXPLICITE (timedelta > 0) ET si 0 <= reference - date de
+    cotation <= max_age ; une date future ou trop ancienne reste
+    PRICE_DATED ; aucun seuil (None, défaut) : jamais récent. Ne crée ni ne
+    modifie aucune date."""
+    if type(reference) is not datetime or reference.tzinfo is None or reference.utcoffset() is None:
+        raise ValueError("instant de référence PostgreSQL attendu")
+    if max_age is not None and (type(max_age) is not timedelta or max_age <= timedelta(0)):
+        raise ValueError("seuil de fraîcheur : timedelta strictement positif ou None")
+    status = snapshot.price_freshness
+    if status in (PRICE_DATED, PRICE_RECENT):
+        age = reference - datetime.fromisoformat(snapshot.price_as_of)
+        status = PRICE_RECENT if max_age is not None and timedelta(0) <= age <= max_age else PRICE_DATED
+    return dataclasses.replace(snapshot, price_freshness=status,
+                               price_reference_at=reference.astimezone(timezone.utc).isoformat())
 
 
 def eodhd_symbol(resolution: di.InstrumentResolution) -> str:
@@ -250,7 +319,8 @@ def _cagr(income: list):
 
 
 def _ratio(numerator, denominator, scale=100.0, digits=2):
-    if numerator is None or denominator is None or denominator <= 0:
+    if numerator is None or denominator is None or not math.isfinite(numerator) \
+            or not math.isfinite(denominator) or denominator <= 0:
         return None
     value = round(numerator / denominator * scale, digits)
     return value if math.isfinite(value) else None
@@ -349,7 +419,7 @@ def parse_eodhd(resolution: di.InstrumentResolution, fundamentals, realtime):
                              label(general.get("Sector"), SECTOR_MAX_CHARS), currency, conversion, as_of, updated,
                              statement_currency, income[0][0] if income else None,
                              balance[0][0] if balance else None, cash_flow[0][0] if cash_flow else None,
-                             tuple(fields), ())
+                             tuple(fields), (), _freshness(fields[0].value, as_of))
 
 
 def _first(raw):
@@ -406,11 +476,7 @@ def complement(snapshot: FinancialSnapshot, ratios_raw) -> FinancialSnapshot:
         filled.append(name)
     if not filled:
         return snapshot
-    return FinancialSnapshot(snapshot.version, snapshot.ticker, snapshot.provider_symbol, snapshot.instrument_code,
-                             snapshot.instrument_isin, snapshot.primary_source, snapshot.name, snapshot.sector,
-                             snapshot.currency, snapshot.unit_conversion, snapshot.price_as_of,
-                             snapshot.fundamentals_updated_at, snapshot.statement_currency, snapshot.income_fy,
-                             snapshot.balance_fy, snapshot.cash_flow_fy, tuple(fields), tuple(filled))
+    return dataclasses.replace(snapshot, fields=tuple(fields), complemented=tuple(filled))
 
 
 def parse_fmp(resolution: di.InstrumentResolution, profile_raw, ratios_raw):
@@ -447,4 +513,4 @@ def parse_fmp(resolution: di.InstrumentResolution, profile_raw, ratios_raw):
                              FMP, label(profile.get("companyName"), NAME_MAX_CHARS),
                              label(profile.get("sector"), SECTOR_MAX_CHARS), currency, None, None, None,
                              _currency(ratios.get("reportedCurrency")) if ratios is not None else None, date, date,
-                             date, tuple(fields), ())
+                             date, tuple(fields), (), _freshness(fields[0].value, None))

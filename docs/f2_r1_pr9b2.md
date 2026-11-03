@@ -27,7 +27,8 @@
 | Orchestrateur et budget | `core/authz_f2/decryptage_generation.py` (nouveau) |
 | Transports réels EODHD / FMP / Anthropic (dormants) | `core/decryptage_providers.py` (nouveau) |
 | Docstring du paquet | `core/authz_f2/__init__.py` |
-| Tests | § 18 |
+| Drapeau mot-clé `log` de `lookup_method` (défaut historique, correctif d'audit P1-01) | `core/pedagogie_library.py` |
+| Tests | § 18, § 22 |
 
 Non livré (interdit par le freeze) : route publique ou F2 Décrypter, ACK F2,
 modification de `/decryptage` historique ou du frontend, `AssistantDelivery`,
@@ -39,12 +40,15 @@ modification des règles de bail B1 ou des contrats PR9-A, paramètre Railway.
 `api.py`, `core/data_fetcher.py`, `core/ticker_resolver.py`,
 `core/decryptage_engine.py`, `core/decryptage_progress.py`,
 `core/decryptage_cognitive_runtime.py`, `core/assistant_delivery.py`,
-`core/pedagogie_library.py`, `core/models.py`, `web*`, `alembic/` : **inchangés**.
+`core/models.py`, `web*`, `alembic/` : **inchangés**.
+`core/pedagogie_library.py` : seul ajout d'un paramètre mot-clé `log=True`
+(§ 22, P1-01) ; comportement historique et appelants inchangés.
 
 ## 3. Interfaces nouvelles
 
 ```python
-DecryptageGenerationOrchestrator(runner, *, eodhd, fmp, claude, model, clock=time.monotonic)
+DecryptageGenerationOrchestrator(runner, *, eodhd, fmp, claude, model, clock=time.monotonic,
+                                 price_recent_max_age=None)
     .generate(credential, reservation: ReserveDecryptageTurn, reserved: AuthorizationOutcome) -> GenerationOutcome
 
 GenerationOutcome(status, reason, candidate, declaration)
@@ -143,9 +147,11 @@ Flottants lus par `float8send`.
 **réellement injecté** : tour (réservation, epoch, conversation, tour),
 propriétaire, ticker saisi et résolu, `(level, level_revision)`, méthode et
 base (`active_analysis`, `initial_turn`, `lookup`), ancre, session active et
-étape ouverte, faits utilisés (dernier par type injecté, valeur connue —
-règle historique du dict), contributions utilisées (étape et texte non
-vides), thèse rappelée (tour initial seulement), identifiants inclus.
+étape ouverte, faits utilisés (DERNIÈRE ligne par type injecté, même NULL
+— règle historique du dict ; une dernière valeur NULL est rendue `N/D` dans
+le prompt, jamais une valeur antérieure ; § 22, P1-02), contributions
+utilisées (étape et texte non vides), thèse rappelée (tour initial
+seulement), identifiants inclus.
 
 Empreinte : `SHA-256("ORYX-DECRYPTAGE-PREPARATION-SNAPSHOT\0" ||
 JSON canonique)` — clés triées, séparateurs compacts, UTF-8 sans échappement,
@@ -209,7 +215,12 @@ ou complément contrôlé. Chaque champ (`current_price`, `revenue_growth`,
   FMP (YoY) n'est jamais présentée comme le CAGR ;
 - suffisance : ≥ 3 des 5 champs clés (seuil historique) ;
 - textes fournisseurs bornés, sans caractère de contrôle ; le prompt
-  rappelle qu'ils sont des contenus, jamais des instructions.
+  rappelle qu'ils sont des contenus, jamais des instructions ;
+- conversion numérique sûre (§ 22, P2-02) : un entier non représentable en
+  binary64 ou tout dérivé non fini est absent, jamais une exception ;
+- fraîcheur du cours fermée (§ 22, P2-01) : `recent`, `dated`, `undated`,
+  `unavailable` ; seul `recent` (seuil EXPLICITE, aucun par défaut) est
+  présenté comme le cours actuel.
 
 Les signaux qualitatifs historiques (`fcf_vs_net_income`,
 `gross_margin_trend`, `receivables_vs_revenue`, prévisibilité, P/E
@@ -313,11 +324,9 @@ de préparation (ni jeton, ni empreinte HMAC, ni empreinte du jeton), des
 journaux (testé avec `caplog` complet) et de toute sérialisation. Clés
 fournisseurs jamais journalisées (aucun appel de journalisation dans les
 transports) ; corps fournisseurs jamais journalisés ; l'orchestrateur ne
-journalise que statut, motif, étape et type d'exception.
-
-Limite : `core.pedagogie_library.lookup_method` (réutilisé tel quel)
-imprime la question utilisateur sur la sortie standard, comme sur
-`/decryptage` historique.
+journalise que statut, motif, étape et type d'exception. La sélection de
+méthode est appelée avec `log=False` : la question n'est jamais imprimée ni
+journalisée par le chemin F2 (§ 22, P1-01).
 
 ## 16. Limites d'idempotence réseau
 
@@ -357,6 +366,7 @@ Ces tests montrent l'absence d'effet canonique de B2 et le transport des
 | `tests/test_authz_f2_pr9b2_units.py` (sans base) | instrument, données, budget, réponse, snapshot, candidat, commande, transports réels simulés |
 | `tests/test_authz_f2_pr9b2_boundary.py` (sans base) | registre, runner seul accès, graphe d'imports, dormance du vrai `api:app`, import sans réseau, aucune migration |
 | `tests/authz_f2_pr9b2_support.py` | environnement, horloge et transports simulés |
+| `tests/test_authz_f2_pr9b2_audit.py` (sans base) | régressions du correctif d'audit P1-01, P1-02, P2-01, P2-02 (§ 22) |
 | Extensions nominatives | BF1 (`_PREPARATION_CONTEXT`, aucune CTE modifiante, registre 17, lecture à trousseau), matrice d'imports, inventaire transitif du pont, dispatch des trousseaux, vocabulaire des commandes, liste blanche T2-A de `test_migration_0005` (`_adapters.py` LIT l'event d'ancrage, comme le pont PR9-A) |
 
 Résultats : voir la description de la PR (exécutions locales PostgreSQL
@@ -399,6 +409,92 @@ activation.
    marge) ; un appel Claude non streamé peut attendre jusqu'à son allocation.
 6. Idempotence réseau limitée à un orchestrateur (§ 16).
 7. `max_tokens` refusé comme inexploitable (§ 14).
-8. `lookup_method` journalise la question (comportement historique).
+8. Seuil de fraîcheur du cours (§ 22, P2-01) : **à arbitrer par le
+   fondateur** ; sans seuil (défaut), aucun cours n'est présenté comme
+   actuel et le payload candidat porte `price = null`.
 9. Une lecture `READ` reçoit désormais le trousseau Décrypter (dispatch
    existant, test nominatif) : à confirmer à l'audit.
+
+## 22. Correctif d'audit indépendant (NO-GO → corrections)
+
+Base du correctif : `9c2c596` (HEAD audité). Architecture V1.1 inchangée
+(registre à 17, plan READ, runner, B1, bail 360 s, budget 240 s, EODHD puis
+FMP, aucun yfinance, double lecture, ancre R1-C4, candidat immuable, aucune
+route, migration, livraison ni écriture cognitive). Tests de régression
+écrits AVANT les correctifs (`tests/test_authz_f2_pr9b2_audit.py`) :
+**39 échecs sur `9c2c596`**, dont `OverflowError: int too large to convert
+to float` (5 cas) et `used_facts` rendant `(1, 20.0)` au lieu de `(2, None)`.
+
+### P1-01 — La question utilisateur n'est plus journalisée par F2
+
+`lookup_method(..., *, log=True)` : paramètre **mot-clé uniquement**, défaut
+historique ; chaque `print` de la fonction est gardé par `if log:` (rien
+d'autre ne change : mêmes branches, priorités, verrou de thèse, reprise de
+session, absence de correspondance). Le chemin F2 l'appelle avec
+`log=False`. Aucune redirection de stdout, aucun remplacement de `print`,
+aucun état global : la sélection silencieuse est locale à l'appel.
+
+Tests : égalité stricte du résultat silencieux et historique sur toutes les
+branches (12 cas), signature et défaut, garde de CHAQUE `print` (AST),
+absence de `redirect_stdout` / `sys.stdout` / `builtins`, exécutions
+concurrentes (200 sélections historiques et 200 silencieuses en parallèle :
+les 200 lignes historiques sont imprimées, aucune silencieuse), et, sur
+PostgreSQL, une génération F2 complète sans la question dans stdout, stderr
+ni journaux, avec la même méthode que le legacy.
+
+### P1-02 — La dernière valeur d'un fait l'emporte, même NULL
+
+`used_facts` ne filtre plus les valeurs NULL avant de retenir la dernière
+ligne (`fact_date ASC, id ASC`) de chaque type injecté : comportement exact
+du dict historique. Le snapshot porte la ligne réellement retenue (id,
+valeur `None`) et son empreinte change avec elle ; le prompt reçoit `N/D`
+(convention d'absence du moteur, qui interdit toute estimation), jamais une
+valeur antérieure ni un zéro. Écart textuel assumé : le legacy afficherait
+`None`.
+
+Tests A à G de l'audit (unitaires) et propagation PostgreSQL (prompt
+`- ROE : N/D`, aucune trace de `20.0`, provenance de la ligne NULL).
+
+### P2-01 — Fraîcheur du cours
+
+`FinancialSnapshot.price_freshness` ∈ {`recent`, `dated`, `undated`,
+`unavailable`} et `price_reference_at` :
+
+| Statut | Condition | Prompt | Payload `price` |
+|---|---|---|---|
+| `recent` | date de cotation fiable ET 0 ≤ (read_at PostgreSQL de la seconde lecture − date) ≤ seuil EXPLICITE | « Prix actuel » + « Cours récent vérifié » | valeur |
+| `dated` | date fiable, sans seuil, trop ancienne ou future | « Prix actuel : N/D » + « Dernier cours connu … au <date> ; ne le présente jamais comme le cours actuel » | `null` |
+| `undated` | cours sans date fiable (timestamp absent ou invalide, profil FMP) | « Prix actuel : N/D » + « sans date fiable » | `null` |
+| `unavailable` | aucun cours | « Cours : non disponible » | `null` |
+
+Aucun seuil n'est introduit silencieusement : `price_recent_max_age=None`
+par défaut ; **la valeur du seuil est un point à arbitrer par le
+fondateur** (§ 21). La valeur, la date et la source du cours restent dans le
+snapshot financier (et dans son empreinte) pour PR9-C. Aucune date ni
+fraîcheur n'est inventée ; le moteur historique et `/decryptage` sont
+inchangés.
+
+Tests : cours daté avec et sans seuil, ancien, futur, sans timestamp
+(absent, nul, chaîne), absent, prix FMP, bloc de provenance, empreinte,
+seuil invalide refusé ; propagation PostgreSQL vers le prompt Claude et le
+candidat pour chaque statut.
+
+### P2-02 — Conversions numériques sûres
+
+`number()` traduit en absence le seul `OverflowError` d'un entier non
+représentable (aucune autre exception masquée) ; une chaîne hors domaine
+(`float` rend ±inf) est absente ; `_present` refuse tout dérivé non fini
+(produit, quotient, arrondi) et `_ratio` exige des opérandes finis (jamais
+de zéro fabriqué par une division par l'infini). Zéro réellement fourni :
+`0.0`, présent ; absence : `None`.
+
+Tests : `10**400`, `-10**400`, `"1e400"`, `"9"*400`, NaN, ±inf, booléens,
+`None`, conteneurs, chaînes vides ; valeurs valides et zéro réel ; valeurs
+extrêmes EODHD et FMP sans interruption du parsing ni infini.
+
+### Tests existants ajustés (attentes corrigées, aucun affaiblissement)
+
+- `test_the_snapshot_keeps_only_what_the_prompt_uses_with_historical_rules` :
+  attendait l'exclusion d'un `eps` NULL dernier (le défaut P1-02) ;
+- `candidate()` (unitaires) et `test_a_full_generation_…` : attendaient le
+  cours daté publié comme actuel (le défaut P2-01).

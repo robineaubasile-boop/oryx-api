@@ -20,7 +20,9 @@ explicitement attendue. Couvre :
   appels externes, échéance du bail, secret.
 """
 import logging
+import time
 import uuid
+from datetime import timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
@@ -30,11 +32,12 @@ from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_generation as dg
+from core.authz_f2 import decryptage_market_data as dm
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2.runner import (AUTHORIZED, IDEMPOTENCY_CONFLICT, NOT_FOUND, REVISION_CONFLICT, SESSION_INVALID,
                                   UNAVAILABLE, AuthorizationOutcome)
 from tests.authz_f2_pr9b1_support import CONV, legacy_route, reserve_command  # noqa: F401 — fixture
-from tests.authz_f2_pr9b2_support import (DELETE, FMP_RATIOS, MODEL, REPLY, TICKER, FakeClaude, FakeClock, FakeEodhd,
+from tests.authz_f2_pr9b2_support import (DELETE, FMP_RATIOS, MODEL, REALTIME, REPLY, TICKER, FakeClaude, FakeClock, FakeEodhd,
                                           FakeFmp, PreparationEnv, fundamentals, reply)
 from tests.authz_f2_support import BOB, USER_A, USER_B
 from tests.f2_support import prepare_schema
@@ -353,8 +356,10 @@ def test_a_full_generation_produces_an_internal_candidate_and_commits_nothing(en
     assert candidate.step_marker == "business" and "ORYX_STEP" not in candidate.visible_text
     assert candidate.payload.as_dict() == {
         "success": True, "ticker": TICKER, "name": "LVMH", "method_used": "construction_these",
-        "analysis": REPLY.split("\n<!--")[0], "price": 600.5, "currency": "EUR",
+        "analysis": REPLY.split("\n<!--")[0], "price": None, "currency": "EUR",  # cours daté, aucun seuil : P2-01
         "disclaimer": dcand.DISCLAIMER}
+    assert candidate.market.price_freshness == "dated" and candidate.market.value("current_price") == 600.5
+    assert candidate.market.price_reference_at == candidate.prepared_read_at.astimezone(timezone.utc).isoformat()
     assert candidate.delivery_fingerprint_inputs() == {
         "user_id": USER_A, "conversation_key": CONV, "client_turn_id": command.client_turn_id,
         "ticker_input": TICKER, "question": "", "context": "", "last_method_id": None, "level": "debutant"}
@@ -605,3 +610,87 @@ def test_a_validation_overrun_is_a_refusal_never_a_provider_failure(env, alice, 
     outcome = orchestrator.generate(alice.credential(), command, reserved)
     assert (outcome.status, outcome.reason, outcome.declaration) == (dg.REFUSED, dg.BUDGET_EXHAUSTED, None)
     assert env.full_state() == before and len(env.claude.requests) == 1
+
+
+
+# --------------------------------------------------------------------------
+# Correctif d'audit : propagation réelle (P1-01, P1-02, P2-01)
+# --------------------------------------------------------------------------
+
+def test_the_f2_path_never_logs_the_question_and_keeps_the_historical_method(env, alice, capsys, caplog):
+    from core.pedagogie_library import lookup_method
+    secret = "QUESTION-CONFIDENTIELLE-91c2 que penses-tu du moat de cette entreprise"
+    command, reserved = env.reserve(alice, reserve_command(question=secret, context="historique",
+                                                           last_method_id=None))
+    orchestrator = env.orchestrator()
+    capsys.readouterr()
+    with caplog.at_level(logging.DEBUG):
+        outcome = orchestrator.generate(alice.credential(), command, reserved)
+    assert outcome.status == dg.GENERATED
+    out = capsys.readouterr()
+    assert "CONFIDENTIELLE" not in out.out + out.err and "CONFIDENTIELLE" not in caplog.text
+    historical = lookup_method(secret, context="historique", last_method_id=None)
+    assert "CONFIDENTIELLE" in capsys.readouterr().out  # le legacy journalise toujours
+    prep = outcome.candidate.preparation
+    assert (prep.method_basis, prep.method_id) == (dcand.BASIS_LOOKUP, historical["method_id"])
+
+
+def test_a_null_latest_fact_reaches_the_prompt_and_the_candidate_as_unavailable(env, alice):
+    command, reserved = env.reserve(alice, reserve_command(question="Réponse.", context="historique",
+                                                           last_method_id="construction_these"))
+    session_id = env.add_session(step="chiffres")
+    env.add_fact(session_id, "roe", 20.0, date="2026-01-01 00:00:00")
+    latest = env.add_fact(session_id, "roe", None, date="2026-01-02 00:00:00")
+    orchestrator = env.orchestrator()
+    outcome = orchestrator.generate(alice.credential(), command, reserved)
+    snapshot = outcome.candidate.preparation
+    assert snapshot.facts_used == (dc.PreparationFact(latest, "roe", None),)  # provenance de la vraie dernière ligne
+    system = env.claude.requests[0]["system"]
+    assert "- ROE : N/D" in system and "ROE : 20.0" not in system
+
+
+def test_without_a_threshold_a_dated_quote_is_never_presented_as_current(env, alice):
+    command, reserved = env.reserve(alice)
+    orchestrator = env.orchestrator()
+    candidate = orchestrator.generate(alice.credential(), command, reserved).candidate
+    system = env.claude.requests[0]["system"]
+    assert "Prix actuel : N/D EUR" in system and "Prix actuel : 600.5" not in system
+    assert "Dernier cours connu : 600.5 EUR au " in system and "ne le présente jamais comme le cours actuel" in system
+    assert candidate.payload.price is None and candidate.market.price_freshness == dm.PRICE_DATED
+
+
+def test_a_recent_quote_under_an_explicit_threshold_is_current_everywhere(env, alice):
+    command, reserved = env.reserve(alice)
+    clock = FakeClock()
+    fresh = dict(REALTIME, timestamp=int(time.time()) - 60)
+    # Seuil explicite de TEST (aucun seuil par défaut en production : à arbitrer).
+    orchestrator = env.orchestrator(clock, eodhd=FakeEodhd(clock, responses={"realtime": fresh}),
+                                    price_recent_max_age=timedelta(days=1))
+    candidate = orchestrator.generate(alice.credential(), command, reserved).candidate
+    assert candidate.market.price_freshness == dm.PRICE_RECENT and candidate.payload.price == 600.5
+    system = env.claude.requests[0]["system"]
+    assert "Prix actuel : 600.5 EUR" in system and "Cours récent vérifié : 600.5 EUR" in system
+
+
+@pytest.mark.parametrize("realtime,expected", [(dict(REALTIME, timestamp=1500000000), dm.PRICE_DATED),
+                                               (dict(REALTIME, timestamp=None), dm.PRICE_UNDATED),
+                                               (None, dm.PRICE_UNAVAILABLE)])
+def test_old_undated_or_missing_quotes_are_never_current(env, alice, realtime, expected):
+    command, reserved = env.reserve(alice)
+    clock = FakeClock()
+    orchestrator = env.orchestrator(clock, eodhd=FakeEodhd(clock, responses={"realtime": realtime}),
+                                    price_recent_max_age=timedelta(days=1))
+    candidate = orchestrator.generate(alice.credential(), command, reserved).candidate
+    assert candidate.market.price_freshness == expected and candidate.payload.price is None
+    assert "Prix actuel : N/D EUR" in env.claude.requests[0]["system"]
+
+
+def test_an_fmp_fallback_price_is_never_current(env, alice):
+    command, reserved = env.reserve(alice)
+    clock = FakeClock()
+    orchestrator = env.orchestrator(clock, eodhd=FakeEodhd(clock, responses={"fundamentals": None}),
+                                    price_recent_max_age=timedelta(days=3650))
+    candidate = orchestrator.generate(alice.credential(), command, reserved).candidate
+    assert (candidate.market.primary_source, candidate.market.price_freshness) == ("fmp", dm.PRICE_UNDATED)
+    assert candidate.payload.price is None
+    assert "sans date fiable : 601.0 EUR" in env.claude.requests[0]["system"]

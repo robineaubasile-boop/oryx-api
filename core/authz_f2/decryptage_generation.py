@@ -64,6 +64,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from datetime import timedelta
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -271,7 +272,17 @@ def provenance_block(market: dm.FinancialSnapshot) -> str:
         lines.append("- Complément FMP (même exercice) : " + ", ".join(FIELD_LABELS[n] for n in market.complemented))
     lines.append(f"- Devise de cotation : {market.currency}"
                  + (f" (conversion {market.unit_conversion})" if market.unit_conversion else ""))
-    lines.append(f"- Prix : au {market.price_as_of}" if market.price_as_of else "- Prix : date non communiquée")
+    price, currency = market.value("current_price"), market.currency
+    if market.price_freshness == dm.PRICE_RECENT:
+        lines.append(f"- Cours récent vérifié : {price} {currency} au {market.price_as_of}")
+    elif market.price_freshness == dm.PRICE_DATED:
+        lines.append(f"- Dernier cours connu : {price} {currency} au {market.price_as_of} ; fraîcheur non établie : "
+                     "ne le présente jamais comme le cours actuel (le « Prix actuel » ci-dessus est N/D)")
+    elif market.price_freshness == dm.PRICE_UNDATED:
+        lines.append(f"- Dernier cours communiqué sans date fiable : {price} {currency} ; ne le présente jamais "
+                     "comme le cours actuel (le « Prix actuel » ci-dessus est N/D)")
+    else:
+        lines.append("- Cours : non disponible")
     if present:
         lines.append("- Périodes : " + " ; ".join(f"{FIELD_LABELS[f.name]} {f.period} ({f.source})" for f in present))
     if absent:
@@ -292,9 +303,10 @@ class DecryptageGenerationOrchestrator:
     monotone. Les transports lèvent une exception (TimeoutError compris) en
     cas d'échec et rendent None pour une ressource introuvable."""
 
-    __slots__ = ("_runner", "_eodhd", "_fmp", "_claude", "_model", "_clock", "_lock", "_inflight", "_consumed")
+    __slots__ = ("_runner", "_eodhd", "_fmp", "_claude", "_model", "_clock", "_lock", "_inflight", "_consumed",
+                 "_price_max_age")
 
-    def __init__(self, runner, *, eodhd, fmp, claude, model: str, clock=time.monotonic):
+    def __init__(self, runner, *, eodhd, fmp, claude, model: str, clock=time.monotonic, price_recent_max_age=None):
         if type(runner) is not AuthorizedTransactionRunner:
             raise TypeError("AuthorizedTransactionRunner attendu")
         if type(model) is not str or not 0 < len(model) <= dcand.MODEL_MAX_CHARS or not callable(clock):
@@ -304,7 +316,13 @@ class DecryptageGenerationOrchestrator:
             if not all(callable(getattr(transport, m, None)) for m in methods):
                 raise TypeError("transport fournisseur incomplet")
         self._runner, self._eodhd, self._fmp, self._claude = runner, eodhd, fmp, claude
+        if price_recent_max_age is not None and (type(price_recent_max_age) is not timedelta
+                                                 or price_recent_max_age <= timedelta(0)):
+            raise TypeError("seuil de fraîcheur du cours : timedelta strictement positif ou None")
         self._model, self._clock = model, clock
+        # Audit P2-01 : aucun seuil par défaut (à arbitrer par le fondateur) :
+        # sans seuil, aucun cours n'est présenté comme actuel.
+        self._price_max_age = price_recent_max_age
         self._lock = threading.Lock()
         self._inflight = set()
         self._consumed = OrderedDict()
@@ -464,7 +482,8 @@ class _Run:
             method, basis = _forced_construction_these(), dcand.BASIS_INITIAL_TURN
         else:
             lookup_text = question if question else f"analyser bilan états financiers {company_name}"
-            method = lookup_method(lookup_text, context=context, last_method_id=self._reservation.last_method_id)
+            # log=False : sélection historique identique, sans jamais imprimer la question (audit P1-01).
+            method = lookup_method(lookup_text, context=context, last_method_id=self._reservation.last_method_id, log=False)
             basis = dcand.BASIS_LOOKUP
         method_id = method["method_id"] if method else None
         snapshot = dcand.build_snapshot(view, self._reservation.ticker, method_id, basis)
@@ -505,6 +524,8 @@ class _Run:
         second = self._read(resolution.ticker)
         if second.context_key() != first.context_key():
             raise _Refusal(CONTEXT_CHANGED)
+        # Fraîcheur du cours jugée à l'horloge PostgreSQL de la seconde lecture (audit P2-01).
+        market = dm.qualify_price(market, second.read_at, self._o._price_max_age)
         snapshot, system, user, company_name = self._validation(lambda t: self._prepare_prompt(second, market))
         raw = self._call_claude(system, user)
         if self._budget.lease_expired():
@@ -514,7 +535,7 @@ class _Run:
         except dcand.ResponseUnusable:
             raise _ProviderFailure(dr.GENERATION_UNUSABLE) from None
         payload = dcand.CandidatePayload(second.ticker, company_name, snapshot.method_id, response.visible_text,
-                                         market.value("current_price"), market.currency)
+                                         market.public_price(), market.currency)
         candidate = dcand.GeneratedDecryptageCandidate(
             dcand.CANDIDATE_VERSION, dcand.TurnInputs.from_reservation(reservation), lease, self._owner,
             resolution, market, dcand.market_fingerprint(market), snapshot, second.read_at, second.lease_expires_at,

@@ -66,6 +66,7 @@ METHOD_BASES = (BASIS_ACTIVE_ANALYSIS, BASIS_INITIAL_TURN, BASIS_LOOKUP)
 # Faits injectés par core.decryptage_engine (ordre et clés de fact_labels).
 PROMPT_FACT_TYPES = ("operating_margin", "roe", "roic", "gross_margin_latest", "fcf_per_share", "revenue_growth",
                      "net_cash", "eps")
+ABSENT_LABEL = "N/D"  # convention d'absence de core.decryptage_engine
 RESPONSE_MAX_BYTES = 64 * 1024
 ACCEPTED_STOP_REASONS = ("end_turn", "stop_sequence")
 UNKNOWN_MARKER = "unknown_marker"
@@ -205,7 +206,9 @@ class PreparationSnapshot:
             return None
         return {"current_step": self.active_session.current_step,
                 "statements": [{"step": s.step, "text": s.text} for s in self.statements_used],
-                "facts": {f.fact_type: f.value for f in self.facts_used}}
+                # Dernière valeur NULL : « N/D » (convention d'absence du moteur), jamais
+                # une valeur antérieure ni un zéro ; la valeur None reste dans le snapshot.
+                "facts": {f.fact_type: ABSENT_LABEL if f.value is None else f.value for f in self.facts_used}}
 
     def existing_thesis(self):
         """Argument existing_thesis de build_system_prompt (nouveau dict)."""
@@ -218,12 +221,14 @@ class PreparationSnapshot:
 
 
 def used_facts(facts: tuple) -> tuple:
-    """Règle historique (dict {type: valeur} dans l'ordre fact_date, id : la
-    DERNIÈRE ligne d'un type l'emporte) restreinte aux types injectés et aux
-    valeurs connues, dans l'ordre de lecture."""
+    """Règle historique (dict {type: valeur} construit dans l'ordre fact_date
+    ASC, id ASC) : la DERNIÈRE ligne d'un type l'emporte, MÊME si sa valeur
+    est NULL — jamais une valeur antérieure réutilisée parce qu'elle est
+    connue (audit P1-02). Restreinte aux types injectés dans le prompt, dans
+    l'ordre de lecture."""
     last = {}
     for fact in facts:
-        if fact.fact_type in PROMPT_FACT_TYPES and fact.value is not None:
+        if fact.fact_type in PROMPT_FACT_TYPES:
             last[fact.fact_type] = fact
     chosen = {id(f) for f in last.values()}
     return tuple(f for f in facts if id(f) in chosen)
@@ -404,7 +409,7 @@ class GeneratedDecryptageCandidate(dr._Unserializable):
         if self.market_fingerprint != market_fingerprint(self.market):
             raise ValueError("candidat : empreinte financière incohérente")
         if self.payload.method_used != prep.method_id or self.payload.currency != self.market.currency \
-                or self.payload.price != self.market.value("current_price"):
+                or self.payload.price != self.market.public_price():
             raise ValueError("candidat : payload incohérent")
         if self.step_marker is not None and self.step_marker not in DECRYPTAGE_STEP_MARKERS:
             raise ValueError("candidat : marqueur hors vocabulaire")

@@ -346,11 +346,12 @@ def preparation_view(**overrides):
 
 def test_the_snapshot_keeps_only_what_the_prompt_uses_with_historical_rules():
     snap = dcand.build_snapshot(preparation_view(), "MC.PA", "construction_these", dcand.BASIS_ACTIVE_ANALYSIS)
-    assert [f.fact_id for f in snap.facts_used] == [3]  # dernier par type injecté, valeur connue
+    # Dernière ligne par type injecté, MÊME NULL (eps : ligne 4, None) — audit P1-02.
+    assert [f.fact_id for f in snap.facts_used] == [3, 4]
     assert [s.statement_id for s in snap.statements_used] == [1]  # étape et texte non vides
     assert snap.in_progress_analysis() == {"current_step": "moat", "statements": [{"step": "business",
                                                                                    "text": "Luxe."}],
-                                           "facts": {"roe": 24.0}}
+                                           "facts": {"roe": 24.0, "eps": "N/D"}}
     assert snap.fingerprint == dcand.build_snapshot(preparation_view(), "MC.PA", "construction_these",
                                                     dcand.BASIS_ACTIVE_ANALYSIS).fingerprint
     for change in (dict(level="avance"), dict(level_revision=1), dict(lease_epoch=2), dict(owner_user_id="user-b"),
@@ -398,7 +399,8 @@ def candidate(**overrides):
                   owner_user_id="user-a", instrument=MC, market=market,
                   market_fingerprint=dcand.market_fingerprint(market), preparation=snap, prepared_read_at=NOW,
                   prepared_lease_expires_at=the_lease.lease_expires_at,
-                  payload=dcand.CandidatePayload("MC.PA", "LVMH", "construction_these", "Texte.", 600.5, "EUR"),
+                  # Cours daté sans seuil de fraîcheur : jamais publié comme actuel (audit P2-01).
+                  payload=dcand.CandidatePayload("MC.PA", "LVMH", "construction_these", "Texte.", None, "EUR"),
                   step_marker="moat", response_diagnostics=(), model="claude-test-model")
     fields.update(overrides)
     return dcand.GeneratedDecryptageCandidate(**fields)
