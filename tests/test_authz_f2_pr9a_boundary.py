@@ -65,15 +65,22 @@ REACHABLE = {
             "_is_turn_unique_violation", "_utcnow", "_require_text", "_require_owned", "_bind_locked"},
         "core.interaction_identity": {"register_or_resolve_conversation", "_require_identifier", "_resolve",
                                       "_is_identity_collision", "_utcnow"},
+        # R1 PR 9-C1-A : capture_user_turn = _classify_user_turn (sélection
+        # historique) + _write_user_turn ; _lock_active_analysis_session
+        # devient _lock_active_analysis_sessions (même instruction, la
+        # politique de sélection revient à l'appelant). Progression :
+        # validation et règles extraites (_require_progress_request,
+        # _apply_progress_rules), mêmes instructions SQL.
         "core.decryptage_cognitive_runtime": {
             "runtime_private_metadata", "capture_user_turn", "answered_step", "record_turn_progress",
-            "_runtime_version", "_lock_link", "_lock_active_analysis_session", "_conversation_anchor_event_id",
+            "_classify_user_turn", "_write_user_turn",
+            "_runtime_version", "_lock_link", "_lock_active_analysis_sessions", "_conversation_anchor_event_id",
             "_anchor_event_id", "_lock_turn_events", "_session_ticker", "_append_contribution",
             "_conversation_support_refs", "_utcnow", "_event_step"},
         "core.cognitive_capture": {"append_user_contribution", "_require_uuid", "_require_exact_uuid",
                                    "_require_identifier", "_require_text", "_lock_event", "_utcnow"},
         "core.decryptage_progress": {"apply_construction_these_progress", "find_active_analysis_session",
-                                     "_progress_action"},
+                                     "_progress_action", "_require_progress_request", "_apply_progress_rules"},
     },
     "_acknowledge": {
         "core.assistant_delivery": {"lock_owned_delivery", "acknowledge_locked_delivery", "_require_uuid",

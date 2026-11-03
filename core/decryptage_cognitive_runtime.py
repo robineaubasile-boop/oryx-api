@@ -126,6 +126,25 @@ KEY SHARE implicite), qui ne doit jamais être pris hors de cet ordre. Une
 transaction ne verrouille qu'UNE AnalysisSession, toujours avant ses
 events ; elle n'attend jamais une AnalysisSession en détenant un event.
 
+R1 PR 9-C1-A (F2, DORMANT) — préparation et application séparées :
+
+- capture_user_turn (legacy, inchangé) = _classify_user_turn (sélection
+  historique) puis _write_user_turn : mêmes instructions SQL, mêmes verrous,
+  même ordre, même résultat ;
+- prepare_locked_cognitive_turn (phase Prepare F2) = _classify_user_turn
+  avec refus fermé de l'ambiguïté d'AnalysisSession active
+  (AmbiguousActiveAnalysisSessions ; le legacy retient toujours la plus
+  récente) + answered_step lu sous le verrou de l'ancre. AUCUNE écriture :
+  ni contribution, ni lien, ni UserStatement, ni progression. Rend une
+  PreparedCognitiveTurn : privée, à usage unique, liée à la Session qui l'a
+  préparée, non sérialisable ;
+- apply_prepared_cognitive_turn (phase Apply F2) = _write_user_turn sur la
+  décision préparée : ni nouvelle ancre, ni nouvelle AnalysisSession, ni
+  nouveau classement.
+La liaison au SAVEPOINT de la transaction (une décision préparée dans un
+SAVEPOINT annulé n'est jamais réappliquée) appartient au pont ORM privé de
+la frontière F2 : ce module ne lit ni ne pilote jamais la transaction.
+
 Limites documentées :
 
 - provenance intra-event uniquement (SupportTrace event-local) ;
@@ -139,6 +158,7 @@ Limites documentées :
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy import inspect as orm_state
 from sqlalchemy import or_, select
 
 from core import cognitive_capture
@@ -243,6 +263,26 @@ class StaleConversationContext(DecryptageCognitiveRuntimeError):
     def __init__(self, expected_event_id):
         super().__init__(f"event d'ancrage {expected_event_id} n'est plus le contexte cognitif valide")
         self.expected_event_id = expected_event_id
+
+
+class AmbiguousActiveAnalysisSessions(DecryptageCognitiveRuntimeError):
+    """PR9-C1-A (F2) : plusieurs AnalysisSessions in_progress pour
+    user+ticker, constatées sous verrou. Le legacy retient la plus récente
+    (comportement historique inchangé) ; la préparation F2 refuse (fail
+    closed), comme la lecture de préparation B2 (multiple_active_sessions)."""
+
+
+class PreparedCognitiveTurnUnusable(DecryptageCognitiveRuntimeError):
+    """PR9-C1-A : décision préparée inutilisable — construction hors de
+    prepare_locked_cognitive_turn, seconde application, autre Session,
+    référence ORM détachée ou expirée, livraison qui n'est plus pending.
+    Jamais réparée : fail closed."""
+
+
+# Politique de sélection de l'AnalysisSession active (PR9-C1-A).
+_LEGACY_SELECTION = "legacy_most_recent"  # historique : la plus récente, sans refus
+_F2_SELECTION = "f2_refuse_ambiguous"     # F2 : plusieurs sessions actives => refus fermé
+_SELECTIONS = (_LEGACY_SELECTION, _F2_SELECTION)
 
 
 def _utcnow() -> datetime:
@@ -361,12 +401,14 @@ def _lock_link(db, delivery_id) -> DecryptageCognitiveLink | None:
     ).scalar_one_or_none()
 
 
-def _lock_active_analysis_session(db, *, user_id: str, ticker: str) -> AnalysisSession | None:
-    """AnalysisSession in_progress de user+ticker, verrouillée, avec le même
-    ordre déterministe que find_active_analysis_session (la progression
-    produit la relira ensuite, sous ce verrou). Lecture de l'état AVANT la
-    mutation produit du tour."""
-    sessions = db.execute(
+def _lock_active_analysis_sessions(db, *, user_id: str, ticker: str) -> list[AnalysisSession]:
+    """AnalysisSessions in_progress de user+ticker, TOUTES verrouillées (une
+    instruction), dans le même ordre déterministe que
+    find_active_analysis_session (la progression produit legacy la relira
+    ensuite, sous ce verrou). Lecture de l'état AVANT la mutation produit du
+    tour. La politique de sélection (_LEGACY_SELECTION / _F2_SELECTION)
+    appartient à l'appelant."""
+    return db.execute(
         select(AnalysisSession)
         .where(AnalysisSession.user_id == user_id, AnalysisSession.ticker == ticker,
                AnalysisSession.status == "in_progress")
@@ -374,7 +416,6 @@ def _lock_active_analysis_session(db, *, user_id: str, ticker: str) -> AnalysisS
         .with_for_update()
         .execution_options(populate_existing=True)
     ).scalars().all()
-    return sessions[0] if sessions else None
 
 
 def _lock_analysis_session(db, analysis_session_id) -> AnalysisSession:
@@ -621,7 +662,51 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     6. Ligne de lien awaiting_delivery (context_exit_event_id toujours NULL
        en V2 : aucune fermeture sur navigation).
 
-    Mute et flush ; jamais de commit."""
+    Mute et flush ; jamais de commit.
+
+    PR9-C1-A : composition, sans aucun changement de comportement, des deux
+    primitives internes partagées avec le chemin F2 — _classify_user_turn
+    (étapes 1 à 5, sélection HISTORIQUE de l'AnalysisSession active : la
+    plus récente) puis _write_user_turn (contribution éventuelle et étape
+    6). Mêmes instructions SQL, dans le même ordre, mêmes verrous."""
+    classification = _classify_user_turn(db, delivery=delivery, ticker=ticker, user_text=user_text,
+                                         selection=_LEGACY_SELECTION)
+    return _write_user_turn(db, delivery=delivery, classification=classification, user_text=user_text)
+
+
+class _TurnClassification:
+    """Classement d'un tour, constaté sous verrous (interne, jamais rendu,
+    jamais modifié après construction)."""
+
+    __slots__ = ("active", "anchor_id", "anchor", "input_action", "response_context_id")
+
+    def __init__(self, active, anchor_id, anchor, input_action: str, response_context_id):
+        # active : AnalysisSession verrouillée retenue, ou None ; anchor_id :
+        # ancre AVANT le tour (input_context_event_id), ou None ; anchor :
+        # CognitiveEvent d'ancrage verrouillé, ou None ; response_context_id :
+        # cible figée de la réponse, ou None.
+        for name, value in (("active", active), ("anchor_id", anchor_id), ("anchor", anchor),
+                            ("input_action", input_action), ("response_context_id", response_context_id)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("_TurnClassification est immuable")
+
+
+def _classify_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text: str,
+                        selection: str) -> _TurnClassification:
+    """Étapes 1 à 5 de capture_user_turn : préconditions de livraison,
+    verrous (lien, AnalysisSession active, events open + ancre en une
+    instruction triée), classement. N'ÉCRIT RIEN (ni contribution, ni lien) :
+    seules des lectures, dont des SELECT ... FOR UPDATE.
+
+    selection : _LEGACY_SELECTION (plusieurs sessions actives : la plus
+    récente, comportement historique) ou _F2_SELECTION (plusieurs sessions
+    actives : AmbiguousActiveAnalysisSessions, fail closed). Dans les deux
+    cas TOUTES les sessions actives sont verrouillées par la même
+    instruction (même ensemble de verrous)."""
+    if selection not in _SELECTIONS:
+        raise ValueError("politique de sélection inconnue")
     version = _runtime_version(delivery)
     if version is None:
         raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : livraison sans opt-in R1-C2")
@@ -632,7 +717,12 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     if _lock_link(db, delivery.id) is not None:
         raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : lien déjà présent")
 
-    active = _lock_active_analysis_session(db, user_id=delivery.user_id, ticker=ticker)
+    sessions = _lock_active_analysis_sessions(db, user_id=delivery.user_id, ticker=ticker)
+    if len(sessions) > 1 and selection == _F2_SELECTION:
+        logger.warning("[R1-C4] assistant_turn=%s anomaly=multiple_active_sessions count=%d phase=prepare",
+                       delivery.id, len(sessions))
+        raise AmbiguousActiveAnalysisSessions(f"assistant turn {delivery.id} : {len(sessions)} sessions actives")
+    active = sessions[0] if sessions else None
     anchor_id = _conversation_anchor_event_id(db, user_id=delivery.user_id,
                                               conversation_key=delivery.conversation_key)
     locked = _lock_turn_events(db, user_id=delivery.user_id, analysis_session_id=active.id if active else None,
@@ -649,7 +739,6 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         if anchor is None or anchor.analysis_session_id is None:
             raise CognitiveLinkInvariantError(f"assistant turn {delivery.id} : ancre {anchor_id} incohérente")
 
-    input_event_id = None
     if anchor is None:
         input_action = NO_OPEN_EVENT
     elif _session_ticker(db, anchor.analysis_session_id) != ticker:
@@ -667,8 +756,7 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
                        anchor_id)
         raise StaleConversationContext(anchor_id)
     elif user_text:
-        _append_contribution(db, event=anchor, delivery=delivery, user_text=user_text)
-        input_action, input_event_id = CONTRIBUTION_APPENDED, anchor.id
+        input_action = CONTRIBUTION_APPENDED
     else:
         input_action = NO_USER_CONTRIBUTION
     # Cible figée de la réponse : verrouillée ci-dessus (compatible), FK prise
@@ -677,6 +765,21 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
         response_context_id = anchor.id
     else:
         response_context_id = compatible[0].id if compatible else None
+    return _TurnClassification(active, anchor_id, anchor, input_action, response_context_id)
+
+
+def _write_user_turn(db, *, delivery: AssistantDelivery, classification: _TurnClassification,
+                     user_text: str) -> DecryptageCognitiveLink:
+    """Étape 6 de capture_user_turn, sur un classement DÉJÀ décidé sous
+    verrous : contribution à l'ancre exacte (contribution_appended
+    seulement), puis ligne de lien awaiting_delivery. Ne relit ni ancre, ni
+    AnalysisSession, ne reclasse rien."""
+    input_action, anchor = classification.input_action, classification.anchor
+    anchor_id, response_context_id = classification.anchor_id, classification.response_context_id
+    input_event_id = None
+    if input_action == CONTRIBUTION_APPENDED:
+        _append_contribution(db, event=anchor, delivery=delivery, user_text=user_text)
+        input_event_id = anchor.id
 
     link = DecryptageCognitiveLink(
         assistant_delivery_id=delivery.id,
@@ -698,6 +801,183 @@ def capture_user_turn(db, *, delivery: AssistantDelivery, ticker: str, user_text
     logger.info("[R1-C2] assistant_turn=%s input_action=%s event=%s context_event=%s response_context=%s",
                 delivery.id, input_action, input_event_id, anchor_id, response_context_id)
     return link
+
+
+# --------------------------------------------------------------------------
+# PR9-C1-A — décision cognitive préparée (F2, dormant)
+# --------------------------------------------------------------------------
+
+_PREPARE_TOKEN = object()  # seul prepare_locked_cognitive_turn construit une décision
+_PREPARED, _CONSUMED = "prepared", "consumed"
+
+
+class PreparedCognitiveTurn:
+    """Décision cognitive d'UN tour F2, préparée sous verrous et SANS
+    écriture par prepare_locked_cognitive_turn (phase Prepare), appliquée au
+    plus une fois par apply_prepared_cognitive_turn (phase Apply).
+
+    Strictement privée : construite seulement par prepare_locked_cognitive_
+    turn (jeton de module), immuable (aucun attribut assignable), à usage
+    unique (consommée AVANT toute mutation : un échec d'Apply ne la rend
+    jamais réutilisable), liée à la Session qui l'a préparée, non
+    sérialisable (pickle, copie) et sans texte utilisateur dans son repr().
+    Elle ne porte que des valeurs issues de la livraison du principal
+    (user_id, conversation : jamais d'un client) et du tour déjà admis.
+
+    analysis_session : l'AnalysisSession VERROUILLÉE retenue (ou None,
+    absence préparée comme telle) ; la progression F2 l'utilise telle quelle
+    (core.decryptage_progress.apply_prepared_construction_these_progress),
+    sans jamais relire « la session active ». answered_step : étape de
+    l'event d'ancrage d'une contribution (même dérivation que answered_step,
+    lue sous le verrou de l'ancre), None sinon.
+
+    Limite : la décision ne sait pas dans quel SAVEPOINT elle a été préparée
+    (ce module ne lit jamais la transaction) ; un ROLLBACK TO SAVEPOINT
+    n'expire pas les objets seulement chargés (SQLAlchemy). La liaison au
+    SAVEPOINT et le refus après une annulation locale appartiennent au pont
+    ORM privé de la frontière F2."""
+
+    __slots__ = ("_db", "_delivery", "_ticker", "_user_text", "_classification", "_answered_step", "_state")
+
+    def __init__(self, token, db, delivery, ticker, user_text, classification, answered_step):
+        if token is not _PREPARE_TOKEN:
+            raise PreparedCognitiveTurnUnusable("décision construite hors de prepare_locked_cognitive_turn")
+        for name, value in (("_db", db), ("_delivery", delivery), ("_ticker", ticker), ("_user_text", user_text),
+                            ("_classification", classification), ("_answered_step", answered_step),
+                            ("_state", _PREPARED)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("PreparedCognitiveTurn est immuable")
+
+    def __delattr__(self, name):
+        raise AttributeError("PreparedCognitiveTurn est immuable")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("PreparedCognitiveTurn n'est pas sérialisable")
+
+    def __reduce__(self):
+        raise TypeError("PreparedCognitiveTurn n'est pas sérialisable")
+
+    def __copy__(self):
+        raise TypeError("PreparedCognitiveTurn n'est pas copiable")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("PreparedCognitiveTurn n'est pas copiable")
+
+    def __repr__(self) -> str:
+        return f"PreparedCognitiveTurn(input_action={self._classification.input_action}, state={self._state})"
+
+    # -- lectures (valeurs décidées sous verrou, jamais recalculées) --------
+
+    @property
+    def delivery(self):
+        return self._delivery
+
+    @property
+    def ticker(self) -> str:
+        return self._ticker
+
+    @property
+    def user_text(self) -> str:
+        return self._user_text
+
+    @property
+    def analysis_session(self):
+        return self._classification.active
+
+    @property
+    def anchor_event_id(self):
+        return self._classification.anchor_id
+
+    @property
+    def anchor_analysis_session_id(self):
+        anchor = self._classification.anchor
+        return anchor.analysis_session_id if anchor is not None else None
+
+    @property
+    def input_action(self) -> str:
+        return self._classification.input_action
+
+    @property
+    def contribution_event_id(self):
+        classification = self._classification
+        return classification.anchor.id if classification.input_action == CONTRIBUTION_APPENDED else None
+
+    @property
+    def response_context_event_id(self):
+        return self._classification.response_context_id
+
+    @property
+    def answered_step(self):
+        return self._answered_step
+
+    @property
+    def consumed(self) -> bool:
+        return self._state == _CONSUMED
+
+    def _consume(self, db) -> None:
+        """Usage unique, consommé AVANT toute vérification et toute mutation ;
+        même Session ; références ORM toujours attachées à cette Session,
+        persistantes et entièrement chargées (un COMMIT qui expire les
+        instances, une fermeture ou un expunge les invalident) ; livraison
+        toujours pending."""
+        if self._state != _PREPARED:
+            raise PreparedCognitiveTurnUnusable("décision déjà appliquée")
+        object.__setattr__(self, "_state", _CONSUMED)
+        if db is not self._db:
+            raise PreparedCognitiveTurnUnusable("décision appliquée dans une autre Session")
+        classification = self._classification
+        for obj in (self._delivery, classification.active, classification.anchor):
+            if obj is None:
+                continue
+            if not _loaded_in(obj, db):
+                raise PreparedCognitiveTurnUnusable("référence ORM de la décision détachée ou périmée")
+        if self._delivery.status != "pending":
+            raise PreparedCognitiveTurnUnusable("livraison qui n'est plus pending")
+
+
+def _loaded_in(obj, db) -> bool:
+    """Instance persistante de CETTE Session dont toutes les colonnes sont
+    chargées : jamais une relecture implicite (sans verrou) d'un attribut."""
+    state = orm_state(obj)
+    columns = {attribute.key for attribute in state.mapper.column_attrs}
+    return state.session is db and state.persistent and not (state.unloaded & columns)
+
+
+def prepare_locked_cognitive_turn(db, *, delivery: AssistantDelivery, ticker: str,
+                                  user_text: str) -> PreparedCognitiveTurn:
+    """Phase Prepare F2 (PR9-C1-A, dormante) : mêmes préconditions de
+    livraison, mêmes verrous, même ordre et même classement que
+    capture_user_turn (_classify_user_turn), avec refus fermé de plusieurs
+    AnalysisSessions actives (AmbiguousActiveAnalysisSessions) et de plusieurs
+    events open compatibles (AmbiguousOpenDecryptageEvents, comme le legacy)
+    ; contexte stale : StaleConversationContext (comme le legacy).
+
+    Détermine input_action, l'event de contribution (l'ancre exacte), la
+    cible figée de la réponse et answered_step (étape de l'event d'ancrage,
+    lue sous son verrou). N'ÉCRIT RIEN : ni contribution, ni
+    DecryptageCognitiveLink, ni UserStatement, ni InvestmentThesis, ni
+    progression. Rend une PreparedCognitiveTurn privée, à usage unique."""
+    classification = _classify_user_turn(db, delivery=delivery, ticker=ticker, user_text=user_text,
+                                         selection=_F2_SELECTION)
+    answered = (_event_step(db, classification.anchor)
+                if classification.input_action == CONTRIBUTION_APPENDED else None)
+    return PreparedCognitiveTurn(_PREPARE_TOKEN, db, delivery, ticker, user_text, classification, answered)
+
+
+def apply_prepared_cognitive_turn(db, *, prepared: PreparedCognitiveTurn) -> DecryptageCognitiveLink:
+    """Phase Apply F2 (PR9-C1-A, dormante) : applique EXACTEMENT la décision
+    préparée (mêmes mutations que capture_user_turn : contribution à l'ancre
+    exacte, lien awaiting_delivery avec la même provenance). Aucune nouvelle
+    ancre, aucune nouvelle AnalysisSession, aucun nouveau classement.
+    Décision consommée avant toute mutation ; mute et flush, jamais de
+    commit."""
+    if type(prepared) is not PreparedCognitiveTurn:
+        raise PreparedCognitiveTurnUnusable("décision préparée attendue")
+    prepared._consume(db)
+    return _write_user_turn(db, delivery=prepared.delivery, classification=prepared._classification,
+                            user_text=prepared.user_text)
 
 
 def record_turn_progress(db, *, link: DecryptageCognitiveLink, progress_action: str | None) -> None:

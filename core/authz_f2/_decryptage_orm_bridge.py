@@ -61,10 +61,35 @@ annule tout (UNAVAILABLE), jamais converti en succès.
 Aucune commande du registre de production n'atteint ce module (registre à
 quatorze commandes inchangé) : PR 9-A ne l'exerce que par le banc d'essai
 isolé des tests. api.py ne l'importe pas (F2 dormant).
+
+R1 PR 9-C1-A — primitives PRIVÉES de la future finalisation F2 (phases 3, 5,
+6 et 7 du protocole figé), DORMANTES : aucune n'est atteinte par OPERATIONS,
+par une commande du registre de production ni par _adapters ; l'inventaire
+ci-dessus (deux opérations) est inchangé. Elles ne sont exercées que par le
+banc d'essai isolé des tests (tests/authz_f2_pr9c1a_support.py).
+
+| Phase | Primitive | Rôle |
+|---|---|---|
+| 3 / 8 | _business_savepoint(db) | SAVEPOINT métier C1 sur la Session du pont : refus s'il reste une écriture non flushée, sonde de la transaction du runner, puis SAVEPOINT ; sortie normale : flush + RELEASE + sonde ; _LocalRollback (motif FERMÉ) : sonde AVANT l'annulation (une erreur SQL avalée n'est jamais masquée), ROLLBACK TO SAVEPOINT, expunge_all(), sonde ; toute autre exception : ROLLBACK TO SAVEPOINT puis propagation (refus global, ROLLBACK du runner) |
+| 5 | _prepare_turn(db, scope, user_id, delivery, ...) | décision cognitive verrouillée SANS écriture (dcr.prepare_locked_cognitive_turn), liée au SAVEPOINT C1 courant ; livraison du principal exigée |
+| 6 | _PreparedTurn.context, _cognitive_context_matches | vue immuable et bornée de ce qui a été verrouillé (PreparedCognitiveContext) et comparaison PURE avec l'ancre / la session active d'un snapshot B2 (types de core.authz_f2.decryptage_context) |
+| 7 | _apply_prepared_turn(db, scope, user_id, prepared, ...) | application EXACTE de la décision : dcr.apply_prepared_cognitive_turn, dp.apply_prepared_construction_these_progress sur la session préparée, bind_locked_analysis_session, record_turn_progress ; vue PreparedTurnApplied |
+
+Garanties : une seule Session (celle du pont) ; jamais de COMMIT ni de
+ROLLBACK global ; les SAVEPOINT historiques des services restent imbriqués
+et inchangés ; une décision préparée n'est appliquée qu'une fois, dans le
+même SAVEPOINT C1 encore actif, par le même principal — jamais après une
+annulation locale (les verrous pris après le SAVEPOINT sont alors libérés
+par PostgreSQL et les objets chargés dans le SAVEPOINT, qu'un ROLLBACK TO
+SAVEPOINT SQLAlchemy n'expire pas, sont détachés par expunge_all()) ; les
+verrous pris AVANT le SAVEPOINT restent détenus. N'écrit jamais la
+réservation B1 (l'UPDATE reserved -> finalized appartient à _adapters.py,
+PR 9-C1-B) ; aucun réseau.
 """
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -76,8 +101,9 @@ from core import decryptage_cognitive_runtime as dcr
 from core import decryptage_progress as dp
 from core.authz_f2 import _adapters
 from core.authz_f2 import commands as c
+from core.authz_f2 import decryptage_context as dc
 from core.authz_f2.principal import AuthorizedContext
-from core.models import AnalysisSession, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
+from core.models import AnalysisSession, AssistantDelivery, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
 
 logger = logging.getLogger("oryx.authz_f2.decryptage_bridge")
 
@@ -407,3 +433,370 @@ def _execute(conn, ctx, operation):
         raise
     session._release()
     return result
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-C1-A — primitives privées de la future finalisation F2 (dormantes)
+# --------------------------------------------------------------------------
+
+# Motifs FERMÉS d'annulation LOCALE du SAVEPOINT C1 (la transaction du runner
+# continue). C1-A ne connaît que l'écart de revalidation du contexte
+# cognitif préparé ; tout autre motif sera ajouté explicitement par C1-B.
+CONTEXT_CHANGED = "context_changed"
+LOCAL_ROLLBACK_REASONS = (CONTEXT_CHANGED,)
+# Classements V2 qu'une décision préparée peut porter (jamais V1).
+_PREPARED_INPUT_ACTIONS = (dcr.NO_OPEN_EVENT, dcr.NO_USER_CONTRIBUTION, dcr.CONTRIBUTION_APPENDED,
+                           dcr.CONTEXT_SWITCHED)
+_STEP_MAX_CHARS = 32
+
+
+class PendingWritesBeforeSavepoint(_adapters.AdapterInvariantBroken):
+    """Écriture ORM non flushée à l'ouverture du SAVEPOINT C1 (begin_nested()
+    la flusherait HORS du SAVEPOINT) : refus, jamais un flush implicite."""
+
+    alert = "decryptage_bridge_pending_writes"
+
+
+class PreparedTurnUnusable(_adapters.AdapterInvariantBroken):
+    """Décision préparée ou SAVEPOINT C1 inutilisable : hors du SAVEPOINT
+    courant, après une annulation locale, seconde application, autre
+    principal, préparation qui écrit, construction directe."""
+
+    alert = "decryptage_bridge_prepared_turn_unusable"
+
+
+class _LocalRollback(Exception):
+    """Seule demande d'annulation LOCALE du SAVEPOINT C1, levée par le code
+    du pont pour un motif FERMÉ (LOCAL_ROLLBACK_REASONS). Toute autre
+    exception annule le SAVEPOINT puis est propagée (refus global)."""
+
+    def __init__(self, reason: str):
+        if type(reason) is not str or reason not in LOCAL_ROLLBACK_REASONS:
+            raise ValueError("motif d'annulation locale hors vocabulaire fermé")
+        super().__init__(reason)
+        self.reason = reason
+
+
+_OPEN, _RELEASED, _ROLLED_BACK, _FAILED = "open", "released", "rolled_back", "failed"
+
+
+class _SavepointScope:
+    """État du SAVEPOINT C1 rendu par _business_savepoint : ouvert, libéré
+    (RELEASE), annulé localement (motif fermé) ou en échec (exception
+    propagée). Non sérialisable ; aucune donnée métier."""
+
+    __slots__ = ("_db", "_transaction", "_state", "_reason")
+
+    def __init__(self, db):
+        self._db, self._transaction, self._state, self._reason = db, None, _OPEN, None
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("SAVEPOINT C1 non sérialisable")
+
+    def __repr__(self) -> str:
+        return f"_SavepointScope(state={self._state})"
+
+    @property
+    def released(self) -> bool:
+        return self._state == _RELEASED
+
+    @property
+    def rolled_back(self) -> bool:
+        return self._state == _ROLLED_BACK
+
+    @property
+    def reason(self):
+        return self._reason
+
+    def _require_current(self, db) -> None:
+        """Ce SAVEPOINT est ouvert, actif et le SAVEPOINT courant de CETTE
+        Session (aucun autre ouvert au-dessus)."""
+        transaction = self._transaction
+        if (self._state != _OPEN or db is not self._db or transaction is None or not transaction.is_active
+                or db.get_nested_transaction() is not transaction):
+            raise PreparedTurnUnusable("hors du SAVEPOINT C1 courant")
+
+
+def _has_pending_writes(db) -> bool:
+    return bool(db.new or db.dirty or db.deleted)
+
+
+def _require_session_live(db) -> None:
+    """Sonde intermédiaire : la transaction du runner (connexion de la
+    Session du pont) est active et PostgreSQL l'accepte encore (même sonde
+    que _require_live, qui échoue sur une transaction ou une sous-transaction
+    avortée)."""
+    conn = db.bind
+    _require_live(conn, conn.get_transaction())
+
+
+@contextmanager
+def _business_savepoint(db):
+    """SAVEPOINT métier C1 (phases 3 et 8), sur la Session du pont, dans la
+    transaction du runner ; jamais imbriqué dans un autre SAVEPOINT.
+
+    Ouverture : aucune écriture ORM en attente (PendingWritesBeforeSavepoint)
+    puis sonde, puis SAVEPOINT. Sortie normale : flush, RELEASE SAVEPOINT,
+    sonde ; scope.released. _LocalRollback (motif fermé) : sonde AVANT
+    l'annulation — une erreur SQL avalée dans le SAVEPOINT reste un refus
+    global —, ROLLBACK TO SAVEPOINT, expunge_all() (aucune référence ORM du
+    SAVEPOINT annulé n'est réutilisable : SQLAlchemy n'expire pas les objets
+    seulement chargés), sonde ; scope.rolled_back, la transaction du runner
+    continue. Toute autre exception : ROLLBACK TO SAVEPOINT, scope en échec,
+    exception propagée (le runner annule tout). Jamais de COMMIT ni de
+    ROLLBACK global ; les SAVEPOINT des services s'imbriquent dedans."""
+    if type(db) is not _BridgeSession:
+        raise TypeError("SAVEPOINT C1 : Session du pont attendue")
+    if db.get_nested_transaction() is not None:
+        raise PreparedTurnUnusable("SAVEPOINT C1 imbriqué dans un autre SAVEPOINT")
+    if _has_pending_writes(db):
+        raise PendingWritesBeforeSavepoint("écriture non flushée avant le SAVEPOINT C1")
+    _require_session_live(db)
+    scope = _SavepointScope(db)
+    try:
+        with db.begin_nested() as transaction:
+            scope._transaction = transaction
+            try:
+                yield scope
+            except _LocalRollback:
+                _require_session_live(db)  # sous-transaction avortée : refus global, jamais une annulation locale
+                raise
+            db.flush()
+    except _LocalRollback as refusal:
+        scope._state, scope._reason = _ROLLED_BACK, refusal.reason
+        db.expunge_all()
+        _require_session_live(db)
+        logger.info("decryptage_bridge savepoint=rolled_back reason=%s", refusal.reason)
+        return
+    except BaseException:
+        scope._state = _FAILED
+        raise
+    scope._state = _RELEASED
+    _require_session_live(db)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCognitiveContext:
+    """Vue immuable et bornée de la décision préparée (phase 6) : ce qui a
+    été verrouillé et sera appliqué tel quel. Identifiants techniques et
+    vocabulaires fermés seulement ; jamais de texte utilisateur ni
+    d'instance ORM."""
+    ticker: str
+    analysis_session_id: object         # uuid.UUID ou None (absence préparée)
+    current_step: object                # étape ouverte verrouillée (str) ou None
+    anchor_event_id: object             # uuid.UUID ou None
+    anchor_analysis_session_id: object  # uuid.UUID ou None
+    input_action: str                   # _PREPARED_INPUT_ACTIONS
+    contribution_event_id: object       # uuid.UUID (= ancre) ou None
+    response_context_event_id: object   # uuid.UUID ou None
+    answered_step: object               # dp.ANSWERABLE_STEPS (contribution) ou None
+
+    def __post_init__(self):
+        _text(self.ticker, "ticker", c.TICKER_MAX_CHARS)
+        for name in ("analysis_session_id", "anchor_event_id", "anchor_analysis_session_id",
+                     "contribution_event_id", "response_context_event_id"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not uuid.UUID:
+                raise ValueError(f"contexte préparé : {name} hors contrat")
+        if self.current_step is not None and (type(self.current_step) is not str
+                                              or len(self.current_step) > _STEP_MAX_CHARS):
+            raise ValueError("contexte préparé : étape hors contrat")
+        if self.analysis_session_id is None and self.current_step is not None:
+            raise ValueError("contexte préparé : étape sans session")
+        if type(self.input_action) is not str or self.input_action not in _PREPARED_INPUT_ACTIONS:
+            raise ValueError("contexte préparé : classement hors contrat")
+        if (self.anchor_event_id is None) != (self.anchor_analysis_session_id is None) or (
+                (self.anchor_event_id is None) != (self.input_action == dcr.NO_OPEN_EVENT)):
+            raise ValueError("contexte préparé : ancre incohérente")
+        contribution = self.input_action == dcr.CONTRIBUTION_APPENDED
+        if contribution != (self.contribution_event_id is not None) or (
+                contribution and self.contribution_event_id != self.anchor_event_id):
+            raise ValueError("contexte préparé : contribution incohérente")
+        if contribution != (self.answered_step is not None) or (
+                contribution and self.answered_step not in dp.ANSWERABLE_STEPS):
+            raise ValueError("contexte préparé : étape répondue incohérente")
+        if self.input_action in dcr.ANCHORED_INPUT_ACTIONS and (
+                self.response_context_event_id != self.anchor_event_id
+                or self.analysis_session_id != self.anchor_analysis_session_id):
+            raise ValueError("contexte préparé : tour ancré incohérent")
+
+    def __reduce__(self):
+        raise TypeError("PreparedCognitiveContext n'est pas sérialisable")
+
+
+def _context_of(decision) -> PreparedCognitiveContext:
+    session = decision.analysis_session
+    return PreparedCognitiveContext(
+        decision.ticker, session.id if session is not None else None,
+        session.current_step if session is not None else None, decision.anchor_event_id,
+        decision.anchor_analysis_session_id, decision.input_action, decision.contribution_event_id,
+        decision.response_context_event_id, decision.answered_step)
+
+
+_HANDLE_TOKEN = object()
+_HANDLE_PREPARED, _HANDLE_CONSUMED = "prepared", "consumed"
+
+
+class _PreparedTurn:
+    """Décision préparée DANS un SAVEPOINT C1 précis, pour un principal
+    précis : PreparedCognitiveTurn (core.decryptage_cognitive_runtime) +
+    liaison au SAVEPOINT + vue immuable `context`. Construite seulement par
+    _prepare_turn, immuable, à usage unique (consommée avant toute
+    mutation), non sérialisable, sans texte dans son repr()."""
+
+    __slots__ = ("_scope", "_user_id", "_decision", "_context", "_state")
+
+    def __init__(self, token, scope, user_id, decision):
+        if token is not _HANDLE_TOKEN:
+            raise PreparedTurnUnusable("décision construite hors de _prepare_turn")
+        for name, value in (("_scope", scope), ("_user_id", user_id), ("_decision", decision),
+                            ("_context", _context_of(decision)), ("_state", _HANDLE_PREPARED)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("décision préparée immuable")
+
+    def __delattr__(self, name):
+        raise AttributeError("décision préparée immuable")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("décision préparée non sérialisable")
+
+    def __copy__(self):
+        raise TypeError("décision préparée non copiable")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("décision préparée non copiable")
+
+    def __repr__(self) -> str:
+        return f"_PreparedTurn(input_action={self._context.input_action}, state={self._state})"
+
+    @property
+    def context(self) -> PreparedCognitiveContext:
+        return self._context
+
+    def _consume(self, db, scope, user_id: str):
+        if self._state != _HANDLE_PREPARED:
+            raise PreparedTurnUnusable("décision préparée déjà appliquée")
+        object.__setattr__(self, "_state", _HANDLE_CONSUMED)
+        if scope is not self._scope or user_id != self._user_id:
+            raise PreparedTurnUnusable("décision préparée hors de son SAVEPOINT ou de son principal")
+        scope._require_current(db)
+        return self._decision
+
+
+def _prepare_turn(db, scope, user_id: str, delivery, *, ticker: str, user_text: str) -> _PreparedTurn:
+    """Phase 5 : décision cognitive verrouillée, SANS écriture, dans le
+    SAVEPOINT C1 courant. delivery : la livraison pending du principal
+    (revendiquée dans ce SAVEPOINT, phase 4 — C1-B). Aucune écriture ORM en
+    attente avant ni après (une préparation qui écrirait est un refus
+    fermé) ; plusieurs sessions actives ou events open compatibles, ancre
+    stale : exceptions du runtime cognitif propagées."""
+    scope._require_current(db)
+    if type(delivery) is not AssistantDelivery or delivery.user_id != user_id:
+        raise ProvenanceIncoherent("livraison préparée hors du principal autorisé")
+    _text(ticker, "ticker", c.TICKER_MAX_CHARS)
+    if type(user_text) is not str or user_text != user_text.strip():
+        raise ValueError("user_text : chaîne strippée attendue")
+    if _has_pending_writes(db):
+        raise PendingWritesBeforeSavepoint("écriture non flushée avant la préparation")
+    decision = dcr.prepare_locked_cognitive_turn(db, delivery=delivery, ticker=ticker, user_text=user_text)
+    if _has_pending_writes(db):
+        raise PreparedTurnUnusable("la préparation cognitive a produit une écriture")
+    scope._require_current(db)
+    return _PreparedTurn(_HANDLE_TOKEN, scope, user_id, decision)
+
+
+def _cognitive_context_matches(context: PreparedCognitiveContext, *, ticker: str, anchor,
+                               active_session) -> bool:
+    """Phase 6 (partie cognitive), fonction PURE : la décision préparée
+    décrit-elle EXACTEMENT le contexte d'un snapshot B2 (ticker résolu,
+    dc.PreparationAnchor, dc.PreparationActiveSession ou None) ?
+
+    - session active : même identifiant ET même étape ouverte, ou absente
+      des deux côtés ;
+    - ancre none : aucune ancre préparée (no_open_event) ;
+    - ancre other_ticker : même event, même AnalysisSession, context_switched ;
+    - ancre current : même event, même AnalysisSession, tour ancré ;
+    - ancre unbound : jamais (la préparation refuse une ancre sans session).
+    Le niveau, sa révision, les faits, contributions et la thèse du snapshot
+    ne sont PAS revalidés ici (PR 9-C1-B)."""
+    if type(context) is not PreparedCognitiveContext or type(anchor) is not dc.PreparationAnchor or (
+            active_session is not None and type(active_session) is not dc.PreparationActiveSession):
+        raise TypeError("revalidation : types fermés attendus")
+    if context.ticker != ticker:
+        return False
+    expected = (None, None) if active_session is None else (active_session.analysis_session_id,
+                                                            active_session.current_step)
+    if (context.analysis_session_id, context.current_step) != expected:
+        return False
+    if anchor.state == dc.ANCHOR_NONE:
+        return context.anchor_event_id is None and context.input_action == dcr.NO_OPEN_EVENT
+    if anchor.state not in (dc.ANCHOR_OTHER_TICKER, dc.ANCHOR_CURRENT):
+        return False
+    if context.anchor_event_id != anchor.event_id or context.anchor_analysis_session_id != anchor.analysis_session_id:
+        return False
+    if anchor.state == dc.ANCHOR_OTHER_TICKER:
+        return context.input_action == dcr.CONTEXT_SWITCHED
+    return context.input_action in dcr.ANCHORED_INPUT_ACTIONS
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTurnApplied:
+    """Vue fermée de la phase 7 (aucun payload, aucun texte)."""
+    assistant_turn_id: uuid.UUID
+    input_action: str
+    product_progress_action: object  # dp.PROGRESS_ACTIONS ou None
+    analysis_session_id: object      # uuid.UUID ou None
+
+    def __post_init__(self):
+        if type(self.assistant_turn_id) is not uuid.UUID or self.input_action not in _PREPARED_INPUT_ACTIONS:
+            raise ValueError("application : tour hors contrat")
+        if self.product_progress_action is not None and self.product_progress_action not in dp.PROGRESS_ACTIONS:
+            raise ValueError("application : progression hors contrat")
+        if self.analysis_session_id is not None and type(self.analysis_session_id) is not uuid.UUID:
+            raise ValueError("application : AnalysisSession hors contrat")
+
+    def __reduce__(self):
+        raise TypeError("PreparedTurnApplied n'est pas sérialisable")
+
+
+def _apply_prepared_turn(db, scope, user_id: str, prepared, *, method_id, step_marker,
+                         financial_snapshot) -> PreparedTurnApplied:
+    """Phase 7 : applique EXACTEMENT la décision préparée, dans le même
+    SAVEPOINT C1 encore courant, pour le même principal, une seule fois.
+    Même composition que la finalisation historique (après claim) :
+    contribution + lien (dcr.apply_prepared_cognitive_turn), progression
+    construction_these sur la session PRÉPARÉE
+    (dp.apply_prepared_construction_these_progress : jamais de relecture de
+    « la session active »), rattachement de la livraison, décision de
+    progression sur le lien ; flush. Aucune écriture de la réservation B1."""
+    if type(prepared) is not _PreparedTurn:
+        raise PreparedTurnUnusable("décision préparée attendue")
+    if method_id is not None:
+        _text(method_id, "method_id")
+    if step_marker is not None and (type(step_marker) is not str or step_marker not in dp.DECRYPTAGE_STEP_MARKERS):
+        raise ValueError("step_marker : marqueur du vocabulaire fermé ou None attendu")
+    facts = None if financial_snapshot is None else _json_object(financial_snapshot, "financial_snapshot")
+    decision = prepared._consume(db, scope, user_id)
+    link = dcr.apply_prepared_cognitive_turn(db, prepared=decision)
+    contribution = link.input_action == dcr.CONTRIBUTION_APPENDED
+    answered = decision.answered_step if contribution else None
+    progress = None
+    if method_id == CONSTRUCTION_THESE and step_marker is not None:
+        progress = dp.apply_prepared_construction_these_progress(
+            db, analysis_session=decision.analysis_session, user_id=user_id, ticker=decision.ticker,
+            step=step_marker, thesis_text=decision.user_text if contribution else None, data=facts,
+            user_contribution=contribution, answered_step=answered,
+        )
+        if progress is not None:
+            if decision.analysis_session is not None and progress.analysis_session is not decision.analysis_session:
+                raise PreparedTurnUnusable("progression appliquée à une autre AnalysisSession")
+            ad.bind_locked_analysis_session(db, delivery=decision.delivery, user_id=user_id,
+                                            analysis_session_id=progress.analysis_session.id)
+            dcr.record_turn_progress(db, link=link, progress_action=progress.action)
+    db.flush()
+    scope._require_current(db)
+    return PreparedTurnApplied(decision.delivery.id, link.input_action,
+                               progress.action if progress is not None else None,
+                               decision.delivery.analysis_session_id)
