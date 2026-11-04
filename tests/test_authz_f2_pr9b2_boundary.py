@@ -87,7 +87,9 @@ def _reachable(start_paths) -> set:
 
 
 def test_the_production_registry_has_seventeen_commands_and_one_new_read():
-    assert len(_adapters.REGISTRY) == 17
+    # R1 PR 9-C1-B : dix-huit commandes (finalisation, plan DECRYPTAGE_MUTATION) ;
+    # la lecture B2 et les onze lectures READ sont inchangées.
+    assert len(_adapters.REGISTRY) == 18
     spec = _adapters.REGISTRY[c.ReadDecryptagePreparationContext]
     assert spec.plan is c.READ and spec.lock is _adapters._no_business_lock
     assert spec.execute is _adapters._read_preparation_context and spec.decryptage_keyed and not spec.keyed

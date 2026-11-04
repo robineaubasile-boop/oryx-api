@@ -93,13 +93,24 @@ def test_every_print_of_the_library_is_guarded_by_the_explicit_flag():
 
 
 def test_the_f2_path_calls_the_selection_silently_and_nothing_global():
+    # R1 PR 9-C1-B : la sélection est extraite TELLE QUELLE dans le module pur
+    # partagé core.authz_f2.decryptage_method_selection (génération B2 et
+    # revalidation C1-B) ; la génération l'appelle, sans autre lookup_method.
+    from core.authz_f2 import decryptage_method_selection as dms
+
     source = inspect.getsource(dg)
-    assert "lookup_method(lookup_text, context=context, last_method_id=self._reservation.last_method_id, " \
-           "log=False)" in source
-    for forbidden in ("redirect_stdout", "sys.stdout", "builtins"):
-        assert forbidden not in source
-    calls = {ast.unparse(n.func) for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)}
-    assert "print" not in calls
+    assert "dms.select_method(has_active_session=view.active_session is not None, question=question, " \
+           "context=context, last_method_id=self._reservation.last_method_id, market_name=market.name, " \
+           "ticker=ticker)" in " ".join(source.split())
+    assert "lookup_method" not in {ast.unparse(n.func) for n in ast.walk(ast.parse(source))
+                                   if isinstance(n, ast.Call)}
+    shared = inspect.getsource(dms)
+    assert "lookup_method(lookup_text, context=context, last_method_id=last_method_id, log=False)" in shared
+    for text in (source, shared):
+        for forbidden in ("redirect_stdout", "sys.stdout", "builtins"):
+            assert forbidden not in text
+        calls = {ast.unparse(n.func) for n in ast.walk(ast.parse(text)) if isinstance(n, ast.Call)}
+        assert "print" not in calls
 
 
 def test_concurrent_silent_and_historical_selections_keep_their_own_behavior(capsys):

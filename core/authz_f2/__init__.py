@@ -75,6 +75,26 @@ Aucune route, aucune AssistantDelivery, aucune finalisation, aucune écriture
 cognitive ; les transports réels (core/decryptage_providers.py) ne sont
 importés par aucun module applicatif.
 
+R1 PR 9-C1-B : finalisation atomique DORMANTE. Registre fermé à dix-huit
+commandes (FinalizeDecryptageCandidate, plan DECRYPTAGE_MUTATION inchangé,
+trousseau Décrypter par le dispatch existant) ; inventaire du pont privé à
+trois opérations (CandidateFinalization). Trois modules :
+
+- _bridge_contracts.py           : contrats communs PURS (sentinelles,
+                                   AdapterInvariantBroken, capacités scellées
+                                   TransactionProbe / FinalizationReadPort) ;
+                                   les adaptateurs SQL importent le pont, qui
+                                   n'importe plus les adaptateurs (F-01) ;
+- decryptage_method_selection.py : sélecteur de méthode PUR partagé par la
+                                   génération B2 et la revalidation C1-B ;
+- decryptage_finalization.py     : vues fermées de finalisation et projection
+                                   financière pure.
+
+Une transaction : verrou B1 propriétaire, HMAC, epoch, jeton, échéance ->
+pont (SAVEPOINT C1, claim, Prepare, relecture B2, comparaison, Apply,
+RELEASE) -> UPDATE reserved -> finalized -> COMMIT unique. Aucune route,
+aucun appel externe, aucune migration.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

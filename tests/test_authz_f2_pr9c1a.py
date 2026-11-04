@@ -494,7 +494,7 @@ def test_prepared_decision_is_dead_after_a_local_rollback(benv, alice, c1a):
                 step="chiffres", thesis_text=None, data=None, user_contribution=False, answered_step=None)
         refusals.append("progress")
         db.expunge(fresh)
-        with bridge._business_savepoint(db) as other:
+        with bridge._business_savepoint(db, state.probe) as other:
             with pytest.raises(bridge.PreparedTurnUnusable):
                 _apply(state, scope=other)  # nouveau SAVEPOINT : jamais la décision de l'ancien
             refusals.append("other_scope")

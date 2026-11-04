@@ -188,7 +188,15 @@ def test_the_bridge_is_the_only_privileged_module():
                 elif isinstance(node, ast.Call) and ast.unparse(node.func) in ("importlib.import_module",
                                                                                 "__import__"):
                     names = [ast.unparse(a) for a in node.args]
+                    assert not any("_decryptage_orm_bridge" in n for n in names), path  # jamais dynamique
+                # R1 PR 9-C1-B (freeze) : UNIQUE importateur, les adaptateurs SQL
+                # (import de module statique ; le pont n'importe plus _adapters).
+                if path == REPO_ROOT / "core" / "authz_f2" / "_adapters.py" and isinstance(node, ast.ImportFrom):
+                    continue
                 assert not any("_decryptage_orm_bridge" in n for n in names), path
+    adapters_imports = [ast.unparse(n) for n in ast.walk(_tree(REPO_ROOT / "core" / "authz_f2" / "_adapters.py"))
+                        if isinstance(n, (ast.Import, ast.ImportFrom)) and "_decryptage_orm_bridge" in ast.unparse(n)]
+    assert adapters_imports == ["from core.authz_f2 import _decryptage_orm_bridge as bridge"]
     for path in (REPO_ROOT / "api.py", REPO_ROOT / "web-v2" / "index.html"):
         assert "_decryptage_orm_bridge" not in path.read_text(encoding="utf-8")
     # Les seuls constructeurs de Session de la frontière : le pont.
@@ -231,15 +239,23 @@ def test_errors_of_the_bridge_are_closed_runner_alerts():
 # --------------------------------------------------------------------------
 
 def test_closed_inventory_of_exact_operation_types():
+    # R1 PR 9-C1-B : troisième opération (finalisation d'un candidat), seule à
+    # recevoir la relecture B2 ; les deux historiques n'ont que la sonde.
     assert dict(bridge.OPERATIONS) == {bridge.TurnFinalization: bridge._finalize_turn,
-                                       bridge.DeliveryAcknowledgement: bridge._acknowledge}
+                                       bridge.DeliveryAcknowledgement: bridge._acknowledge,
+                                       bridge.CandidateFinalization: bridge._finalize_candidate}
+    from core.authz_f2 import _bridge_contracts as contracts
+    assert dict(bridge.CAPABILITIES) == {bridge.TurnFinalization: contracts.TransactionProbe,
+                                         bridge.DeliveryAcknowledgement: contracts.TransactionProbe,
+                                         bridge.CandidateFinalization: contracts.FinalizationReadPort}
     for operation, entry in bridge.OPERATIONS.items():
         assert entry.__module__ == bridge.__name__ and entry.__name__.startswith("_")
         assert dataclasses.is_dataclass(operation) and operation.__dataclass_params__.frozen
         assert not issubclass(operation, c.Command)  # jamais une commande du registre
         fields = {f.name for f in dataclasses.fields(operation)}
         assert not fields & {"user_id", "owner", "session", "db", "conn", "connection", "engine", "callback", "sql"}
-    assert list(inspect.signature(bridge._execute).parameters) == ["conn", "ctx", "operation"]
+    # R1 PR 9-C1-B : + capacité de transaction, construite par les adaptateurs SQL.
+    assert list(inspect.signature(bridge._execute).parameters) == ["conn", "ctx", "operation", "probe"]
     public = {n.name for n in _tree(BRIDGE).body if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")}
     assert public == set()
 
@@ -276,9 +292,12 @@ def test_entry_points_call_the_services_in_the_historical_order():
              "ad.acknowledge_locked_delivery(", "db.flush()", "return DeliveryAcknowledged("]
     assert [acknowledge.index(m) for m in order] == sorted(acknowledge.index(m) for m in order)
     execute = ast.unparse(_functions(BRIDGE)["_execute"])
-    order = ["OPERATIONS.get(type(operation))", "conn.get_transaction()", "_require_live(conn, outer)",
-             "_BridgeSession(conn)", "entry(session, ctx.principal.user_id, operation)", "_require_live(conn, outer)",
-             "session._release()", "return result"]
+    # R1 PR 9-C1-B : capacité EXACTE de l'opération, liée à la connexion et au
+    # principal, AVANT toute Session ; sondes par la capacité (SQL des adaptateurs).
+    order = ["OPERATIONS.get(type(operation))", "contracts.implementation(CAPABILITIES[type(operation)])",
+             "_require_probe(probe, conn, ctx.principal.user_id)", "_require_live(probe)", "_BridgeSession(conn)",
+             "entry(session, ctx.principal.user_id, operation, probe)", "_require_live(probe)", "session._release()",
+             "return result"]
     positions, start = [], 0
     for marker in order:
         start = execute.index(marker, start)
@@ -395,16 +414,19 @@ print(json.dumps({"loaded": loaded, "attempts": attempts, "engine": core.db.engi
                   "network": sorted(m for m in ("anthropic", "requests", "httpx", "yfinance", "api", "fastapi",
                                                 "core.data_fetcher", "core.market_lookup") if m in sys.modules)}))
 '''
+# R1 PR 9-C1-B : le pont n'importe plus _adapters (cycle supprimé, F-01) mais
+# les contrats communs purs ; il charge le candidat, le sélecteur de méthode
+# et les vues de finalisation (modules PURS) et leurs dépendances pures
+# (instrument, données de marché, bibliothèque pédagogique). Aucun réseau.
 TRANSITIVE_CORE_IMPORTS = [
-    "core", "core.assistant_delivery", "core.authz_f2", "core.authz_f2._adapters",
-    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands",
-    # R1 PR 9-B1 : modules purs importés par commands / _adapters.
-    # R1 PR 9-B2 : decryptage_context (vue de préparation, pure).
-    "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
-    "core.authz_f2.portfolio_fingerprint",
-    "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values", "core.authz_f2.principal",
+    "core", "core.assistant_delivery", "core.authz_f2", "core.authz_f2._bridge_contracts",
+    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands", "core.authz_f2.decryptage_candidate",
+    "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_finalization",
+    "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_instrument",
+    "core.authz_f2.decryptage_market_data", "core.authz_f2.decryptage_method_selection",
+    "core.authz_f2.decryptage_reservation", "core.authz_f2.portfolio_values", "core.authz_f2.principal",
     "core.cognitive_capture", "core.db", "core.decryptage_cognitive_runtime", "core.decryptage_progress",
-    "core.interaction_identity", "core.models"]
+    "core.interaction_identity", "core.models", "core.pedagogie_library"]
 
 
 @pytest.mark.parametrize("database_url", [None, "postgresql://u:p@127.0.0.1:1/oryx_never_test"])
@@ -425,13 +447,14 @@ def test_importing_the_bridge_is_inventoried_and_opens_nothing(database_url):
 # 6. Registre de production, runner, api:app, migrations
 # --------------------------------------------------------------------------
 
-def test_production_registry_stays_closed_at_seventeen_commands():
-    # R1 PR 9-B1 : les DEUX seules commandes sous DECRYPTAGE_MUTATION sont les
-    # commandes de réservation, exécutées par _adapters (jamais par le pont).
+def test_production_registry_stays_closed_at_eighteen_commands():
+    # R1 PR 9-B1 : les commandes de réservation, exécutées par _adapters.
     # R1 PR 9-B2 : dix-sept commandes (lecture de préparation sous READ).
-    assert len(_adapters.REGISTRY) == 17
+    # R1 PR 9-C1-B : dix-huit ; la finalisation est exécutée par _adapters,
+    # qui seul appelle le pont (troisième opération privée).
+    assert len(_adapters.REGISTRY) == 18
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
-        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate}
     assert all(spec.execute.__module__ == _adapters.__name__ for spec in _adapters.REGISTRY.values())
     assert not set(bridge.OPERATIONS) & set(_adapters.REGISTRY)
     assert list(inspect.signature(AuthorizedTransactionRunner.run).parameters) == ["self", "credential", "command"]
@@ -461,7 +484,7 @@ def test_bench_commands_are_unknown_outside_the_isolated_fixture():
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().splitlines()[-1] == "17 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
+    assert out.stdout.strip().splitlines()[-1] == "18 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
 
 
 def test_real_entrypoint_never_loads_the_bridge():

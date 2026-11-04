@@ -3,12 +3,12 @@ exacts, registre fermé de test, observation des écritures et parcours
 historiques réels.
 
 Le registre de test n'existe que dans ce module de tests : il réunit les
-dix-sept commandes de production (R1 PR 9-B2) et deux commandes de banc
+dix-huit commandes de production (R1 PR 9-C1-B) et deux commandes de banc
 (BenchTurn, BenchAck) dont l'adaptateur d'exécution appelle le VRAI pont
 (core.authz_f2._decryptage_orm_bridge._execute) sous le VRAI runner, plan
 DECRYPTAGE_MUTATION. La fixture `bench` le substitue à
 core.authz_f2._adapters.REGISTRY le temps d'un test (monkeypatch), puis
-vérifie que l'objet de production d'origine (dix-sept commandes) est
+vérifie que l'objet de production d'origine (dix-huit commandes) est
 restauré. Aucun paramètre du runner, aucun drapeau ni variable
 d'environnement n'active ces commandes ; hors de cette fixture, le runner
 les refuse (UnknownCommand).
@@ -61,7 +61,13 @@ class BenchAck(c.Command):
 
 
 def _bench_execute(conn, ctx, command, locked):
-    return bridge._execute(conn, ctx, command.operation)
+    # R1 PR 9-C1-B : la sonde de transaction (SQL) appartient aux adaptateurs ;
+    # une opération historique du pont ne reçoit qu'elle (jamais la relecture B2).
+    probe = _adapters._transaction_probe(conn, ctx)
+    try:
+        return bridge._execute(conn, ctx, command.operation, probe)
+    finally:
+        probe._close()
 
 
 BENCH_REGISTRY = MappingProxyType({
@@ -74,12 +80,12 @@ BENCH_REGISTRY = MappingProxyType({
 @pytest.fixture
 def bench(monkeypatch):
     """Registre fermé de TEST pendant un test, puis registre de production
-    d'origine (même objet, dix-sept commandes depuis R1 PR 9-B2)."""
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(PRODUCTION_REGISTRY) == 17
+    d'origine (même objet, dix-huit commandes depuis R1 PR 9-C1-B)."""
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(PRODUCTION_REGISTRY) == 18
     monkeypatch.setattr(_adapters, "REGISTRY", BENCH_REGISTRY)
     yield BENCH_REGISTRY
     monkeypatch.undo()
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 17
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 18
     assert BenchTurn not in _adapters.REGISTRY and BenchAck not in _adapters.REGISTRY
 
 

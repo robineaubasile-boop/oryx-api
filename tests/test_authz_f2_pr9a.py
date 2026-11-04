@@ -164,8 +164,8 @@ def _record_inside(monkeypatch):
     seen = []
 
     def recording(entry):
-        def wrapper(db, user_id, operation):
-            result = entry(db, user_id, operation)
+        def wrapper(db, user_id, operation, probe):  # R1 PR 9-C1-B : + capacité de transaction
+            result = entry(db, user_id, operation, probe)
             top = int(db.execute(sa.text("SELECT pg_current_xact_id()::text")).scalar_one())
             seen.append((top, sorted(tuple(r) for r in db.execute(sa.text(_WRITTEN)))))
             return result
@@ -738,7 +738,7 @@ def test_bridge_refuses_operations_outside_its_closed_inventory():
     op = turn(CONV, "business").operation
     for operation in (Sub(*(getattr(op, f) for f in op.__dataclass_fields__)), object(), "TurnFinalization"):
         with pytest.raises(bridge.UnknownOperation):
-            bridge._execute(Untouchable(), None, operation)
+            bridge._execute(Untouchable(), None, operation, Untouchable())  # refus AVANT toute capacité
 
 
 # --------------------------------------------------------------------------
@@ -789,16 +789,19 @@ def test_require_live_detects_an_external_transaction_ended_behind_the_runner(be
     """Mesuré : une Session rollback_only ordinaire qui annule termine la
     transaction externe ; le contrôle du pont le constate (TransactionLost),
     jamais un succès."""
+    # R1 PR 9-C1-B : le contrôle passe par la capacité TransactionProbe des
+    # adaptateurs SQL (liée à la connexion et à la transaction externe).
     with pytest.raises(bridge.TransactionLost):
         with benv.engine.begin() as conn:
             outer = conn.get_transaction()
-            bridge._require_live(conn, outer)
+            probe = _adapters._TransactionProbe(_adapters._CAPABILITY, conn, USER_A)
+            bridge._require_live(probe)
             plain = Session(bind=conn, autoflush=False, join_transaction_mode="rollback_only")
             plain.execute(sa.text("SELECT 1"))
             plain.rollback()
             plain.close()
             assert not outer.is_active
-            bridge._require_live(conn, outer)
+            bridge._require_live(probe)
 
 
 def test_swallowed_statement_error_is_never_reported_as_success(benv, alice, monkeypatch, caplog):
