@@ -113,10 +113,13 @@ IMPORT_MATRIX = {
                                         "core.authz_f2_http.provenance", "core.authz_f2_http.routes"},
     # R1 PR 9-A : pont ORM privé, seul module de la frontière qui importe
     # des services métier et core.models (exception nominative, V2.2-03).
+    # R1 PR 9-C1-A : + vue de préparation B2 (module pur, déjà chargé par
+    # commands) pour la revalidation cognitive ; aucun import de _adapters
+    # vers le pont (F-01).
     "core/authz_f2/_decryptage_orm_bridge.py": {"core.assistant_delivery", "core.decryptage_cognitive_runtime",
                                                 "core.decryptage_progress", "core.authz_f2._adapters",
                                                 "core.authz_f2.commands", "core.authz_f2.principal",
-                                                "core.models"},
+                                                "core.authz_f2.decryptage_context", "core.models"},
     # R1 PR 8 : codec pur (commandes et vues seulement) et routeur de lecture.
     "core/authz_f2_http/consultation_codec.py": {"core.authz_f2.commands"},
     "core/authz_f2_http/consultation.py": {"core.auth_f2.crypto", "core.auth_f2.service",

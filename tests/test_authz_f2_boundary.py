@@ -112,14 +112,24 @@ def test_no_boundary_module_controls_a_transaction():
             # son seul nettoyage, begin(nested=True) des SAVEPOINT des
             # services, get_transaction() du contrôle de la transaction du
             # runner ; rien d'autre (ni commit, rollback, connect, ...).
-            assert _attr_calls(tree) & TRANSACTION_METHODS == {"close", "begin", "get_transaction"}
+            # R1 PR 9-C1-A : SAVEPOINT métier C1 privé (_business_savepoint :
+            # UN `with db.begin_nested()`, RELEASE / ROLLBACK TO par le seul
+            # gestionnaire de contexte SQLAlchemy, jamais commit() ni
+            # rollback() appelés) et sonde intermédiaire (_require_session_live).
+            assert _attr_calls(tree) & TRANSACTION_METHODS == {"close", "begin", "get_transaction", "begin_nested"}
             located = {(n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
                        for n in _calls(f) if isinstance(n.func, ast.Attribute) and n.func.attr in TRANSACTION_METHODS}
             assert located == {("close", "_release"), ("begin", "begin"), ("get_transaction", "_require_live"),
-                               ("get_transaction", "_execute")}
+                               ("get_transaction", "_execute"), ("get_transaction", "_require_session_live"),
+                               ("begin_nested", "_business_savepoint")}
             for call in _calls(tree):
-                if isinstance(call.func, ast.Attribute) and call.func.attr in ("close", "begin"):
-                    assert ast.unparse(call) in ("super().close()", "super().begin(nested=True)"), ast.unparse(call)
+                if isinstance(call.func, ast.Attribute) and call.func.attr in ("close", "begin", "begin_nested"):
+                    assert ast.unparse(call) in ("super().close()", "super().begin(nested=True)",
+                                                 "db.begin_nested()"), ast.unparse(call)
+            withs = [ast.unparse(item.context_expr) for n in ast.walk(tree) if isinstance(n, ast.With)
+                     for item in n.items]
+            assert withs == ["db.begin_nested()"]
+            assert not {"commit", "rollback"} & _attr_calls(tree)
             assert not names & {"SessionLocal", "get_db", "sessionmaker", "create_engine"}, path.name
             assert "Session" in names
             continue

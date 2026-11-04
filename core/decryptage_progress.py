@@ -55,12 +55,29 @@ session que si answered_step == current_step == risques.
 
 Aucun appel à un service pédagogique T2+ (capture cognitive, observations,
 longitudinal, inférence).
+
+R1 PR 9-C1-A (F2, DORMANT) : les règles ci-dessus sont dans UNE fonction
+interne, _apply_progress_rules, appliquée à une AnalysisSession DÉJÀ
+choisie et verrouillée (ou à son absence). Deux points d'entrée :
+
+- apply_construction_these_progress (legacy, inchangé) : relit la session
+  active sous verrou (find_active_analysis_session, sélection historique de
+  la plus récente si plusieurs), puis les règles ;
+- apply_prepared_construction_these_progress (F2) : applique les MÊMES
+  règles à la session préparée et verrouillée par la phase Prepare du runtime
+  cognitif (jamais une relecture de « la session active ») ; absence
+  préparée : jamais une session apparue depuis (refus fermé
+  PreparedAnalysisSessionMismatch si une session in_progress commitée est
+  visible ; une création concurrente NON commitée reste invisible : limite
+  documentée, non résolue ici).
 """
 import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import NamedTuple
+
+from sqlalchemy import inspect as orm_state
 
 from core.models import AnalysisFact, AnalysisSession, InvestmentThesis, UserStatement
 
@@ -129,6 +146,14 @@ _FACT_FIELDS = [
 class InvalidDecryptageStep(ValueError):
     """Étape hors du vocabulaire fermé DECRYPTAGE_STEP_MARKERS : aucune
     progression n'est jamais inventée."""
+
+
+class PreparedAnalysisSessionMismatch(RuntimeError):
+    """PR9-C1-A (F2) : l'AnalysisSession préparée n'est plus utilisable telle
+    quelle (autre Session, détachée ou expirée, autre propriétaire ou ticker,
+    plus in_progress), ou une session in_progress est apparue alors que
+    l'absence avait été préparée. Fail closed : aucune autre session n'est
+    jamais choisie."""
 
 
 def extract_step_marker(text: str) -> tuple[str, str | None]:
@@ -262,7 +287,87 @@ def apply_construction_these_progress(
     UserStatement, ni InvestmentThesis.
 
     Tout ce qui est écrit pour la tentative porte
-    analysis_session_id = session.id."""
+    analysis_session_id = session.id.
+
+    PR9-C1-A : validation (_require_progress_request), relecture verrouillée
+    de la session active (inchangée), puis règles (_apply_progress_rules) ;
+    mêmes instructions SQL, dans le même ordre."""
+    _require_progress_request(step=step, thesis_text=thesis_text, user_contribution=user_contribution,
+                              answered_step=answered_step)
+    active = find_active_analysis_session(db, user_id, ticker, for_update=True)
+    return _apply_progress_rules(db, active=active, user_id=user_id, ticker=ticker, step=step,
+                                 thesis_text=thesis_text, data=data, user_contribution=user_contribution,
+                                 answered_step=answered_step)
+
+
+def apply_prepared_construction_these_progress(
+    db,
+    *,
+    analysis_session,
+    user_id: str,
+    ticker: str,
+    step: str,
+    thesis_text: str | None,
+    data: dict | None,
+    user_contribution: bool,
+    answered_step: str | None,
+) -> ProgressOutcome | None:
+    """Variante F2 FERMÉE (PR9-C1-A, dormante) de
+    apply_construction_these_progress : MÊMES règles (_apply_progress_rules :
+    same, forward, step_skip, retrograde_marker, stale_contribution_step,
+    terminal_before_risques, swot_final, contributions réelles seules,
+    UserStatement sur answered_step, InvestmentThesis seulement sur un
+    swot_final accepté avec contribution, faits du snapshot à la création,
+    analysis_session_id partout), appliquées à l'AnalysisSession PRÉPARÉE.
+
+    analysis_session : l'instance verrouillée par la phase Prepare
+    (core.decryptage_cognitive_runtime.PreparedCognitiveTurn.analysis_session),
+    ou None si l'absence a été préparée. Jamais de relecture de « la session
+    active », jamais d'autre session choisie :
+
+    - instance : doit être une AnalysisSession de CETTE Session, persistante,
+      entièrement chargée (un COMMIT qui l'expire ou un expunge l'invalident), du
+      même propriétaire et du même ticker, encore in_progress ; sinon
+      PreparedAnalysisSessionMismatch (aucune écriture) ;
+    - None : une lecture SANS verrou (aucune attente, aucun nouvel ordre de
+      verrous) vérifie qu'aucune session in_progress commitée n'est apparue ;
+      sinon PreparedAnalysisSessionMismatch. Une création concurrente non
+      encore commitée reste invisible (limite documentée, non résolue).
+
+    Mute et flush ; jamais de commit, rollback ni capture d'erreur DB."""
+    _require_progress_request(step=step, thesis_text=thesis_text, user_contribution=user_contribution,
+                              answered_step=answered_step)
+    if analysis_session is None:
+        if _visible_in_progress_session_ids(db, user_id, ticker):
+            logger.warning("[DECRYPTAGE-PROGRESS] anomaly=prepared_absence_contradicted")
+            raise PreparedAnalysisSessionMismatch("absence préparée contredite par une session active")
+    else:
+        if type(analysis_session) is not AnalysisSession:
+            raise PreparedAnalysisSessionMismatch("AnalysisSession préparée attendue")
+        state = orm_state(analysis_session)
+        columns = {attribute.key for attribute in state.mapper.column_attrs}
+        if state.session is not db or not state.persistent or state.unloaded & columns:
+            raise PreparedAnalysisSessionMismatch("AnalysisSession préparée détachée ou périmée")
+        if (analysis_session.user_id != user_id or analysis_session.ticker != ticker
+                or analysis_session.status != "in_progress"):
+            raise PreparedAnalysisSessionMismatch("AnalysisSession préparée hors contrat")
+    return _apply_progress_rules(db, active=analysis_session, user_id=user_id, ticker=ticker, step=step,
+                                 thesis_text=thesis_text, data=data, user_contribution=user_contribution,
+                                 answered_step=answered_step)
+
+
+def _visible_in_progress_session_ids(db, user_id: str, ticker: str) -> list:
+    """Identifiants des AnalysisSessions in_progress visibles (commitées ou
+    de cette transaction) pour user+ticker. Lecture simple, SANS verrou."""
+    return [row.id for row in db.query(AnalysisSession.id).filter(
+        AnalysisSession.user_id == user_id,
+        AnalysisSession.ticker == ticker,
+        AnalysisSession.status == "in_progress",
+    ).all()]
+
+
+def _require_progress_request(*, step: str, thesis_text, user_contribution, answered_step) -> None:
+    """Cohérence de la demande de progression (avant toute lecture)."""
     if step not in DECRYPTAGE_STEP_MARKERS:
         raise InvalidDecryptageStep("étape hors vocabulaire construction_these")
     if type(user_contribution) is not bool:
@@ -275,7 +380,15 @@ def apply_construction_these_progress(
         raise ValueError("contribution sans étape répondue valide")
     if not user_contribution and answered_step is not None:
         raise ValueError("answered_step fourni sans contribution réelle")
-    active = find_active_analysis_session(db, user_id, ticker, for_update=True)
+
+
+def _apply_progress_rules(db, *, active, user_id: str, ticker: str, step: str, thesis_text, data,
+                          user_contribution: bool, answered_step) -> ProgressOutcome | None:
+    """Règles de progression construction_these d'UN tour (T1-C1, R1-C3,
+    R1-C4 ; voir apply_construction_these_progress), appliquées à
+    l'AnalysisSession `active` DÉJÀ choisie et verrouillée par l'appelant, ou
+    à son absence (None). Seul moteur des deux points d'entrée : aucune
+    règle n'est dupliquée."""
     if user_contribution and active is None:
         # Une contribution répond à un event d'une session ACTIVE (verrouillée
         # par la capture cognitive du même tour) : fail closed.

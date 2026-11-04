@@ -226,7 +226,12 @@ def test_progress_module_owns_no_transaction_and_swallows_nothing():
     tree = ast.parse(source)
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Try)], "aucune capture d'erreur DB"
     # typing : ProgressOutcome (NamedTuple, R1-C4), aucune I/O.
-    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "typing", "core.models"}
+    # R1 PR 9-C1-A : sqlalchemy, UNIQUEMENT inspect (état ORM de la session
+    # préparée F2 : même Session, persistante, chargée), aucune I/O.
+    assert _imports(tree) == {"logging", "re", "uuid", "datetime", "typing", "sqlalchemy", "core.models"}
+    sqlalchemy_names = {(n.module, a.name, a.asname) for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                        and n.module == "sqlalchemy" for a in n.names}
+    assert sqlalchemy_names == {("sqlalchemy", "inspect", "orm_state")}
 
 
 @pytest.mark.parametrize("path", [SERVICE_PATH, PROGRESS_PATH], ids=lambda p: p.name)

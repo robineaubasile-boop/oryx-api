@@ -117,9 +117,17 @@ def test_vocabularies_are_closed_and_identical_to_the_migration_checks():
 def test_public_api_is_exact_and_keyword_only():
     tree = ast.parse(RUNTIME_PATH.read_text(encoding="utf-8"))
     functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    # R1 PR 9-C1-A : deux points d'entrée F2 dormants (Prepare / Apply),
+    # atteints seulement par le pont ORM privé de la frontière F2.
     assert {f for f in functions if not f.startswith("_")} == {
         "runtime_private_metadata", "capture_user_turn", "capture_delivered_response", "precheck_conversation_context",
-        "answered_step", "record_turn_progress"}
+        "answered_step", "record_turn_progress", "prepare_locked_cognitive_turn", "apply_prepared_cognitive_turn"}
+    assert list(inspect.signature(dcr.prepare_locked_cognitive_turn).parameters) == [
+        "db", "delivery", "ticker", "user_text"]
+    assert list(inspect.signature(dcr.apply_prepared_cognitive_turn).parameters) == ["db", "prepared"]
+    for name in ("prepare_locked_cognitive_turn", "apply_prepared_cognitive_turn"):
+        params = list(inspect.signature(getattr(dcr, name)).parameters.values())[1:]
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params), name
     assert list(inspect.signature(dcr.record_turn_progress).parameters) == ["db", "link", "progress_action"]
     assert list(inspect.signature(dcr.answered_step).parameters) == ["db", "link"]
     assert list(inspect.signature(dcr.capture_user_turn).parameters) == ["db", "delivery", "ticker", "user_text"]
@@ -132,7 +140,8 @@ def test_public_api_is_exact_and_keyword_only():
     # R1-C4 : plus de sortie de contexte (V1) ; une conversation stale est
     # une erreur métier dédiée.
     assert not hasattr(dcr, "AmbiguousDecryptageContextExit")
-    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents, dcr.StaleConversationContext):
+    for exc in (dcr.CognitiveLinkInvariantError, dcr.AmbiguousOpenDecryptageEvents, dcr.StaleConversationContext,
+                dcr.AmbiguousActiveAnalysisSessions, dcr.PreparedCognitiveTurnUnusable):
         assert issubclass(exc, dcr.DecryptageCognitiveRuntimeError)
         assert not issubclass(exc, (sa.exc.SQLAlchemyError, cc.CognitiveCaptureError, ad.AssistantDeliveryError))
 
@@ -187,8 +196,15 @@ def test_runtime_writes_t2_only_through_cognitive_capture_primitives():
                       "cognitive_capture.abandon_event"}
     constructed = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                    and n.func.id[:1].isupper()}
+    # R1 PR 9-C1-A : décision préparée (non ORM), ses refus et les erreurs
+    # Python de ses gardes (immuabilité, sérialisation, politique fermée).
     assert constructed == {"DecryptageCognitiveLink", "CognitiveLinkInvariantError", "AmbiguousOpenDecryptageEvents",
-                           "StaleConversationContext", "DecryptageCognitiveRuntimeError"}
+                           "StaleConversationContext", "DecryptageCognitiveRuntimeError",
+                           "AmbiguousActiveAnalysisSessions", "PreparedCognitiveTurnUnusable", "PreparedCognitiveTurn",
+                           "ValueError", "TypeError", "AttributeError"}
+    from core import models
+    assert not {name for name in constructed if isinstance(getattr(models, name, None), type)} - {
+        "DecryptageCognitiveLink"}  # seul modèle ORM instancié : le lien
     # task_kind est toujours NULL.
     [opening] = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "open_event_idempotent"]
