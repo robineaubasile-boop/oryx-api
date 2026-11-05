@@ -94,6 +94,22 @@ inchangé (aucun plan nouveau), dormante :
   réservation propre, le HMAC d'intention, l'epoch, le jeton et l'échéance
   sont revérifiés sous verrou par les adaptateurs SQL ; le propriétaire
   reste AuthorizedContext.principal.
+
+R1 PR 9-C2 : deux commandes (vingt au total), aucun plan nouveau, dormantes,
+SANS trousseau Décrypter (aucune empreinte HMAC B1 n'est recalculée : C2 ne
+possède ni les entrées de génération ni le jeton, et n'en a pas besoin pour
+restituer une réponse finalisée) :
+
+- ReadCanonicalDecryptageDelivery (plan READ) et
+  AcknowledgeDecryptageDelivery (plan DECRYPTAGE_MUTATION) : champs EXACTS
+  reservation_id (uuid.UUID), conversation_key (validateur B1 existant, sans
+  normalisation) et assistant_turn_id (uuid.UUID). Jamais un user_id, un
+  jeton, une clé, un candidat, des données de génération, un payload, un
+  statut imposé, une décision cognitive, une Session, une connexion, du SQL
+  ni un rappel ;
+- CanonicalDecryptageDelivery : vue fermée du replay (octets UTF-8 exacts du
+  texte JSONB public validé, repr sans contenu). L'ACK rend la vue
+  historique DeliveryAcknowledged du pont (type exact réutilisé).
 """
 import re
 import uuid
@@ -860,5 +876,87 @@ class FinalizeDecryptageCandidate(Command):
 
     def __repr__(self) -> str:
         return f"FinalizeDecryptageCandidate({self.candidate!r})"
+
+    __str__ = __repr__
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-C2 : replay canonique (plan READ) et ACK F2 (plan DECRYPTAGE_MUTATION)
+# --------------------------------------------------------------------------
+
+# Statuts de livraison restituables (core.assistant_delivery.PENDING /
+# DELIVERED, recopiés : la frontière des commandes n'importe pas les services ;
+# égalité vérifiée par les tests).
+CANONICAL_DELIVERY_STATUSES = ("pending", "delivered")
+
+
+def _admit_canonical_delivery(command) -> None:
+    """Admission structurelle COMPLÈTE de l'identité demandée (avant tout SQL) :
+    UUID de types exacts, conversation au validateur B1 existant ; aucune
+    normalisation, aucune valeur corrigée. Jamais une autorisation : la
+    réservation propre, son état finalized, la livraison liée et sa provenance
+    V2 sont prouvés par les adaptateurs SQL ; le propriétaire reste
+    AuthorizedContext.principal."""
+    if type(command.reservation_id) is not uuid.UUID:
+        raise ValueError("reservation_id : uuid.UUID attendu")
+    if type(command.assistant_turn_id) is not uuid.UUID:
+        raise ValueError("assistant_turn_id : uuid.UUID attendu")
+    try:
+        dfp.admit_conversation_key(command.conversation_key)
+    except dfp.TurnRejected as exc:
+        raise ValueError(str(exc)) from None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadCanonicalDecryptageDelivery(Command):
+    """Restitue le contenu public CANONIQUE d'une livraison Décrypter
+    finalisée par C1-B (réservation B1 propre finalized -> livraison liée ->
+    lien cognitif V2), sans écriture, sans verrou métier, sans regénération.
+    Ni user_id, ni jeton, ni clé, ni candidat, ni payload, ni statut imposé."""
+    reservation_id: uuid.UUID
+    conversation_key: str
+    assistant_turn_id: uuid.UUID
+
+    def __post_init__(self):
+        _admit_canonical_delivery(self)
+
+
+@dataclass(frozen=True, slots=True)
+class AcknowledgeDecryptageDelivery(Command):
+    """Confirme la PRÉSENTATION d'une livraison canonique C1-B (insertion dans
+    l'interface first-party : jamais une preuve de lecture ni de
+    compréhension). Capture cognitive historique et pending -> delivered
+    atomiques ; ACK rejoué : no-op. Mêmes champs, même admission que le replay."""
+    reservation_id: uuid.UUID
+    conversation_key: str
+    assistant_turn_id: uuid.UUID
+
+    def __post_init__(self):
+        _admit_canonical_delivery(self)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CanonicalDecryptageDelivery:
+    """Vue fermée du replay : octets UTF-8 EXACTS du texte JSONB public validé
+    (assistant_deliveries.response_payload::text), jamais resérialisés.
+    Aucune métadonnée privée, aucune empreinte, aucun identifiant cognitif.
+    repr() / str() ne révèlent jamais le contenu."""
+    reservation_id: uuid.UUID
+    assistant_turn_id: uuid.UUID
+    delivery_status: str
+    payload_json: bytes
+
+    def __post_init__(self):
+        if type(self.reservation_id) is not uuid.UUID or type(self.assistant_turn_id) is not uuid.UUID:
+            raise ValueError("livraison canonique : identifiants hors contrat")
+        if type(self.delivery_status) is not str or self.delivery_status not in CANONICAL_DELIVERY_STATUSES:
+            raise ValueError("livraison canonique : statut hors contrat")
+        if type(self.payload_json) is not bytes or not self.payload_json:
+            raise ValueError("livraison canonique : contenu hors contrat")
+
+    def __repr__(self) -> str:
+        return (f"CanonicalDecryptageDelivery(reservation_id={self.reservation_id}, "
+                f"assistant_turn_id={self.assistant_turn_id}, delivery_status={self.delivery_status}, "
+                "payload_json=<private>)")
 
     __str__ = __repr__

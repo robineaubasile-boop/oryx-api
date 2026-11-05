@@ -70,7 +70,11 @@ IMPORT_MATRIX = {
                                    "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values",
                                    "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
                                    "core.authz_f2.decryptage_context", "core.authz_f2._bridge_contracts",
-                                   "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.decryptage_finalization"},
+                                   "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.decryptage_finalization",
+                                   # R1 PR 9-C2 : constantes du payload public C1-B
+                                   # (avertissement, borne du texte, devise admise),
+                                   # modules PURS déjà chargés par commands.
+                                   "core.authz_f2.decryptage_candidate", "core.authz_f2.decryptage_market_data"},
     # R1 PR 9-C1-B : contrats communs PURS (aucun import), vues de finalisation
     # et sélecteur de méthode PURS.
     "core/authz_f2/_bridge_contracts.py": set(),

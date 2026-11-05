@@ -19,7 +19,7 @@ module ajoute, le temps d'un test seulement (fixture `c1a`) :
 
 Les points d'observation (SCRIPT) sont des fonctions de TEST appelées aux
 étapes nommées ; la production n'en a aucun. La fixture vérifie qu'après le
-test le registre de production (dix-huit commandes) et l'inventaire du pont
+test le registre de production (vingt commandes depuis R1 PR 9-C2) et l'inventaire du pont
 (trois opérations, R1 PR 9-C1-B) sont exactement les objets d'origine.
 """
 import json
@@ -159,7 +159,8 @@ C1A_REGISTRY = MappingProxyType({
 })
 C1A_OPERATIONS = MappingProxyType({**PRODUCTION_OPERATIONS, Rehearsal: _rehearse})
 # R1 PR 9-C1-B : l'opération de test ne reçoit que la sonde (jamais la relecture B2).
-C1A_CAPABILITIES = MappingProxyType({**PRODUCTION_CAPABILITIES, Rehearsal: contracts.TransactionProbe})
+# R1 PR 9-C2 : CAPABILITIES associe à chaque opération un tuple fermé de contrats exacts.
+C1A_CAPABILITIES = MappingProxyType({**PRODUCTION_CAPABILITIES, Rehearsal: (contracts.TransactionProbe,)})
 
 
 @pytest.fixture
@@ -176,7 +177,7 @@ def c1a(monkeypatch, bench):
     monkeypatch.setattr(sys.modules[__name__], "SCRIPT", script)
     yield script
     monkeypatch.undo()
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 18
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 20  # R1 PR 9-C2
     assert bridge.OPERATIONS is PRODUCTION_OPERATIONS and len(bridge.OPERATIONS) == 3
     assert bridge.CAPABILITIES is PRODUCTION_CAPABILITIES
     assert BenchRehearsal not in _adapters.REGISTRY and Rehearsal not in bridge.OPERATIONS

@@ -60,7 +60,11 @@ ADAPTERS_BRIDGE_ATTRIBUTES = {
     "_execute", "CandidateFinalization", "PreparedTurnApplied", "FinalizationRolledBack", "CONTEXT_CHANGED",
     "PREPARATION_REFUSED", "LEGACY_COLLISION", "LEASE_STALE", "INTENT_MISMATCH", "NOT_FOUND",
     "_delivery_request_fingerprint", "DELIVERY_STATUSES", "DELIVERY_SCHEMA_VERSION", "_BridgeSession",
-    "_SavepointScope"}
+    "_SavepointScope",
+    # R1 PR 9-C2 : opération ACK INCHANGÉE et sa vue, constantes de provenance
+    # V2 et empreinte visible historique (aucune primitive C1-A).
+    "DeliveryAcknowledgement", "DeliveryAcknowledged", "DELIVERED", "COGNITIVE_RUNTIME_V2", "CANONICAL_COUPLES",
+    "RESPONSE_ACTIONS", "_visible_content_fingerprint"}
 C1A_SERVICE_ENTRIES = ("prepare_locked_cognitive_turn", "apply_prepared_cognitive_turn",
                        "apply_prepared_construction_these_progress")
 
@@ -114,9 +118,12 @@ def test_production_registry_and_bridge_inventory_are_unchanged():
     # R1 PR 9-C1-B : 18 commandes (FinalizeDecryptageCandidate) et 3 opérations
     # (CandidateFinalization) ; aucune autre. La commande n'est nommée que par
     # sa définition et par les adaptateurs SQL ; jamais par une route.
-    assert len(_adapters.REGISTRY) == 18
+    # R1 PR 9-C2 : 20 commandes (replay READ, ACK DECRYPTAGE_MUTATION) ; les 3
+    # opérations du pont sont inchangées (l'ACK atteint DeliveryAcknowledgement).
+    assert len(_adapters.REGISTRY) == 20
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
-        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate}
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate,
+        c.AcknowledgeDecryptageDelivery}
     assert dict(bridge.OPERATIONS) == {bridge.TurnFinalization: bridge._finalize_turn,
                                        bridge.DeliveryAcknowledgement: bridge._acknowledge,
                                        bridge.CandidateFinalization: bridge._finalize_candidate}

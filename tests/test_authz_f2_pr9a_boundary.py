@@ -245,9 +245,17 @@ def test_closed_inventory_of_exact_operation_types():
                                        bridge.DeliveryAcknowledgement: bridge._acknowledge,
                                        bridge.CandidateFinalization: bridge._finalize_candidate}
     from core.authz_f2 import _bridge_contracts as contracts
-    assert dict(bridge.CAPABILITIES) == {bridge.TurnFinalization: contracts.TransactionProbe,
-                                         bridge.DeliveryAcknowledgement: contracts.TransactionProbe,
-                                         bridge.CandidateFinalization: contracts.FinalizationReadPort}
+    # R1 PR 9-C2 (nominatif) : tuple FERMÉ de contrats exacts par opération ;
+    # l'ACK admet EXACTEMENT la sonde historique (PR 9-A) ou l'attestation C2,
+    # les deux autres opérations restent à un seul contrat, inchangé.
+    assert dict(bridge.CAPABILITIES) == {
+        bridge.TurnFinalization: (contracts.TransactionProbe,),
+        bridge.DeliveryAcknowledgement: (contracts.TransactionProbe, contracts.AckAdmissionPort),
+        bridge.CandidateFinalization: (contracts.FinalizationReadPort,)}
+    assert {op: bridge._admitted_capabilities(op.__new__(op)) for op in bridge.OPERATIONS} == {
+        bridge.TurnFinalization: {_adapters._TransactionProbe},
+        bridge.DeliveryAcknowledgement: {_adapters._TransactionProbe, _adapters._AckAdmissionPort},
+        bridge.CandidateFinalization: {_adapters._FinalizationReadPort}}
     for operation, entry in bridge.OPERATIONS.items():
         assert entry.__module__ == bridge.__name__ and entry.__name__.startswith("_")
         assert dataclasses.is_dataclass(operation) and operation.__dataclass_params__.frozen
@@ -291,10 +299,20 @@ def test_entry_points_call_the_services_in_the_historical_order():
     order = ["ad.lock_owned_delivery(", "_require_owned_provenance(", "dcr.capture_delivered_response(",
              "ad.acknowledge_locked_delivery(", "db.flush()", "return DeliveryAcknowledged("]
     assert [acknowledge.index(m) for m in order] == sorted(acknowledge.index(m) for m in order)
+    # R1 PR 9-C2 (nominatif) : contrôles AJOUTÉS au chemin attesté, jamais
+    # retirés du chemin historique ; l'attestation et la V2 sont vérifiées sur
+    # la livraison verrouillée AVANT la provenance transitive et la capture.
+    order = ["attested = type(probe) is contracts.implementation(contracts.AckAdmissionPort)",
+             "ad.lock_owned_delivery(", "_require_attested_canonical(db, delivery, probe)",
+             "_require_owned_provenance(", "dcr.capture_delivered_response(", "ad.acknowledge_locked_delivery(",
+             "db.flush()", "if attested and (link is None", "return DeliveryAcknowledged("]
+    assert [acknowledge.index(m) for m in order] == sorted(acknowledge.index(m) for m in order)
     execute = ast.unparse(_functions(BRIDGE)["_execute"])
     # R1 PR 9-C1-B : capacité EXACTE de l'opération, liée à la connexion et au
     # principal, AVANT toute Session ; sondes par la capacité (SQL des adaptateurs).
-    order = ["OPERATIONS.get(type(operation))", "contracts.implementation(CAPABILITIES[type(operation)])",
+    # R1 PR 9-C2 (nominatif) : la capacité EXACTE est choisie parmi le tuple
+    # fermé des contrats de l'opération (_admitted_capabilities).
+    order = ["OPERATIONS.get(type(operation))", "type(probe) not in _admitted_capabilities(operation)",
              "_require_probe(probe, conn, ctx.principal.user_id)", "_require_live(probe)", "_BridgeSession(conn)",
              "entry(session, ctx.principal.user_id, operation, probe)", "_require_live(probe)", "session._release()",
              "return result"]
@@ -447,14 +465,18 @@ def test_importing_the_bridge_is_inventoried_and_opens_nothing(database_url):
 # 6. Registre de production, runner, api:app, migrations
 # --------------------------------------------------------------------------
 
-def test_production_registry_stays_closed_at_eighteen_commands():
+def test_production_registry_stays_closed_at_twenty_commands():
     # R1 PR 9-B1 : les commandes de réservation, exécutées par _adapters.
     # R1 PR 9-B2 : dix-sept commandes (lecture de préparation sous READ).
     # R1 PR 9-C1-B : dix-huit ; la finalisation est exécutée par _adapters,
     # qui seul appelle le pont (troisième opération privée).
-    assert len(_adapters.REGISTRY) == 18
+    # R1 PR 9-C2 : vingt ; le replay (READ) et l'ACK (DECRYPTAGE_MUTATION,
+    # qui atteint l'opération privée DeliveryAcknowledgement INCHANGÉE par
+    # _adapters avec l'attestation C2) ; aucune opération nouvelle.
+    assert len(_adapters.REGISTRY) == 20
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
-        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate}
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate,
+        c.AcknowledgeDecryptageDelivery}
     assert all(spec.execute.__module__ == _adapters.__name__ for spec in _adapters.REGISTRY.values())
     assert not set(bridge.OPERATIONS) & set(_adapters.REGISTRY)
     assert list(inspect.signature(AuthorizedTransactionRunner.run).parameters) == ["self", "credential", "command"]
@@ -484,7 +506,8 @@ def test_bench_commands_are_unknown_outside_the_isolated_fixture():
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().splitlines()[-1] == "18 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
+    # R1 PR 9-C2 : vingt commandes ; banc et opérations brutes toujours refusés.
+    assert out.stdout.strip().splitlines()[-1] == "20 ['BenchTurn', 'BenchAck', 'TurnFinalization']"
 
 
 def test_real_entrypoint_never_loads_the_bridge():
