@@ -44,6 +44,8 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _finalize_reservation (R1 PR 9-C1-B) | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch ET compteur ET jeton haché ET échéance > T_finalize (clock_timestamp() capturé PAR l'UPDATE) ET identité complète ET aucune livraison liée | (ligne déjà verrouillée) |
 | _block_proven_collision (R1 PR 9-C1-B) | assistant_deliveries (preuve, identité complète du tour) puis decryptage_turn_reservations (mêmes conditions que la finalisation) | user_id | (ligne déjà verrouillée) |
 | _recognize_finalized (R1 PR 9-C1-B) | assistant_deliveries (_LINKED_DELIVERY) | id ET user_id | - |
+| _canonical_proof (R1 PR 9-C2 : replay et ACK) | UNE instruction (_CANONICAL_DELIVERY) : decryptage_turn_reservations (propriété projetée en booléen ; colonnes lues pour :u seulement), assistant_deliveries (liée, propre, finalized, conversation et livraison demandées), decryptage_cognitive_links, support_traces (parent de la trace du lien), cognitive_events et analysis_sessions (seulement COMPTÉES si manquantes ou d'autrui) | user_id serveur (unique paramètre :u, propagé par la CTE o) ET id de réservation / conversation / livraison demandés | - (aucun verrou, aucune écriture) |
+| _acknowledge_delivery (R1 PR 9-C2) : verrou | decryptage_turn_reservations (_LOCK_RESERVATION) | id ET user_id | FOR UPDATE (après T_authorization), puis pont (DeliveryAcknowledgement + AckAdmissionPort) |
 | _read_preparation_context (R1 PR 9-B2) | UNE instruction : decryptage_turn_reservations, users, conversation_identities, assistant_deliveries + decryptage_cognitive_links (ancre), cognitive_events, analysis_sessions, analysis_facts, user_statements, investment_theses | user_id serveur (unique paramètre :u, propagé par la CTE o) ET id de réservation / conversation / ticker résolu | - (plan READ, aucune écriture) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
@@ -195,10 +197,30 @@ reserved : epoch, jeton, échéance -> pont -> après RELEASE : UNIQUE UPDATE
 reserved -> finalized, qui capture lui-même T_finalize (aucune ligne :
 CONFLICT, ROLLBACK global de TOUTES les écritures ORM) ; ou issue de l'annulation locale (vue métier,
 blocage d'une collision PROUVÉE, ou sentinelle de ROLLBACK).
+
+R1 PR 9-C2 (plans READ et DECRYPTAGE_MUTATION INCHANGÉS, SANS trousseau : le
+HMAC B1 n'est jamais recalculé) : ReadCanonicalDecryptageDelivery et
+AcknowledgeDecryptageDelivery. Preuve terminale C1-B commune
+(_canonical_proof, UNE instruction sans verrou) dans l'ordre figé : propriété
+(absente ou d'autrui : ABSENT) -> état B1 (non finalized : CONFLICT) ->
+identité demandée (conversation ou livraison différente du lien B1 :
+CONFLICT) -> intégrité persistée (réservation terminale complète, livraison
+liée propre de même identité et de schéma connu, runtime et lien V2, couple
+statut / lien admis, provenance transitive, payload public : 503). Payload :
+texte JSONB persisté (response_payload::text), validé en Decimal (prix :
+représentation exacte d'un binary64 fini), restitué en octets UTF-8 SANS
+seconde sérialisation. ACK : réservation propre FOR UPDATE -> preuve sous ce
+verrou -> attestation scellée _AckAdmissionPort (fermée dans un finally) ->
+pont -> résultat comparé à la livraison admise (DeliveryAcknowledged,
+response_action V2 non nulle). Aucune écriture B1, aucun retry, aucune
+progression d'entrée.
 """
+import json
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import MappingProxyType
 
 import sqlalchemy as sa
@@ -206,8 +228,10 @@ import sqlalchemy as sa
 from core.authz_f2 import _bridge_contracts as contracts
 from core.authz_f2 import _decryptage_orm_bridge as bridge
 from core.authz_f2 import commands as c
+from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_finalization as dfin
+from core.authz_f2 import decryptage_market_data as dm
 from core.authz_f2 import decryptage_fingerprint as dfp
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_fingerprint as fp
@@ -1577,8 +1601,10 @@ class _FinalizationReadPort(_TransactionProbe, contracts.FinalizationReadPort):
 
 def _transaction_probe(conn, ctx) -> _TransactionProbe:
     """Sonde SEULE pour une opération historique du pont (TurnFinalization,
-    DeliveryAcknowledgement : bancs d'essai PR 9-A / C1-A ; aucune commande
-    de production) : jamais de relecture B2."""
+    DeliveryAcknowledgement sur le chemin historique : bancs d'essai PR 9-A /
+    C1-A ; aucune commande de production — R1 PR 9-C2 : l'ACK de production
+    reçoit TOUJOURS l'attestation _AckAdmissionPort, jamais cette sonde) :
+    jamais de relecture B2."""
     return _TransactionProbe(_CAPABILITY, conn, ctx.principal.user_id)
 
 
@@ -1714,6 +1740,278 @@ def _finalize_candidate(conn, ctx, command, locked, keys):
     raise AdapterInvariantBroken("motif d'annulation locale hors contrat")
 
 
+# --------------------------------------------------------------------------
+# R1 PR 9-C2 : replay canonique (plan READ) et ACK F2 (plan DECRYPTAGE_MUTATION)
+# --------------------------------------------------------------------------
+
+# UNE instruction propriétaire-centrée, point d'entrée
+# decryptage_turn_reservations, SANS verrou ni écriture : l'unique paramètre
+# de propriétaire :u est propagé par la CTE o. La réservation d'autrui n'est
+# jamais lue (seule sa propriété est projetée en booléen, comme
+# _CONVERSATION_OWNED) ; la livraison n'est jointe que pour une réservation
+# PROPRE, finalized, de la conversation demandée, dont le lien B1 est
+# EXACTEMENT la livraison demandée, ET filtrée par :u (une livraison liée
+# d'autrui est une livraison manquante) ; jointures externes depuis o : une
+# incohérence persistée (livraison ou lien absent) reste visible, jamais une
+# disparition silencieuse de la ligne résultat. Le lien cognitif est celui de
+# la livraison exacte ; la provenance transitive (cinq events du lien, event
+# parent de la SupportTrace, AnalysisSessions de la livraison et des events)
+# n'est que COMPTÉE quand elle manque ou appartient à autrui (même contrôle
+# que bridge._require_owned_provenance). Le payload est le JSONB persisté
+# (response_payload::text), jamais les octets envoyés à l'écriture.
+_CANONICAL_DELIVERY = (
+    "WITH o AS (SELECT CAST(:u AS text) AS u, CAST(:rid AS uuid) AS rid, CAST(:k AS text) AS k, "
+    "CAST(:tid AS uuid) AS tid), "
+    "f AS (SELECT t.user_id = o.u AS owned FROM decryptage_turn_reservations t, o WHERE t.id = o.rid), "
+    "r AS (SELECT " + _RESERVATION_LIST_COLUMNS + " FROM decryptage_turn_reservations, o "
+    "WHERE id = o.rid AND user_id = o.u), "
+    "dl AS (SELECT d.id AS d_id, d.conversation_key AS d_conversation_key, d.surface AS d_surface, "
+    "d.source_user_turn_id AS d_source_user_turn_id, d.delivery_ordinal AS d_delivery_ordinal, "
+    "d.delivery_schema_version AS d_schema_version, d.status AS d_status, "
+    "d.visible_content_fingerprint AS d_visible_fingerprint, d.analysis_session_id AS d_analysis_session_id, "
+    "jsonb_typeof(d.private_metadata -> 'cognitive_runtime_version') AS d_runtime_type, "
+    "d.private_metadata ->> 'cognitive_runtime_version' AS d_runtime, d.response_payload::text AS d_payload "
+    "FROM assistant_deliveries d, r, o WHERE d.id = r.assistant_delivery_id AND d.user_id = o.u "
+    "AND r.state = 'finalized' AND r.conversation_key = o.k AND r.assistant_delivery_id = o.tid), "
+    "lk AS (SELECT l.capture_version, l.capture_state, l.response_action, l.input_event_id, "
+    "l.input_context_event_id, l.response_context_event_id, l.context_exit_event_id, l.response_event_id, "
+    "l.support_trace_id FROM decryptage_cognitive_links l, dl WHERE l.assistant_delivery_id = dl.d_id), "
+    "ev AS (SELECT x.e AS id FROM lk CROSS JOIN LATERAL (VALUES (lk.input_event_id), (lk.input_context_event_id), "
+    "(lk.response_context_event_id), (lk.context_exit_event_id), (lk.response_event_id)) AS x(e) "
+    "WHERE x.e IS NOT NULL "
+    "UNION SELECT st.cognitive_event_id FROM support_traces st, lk WHERE st.id = lk.support_trace_id), "
+    "pv AS (SELECT (SELECT count(*) FROM lk WHERE lk.support_trace_id IS NOT NULL AND NOT EXISTS "
+    "(SELECT 1 FROM support_traces st WHERE st.id = lk.support_trace_id)) AS missing_traces, "
+    "(SELECT count(*) FROM ev WHERE NOT EXISTS (SELECT 1 FROM cognitive_events e, o "
+    "WHERE e.id = ev.id AND e.user_id = o.u)) AS foreign_events, "
+    "(SELECT count(*) FROM (SELECT dl.d_analysis_session_id AS s FROM dl UNION SELECT e.analysis_session_id "
+    "FROM cognitive_events e, ev, o WHERE e.id = ev.id AND e.user_id = o.u) ss WHERE ss.s IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM analysis_sessions a, o WHERE a.id = ss.s AND a.user_id = o.u)) "
+    "AS foreign_sessions) "
+    "SELECT f.owned, r.*, dl.*, (SELECT count(*) FROM lk) AS l_count, lk.capture_version AS l_capture_version, "
+    "lk.capture_state AS l_capture_state, lk.response_action AS l_response_action, pv.missing_traces, "
+    "pv.foreign_events, pv.foreign_sessions "
+    "FROM o LEFT JOIN f ON true LEFT JOIN r ON true LEFT JOIN dl ON true LEFT JOIN lk ON true CROSS JOIN pv")
+
+# Payload public C1-B (decryptage_candidate.CandidatePayload.as_dict) : huit
+# champs EXACTS, aucune clé supplémentaire ni réservée.
+CANONICAL_PAYLOAD_KEYS = frozenset(("success", "ticker", "name", "method_used", "analysis", "price", "currency",
+                                    "disclaimer"))
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _CanonicalProof:
+    """Preuve terminale C1-B établie par _canonical_proof (aucun contenu dans
+    repr) : réservation finalized validée, statut et octets JSONB du payload."""
+    reservation: _Reservation
+    delivery_status: str
+    payload_json: bytes
+
+    def __repr__(self) -> str:
+        return "_CanonicalProof(<private>)"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("preuve canonique non sérialisable")
+
+
+def _json_object_pairs(pairs) -> dict:
+    out = {}
+    for key, value in pairs:
+        if key in out:  # JSONB n'en produit jamais : refus fermé
+            raise ValueError("clé JSON dupliquée")
+        out[key] = value
+    return out
+
+
+def _json_constant(name):
+    raise ValueError("constante JSON non standard")
+
+
+def _binary64_decimal(value) -> bool:
+    """Nombre JSON lu en Decimal (jamais en float) : fini et EXACTEMENT la
+    représentation décimale la plus courte d'un binary64 fini — domaine des
+    prix écrits par C1-B (float fini sérialisé par json, conservé par JSONB
+    numeric, éventuellement sous une autre notation). Aucun arrondi accepté."""
+    if type(value) is not Decimal or not value.is_finite():
+        return False
+    as_float = float(value)
+    return math.isfinite(as_float) and Decimal(repr(as_float)) == value
+
+
+def _visible_analysis(value) -> bool:
+    """Texte visible C1-B : non vide, sans marqueur privé résiduel ni NUL,
+    au plus RESPONSE_MAX_BYTES octets UTF-8 (mêmes règles que
+    decryptage_candidate.validate_response ; aucune borne nouvelle)."""
+    if type(value) is not str or not value.strip() or "\x00" in value:
+        return False
+    if "ORYX_STEP" in value or "<!--" in value:
+        return False
+    length = dc.utf8_length(value)
+    return length is not None and length <= dcand.RESPONSE_MAX_BYTES
+
+
+def _canonical_payload(text, resolved_ticker: str, recorded_fingerprint) -> bytes:
+    """Valide le texte JSONB persisté SANS le resérialiser et rend ses octets
+    UTF-8 exacts ; tout écart : DecryptageUnavailable (aucun détail public)."""
+    try:
+        payload = json.loads(text, parse_float=Decimal, parse_int=Decimal, parse_constant=_json_constant,
+                             object_pairs_hook=_json_object_pairs) if type(text) is str else None
+    except (ValueError, RecursionError):
+        payload = None
+    valid = type(payload) is dict and set(payload) == CANONICAL_PAYLOAD_KEYS
+    if valid:
+        valid = (payload["success"] is True
+                 and dc.valid_resolved_ticker(payload["ticker"]) and payload["ticker"] == resolved_ticker
+                 and type(payload["name"]) is str and payload["name"] != ""
+                 and (payload["method_used"] is None or type(payload["method_used"]) is str)
+                 and _visible_analysis(payload["analysis"])
+                 and (payload["price"] is None or _binary64_decimal(payload["price"]))
+                 and type(payload["currency"]) is str and dm.CURRENCY_RE.fullmatch(payload["currency"]) is not None
+                 and type(payload["disclaimer"]) is str and payload["disclaimer"] == dcand.DISCLAIMER
+                 and type(recorded_fingerprint) is str
+                 and bridge._visible_content_fingerprint(payload["analysis"]) == recorded_fingerprint)
+    if not valid:
+        raise DecryptageUnavailable("contenu canonique incohérent", "decryptage_payload_incoherent")
+    return text.encode("utf-8")
+
+
+def _terminal(res: _Reservation) -> bool:
+    """Réservation finalized C1-B complète : champs actifs du bail effacés,
+    aucun motif de blocage, instant de finalisation et ticker résolu présents,
+    epoch et compteur d'une attribution réelle, versions et empreinte B1
+    structurellement valides (jamais recalculées : aucune clé)."""
+    return (res.state == dr.FINALIZED and res.lease_token_hash is None and res.lease_expires_at is None
+            and res.retry_not_before_at is None and res.blocked_reason is None and res.finalized_at is not None
+            and res.resolved_ticker is not None and res.lease_epoch >= 1 and res.attempts_used >= 1
+            and res.fingerprint_version in dfp.FRAMES
+            and dfp.KEY_VERSION_RE.fullmatch(res.fingerprint_key_version) is not None
+            and dfp.FINGERPRINT_RE.fullmatch(res.request_fingerprint) is not None)
+
+
+def _canonical_proof(conn, user_id: str, command):
+    """Preuve de provenance terminale C1-B (replay et ACK), UNE instruction
+    (_CANONICAL_DELIVERY). Ordre : propriété (absente ou d'autrui : ABSENT,
+    indiscernables) -> état B1 (non finalized : CONFLICT) -> identité demandée
+    (conversation ou livraison différente du lien B1 : CONFLICT) -> intégrité
+    persistée (réservation, livraison liée, runtime et lien V2, couple
+    statut / lien, provenance transitive, payload : DecryptageUnavailable,
+    503) -> _CanonicalProof. Aucune écriture, aucun verrou."""
+    row = _first(conn, _CANONICAL_DELIVERY, u=user_id, rid=command.reservation_id, k=command.conversation_key,
+                 tid=command.assistant_turn_id)
+    if row is None or row["owned"] not in (True, False, None):
+        raise AdapterInvariantBroken("projection canonique hors contrat")
+    if row["owned"] is not True:
+        return ABSENT
+    res = _reservation(row, user_id)
+    if res.state != dr.FINALIZED:
+        return CONFLICT
+    if res.conversation_key != command.conversation_key or res.assistant_delivery_id != command.assistant_turn_id:
+        return CONFLICT
+    if not _terminal(res):
+        raise DecryptageUnavailable("réservation finalisée incohérente", "decryptage_reservation_incoherent")
+    if row["d_id"] != res.assistant_delivery_id or (
+            row["d_conversation_key"], row["d_surface"], row["d_source_user_turn_id"], row["d_delivery_ordinal"],
+            row["d_schema_version"]) != (res.conversation_key, dfp.SURFACE, res.source_user_turn_id,
+                                         dfp.DELIVERY_ORDINAL, bridge.DELIVERY_SCHEMA_VERSION) \
+            or row["d_status"] not in bridge.DELIVERY_STATUSES:
+        raise DecryptageUnavailable("livraison liée manquante ou incohérente", "decryptage_delivery_incoherent")
+    if (row["d_runtime_type"], row["d_runtime"]) != ("string", bridge.COGNITIVE_RUNTIME_V2) \
+            or row["l_count"] != 1 or row["l_capture_version"] != bridge.COGNITIVE_RUNTIME_V2 \
+            or (row["d_status"], row["l_capture_state"]) not in bridge.CANONICAL_COUPLES \
+            or (row["l_response_action"] is None) != (row["l_capture_state"] == bridge.CANONICAL_COUPLES[0][1]) \
+            or (row["l_response_action"] is not None and row["l_response_action"] not in bridge.RESPONSE_ACTIONS):
+        raise DecryptageUnavailable("provenance cognitive V2 incompatible", "decryptage_cognitive_link_incoherent")
+    if (row["missing_traces"], row["foreign_events"], row["foreign_sessions"]) != (0, 0, 0):
+        raise DecryptageUnavailable("provenance transitive incohérente", "decryptage_provenance_incoherent")
+    payload = _canonical_payload(row["d_payload"], res.resolved_ticker, row["d_visible_fingerprint"])
+    return _CanonicalProof(res, row["d_status"], payload)
+
+
+def _read_canonical_delivery(conn, ctx, command, locked):
+    """Replay (plan READ) : contenu public canonique d'une livraison C1-B, tel
+    que persisté, et son statut à l'instant de l'instruction. Aucune écriture,
+    aucun verrou métier, aucun fournisseur, aucune progression."""
+    proof = _canonical_proof(conn, ctx.principal.user_id, command)
+    if proof is ABSENT or proof is CONFLICT:
+        return proof
+    return c.CanonicalDecryptageDelivery(proof.reservation.id, proof.reservation.assistant_delivery_id,
+                                         proof.delivery_status, proof.payload_json)
+
+
+class _AckAdmissionPort(_TransactionProbe, contracts.AckAdmissionPort):
+    """Implémentation SCELLÉE d'AckAdmissionPort, construite seulement par
+    _acknowledge_delivery APRÈS l'autorisation du principal, le verrou FOR
+    UPDATE de la réservation B1 propre et la preuve terminale C1-B. Principal,
+    réservation, conversation et identité complète de la livraison admise sont
+    FIGÉS ici ; liée à la connexion, à la transaction externe et à la durée
+    d'UNE opération ACK (_close dans un finally). require_delivery : UNE fois,
+    identité de la livraison verrouillée par le pont comparée à l'attestation.
+    Aucune méthode d'exécution SQL ni de rappel ; non sérialisable, non
+    copiable (hérité)."""
+
+    __slots__ = ("_reservation_id", "_conversation_key", "_assistant_turn_id", "_source_user_turn_id", "_consumed")
+
+    def __init__(self, token, conn, user_id: str, proof: _CanonicalProof):
+        super().__init__(token, conn, user_id)
+        if type(proof) is not _CanonicalProof or type(proof.reservation) is not _Reservation \
+                or proof.reservation.state != dr.FINALIZED:
+            raise contracts.CapabilityRefused("preuve canonique hors contrat")
+        res = proof.reservation
+        for name, value in (("_reservation_id", res.id), ("_conversation_key", res.conversation_key),
+                            ("_assistant_turn_id", res.assistant_delivery_id),
+                            ("_source_user_turn_id", res.source_user_turn_id), ("_consumed", False)):
+            object.__setattr__(self, name, value)
+
+    def __repr__(self) -> str:
+        return "AckAdmissionPort(<private>)"
+
+    def require_delivery(self, *, assistant_turn_id, user_id, conversation_key, surface, source_user_turn_id,
+                         delivery_ordinal, delivery_schema_version) -> None:
+        if self._consumed:
+            raise contracts.CapabilityRefused("attestation déjà consommée")
+        object.__setattr__(self, "_consumed", True)
+        if not self._open:
+            raise contracts.CapabilityRefused("attestation close")
+        outer = self._outer
+        if not outer.is_active or self._conn.get_transaction() is not outer:
+            raise contracts.TransactionLost("transaction externe inactive ou remplacée")
+        if (assistant_turn_id, user_id, conversation_key, surface, source_user_turn_id, delivery_ordinal,
+                delivery_schema_version) != (self._assistant_turn_id, self._user_id, self._conversation_key,
+                                             dfp.SURFACE, self._source_user_turn_id, dfp.DELIVERY_ORDINAL,
+                                             bridge.DELIVERY_SCHEMA_VERSION):
+            raise contracts.CapabilityRefused("livraison verrouillée différente de la livraison attestée")
+
+
+def _acknowledge_delivery(conn, ctx, command, locked):
+    """ACK F2 (plan DECRYPTAGE_MUTATION, après T_authorization) : réservation
+    propre FOR UPDATE (absente ou d'autrui : ABSENT, rien n'est verrouillé
+    chez autrui) -> preuve terminale C1-B (_canonical_proof, sous ce verrou)
+    -> attestation scellée -> pont (opération DeliveryAcknowledgement
+    INCHANGÉE : livraison verrouillée, attestation et V2 revérifiées,
+    provenance transitive, capture historique, pending -> delivered) ->
+    résultat comparé à la livraison admise. ACK rejoué : no-op. Aucun retry ;
+    aucune progression d'entrée ; aucune écriture B1."""
+    user_id = ctx.principal.user_id
+    if _first(conn, _LOCK_RESERVATION, id=command.reservation_id, u=user_id) is None:
+        return ABSENT
+    proof = _canonical_proof(conn, user_id, command)
+    if proof is ABSENT:  # propre et verrouillée par cette transaction : impossible
+        raise DecryptageUnavailable("réservation verrouillée relue absente", "decryptage_reservation_incoherent")
+    if proof is CONFLICT:
+        return CONFLICT
+    port = _AckAdmissionPort(_CAPABILITY, conn, user_id, proof)
+    try:
+        outcome = bridge._execute(conn, ctx, bridge.DeliveryAcknowledgement(command.assistant_turn_id,
+                                                                            command.conversation_key), port)
+    finally:
+        port._close()
+    if type(outcome) is not bridge.DeliveryAcknowledged or outcome.assistant_turn_id != command.assistant_turn_id \
+            or outcome.delivery_status != bridge.DELIVERED or outcome.response_action is None \
+            or outcome.response_action not in bridge.RESPONSE_ACTIONS:
+        raise DecryptageUnavailable("ACK hors contrat", "decryptage_ack_incoherent")
+    return outcome
+
+
 class SpecError(TypeError):
     """Spécification de commande hors contrat (registre impossible à construire)."""
 
@@ -1767,4 +2065,8 @@ REGISTRY = MappingProxyType({
     # décision), trousseau Décrypter par le dispatch existant.
     c.FinalizeDecryptageCandidate: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _finalize_candidate,
                                         decryptage_keyed=True),
+    # R1 PR 9-C2 : replay (plan READ) et ACK (plan DECRYPTAGE_MUTATION),
+    # aucun verrou préparatoire, SANS trousseau (aucun HMAC B1 recalculé).
+    c.ReadCanonicalDecryptageDelivery: Spec(c.READ, _no_business_lock, _read_canonical_delivery),
+    c.AcknowledgeDecryptageDelivery: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _acknowledge_delivery),
 })

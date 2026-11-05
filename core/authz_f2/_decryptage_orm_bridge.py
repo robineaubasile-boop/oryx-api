@@ -49,7 +49,7 @@ Inventaire FERMÉ des opérations (types exacts -> point d'entrée privé) :
 | Opération | Services appelés (dans cet ordre) |
 |---|---|
 | TurnFinalization | claim_delivery ; si créée : capture_user_turn, answered_step (contribution), apply_construction_these_progress (construction_these + marqueur), bind_locked_analysis_session, record_turn_progress |
-| DeliveryAcknowledgement | lock_owned_delivery ; provenance COMPLÈTE relue SANS verrou (5 events, SupportTrace et son event, AnalysisSessions) ; capture_delivered_response ; acknowledge_locked_delivery |
+| DeliveryAcknowledgement | lock_owned_delivery ; [attestation C2 : identité de la livraison verrouillée, runtime V2, lien V2 verrouillé, couple statut / lien] ; provenance COMPLÈTE relue SANS verrou (5 events, SupportTrace et son event, AnalysisSessions) ; capture_delivered_response ; acknowledge_locked_delivery ; [attestation C2 : capture V2 exigée] |
 
 Le propriétaire est TOUJOURS AuthorizedContext.principal.user_id : une
 opération ne porte aucun user_id, aucune Session, connexion, fonction ni
@@ -63,6 +63,20 @@ PR 9-A : aucune commande du registre de production n'atteignait ce module
 FinalizeDecryptageCandidate l'atteint par les adaptateurs SQL (UNIQUE
 importateur) et la troisième opération, CandidateFinalization. api.py ne
 l'importe pas (F2 dormant).
+
+R1 PR 9-C2 : la commande dormante AcknowledgeDecryptageDelivery atteint
+l'opération DeliveryAcknowledgement INCHANGÉE (inventaire toujours de trois
+opérations) avec une capacité AckAdmissionPort construite par les adaptateurs
+APRÈS la preuve terminale C1-B. Le chemin est choisi par le type EXACT de la
+capacité (CAPABILITIES : sonde historique OU attestation, tuple fermé) :
+une attestation n'est jamais traitée comme une sonde, une sonde jamais comme
+une attestation. Avec l'attestation : livraison introuvable sous verrou ->
+AckProvenanceIncoherent (503, jamais ABSENT) ; identité de la livraison
+verrouillée comparée à l'attestation (une fois), runtime V2, lien V2
+verrouillé (ordre livraison -> lien, celui de la capture) et couple
+pending / awaiting_delivery ou delivered / captured, AVANT la provenance
+transitive et la capture ; capture V2 exigée après l'ACK. Le chemin
+historique (sonde) garde ses comportements V1 / V2 / legacy.
 
 R1 PR 9-C1-B — capacités et contrats communs (F-01) : ce module n'importe
 plus core/authz_f2/_adapters.py (exceptions, sentinelles et contrats dans
@@ -129,7 +143,16 @@ CONSTRUCTION_THESE = "construction_these"
 # R1 PR 9-C1-B : valeurs de livraison reconnues par la reconnaissance
 # terminale des adaptateurs SQL (qui n'importent pas core.assistant_delivery).
 DELIVERY_STATUSES = (ad.PENDING, ad.DELIVERED)
+DELIVERED = ad.DELIVERED
 DELIVERY_SCHEMA_VERSION = ad.ASSISTANT_DELIVERY_SCHEMA_VERSION
+# R1 PR 9-C2 : provenance cognitive EXIGÉE par le replay et l'ACK F2 (mêmes
+# raisons : les adaptateurs SQL n'importent pas les services). Runtime V2
+# seul ; couples statut de livraison / état du lien admis, tous les autres
+# refusés ; vocabulaire fermé des actions de réponse.
+COGNITIVE_RUNTIME_V2 = dcr.COGNITIVE_RUNTIME_VERSION_V2
+RUNTIME_VERSION_KEY = dcr.RUNTIME_VERSION_KEY
+CANONICAL_COUPLES = ((ad.PENDING, dcr.AWAITING_DELIVERY), (ad.DELIVERED, dcr.CAPTURED))
+RESPONSE_ACTIONS = dcr.RESPONSE_ACTIONS
 _FINGERPRINT_CHARS = frozenset("0123456789abcdef")
 
 
@@ -148,6 +171,14 @@ class ProvenanceIncoherent(contracts.AdapterInvariantBroken):
     n'appartiennent pas au même propriétaire : jamais verrouillés."""
 
     alert = "decryptage_bridge_provenance_incoherent"
+
+
+class AckProvenanceIncoherent(contracts.AdapterInvariantBroken):
+    """R1 PR 9-C2 : livraison attestée qui, VERROUILLÉE, n'est plus une
+    livraison canonique C1-B V2 (runtime, lien, version, couple statut / lien)
+    ou dont l'ACK ne produit pas une capture V2 : refus fermé, ROLLBACK."""
+
+    alert = "decryptage_bridge_ack_provenance_incoherent"
 
 
 class UnknownOperation(TypeError):
@@ -401,17 +432,56 @@ def _require_owned_provenance(db, delivery, user_id: str) -> None:
             raise ProvenanceIncoherent("AnalysisSession de provenance d'un autre propriétaire ou introuvable")
 
 
+def _require_attested_canonical(db, delivery, probe) -> None:
+    """R1 PR 9-C2 : sur la livraison EFFECTIVEMENT verrouillée, AVANT la
+    provenance transitive et toute capture : identité complète comparée à
+    l'attestation (CapabilityRefused sinon), runtime V2 exigé, lien V2
+    verrouillé (même ordre que la capture : livraison -> lien) et couple
+    statut / état du lien admis. Aucune écriture."""
+    probe.require_delivery(assistant_turn_id=delivery.id, user_id=delivery.user_id,
+                           conversation_key=delivery.conversation_key, surface=delivery.surface,
+                           source_user_turn_id=delivery.source_user_turn_id, delivery_ordinal=delivery.delivery_ordinal,
+                           delivery_schema_version=delivery.delivery_schema_version)
+    metadata = delivery.private_metadata
+    if type(metadata) is not dict or metadata.get(RUNTIME_VERSION_KEY) != COGNITIVE_RUNTIME_V2:
+        raise AckProvenanceIncoherent("livraison attestée hors runtime V2")
+    link = db.execute(
+        select(DecryptageCognitiveLink.capture_version, DecryptageCognitiveLink.capture_state)
+        .where(DecryptageCognitiveLink.assistant_delivery_id == delivery.id)
+        .with_for_update()
+    ).one_or_none()
+    if link is None or link.capture_version != COGNITIVE_RUNTIME_V2 \
+            or (delivery.status, link.capture_state) not in CANONICAL_COUPLES:
+        raise AckProvenanceIncoherent("lien cognitif de la livraison attestée absent ou incohérent")
+
+
 def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement, probe):
+    # R1 PR 9-C2 : chemin choisi par le type EXACT de la capacité, jamais par une
+    # option : l'attestation C2 ne retombe jamais sur le chemin historique.
+    attested = type(probe) is contracts.implementation(contracts.AckAdmissionPort)
     try:
         delivery = ad.lock_owned_delivery(db, assistant_turn_id=operation.assistant_turn_id, user_id=user_id,
                                           conversation_key=operation.conversation_key)
     except ad.AssistantDeliveryNotFound:
+        if attested:  # livraison admise sous le verrou B1 puis introuvable : jamais un 404
+            raise AckProvenanceIncoherent("livraison attestée introuvable sous verrou") from None
         return contracts.ABSENT  # absente, étrangère ou autre conversation : indiscernables, aucun verrou
+    if attested:
+        _require_attested_canonical(db, delivery, probe)
     _require_owned_provenance(db, delivery, user_id)
     link = dcr.capture_delivered_response(db, delivery=delivery)
     delivery = ad.acknowledge_locked_delivery(db, delivery=delivery, user_id=user_id)
     db.flush()  # flush final explicite, avant la vue rendue
+    if attested and (link is None or link.capture_version != COGNITIVE_RUNTIME_V2
+                     or link.capture_state != dcr.CAPTURED or link.response_action not in RESPONSE_ACTIONS):
+        raise AckProvenanceIncoherent("ACK attesté sans capture V2")
     return DeliveryAcknowledged(delivery.id, delivery.status, link.response_action if link is not None else None)
+
+
+def _visible_content_fingerprint(text: str) -> str:
+    """R1 PR 9-C2 : empreinte visible HISTORIQUE (ad.visible_content_fingerprint)
+    pour le contrôle du replay par les adaptateurs SQL (aucun accès base)."""
+    return ad.visible_content_fingerprint(text)
 
 
 # --------------------------------------------------------------------------
@@ -945,20 +1015,27 @@ OPERATIONS = MappingProxyType({
     DeliveryAcknowledgement: _acknowledge,
     CandidateFinalization: _finalize_candidate,
 })
-# Capacité EXACTE exigée par opération : les opérations historiques n'ont
-# que la sonde ; seule la finalisation reçoit la relecture B2.
+# Contrats EXACTS admis par opération (tuple fermé ; la capacité doit être
+# l'implémentation exacte de l'un d'eux) : la finalisation historique n'a que
+# la sonde ; seule la finalisation C1-B reçoit la relecture B2. R1 PR 9-C2 :
+# l'ACK admet EXACTEMENT la sonde (chemin historique PR 9-A) OU l'attestation
+# C2 (AckAdmissionPort) ; aucun autre contrat, aucune sous-classe.
 CAPABILITIES = MappingProxyType({
-    TurnFinalization: contracts.TransactionProbe,
-    DeliveryAcknowledgement: contracts.TransactionProbe,
-    CandidateFinalization: contracts.FinalizationReadPort,
+    TurnFinalization: (contracts.TransactionProbe,),
+    DeliveryAcknowledgement: (contracts.TransactionProbe, contracts.AckAdmissionPort),
+    CandidateFinalization: (contracts.FinalizationReadPort,),
 })
+
+
+def _admitted_capabilities(operation) -> frozenset:
+    """Classes EXACTES admises pour cette opération (implémentations chargées)."""
+    return frozenset(contracts.implementation(k) for k in CAPABILITIES[type(operation)]) - {None}
 
 
 def _require_probe(probe, conn, user_id=None) -> None:
     """Capacité scellée (classe EXACTE implémentée par les adaptateurs SQL),
     ouverte, liée à CETTE connexion (et, si donné, à ce principal)."""
-    admitted = {contracts.implementation(contracts.TransactionProbe),
-                contracts.implementation(contracts.FinalizationReadPort)} - {None}
+    admitted = {contracts.implementation(k) for k in contracts.CONTRACTS} - {None}
     if type(probe) not in admitted or not probe.bound_to(conn, probe.user_id if user_id is None else user_id):
         raise contracts.CapabilityRefused("capacité de transaction hors contrat")
 
@@ -982,8 +1059,7 @@ def _execute(conn, ctx, operation, probe):
         raise UnknownOperation("opération hors de l'inventaire fermé du pont")
     if type(ctx) is not AuthorizedContext:
         raise TypeError("pont : AuthorizedContext attendu")
-    required = contracts.implementation(CAPABILITIES[type(operation)])
-    if required is None or type(probe) is not required:
+    if type(probe) not in _admitted_capabilities(operation):
         raise contracts.CapabilityRefused("capacité non admise pour cette opération")
     _require_probe(probe, conn, ctx.principal.user_id)
     _require_live(probe)

@@ -87,14 +87,18 @@ def _in_order(source, markers):
 # 1. Inventaires fermés
 # --------------------------------------------------------------------------
 
-def test_eighteen_commands_three_operations_exact_capabilities():
-    assert len(_adapters.REGISTRY) == 18
+def test_twenty_commands_three_operations_exact_capabilities():
+    # R1 PR 9-C2 (nominatif) : 20 commandes (replay, ACK) ; opérations et
+    # contrat de la finalisation inchangés (tuple fermé d'UN contrat exact).
+    assert len(_adapters.REGISTRY) == 20
     spec = _adapters.REGISTRY[c.FinalizeDecryptageCandidate]
     assert (spec.plan, spec.lock, spec.execute, spec.decryptage_keyed, spec.keyed, spec.states) == (
         c.DECRYPTAGE_MUTATION, _adapters._no_business_lock, _adapters._finalize_candidate, True, False, (type(None),))
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)  # aucun plan nouveau
     assert len(bridge.OPERATIONS) == 3 and set(bridge.OPERATIONS) == set(bridge.CAPABILITIES)
-    assert bridge.CAPABILITIES[bridge.CandidateFinalization] is contracts.FinalizationReadPort
+    assert bridge.CAPABILITIES[bridge.CandidateFinalization] == (contracts.FinalizationReadPort,)
+    assert bridge._admitted_capabilities(bridge.CandidateFinalization.__new__(bridge.CandidateFinalization)) == {
+        _adapters._FinalizationReadPort}
     assert not set(bridge.OPERATIONS) & set(_adapters.REGISTRY)
 
 
@@ -165,12 +169,13 @@ def test_no_import_cycle_in_either_python_order(order):
             f"for m in {list(order)!r}:\n"
             "    importlib.import_module('core.authz_f2.' + m)\n"
             "from core.authz_f2 import _bridge_contracts as k\n"
-            "print(json.dumps([k.implementation(k.TransactionProbe).__name__,\n"
-            "                  k.implementation(k.FinalizationReadPort).__name__]))\n")
+            "print(json.dumps([k.implementation(t).__name__ for t in k.CONTRACTS]))\n")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert json.loads(out.stdout.strip().splitlines()[-1]) == ["_TransactionProbe", "_FinalizationReadPort"]
+    # R1 PR 9-C2 : trois contrats, une implémentation exacte chacun.
+    assert json.loads(out.stdout.strip().splitlines()[-1]) == ["_TransactionProbe", "_FinalizationReadPort",
+                                                               "_AckAdmissionPort"]
 
 
 def test_bridge_alone_has_no_sql_capability_until_the_adapters_provide_one():
@@ -200,8 +205,10 @@ def test_no_second_runner_and_no_dynamic_import_in_c1b():
 def test_capabilities_are_built_only_by_the_adapters():
     built = {(ast.unparse(n.func), f.name) for f in ast.walk(_tree(ADAPTERS)) if isinstance(f, ast.FunctionDef)
              for n in ast.walk(f) if isinstance(n, ast.Call) and ast.unparse(n.func) in (
-                 "_TransactionProbe", "_FinalizationReadPort")}
-    assert built == {("_TransactionProbe", "_transaction_probe"), ("_FinalizationReadPort", "_finalize_candidate")}
+                 "_TransactionProbe", "_FinalizationReadPort", "_AckAdmissionPort")}
+    # R1 PR 9-C2 : l'attestation ACK n'est construite QUE par l'adaptateur ACK.
+    assert built == {("_TransactionProbe", "_transaction_probe"), ("_FinalizationReadPort", "_finalize_candidate"),
+                     ("_AckAdmissionPort", "_acknowledge_delivery")}
     for path in (BRIDGE, CONTRACTS):
         assert "_CAPABILITY" not in _code_tokens(path.read_text(encoding="utf-8")).split("\n"), path.name
 

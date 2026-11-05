@@ -89,14 +89,17 @@ def _reachable(start_paths) -> set:
 def test_the_production_registry_has_seventeen_commands_and_one_new_read():
     # R1 PR 9-C1-B : dix-huit commandes (finalisation, plan DECRYPTAGE_MUTATION) ;
     # la lecture B2 et les onze lectures READ sont inchangées.
-    assert len(_adapters.REGISTRY) == 18
+    # R1 PR 9-C2 : vingt commandes ; une lecture READ de plus (replay canonique,
+    # SANS trousseau) et l'ACK ; la lecture B2 est inchangée.
+    assert len(_adapters.REGISTRY) == 20
     spec = _adapters.REGISTRY[c.ReadDecryptagePreparationContext]
     assert spec.plan is c.READ and spec.lock is _adapters._no_business_lock
     assert spec.execute is _adapters._read_preparation_context and spec.decryptage_keyed and not spec.keyed
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
     assert c.READ == c.LockPlan("read", "FOR KEY SHARE", ())
     reads = {cmd for cmd, s in _adapters.REGISTRY.items() if s.plan is c.READ}
-    assert len(reads) == 11
+    assert len(reads) == 12 and c.ReadCanonicalDecryptageDelivery in reads
+    assert not _adapters.REGISTRY[c.ReadCanonicalDecryptageDelivery].decryptage_keyed
     assert dr.FAILURE_CLASSES == ("market_data_unavailable", "generation_unavailable", "generation_unusable")
     assert dr.LEASE_DURATION.total_seconds() == 360 and dr.MAX_ATTEMPTS == 3
 
@@ -105,9 +108,14 @@ def test_cognitive_tables_are_only_read_by_the_preparation_statement():
     statements = {k: v for k, v in vars(_adapters).items() if k.startswith("_") and k.isupper() and isinstance(v, str)}
     readers = {k for k, v in statements.items() if any(t in v for t in ("cognitive_events", "decryptage_cognitive_links",
                                                                       "user_statements", "analysis_facts"))}
-    assert readers == {"_PREPARATION_CONTEXT"}
-    assert not any(word in statements["_PREPARATION_CONTEXT"].upper().split() for word in
-                   ("UPDATE", "INSERT", "DELETE", "MERGE"))
+    # R1 PR 9-C2 (nominatif) : la preuve terminale lit AUSSI le lien et les
+    # events de la livraison (provenance V2 et transitive), sans écriture, et
+    # jamais les contributions ni les faits.
+    assert readers == {"_PREPARATION_CONTEXT", "_CANONICAL_DELIVERY"}
+    for name in readers:
+        assert not any(word in statements[name].upper().split() for word in ("UPDATE", "INSERT", "DELETE", "MERGE"))
+    assert "user_statements" not in statements["_CANONICAL_DELIVERY"]
+    assert "analysis_facts" not in statements["_CANONICAL_DELIVERY"]
 
 
 def test_the_orchestrator_reaches_postgresql_only_through_the_runner():

@@ -1,6 +1,6 @@
 """R1 PR 9-C1-B — finalisation atomique Décrypter F2, contre un VRAI
 PostgreSQL (16 et 18 en CI), sous le VRAI runner et le registre de
-PRODUCTION (dix-huit commandes), avec des candidats produits par le VRAI
+PRODUCTION (vingt commandes depuis R1 PR 9-C2), avec des candidats produits par le VRAI
 orchestrateur B2 (transports simulés).
 
 Chaque état durable est observé par une connexion indépendante ; « état

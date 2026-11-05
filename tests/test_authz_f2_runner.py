@@ -349,8 +349,10 @@ def test_registry_is_closed_and_unknown_commands_are_refused_before_any_transact
                                        c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis,  # R1 PR 8
                                        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,  # R1 PR 9-B1
                                        c.ReadDecryptagePreparationContext,  # R1 PR 9-B2
-                                       c.FinalizeDecryptageCandidate}  # R1 PR 9-C1-B
-    assert len(_adapters.REGISTRY) == 18
+                                       c.FinalizeDecryptageCandidate,  # R1 PR 9-C1-B
+                                       # R1 PR 9-C2 : replay canonique et ACK
+                                       c.ReadCanonicalDecryptageDelivery, c.AcknowledgeDecryptageDelivery}
+    assert len(_adapters.REGISTRY) == 20
     with pytest.raises(TypeError):
         _adapters.REGISTRY[object] = None
 

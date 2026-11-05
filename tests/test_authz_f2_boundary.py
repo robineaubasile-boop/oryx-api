@@ -39,6 +39,13 @@ prétend pas isoler le processus contre du code Python hostile.
   conversation_identities (seconde écriture applicative, inventoriée) et de
   decryptage_turn_reservations, toutes filtrées par le user_id serveur ;
   seule instruction sans :u ajoutée : l'horloge T_lease_decision.
+- R1 PR 9-C2 : registre fermé à VINGT commandes (ReadCanonicalDecryptageDelivery
+  sous READ, AcknowledgeDecryptageDelivery sous DECRYPTAGE_MUTATION, sans
+  trousseau, sans verrou préparatoire) ; UNE instruction fermée de preuve
+  terminale (_CANONICAL_DELIVERY), propriétaire-centrée et sans verrou ; dans
+  le pont, UNE lecture ORM verrouillée de plus (le lien de la livraison
+  attestée) et, dans les adaptateurs, un get_transaction() de plus (lecture
+  seule, vérification de l'attestation).
 """
 import ast
 import inspect
@@ -93,13 +100,23 @@ def test_sql_is_executed_only_by_the_audited_adapters():
             # propriété transitive (select(...) construit, jamais du texte).
             assert texts == [], path.name
             owner = _function(tree, "_require_owned_provenance")
-            assert {id(n) for n in executes} == {id(n) for n in _calls(owner) if isinstance(n.func, ast.Attribute)
-                                                and n.func.attr == "execute"}
-            assert len(executes) == 4  # lien, SupportTrace, events, AnalysisSessions
+            owned = {id(n) for n in _calls(owner) if isinstance(n.func, ast.Attribute) and n.func.attr == "execute"}
+            # R1 PR 9-C2 (nominatif) : UNE lecture ORM de plus, hors de la
+            # provenance transitive : le lien cognitif de la livraison ATTESTÉE,
+            # verrouillé (même ordre que la capture : livraison -> lien) pour
+            # revérifier version et couple sur l'objet verrouillé. Les quatre
+            # lectures de provenance restent exactement sans verrou.
+            attested = _function(tree, "_require_attested_canonical")
+            locked = [n for n in _calls(attested) if isinstance(n.func, ast.Attribute) and n.func.attr == "execute"]
+            assert len(locked) == 1 and {id(n) for n in executes} == owned | {id(locked[0])}
+            assert len(owned) == 4  # lien, SupportTrace, events, AnalysisSessions
             for call in executes:
                 (statement,) = call.args
                 assert isinstance(statement, ast.Call) and ast.unparse(statement).startswith("select("), path.name
-                assert "with_for_update" not in ast.unparse(statement)
+                assert ("with_for_update" in ast.unparse(statement)) == (call is locked[0])
+            assert ast.unparse(locked[0].args[0]) == (
+                "select(DecryptageCognitiveLink.capture_version, DecryptageCognitiveLink.capture_state)"
+                ".where(DecryptageCognitiveLink.assistant_delivery_id == delivery.id).with_for_update()")
         else:
             assert executes == [] and texts == [], path.name
 
@@ -148,13 +165,15 @@ def test_no_boundary_module_controls_a_transaction():
             # R1 PR 9-C1-B : get_transaction() en LECTURE seule dans les trois
             # méthodes des capacités scellées (constat de la transaction externe
             # à la construction, sonde, relecture B2) ; rien d'autre.
+            # R1 PR 9-C2 (nominatif) : + la vérification UNIQUE de l'attestation
+            # ACK (require_delivery), même lecture seule de la transaction.
             assert _attr_calls(tree) & TRANSACTION_METHODS == {"begin_nested", "get_transaction"}
             located = sorted((n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
                              for n in _calls(f) if isinstance(n.func, ast.Attribute)
                              and n.func.attr in TRANSACTION_METHODS)
             assert located == [("begin_nested", "_insert_reservation"), ("begin_nested", "_register_conversation"),
                                ("get_transaction", "__init__"), ("get_transaction", "read_preparation"),
-                               ("get_transaction", "require_live")]
+                               ("get_transaction", "require_delivery"), ("get_transaction", "require_live")]
             probes = {ast.unparse(n) for n in _calls(tree) if isinstance(n.func, ast.Attribute)
                       and n.func.attr == "get_transaction"}
             assert probes == {"conn.get_transaction()", "self._conn.get_transaction()"}
@@ -286,7 +305,9 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         "_PREPARATION_CONTEXT",
         # R1 PR 9-C1-B : finalisation et blocage prouvé, chacun capturant son
         # instant de décision (_DECISION_CLOCK, fragment de CTE).
-        "_DECISION_CLOCK", "_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"}
+        "_DECISION_CLOCK", "_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION",
+        # R1 PR 9-C2 : UNE instruction de preuve terminale (replay et ACK).
+        "_CANONICAL_DELIVERY"}
     # Seules requêtes sans user_id : l'isolation active de la transaction et
     # (R1 PR 9-B1) l'horloge T_lease_decision lue après le verrou.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
@@ -303,6 +324,7 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
     assert "finalized_at = decision.at" in statements["_FINALIZE_RESERVATION"]
     assert "_FINALIZATION_DECISION_CLOCK" not in vars(_adapters) and "_finalization_clock" not in vars(_adapters)
     _check_preparation_statement(statements.pop("_PREPARATION_CONTEXT"))
+    _check_canonical_statement(statements.pop("_CANONICAL_DELIVERY"))
     for name in PR9B1_FILTERS:
         sql = statements.pop(name)
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
@@ -389,22 +411,62 @@ def _check_preparation_statement(sql):
     assert sql.count("user_id <> o.u") == 2 and sql.count("SELECT count(*) FROM analysis_facts f, sel, o") == 1
 
 
+# R1 PR 9-C2 : chaque table de la preuve terminale est filtrée par le
+# propriétaire serveur unique (o.u, issu du SEUL paramètre :u), sauf la
+# propriété de la réservation (projetée en booléen) et la SupportTrace (lue
+# par l'identifiant du lien PROPRE, son event parent étant contrôlé ensuite).
+PR9C2_OWNER_FILTERS = (
+    "f AS (SELECT t.user_id = o.u AS owned FROM decryptage_turn_reservations t, o WHERE t.id = o.rid)",
+    "FROM decryptage_turn_reservations, o WHERE id = o.rid AND user_id = o.u",
+    "FROM assistant_deliveries d, r, o WHERE d.id = r.assistant_delivery_id AND d.user_id = o.u "
+    "AND r.state = 'finalized' AND r.conversation_key = o.k AND r.assistant_delivery_id = o.tid",
+    "FROM decryptage_cognitive_links l, dl WHERE l.assistant_delivery_id = dl.d_id",
+    "SELECT 1 FROM cognitive_events e, o WHERE e.id = ev.id AND e.user_id = o.u",
+    "FROM cognitive_events e, ev, o WHERE e.id = ev.id AND e.user_id = o.u",
+    "SELECT 1 FROM analysis_sessions a, o WHERE a.id = ss.s AND a.user_id = o.u",
+    "d.response_payload::text AS d_payload",
+)
+
+
+def _check_canonical_statement(sql):
+    assert sql.startswith("WITH o AS (SELECT CAST(:u AS text) AS u, CAST(:rid AS uuid) AS rid, ")
+    assert ";" not in sql and "--" not in sql and "/*" not in sql
+    assert sql.count(":u") == 1 and sql.count(":rid") == 1 and sql.count(":k") == 1 and sql.count(":tid") == 1
+    assert not FORBIDDEN_SQL.search(sql)
+    assert not re.search(r"\b(UPDATE|INSERT|DELETE|MERGE|UPSERT)\b", sql, re.I)  # aucune CTE modifiante
+    assert not re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b", sql)  # replay : aucun verrou
+    for owner_filter in PR9C2_OWNER_FILTERS:
+        assert owner_filter in sql, owner_filter
+    tables = set(re.findall(r"\b(?:FROM|JOIN) ([a-z_]+)\b", sql)) - {"o", "f", "r", "dl", "lk", "ev", "pv", "ss"}
+    assert tables == {"decryptage_turn_reservations", "assistant_deliveries", "decryptage_cognitive_links",
+                      "support_traces", "cognitive_events", "analysis_sessions"}, tables
+    # Ligne résultat toujours présente (jointures externes depuis o) ;
+    # private_metadata n'est lu que pour la version de runtime.
+    assert sql.endswith("FROM o LEFT JOIN f ON true LEFT JOIN r ON true LEFT JOIN dl ON true LEFT JOIN lk ON true "
+                        "CROSS JOIN pv")
+    assert sql.count("private_metadata") == 2 and sql.count("'cognitive_runtime_version'") == 2
+
+
 def test_closed_registry_and_lock_plans():
     reads = {c.ReadProfile, c.ListPositions, c.ReadPosition, c.ListTheses, c.ListThesesForTicker, c.ReadDelivery,
              c.ListConversationDeliveries,
              # R1 PR 8
-             c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis}
+             c.ListAnalysisOverviewPage, c.ListThesesPage, c.ReadThesis,
+             # R1 PR 9-C2 : replay canonique, sans trousseau
+             c.ReadCanonicalDecryptageDelivery}
     mutations = {c.UpdateProfileLevel: c.PROFILE_MUTATION, c.CreatePortfolioPosition: c.PORTFOLIO_MUTATION,
                  c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION,
                  # R1 PR 9-B1
                  c.ReserveDecryptageTurn: c.DECRYPTAGE_MUTATION,
                  c.RecordDecryptageAttemptFailure: c.DECRYPTAGE_MUTATION,
                  # R1 PR 9-C1-B
-                 c.FinalizeDecryptageCandidate: c.DECRYPTAGE_MUTATION}
+                 c.FinalizeDecryptageCandidate: c.DECRYPTAGE_MUTATION,
+                 # R1 PR 9-C2
+                 c.AcknowledgeDecryptageDelivery: c.DECRYPTAGE_MUTATION}
     # R1 PR 9-B2 : une lecture sous READ qui reçoit le trousseau Décrypter
     # (revérification de l'intention B1 par le dispatch existant).
     keyed_reads = {c.ReadDecryptagePreparationContext}
-    assert set(_adapters.REGISTRY) == reads | keyed_reads | set(mutations) and len(_adapters.REGISTRY) == 18
+    assert set(_adapters.REGISTRY) == reads | keyed_reads | set(mutations) and len(_adapters.REGISTRY) == 20
     # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
     assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
@@ -414,6 +476,11 @@ def test_closed_registry_and_lock_plans():
         if spec.plan is c.PORTFOLIO_MUTATION:
             assert spec.keyed and not spec.decryptage_keyed and spec.states == _adapters.PORTFOLIO_STATES
             assert spec.lock is _adapters._lock_portfolio and spec.execute is _adapters._write_portfolio
+        elif spec.plan is c.DECRYPTAGE_MUTATION and command is c.AcknowledgeDecryptageDelivery:
+            # R1 PR 9-C2 (freeze §4) : ACK SANS aucun trousseau (aucun HMAC B1
+            # recalculé), aucun verrou préparatoire, adaptateur ACK nominatif.
+            assert not spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
+            assert spec.lock is _adapters._no_business_lock and spec.execute is _adapters._acknowledge_delivery
         elif spec.plan is c.DECRYPTAGE_MUTATION:
             # R1 PR 9-B1 : trousseau Décrypter seul, aucun verrou préparatoire.
             assert spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
@@ -427,6 +494,8 @@ def test_closed_registry_and_lock_plans():
             assert spec.lock is _adapters._no_business_lock and spec.execute is _adapters._read_preparation_context
         else:
             assert not spec.keyed and not spec.decryptage_keyed and spec.states == (type(None),)
+            if command is c.ReadCanonicalDecryptageDelivery:  # R1 PR 9-C2 : adaptateur SQL nominatif
+                assert spec.lock is _adapters._no_business_lock and spec.execute is _adapters._read_canonical_delivery
     assert _adapters.PORTFOLIO_STATES == (_adapters.ReceiptFound, _adapters.PositionFound, _adapters.PositionMissing,
                                           _adapters.CreateReady)
     assert c.READ == c.LockPlan("read", "FOR KEY SHARE", ())
@@ -442,7 +511,8 @@ def test_closed_registry_and_lock_plans():
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
         c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,  # R1 PR 9-B1
-        c.FinalizeDecryptageCandidate}  # R1 PR 9-C1-B (plan inchangé, aucun plan nouveau)
+        c.FinalizeDecryptageCandidate,  # R1 PR 9-C1-B (plan inchangé, aucun plan nouveau)
+        c.AcknowledgeDecryptageDelivery}  # R1 PR 9-C2 (plan inchangé, aucun plan nouveau)
     assert _adapters._LOCK_PROFILE["FOR NO KEY UPDATE"] == "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE"
     assert dict(_adapters.ISOLATION_ALERTS) == {"portfolio_mutation": "portfolio_isolation_refused",
                                                 "decryptage_mutation": "decryptage_isolation_refused"}

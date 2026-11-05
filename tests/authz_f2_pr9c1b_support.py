@@ -1,6 +1,6 @@
 """Outils des tests R1 PR 9-C1-B : finalisation Décrypter F2 (dormante)
 contre un VRAI PostgreSQL, sous le VRAI runner et le registre de PRODUCTION
-(dix-huit commandes ; aucun registre de test).
+(vingt commandes depuis R1 PR 9-C2 ; aucun registre de test).
 
 FinalizationEnv étend PreparationEnv (R1 PR 9-B2) : réservation B1 réelle,
 candidat produit par le VRAI orchestrateur B2 (transports simulés, aucun

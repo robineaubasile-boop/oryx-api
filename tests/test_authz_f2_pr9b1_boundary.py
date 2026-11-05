@@ -213,4 +213,8 @@ def test_failure_classes_and_reasons_are_closed_vocabularies():
     assert not hasattr(c, "ForceBlockReservation") and not hasattr(c, "ResetReservation")
     assert {n for n in dir(c) if "Decryptage" in n} == {"ReserveDecryptageTurn", "RecordDecryptageAttemptFailure",
                                                         "ReadDecryptagePreparationContext",  # R1 PR 9-B2 : lecture
-                                                        "FinalizeDecryptageCandidate"}  # R1 PR 9-C1-B
+                                                        "FinalizeDecryptageCandidate",  # R1 PR 9-C1-B
+                                                        # R1 PR 9-C2 : replay, ACK et vue du replay ; toujours
+                                                        # aucune commande force_block / reset / unlock / override.
+                                                        "ReadCanonicalDecryptageDelivery",
+                                                        "AcknowledgeDecryptageDelivery", "CanonicalDecryptageDelivery"}
