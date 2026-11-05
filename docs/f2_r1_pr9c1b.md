@@ -38,7 +38,8 @@ _adapters._finalize_candidate
     12. progression historique sur la session préparée
     13. flush + RELEASE SAVEPOINT
 14. retour aux adaptateurs SQL
-15. T_finalize (SELECT clock_timestamp()) puis UPDATE reserved -> finalized conditionnel
+15. UPDATE reserved -> finalized conditionnel qui capture LUI-MÊME T_finalize
+    (WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) ... lease_expires_at > decision.at)
     (aucune ligne -> CONFLICT -> ROLLBACK GLOBAL de toutes les écritures ORM)
 16. COMMIT unique par le runner
 17. AUTHORIZED / DecryptageFinalized seulement après COMMIT confirmé
@@ -114,9 +115,10 @@ V2). `created=False` (même SHA compris) ou `AssistantTurnIdentityCollision`
 EXACTE -> annulation locale `legacy_collision`. Toute autre erreur (dont
 `IntegrityError` inattendue) -> échec global. Après l'annulation : livraison
 gagnante relue par l'identité complète, filtrée par le propriétaire
-(collision non prouvée : 503) ; `T_finalize` ; `_BLOCK_PROVEN_COLLISION`
-(epoch, compteur, jeton haché, échéance, identité, aucune livraison liée,
-motif EXISTANT `legacy_collision`) ; aucune ligne -> CONFLICT. Jamais
+(collision non prouvée : 503) ; `_BLOCK_PROVEN_COLLISION`, qui capture
+lui-même T_finalize (epoch, compteur, jeton haché, échéance à cet instant,
+identité, aucune livraison liée, motif EXISTANT `legacy_collision`) ; aucune
+ligne -> CONFLICT. Jamais
 d'adoption, aucun objet ORM du SAVEPOINT annulé réutilisé.
 
 ## 9. Revalidation B2 et sélecteur partagé
@@ -137,8 +139,8 @@ comparé au candidat (contenu canonique ET empreinte), PUIS
 
 ## 10. Atomicité après RELEASE SAVEPOINT
 
-L'UPDATE B1 est la seule mutation après RELEASE. Testé : horloge de décision
-finale au-delà de l'échéance, et UPDATE rendu impossible — les instructions
+L'UPDATE B1 est la seule mutation après RELEASE. Testé : expiration RÉELLE du
+bail juste avant l'UPDATE (§ 17), et UPDATE rendu impossible — les instructions
 de la finalisation (INSERT de user_statements, RELEASE SAVEPOINT) sont
 journalisées, puis l'état observé par une connexion tierce est
 **identique** à l'état initial (toutes tables Décrypter, réservations, xmin
@@ -173,7 +175,7 @@ dépendance exigée par le freeze et ajoute des assertions :
 | Test | Changement | Justification |
 |---|---|---|
 | BF1 `test_no_boundary_module_controls_a_transaction` | pont : plus de `get_transaction` ; `with` : `_business_savepoint(db, probe)` ; unique `super().connection()` dans `_materialize_savepoint` ; adaptateurs : `get_transaction` localisé dans `__init__`, `require_live`, `read_preparation` | sonde déplacée dans la capacité (SQL des adaptateurs) |
-| BF1 `test_adapter_statements_are_owner_scoped_and_non_transactional` | + `_FINALIZATION_DECISION_CLOCK`, `_FINALIZE_RESERVATION`, `_BLOCK_PROVEN_COLLISION` avec filtres exacts ; colonnes écrites autorisées étendues pour la seule finalisation | UPDATE B1 et blocage prouvé du freeze |
+| BF1 `test_adapter_statements_are_owner_scoped_and_non_transactional` | + `_DECISION_CLOCK` (fragment de CTE), `_FINALIZE_RESERVATION`, `_BLOCK_PROVEN_COLLISION` avec préfixe et filtres exacts ; une seule évaluation de `clock_timestamp()` par instruction, aucun instant en paramètre ; colonnes écrites autorisées étendues pour la seule finalisation | UPDATE B1 et blocage prouvé du freeze ; correctif d'audit P1 |
 | BF1 registre, réception de `conn` | 18 commandes ; `_require_probe` remplace `_require_live(conn, outer)` ; `bound_to(conn)` du contrat | 18ᵉ commande, capacités |
 | Dormance `IMPORT_MATRIX` | arêtes nouvelles exactes (§ 6) | contrats, finalisation |
 | Dormance `test_importing_the_boundary_opens_nothing` | `core.db` / `core.models` désormais chargés par l'import de la frontière ; toujours aucune connexion, aucun moteur sans `DATABASE_URL`, ni `api` ni `httpx` ; modules purs vérifiés sans `core.db` | conséquence inévitable de l'import statique `_adapters -> pont` (§ 16) |
@@ -220,3 +222,40 @@ backoffs, motifs et états inchangés.
    SAVEPOINT (constat mesuré, § 5).
 3. `FinalizeDecryptageCandidate` revérifie les invariants du candidat en
    rappelant ses validations (`__post_init__`) sur l'objet reçu.
+
+## 17. Correctif d'audit P1 (PR #233, HEAD audité `a8fee56`)
+
+**Constat** : `_finalize_reservation()` et `_block_proven_collision()` lisaient
+leur instant de décision par un `SELECT clock_timestamp()` distinct puis le
+transmettaient (`:at`) à l'UPDATE : un bail pouvait expirer entre les deux
+instructions alors que l'UPDATE comparait l'échéance à un instant antérieur.
+
+**Correctif** (aucune autre condition modifiée) : chaque instruction capture
+son instant PAR elle-même —
+`WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) UPDATE ...
+FROM decision WHERE ... AND lease_expires_at > decision.at ...` — une seule
+évaluation (fonction volatile dans une CTE MATERIALIZED, jamais inlinée),
+réutilisée pour l'échéance ET les horodatages (`finalized_at`, `updated_at`)
+et rendue (`decision.at AS decided_at`) pour la vérification d'écriture.
+L'horloge séparée `_FINALIZATION_DECISION_CLOCK` / `_finalization_clock` est
+supprimée ; aucun instant n'est plus passé en paramètre. Propriétaire,
+réservation, epoch, jeton haché, compteur, identité du tour, intention
+(empreinte enregistrée), état et absence de livraison liée restent dans
+chaque WHERE ; aucune ligne : CONFLICT (ROLLBACK global) ; le blocage
+`legacy_collision` reste subordonné à la preuve du gagnant relue juste avant.
+
+**Régressions** (PostgreSQL 16 et 18, instructions RÉELLES) :
+`test_a_lease_expiring_after_a_pre_read_instant_never_finalizes` et
+`test_a_collision_whose_lease_expires_after_a_pre_read_instant_is_never_blocked`.
+Juste avant l'instruction d'écriture, dans la transaction du runner : un
+instant est lu (bail encore valide) ; pause réelle jusqu'à ce que l'horloge
+PostgreSQL dépasse l'échéance (constaté par une connexion tierce, aucune date
+injectée) ; contre-épreuve sur la même ligne : `lease_expires_at > instant lu
+avant la pause` l'accepterait encore (1), `> clock_timestamp()` non (0) ; puis
+l'instruction réelle est exécutée : refus, REVISION_CONFLICT. Vérifiés :
+instruction et paramètres effectivement exécutés (une CTE d'horloge, aucun
+paramètre temporel), aucune livraison, capture ni progression durable
+(empreinte complète, xmin compris), B1 inchangée (état, epoch, compteur,
+jeton, xmin). Contre-épreuve de mutation : en rétablissant l'ancienne forme
+(instant lu avant, passé à l'UPDATE), les deux tests échouent. Contrôle :
+sans expiration, la même finalisation aboutit.

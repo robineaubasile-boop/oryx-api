@@ -243,11 +243,13 @@ def test_adapters_finalization_checks_b1_before_any_delivery_and_updates_after_r
     before_bridge = source[:source.index("bridge._execute(")]
     assert "_FINALIZE_RESERVATION" not in before_bridge and "_BLOCK_PROVEN_COLLISION" not in before_bridge
     finalize = _source(ADAPTERS, "_finalize_reservation")
-    assert _in_order(finalize, ["_finalization_clock(conn)", "_FINALIZE_RESERVATION", "if row is None:",
-                                "return CONFLICT"])
+    # Audit P1 : aucune horloge lue AVANT l'écriture ; l'UPDATE capture T_finalize.
+    assert _in_order(finalize, ["_FINALIZE_RESERVATION", "if row is None:", "return CONFLICT"])
+    assert "_lease_clock" not in finalize and "clock" not in _code_tokens(finalize).split("\n")
+    assert "at=" not in finalize.split("_FINALIZE_RESERVATION", 1)[1].split(")", 1)[0]
     collision = _source(ADAPTERS, "_block_proven_collision")
-    assert _in_order(collision, ["_legacy_delivery(", "_finalization_clock(conn)", "_BLOCK_PROVEN_COLLISION",
-                                 "return CONFLICT"])
+    assert _in_order(collision, ["_legacy_delivery(", "_BLOCK_PROVEN_COLLISION", "return CONFLICT"])
+    assert "_lease_clock" not in collision
     for name in ("_finalize_candidate", "_finalize_reservation", "_block_proven_collision", "_recognize_finalized"):
         assert "except" not in _source(ADAPTERS, name), name  # aucune erreur convertie en résultat
     # Mapping fermé des motifs d'annulation locale (freeze V1.2.1).

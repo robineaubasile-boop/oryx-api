@@ -22,6 +22,7 @@ compris (aucune écriture durable).
 """
 import dataclasses
 import json
+from datetime import datetime
 import time
 import uuid
 
@@ -142,9 +143,13 @@ def test_nominal_finalization_is_one_atomic_transaction(env, alice):
     name = log[savepoint].split()[-1]
     release = log.index(f"RELEASE SAVEPOINT {name}")
     projection = next(i for i, s in enumerate(log) if s.startswith("WITH o AS"))
-    final = next(i for i, s in enumerate(log) if s.startswith("UPDATE decryptage_turn_reservations SET state = 'finalized'"))
+    final = next(i for i, s in enumerate(log) if s.startswith("WITH decision AS MATERIALIZED")
+                 and "UPDATE decryptage_turn_reservations SET state = 'finalized'" in s)
     assert lock < savepoint < projection < release < final
-    assert log[final - 1] == "SELECT clock_timestamp()"
+    # Correctif d'audit P1 : l'instant de décision est capturé PAR l'UPDATE
+    # (aucune lecture d'horloge distincte après RELEASE).
+    assert log[final].startswith("WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) UPDATE ")
+    assert "SELECT clock_timestamp()" not in log[release:final]
     assert not [s for s in log if s.startswith(("ROLLBACK", "COMMIT"))]
     # Effets : une livraison F2, son lien V2, une session neuve, les faits du snapshot financier.
     [delivery] = env.delivery_rows()
@@ -202,28 +207,110 @@ def test_progress_rules_are_the_historical_ones(env, alice):
 # 2. Atomicité
 # --------------------------------------------------------------------------
 
-def _late_clock(monkeypatch):
-    """Horloge de décision FINALE au-delà de toute échéance : simule
-    l'expiration du bail après Apply, juste avant l'UPDATE B1."""
-    def late(conn):
-        return conn.execute(sa.text("SELECT clock_timestamp() + interval '1 hour'")).scalar_one()
-    monkeypatch.setattr(_adapters, "_finalization_clock", late)
+class ExpiresBeforeTheWrite:
+    """Régression de l'audit P1 (PR #233) sur les instructions RÉELLES.
+
+    Juste avant l'instruction d'écriture visée (UPDATE final ou blocage),
+    DANS la transaction du runner : (1) un instant est lu (`before`) et le bail
+    est encore valide à cet instant ; (2) pause RÉELLE jusqu'à ce que l'horloge
+    PostgreSQL dépasse l'échéance enregistrée (constaté par une connexion
+    tierce, aucune date injectée) ; (3) contre-épreuve : la condition
+    `lease_expires_at > before` (un instant lu AVANT la pause, ancienne forme)
+    accepterait encore la ligne, `lease_expires_at > clock_timestamp()` non ;
+    (4) l'instruction RÉELLE est exécutée telle quelle. Les instructions
+    exécutées et leurs paramètres sont relevés."""
+
+    def __init__(self, monkeypatch, env, statement_name):
+        self.statement = getattr(_adapters, statement_name)
+        self.env, self.before, self.stale_accepts, self.fresh_accepts = env, None, None, None
+        self.executed = []
+        original = _adapters._first
+
+        def first(conn, sql, **params):
+            if sql == self.statement:
+                probe = sa.text("SELECT clock_timestamp() AS now, lease_expires_at FROM decryptage_turn_reservations "
+                                "WHERE id = :i")
+                now, expires = conn.execute(probe, {"i": params["id"]}).one()
+                assert now < expires, "le bail devait être encore valide avant la pause"
+                self.before = now
+                deadline = time.monotonic() + 20
+                while not self._expired(expires):
+                    assert time.monotonic() < deadline, "échéance jamais atteinte"
+                    time.sleep(0.05)
+                check = "SELECT count(*) FROM decryptage_turn_reservations WHERE id = :i AND lease_expires_at > "
+                self.stale_accepts = conn.execute(sa.text(check + ":b"), {"i": params["id"], "b": now}).scalar_one()
+                self.fresh_accepts = conn.execute(sa.text(check + "clock_timestamp()"),
+                                                  {"i": params["id"]}).scalar_one()
+            return original(conn, sql, **params)
+
+        monkeypatch.setattr(_adapters, "_first", first)
+        sa.event.listen(env.engine, "before_cursor_execute",
+                        lambda c, cur, st, parameters, *a: self.executed.append((" ".join(st.split()), parameters)))
+
+    def _expired(self, expires) -> bool:
+        with self.env.observer.connect() as conn:
+            return conn.execute(sa.text("SELECT clock_timestamp() > :e"), {"e": expires}).scalar_one()
+
+    def assert_refused_by_the_real_statement(self):
+        assert self.before is not None, "instruction visée jamais atteinte"
+        assert (self.stale_accepts, self.fresh_accepts) == (1, 0)  # la fenêtre existait bien, l'UPDATE la ferme
+        writes = [(st, params) for st, params in self.executed if st.startswith("WITH decision AS MATERIALIZED")]
+        assert len(writes) == 1, writes
+        statement, params = writes[0]
+        assert statement.startswith("WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) UPDATE "
+                                    "decryptage_turn_reservations SET ")
+        assert "lease_expires_at > decision.at" in statement and statement.count("clock_timestamp()") == 1
+        assert not [v for v in params.values() if isinstance(v, datetime)]  # aucun instant transmis par le code
+        assert "at" not in params
 
 
-def test_final_update_refused_after_release_rolls_back_every_orm_write(env, alice, monkeypatch):
+def _lease_expiring_soon(env, reservation_id, seconds=3):
+    env.force(reservation_id, f"lease_expires_at = clock_timestamp() + interval '{seconds} seconds'")
+
+
+def test_a_lease_expiring_after_a_pre_read_instant_never_finalizes(env, alice, monkeypatch):
+    """reserved -> finalized : un instant lu AVANT la pause n'autorise plus
+    l'UPDATE exécuté APRÈS l'expiration réelle ; ROLLBACK GLOBAL de toutes
+    les écritures du SAVEPOINT libéré ; B1 inchangée (état, epoch, compteur,
+    jeton)."""
     started(env, alice)
     lease, candidate = pending_contribution(env, alice)
+    _lease_expiring_soon(env, lease.reservation_id)
+    reserved = env.reservation(lease.reservation_id)
     before = env.full_snapshot()
-    _late_clock(monkeypatch)
+    window = ExpiresBeforeTheWrite(monkeypatch, env, "_FINALIZE_RESERVATION")
     log = _statements_log(env.engine)
     outcome = env.finalize(alice, candidate)
     assert (outcome.status, outcome.value) == (REVISION_CONFLICT, None)  # jamais un objet LeaseStale committé
+    window.assert_refused_by_the_real_statement()
     # Le SAVEPOINT avait été LIBÉRÉ : livraison, lien, contribution, UserStatement,
     # progression écrits... puis annulés par le ROLLBACK de la transaction externe.
     assert any(s.startswith("RELEASE SAVEPOINT") for s in log)
     assert any(s.startswith("INSERT INTO user_statements") for s in log)
-    assert env.full_snapshot() == before
-    assert env.reservation(lease.reservation_id)["state"] == "reserved"
+    assert any(s.startswith("INSERT INTO assistant_deliveries") for s in log)
+    assert env.full_snapshot() == before  # aucune livraison, capture ni progression durable
+    row = env.reservation(lease.reservation_id)
+    assert {k: row[k] for k in ("state", "lease_epoch", "attempts_used", "lease_token_hash", "lease_expires_at",
+                                "assistant_delivery_id", "finalized_at", "resolved_ticker", "xmin")} == {
+        k: reserved[k] for k in ("state", "lease_epoch", "attempts_used", "lease_token_hash", "lease_expires_at",
+                                 "assistant_delivery_id", "finalized_at", "resolved_ticker", "xmin")}
+    assert row["state"] == "reserved"
+
+
+def test_the_same_pause_without_expiry_still_finalizes(env, alice, monkeypatch):
+    """Contrôle : même instrumentation, bail encore valide au moment de
+    l'écriture -> finalisation normale (la régression ne refuse pas tout)."""
+    started(env, alice)
+    lease, candidate = pending_contribution(env, alice)
+    executed = []
+    sa.event.listen(env.engine, "before_cursor_execute",
+                    lambda c, cur, st, parameters, *a: executed.append(" ".join(st.split())))
+    done = finalized(env, alice, candidate)
+    [write] = [st for st in executed if st.startswith("WITH decision AS MATERIALIZED")]
+    assert "state = 'finalized'" in write
+    row = env.reservation(lease.reservation_id)
+    assert row["state"] == "finalized" and row["finalized_at"] == row["updated_at"]
+    assert row["assistant_delivery_id"] == done.assistant_delivery_id
 
 
 def test_final_update_matching_no_row_is_a_global_rollback(env, alice, monkeypatch):
@@ -682,13 +769,29 @@ def test_a_preexisting_legacy_delivery_is_never_adopted_and_blocks(env, alice, s
     assert [d["id"] for d in after["assistant_deliveries"] if d["id"] == legacy_id]
 
 
-def test_a_collision_whose_lease_expired_before_the_block_commits_nothing(env, alice, monkeypatch):
-    _, lease, candidate = env.generate(alice, next_turn())
-    _legacy_delivery(env, candidate, "f" * 64)
+def test_a_collision_whose_lease_expires_after_a_pre_read_instant_is_never_blocked(env, alice, monkeypatch):
+    """reserved -> blocked / legacy_collision : gagnant prouvé, mais bail
+    expiré AVANT l'instruction de blocage (un instant lu avant la pause ne
+    l'autorise plus) : rien n'est committé, B1 inchangée, la livraison legacy
+    n'est ni adoptée ni modifiée."""
+    started(env, alice)
+    lease, candidate = pending_contribution(env, alice)
+    legacy_id = _legacy_delivery(env, candidate, "f" * 64)
+    _lease_expiring_soon(env, lease.reservation_id)
+    reserved = env.reservation(lease.reservation_id)
     before = env.full_snapshot()
-    _late_clock(monkeypatch)
-    assert env.finalize(alice, candidate).status == REVISION_CONFLICT
-    assert env.full_snapshot() == before and env.reservation(lease.reservation_id)["state"] == "reserved"
+    window = ExpiresBeforeTheWrite(monkeypatch, env, "_BLOCK_PROVEN_COLLISION")
+    outcome = env.finalize(alice, candidate)
+    assert (outcome.status, outcome.value) == (REVISION_CONFLICT, None)
+    window.assert_refused_by_the_real_statement()
+    assert "blocked_reason = 'legacy_collision'" in [st for st, _ in window.executed
+                                                     if st.startswith("WITH decision AS MATERIALIZED")][0]
+    assert env.full_snapshot() == before  # aucune livraison F2, aucun lien, aucune progression
+    row = env.reservation(lease.reservation_id)
+    assert (row["state"], row["blocked_reason"], row["lease_epoch"], row["attempts_used"], row["lease_token_hash"],
+            row["xmin"]) == ("reserved", None, reserved["lease_epoch"], reserved["attempts_used"],
+                             reserved["lease_token_hash"], reserved["xmin"])
+    assert legacy_id in [d["id"] for d in env.delivery_rows()]  # legacy intacte (empreinte : xmin inchangé)
 
 
 def test_an_unproven_collision_is_never_committed(env, alice, monkeypatch):
@@ -744,7 +847,8 @@ def test_no_lease_secret_in_logs_views_or_errors(env, alice, monkeypatch, caplog
     secrets = (lease.token.reveal().hex(), lease.token.digest())
     outcomes = [env.finalize(alice, candidate), env.finalize(alice, candidate)]  # finalisé puis reconnu
     _, other_lease, other = env.generate(alice, next_turn())
-    _late_clock(monkeypatch)
+    monkeypatch.setattr(_adapters, "_FINALIZE_RESERVATION",
+                        _adapters._FINALIZE_RESERVATION.replace("WHERE id = :id", "WHERE FALSE AND id = :id"))
     outcomes.append(env.finalize(alice, other))  # échec global après RELEASE
     secrets += (other_lease.token.reveal().hex(), other_lease.token.digest())
     texts = [caplog.text] + [repr(o) for o in outcomes] + [repr(c.FinalizeDecryptageCandidate(candidate)),

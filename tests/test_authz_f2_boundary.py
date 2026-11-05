@@ -221,9 +221,12 @@ WRITES = {
     "_GRANT_LEASE": "UPDATE decryptage_turn_reservations SET ",
     "_BLOCK_RESERVATION": "UPDATE decryptage_turn_reservations SET ",
     "_RELEASE_LEASE": "UPDATE decryptage_turn_reservations SET ",
-    # R1 PR 9-C1-B : finalisation et blocage d'une collision PROUVÉE.
-    "_FINALIZE_RESERVATION": "UPDATE decryptage_turn_reservations SET ",
-    "_BLOCK_PROVEN_COLLISION": "UPDATE decryptage_turn_reservations SET ",
+    # R1 PR 9-C1-B : finalisation et blocage d'une collision PROUVÉE ; l'instant
+    # de décision est capturé PAR l'instruction (CTE MATERIALIZED, audit P1).
+    "_FINALIZE_RESERVATION": "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+                             "UPDATE decryptage_turn_reservations SET ",
+    "_BLOCK_PROVEN_COLLISION": "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+                               "UPDATE decryptage_turn_reservations SET ",
 }
 # R1 PR 9-B1 : instructions fermées, chacune avec son filtre propriétaire exact.
 PR9B1_FILTERS = {
@@ -242,16 +245,19 @@ PR9B1_FILTERS = {
                           "AND attempts_used = :a ",
     "_RELEASE_LEASE": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
                       "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at ",
-    # R1 PR 9-C1-B : jeton, échéance (T_finalize), identité COMPLÈTE et intention
-    # vérifiés DANS l'instruction ; jamais une livraison déjà liée.
-    "_FINALIZE_RESERVATION": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
-                             "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at "
+    # R1 PR 9-C1-B : jeton, échéance (T_finalize capturé par l'instruction),
+    # identité COMPLÈTE et intention vérifiés DANS l'instruction ; jamais une
+    # livraison déjà liée.
+    "_FINALIZE_RESERVATION": "FROM decision "
+                             "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                             "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
                              "AND assistant_delivery_id IS NULL AND blocked_reason IS NULL AND finalized_at IS NULL "
                              "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
                              "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
                              "AND request_fingerprint = :f ",
-    "_BLOCK_PROVEN_COLLISION": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
-                               "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at "
+    "_BLOCK_PROVEN_COLLISION": "FROM decision "
+                               "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                               "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
                                "AND assistant_delivery_id IS NULL "
                                "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
                                "AND delivery_ordinal = :o AND fingerprint_version = :fv "
@@ -278,14 +284,24 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         "_INSERT_RESERVATION[blocked]", "_GRANT_LEASE", "_BLOCK_RESERVATION", "_RELEASE_LEASE",
         # R1 PR 9-B2 : UNE instruction de lecture de préparation.
         "_PREPARATION_CONTEXT",
-        # R1 PR 9-C1-B : horloge de décision finale, finalisation, blocage prouvé.
-        "_FINALIZATION_DECISION_CLOCK", "_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"}
+        # R1 PR 9-C1-B : finalisation et blocage prouvé, chacun capturant son
+        # instant de décision (_DECISION_CLOCK, fragment de CTE).
+        "_DECISION_CLOCK", "_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"}
     # Seules requêtes sans user_id : l'isolation active de la transaction et
     # (R1 PR 9-B1) l'horloge T_lease_decision lue après le verrou.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
     assert statements.pop("_LEASE_DECISION_CLOCK") == "SELECT clock_timestamp()"
-    # R1 PR 9-C1-B : T_finalize, UNE instruction distincte après RELEASE SAVEPOINT.
-    assert statements.pop("_FINALIZATION_DECISION_CLOCK") == "SELECT clock_timestamp()"
+    # R1 PR 9-C1-B (audit P1) : AUCUNE horloge lue séparément avant l'écriture ;
+    # T_finalize est UNE évaluation de clock_timestamp() DANS chaque UPDATE,
+    # réutilisée pour l'échéance et les horodatages ; aucun instant en paramètre.
+    assert statements.pop("_DECISION_CLOCK") == "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+    for name in ("_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"):
+        sql = statements[name]
+        assert sql.count("clock_timestamp()") == 1 and ":at" not in sql, name
+        assert "lease_expires_at > decision.at" in sql and "updated_at = decision.at" in sql, name
+        assert sql.endswith(", decision.at AS decided_at"), name
+    assert "finalized_at = decision.at" in statements["_FINALIZE_RESERVATION"]
+    assert "_FINALIZATION_DECISION_CLOCK" not in vars(_adapters) and "_finalization_clock" not in vars(_adapters)
     _check_preparation_statement(statements.pop("_PREPARATION_CONTEXT"))
     for name in PR9B1_FILTERS:
         sql = statements.pop(name)

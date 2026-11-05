@@ -41,7 +41,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _record_attempt_failure : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
 | _finalize_candidate (R1 PR 9-C1-B) : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
 | _FinalizationReadPort.read_preparation (R1 PR 9-C1-B) | _PREPARATION_CONTEXT (même instruction que B2) | user_id serveur ET réservation / conversation / ticker FIGÉS dans le port | - (dans le SAVEPOINT C1, réservation déjà verrouillée) |
-| _finalize_reservation (R1 PR 9-C1-B) | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch ET compteur ET jeton haché ET échéance > T_finalize ET identité complète ET aucune livraison liée | (ligne déjà verrouillée) |
+| _finalize_reservation (R1 PR 9-C1-B) | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch ET compteur ET jeton haché ET échéance > T_finalize (clock_timestamp() capturé PAR l'UPDATE) ET identité complète ET aucune livraison liée | (ligne déjà verrouillée) |
 | _block_proven_collision (R1 PR 9-C1-B) | assistant_deliveries (preuve, identité complète du tour) puis decryptage_turn_reservations (mêmes conditions que la finalisation) | user_id | (ligne déjà verrouillée) |
 | _recognize_finalized (R1 PR 9-C1-B) | assistant_deliveries (_LINKED_DELIVERY) | id ET user_id | - |
 | _read_preparation_context (R1 PR 9-B2) | UNE instruction : decryptage_turn_reservations, users, conversation_identities, assistant_deliveries + decryptage_cognitive_links (ancre), cognitive_events, analysis_sessions, analysis_facts, user_statements, investment_theses | user_id serveur (unique paramètre :u, propagé par la CTE o) ET id de réservation / conversation / ticker résolu | - (plan READ, aucune écriture) |
@@ -191,9 +191,9 @@ transaction) ou _FinalizationReadPort (+ UNE relecture B2 dans le SAVEPOINT
 C1). Ordre : réservation propre FOR UPDATE -> T_lease_decision -> identité
 du tour -> HMAC d'intention (version de clé enregistrée) -> finalized :
 reconnaissance terminale (aucune écriture) ; blocked : vue terminale ;
-reserved : epoch, jeton, échéance -> pont -> après RELEASE : T_finalize puis
-UNIQUE UPDATE reserved -> finalized (aucune ligne : CONFLICT, ROLLBACK global
-de TOUTES les écritures ORM) ; ou issue de l'annulation locale (vue métier,
+reserved : epoch, jeton, échéance -> pont -> après RELEASE : UNIQUE UPDATE
+reserved -> finalized, qui capture lui-même T_finalize (aucune ligne :
+CONFLICT, ROLLBACK global de TOUTES les écritures ORM) ; ou issue de l'annulation locale (vue métier,
 blocage d'une collision PROUVÉE, ou sentinelle de ROLLBACK).
 """
 import uuid
@@ -1391,35 +1391,42 @@ def _preparation_outcome(conn, keys, user_id: str, command):
 # (plan DECRYPTAGE_MUTATION inchangé, trousseau Décrypter dédié)
 # --------------------------------------------------------------------------
 
-# T_finalize : UNE instruction distincte, évaluée après RELEASE SAVEPOINT et
-# utilisée à la fois pour l'échéance (lease_expires_at > :at) et pour les
-# horodatages écrits (finalized_at, updated_at).
-_FINALIZATION_DECISION_CLOCK = "SELECT clock_timestamp()"
+# T_finalize (correctif d'audit P1, PR #233) : l'instant de décision est
+# capturé PAR l'instruction d'écriture elle-même — CTE MATERIALIZED (une
+# fonction volatile : UNE évaluation de clock_timestamp(), jamais inlinée),
+# réutilisée pour l'échéance (lease_expires_at > decision.at) ET pour les
+# horodatages écrits. Aucun instant n'est lu avant ni transmis par le code :
+# un bail échu au moment de l'écriture n'est jamais finalisé ni bloqué, même
+# si une lecture antérieure le voyait encore valide. Ligne déjà verrouillée
+# FOR UPDATE par cette transaction : aucune attente entre la capture et
+# l'écriture.
+_DECISION_CLOCK = "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
 # Seule mutation de finalisation : reserved -> finalized, après RELEASE.
 # Efface les champs actifs du bail ; ne réécrit jamais l'intention.
-_FINALIZE_RESERVATION = ("UPDATE decryptage_turn_reservations SET state = 'finalized', assistant_delivery_id = :d, "
-                         "resolved_ticker = :rt, finalized_at = :at, updated_at = :at, lease_token_hash = NULL, "
-                         "lease_expires_at = NULL, retry_not_before_at = NULL "
+_FINALIZE_RESERVATION = (_DECISION_CLOCK + "UPDATE decryptage_turn_reservations SET state = 'finalized', "
+                         "assistant_delivery_id = :d, resolved_ticker = :rt, finalized_at = decision.at, "
+                         "updated_at = decision.at, lease_token_hash = NULL, lease_expires_at = NULL, "
+                         "retry_not_before_at = NULL FROM decision "
                          "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
-                         "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at "
+                         "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
                          "AND assistant_delivery_id IS NULL AND blocked_reason IS NULL AND finalized_at IS NULL "
                          # identité COMPLÈTE et intention revérifiées dans l'instruction
                          "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
                          "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
                          "AND request_fingerprint = :f "
-                         + _RESERVATION_RETURNING)
+                         + _RESERVATION_RETURNING + ", decision.at AS decided_at")
 # Blocage d'une collision legacy PROUVÉE : jeton et échéance vérifiés DANS
 # l'instruction (contrairement à _BLOCK_RESERVATION de B1) ; motif existant.
-_BLOCK_PROVEN_COLLISION = ("UPDATE decryptage_turn_reservations SET state = 'blocked', "
+_BLOCK_PROVEN_COLLISION = (_DECISION_CLOCK + "UPDATE decryptage_turn_reservations SET state = 'blocked', "
                            "blocked_reason = 'legacy_collision', lease_token_hash = NULL, lease_expires_at = NULL, "
-                           "retry_not_before_at = NULL, updated_at = :at "
+                           "retry_not_before_at = NULL, updated_at = decision.at FROM decision "
                            "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
-                           "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at "
+                           "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
                            "AND assistant_delivery_id IS NULL "
                            "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
                            "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
                            "AND request_fingerprint = :f "
-                           + _RESERVATION_RETURNING)
+                           + _RESERVATION_RETURNING + ", decision.at AS decided_at")
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -1575,13 +1582,6 @@ def _transaction_probe(conn, ctx) -> _TransactionProbe:
     return _TransactionProbe(_CAPABILITY, conn, ctx.principal.user_id)
 
 
-def _finalization_clock(conn) -> datetime:
-    at = conn.execute(sa.text(_FINALIZATION_DECISION_CLOCK)).scalar_one()
-    if type(at) is not datetime or at.tzinfo is None:
-        raise AdapterInvariantBroken("horloge PostgreSQL illisible")
-    return at
-
-
 def _identity_params(user_id: str, res: _Reservation) -> dict:
     return {"id": res.id, "u": user_id, "e": res.lease_epoch, "a": res.attempts_used, "k": res.conversation_key,
             "s": dfp.SURFACE, "t": res.source_user_turn_id, "o": dfp.DELIVERY_ORDINAL,
@@ -1622,20 +1622,20 @@ def _recognize_finalized(conn, user_id: str, res: _Reservation, candidate):
 def _finalize_reservation(conn, user_id: str, res: _Reservation, intent: _TurnIntent, applied):
     """Après RELEASE SAVEPOINT : UNIQUE mutation reserved -> finalized,
     conditionnelle (identité complète, état, epoch, compteur, jeton,
-    échéance à T_finalize, aucune livraison liée). Aucune ligne : CONFLICT,
+    échéance à T_finalize capturé PAR l'UPDATE, aucune livraison liée).
+    Aucune ligne : CONFLICT,
     donc ROLLBACK GLOBAL du runner — livraison, lien, contribution,
     progression, UserStatements, thèse et faits écrits dans le SAVEPOINT
     libéré disparaissent avec la transaction externe."""
-    at = _finalization_clock(conn)
-    row = _first(conn, _FINALIZE_RESERVATION, d=applied.assistant_turn_id, rt=intent.resolved_ticker, at=at,
+    row = _first(conn, _FINALIZE_RESERVATION, d=applied.assistant_turn_id, rt=intent.resolved_ticker,
                  h=intent.lease_token.digest(), **_identity_params(user_id, res))
     if row is None:
         return CONFLICT
     out = _reservation(row, user_id)
     if (out.id, out.state, out.lease_epoch, out.attempts_used, out.assistant_delivery_id, out.resolved_ticker,
-            out.finalized_at, out.lease_token_hash, out.lease_expires_at) != (
+            out.lease_token_hash, out.lease_expires_at) != (
             res.id, dr.FINALIZED, res.lease_epoch, res.attempts_used, applied.assistant_turn_id, intent.resolved_ticker,
-            at, None, None):
+            None, None) or type(row["decided_at"]) is not datetime or out.finalized_at != row["decided_at"]:
         raise AdapterInvariantBroken("finalisation écrite inattendue")
     return dfin.DecryptageFinalized(res.id, applied.assistant_turn_id)
 
@@ -1645,17 +1645,17 @@ def _block_proven_collision(conn, user_id: str, res: _Reservation, intent: _Turn
     SAVEPOINT réutilisé) : livraison gagnante relue par l'identité complète
     du tour, filtrée par le propriétaire ; collision non prouvée : 503.
     Puis blocage conditionnel (epoch, compteur, jeton, échéance à
-    T_finalize, identité) ; bail expiré ou capacité périmée : CONFLICT,
+    T_finalize capturé PAR l'UPDATE, identité) ; bail expiré ou capacité
+    périmée : CONFLICT,
     rien n'est committé. LegacyCollisionBlocked seulement si le blocage est
     écrit (et rendu après COMMIT par le runner)."""
     if not _legacy_delivery(conn, _turn(user_id, res.conversation_key, res.source_user_turn_id)):
         raise DecryptageUnavailable("collision legacy non prouvée", "decryptage_collision_unproven")
-    at = _finalization_clock(conn)
-    row = _first(conn, _BLOCK_PROVEN_COLLISION, at=at, h=intent.lease_token.digest(), **_identity_params(user_id, res))
+    row = _first(conn, _BLOCK_PROVEN_COLLISION, h=intent.lease_token.digest(), **_identity_params(user_id, res))
     if row is None:
         return CONFLICT
     out = _mutated(row, user_id, res, dr.BLOCKED, res.lease_epoch, res.attempts_used)
-    if out.blocked_reason != dr.LEGACY_COLLISION:
+    if out.blocked_reason != dr.LEGACY_COLLISION or type(row["decided_at"]) is not datetime:
         raise AdapterInvariantBroken("blocage écrit inattendu")
     return dfin.LegacyCollisionBlocked(res.id)
 
