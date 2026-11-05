@@ -58,9 +58,21 @@ conversation d'un autre utilisateur : ABSENT (NOT_FOUND, rien n'est
 écrit). Toute autre erreur métier ou PostgreSQL est propagée : le runner
 annule tout (UNAVAILABLE), jamais converti en succès.
 
-Aucune commande du registre de production n'atteint ce module (registre à
-quatorze commandes inchangé) : PR 9-A ne l'exerce que par le banc d'essai
-isolé des tests. api.py ne l'importe pas (F2 dormant).
+PR 9-A : aucune commande du registre de production n'atteignait ce module
+(banc d'essai isolé des tests). R1 PR 9-C1-B : la commande dormante
+FinalizeDecryptageCandidate l'atteint par les adaptateurs SQL (UNIQUE
+importateur) et la troisième opération, CandidateFinalization. api.py ne
+l'importe pas (F2 dormant).
+
+R1 PR 9-C1-B — capacités et contrats communs (F-01) : ce module n'importe
+plus core/authz_f2/_adapters.py (exceptions, sentinelles et contrats dans
+core/authz_f2/_bridge_contracts.py). Chaque opération reçoit une capacité
+SCELLÉE construite par les adaptateurs SQL pour CETTE connexion, CETTE
+transaction et CE principal (CAPABILITIES) : TransactionProbe pour les deux
+opérations historiques, FinalizationReadPort pour la finalisation. Toutes
+les sondes de transaction passent par elle (le SQL reste dans les
+adaptateurs) ; la relecture B2 n'est valide qu'UNE fois, dans le SAVEPOINT
+C1 lié.
 
 R1 PR 9-C1-A — primitives PRIVÉES de la future finalisation F2 (phases 3, 5,
 6 et 7 du protocole figé), DORMANTES : aucune n'est atteinte par OPERATIONS,
@@ -99,9 +111,12 @@ from sqlalchemy.orm import Session
 from core import assistant_delivery as ad
 from core import decryptage_cognitive_runtime as dcr
 from core import decryptage_progress as dp
-from core.authz_f2 import _adapters
+from core.authz_f2 import _bridge_contracts as contracts
 from core.authz_f2 import commands as c
+from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
+from core.authz_f2 import decryptage_finalization as dfin
+from core.authz_f2 import decryptage_method_selection as dms
 from core.authz_f2.principal import AuthorizedContext
 from core.models import AnalysisSession, AssistantDelivery, CognitiveEvent, DecryptageCognitiveLink, SupportTrace
 
@@ -111,23 +126,24 @@ logger = logging.getLogger("oryx.authz_f2.decryptage_bridge")
 # les tests : un seul tour assistant par tour utilisateur, méthode guidée.
 DELIVERY_ORDINAL = 1
 CONSTRUCTION_THESE = "construction_these"
+# R1 PR 9-C1-B : valeurs de livraison reconnues par la reconnaissance
+# terminale des adaptateurs SQL (qui n'importent pas core.assistant_delivery).
+DELIVERY_STATUSES = (ad.PENDING, ad.DELIVERED)
+DELIVERY_SCHEMA_VERSION = ad.ASSISTANT_DELIVERY_SCHEMA_VERSION
 _FINGERPRINT_CHARS = frozenset("0123456789abcdef")
 
 
-class TransactionOwnershipViolation(_adapters.AdapterInvariantBroken):
+class TransactionOwnershipViolation(contracts.AdapterInvariantBroken):
     """Un service a tenté de piloter la transaction du runner."""
 
     alert = "decryptage_bridge_transaction_violation"
 
 
-class TransactionLost(_adapters.AdapterInvariantBroken):
-    """La transaction externe n'est plus la transaction active du runner :
-    aucun succès ne peut être rendu."""
-
-    alert = "decryptage_bridge_transaction_lost"
+# R1 PR 9-C1-B : défini une seule fois dans les contrats communs (même objet).
+TransactionLost = contracts.TransactionLost
 
 
-class ProvenanceIncoherent(_adapters.AdapterInvariantBroken):
+class ProvenanceIncoherent(contracts.AdapterInvariantBroken):
     """Lien, event ou AnalysisSession d'une livraison propre qui
     n'appartiennent pas au même propriétaire : jamais verrouillés."""
 
@@ -174,6 +190,13 @@ class _BridgeSession(Session):
 
     def _release(self):
         super().close()
+
+    def _materialize_savepoint(self):
+        """R1 PR 9-C1-B : un SAVEPOINT de Session est émis PARESSEUSEMENT (au
+        premier usage de la Session). Le SAVEPOINT C1 est matérialisé dès son
+        ouverture, pour qu'aucune lecture faite sur la connexion du runner (sonde,
+        relecture B2) ne puisse s'exécuter hors de lui. Réservé au pont."""
+        return super().connection()
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +309,7 @@ class DeliveryAcknowledged:
 # Points d'entrée privés (Session du pont, user_id du principal autorisé)
 # --------------------------------------------------------------------------
 
-def _finalize_turn(db, user_id: str, operation: TurnFinalization):
+def _finalize_turn(db, user_id: str, operation: TurnFinalization, probe):
     payload = json.loads(operation.response_payload)
     facts = None if operation.financial_snapshot is None else json.loads(operation.financial_snapshot)
     try:
@@ -299,7 +322,7 @@ def _finalize_turn(db, user_id: str, operation: TurnFinalization):
             delivery_schema_version=ad.ASSISTANT_DELIVERY_SCHEMA_VERSION,
         )
     except ad.AssistantDeliveryOwnershipConflict:
-        return _adapters.ABSENT  # conversation d'un autre utilisateur : rien n'est écrit (ROLLBACK)
+        return contracts.ABSENT  # conversation d'un autre utilisateur : rien n'est écrit (ROLLBACK)
     # Même règle que la route historique : seul l'appel qui crée la livraison
     # capture le tour et fait progresser le produit.
     link = dcr.capture_user_turn(db, delivery=delivery, ticker=operation.ticker,
@@ -378,12 +401,12 @@ def _require_owned_provenance(db, delivery, user_id: str) -> None:
             raise ProvenanceIncoherent("AnalysisSession de provenance d'un autre propriétaire ou introuvable")
 
 
-def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement):
+def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement, probe):
     try:
         delivery = ad.lock_owned_delivery(db, assistant_turn_id=operation.assistant_turn_id, user_id=user_id,
                                           conversation_key=operation.conversation_key)
     except ad.AssistantDeliveryNotFound:
-        return _adapters.ABSENT  # absente, étrangère ou autre conversation : indiscernables, aucun verrou
+        return contracts.ABSENT  # absente, étrangère ou autre conversation : indiscernables, aucun verrou
     _require_owned_provenance(db, delivery, user_id)
     link = dcr.capture_delivered_response(db, delivery=delivery)
     delivery = ad.acknowledge_locked_delivery(db, delivery=delivery, user_id=user_id)
@@ -391,73 +414,39 @@ def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement):
     return DeliveryAcknowledged(delivery.id, delivery.status, link.response_action if link is not None else None)
 
 
-# Inventaire FERMÉ : type exact d'opération -> point d'entrée privé.
-OPERATIONS = MappingProxyType({
-    TurnFinalization: _finalize_turn,
-    DeliveryAcknowledgement: _acknowledge,
-})
-
-
-def _require_live(conn, outer) -> None:
-    """La transaction du runner est toujours LA transaction active, et
-    PostgreSQL l'accepte encore : une erreur SQL avalée la laisse avortée
-    (SQLAlchemy la croit active ; mesuré : son COMMIT devient alors un
-    ROLLBACK silencieux, sans erreur psycopg2). La sonde réutilise
-    l'instruction fermée de l'isolation, qui échoue (InFailedSqlTransaction)
-    sur une transaction avortée et revérifie READ COMMITTED."""
-    if outer is None or not outer.is_active or conn.get_transaction() is not outer:
-        raise TransactionLost("transaction externe inactive ou remplacée")
-    _adapters.require_read_committed(conn, c.DECRYPTAGE_MUTATION)
-
-
-def _execute(conn, ctx, operation):
-    """Exécute UNE opération de l'inventaire dans la transaction du runner
-    (adaptateur d'exécution, après T_authorization). Rend une vue immuable,
-    ou ABSENT ; toute exception est propagée au runner (ROLLBACK)."""
-    entry = OPERATIONS.get(type(operation))
-    if entry is None:
-        raise UnknownOperation("opération hors de l'inventaire fermé du pont")
-    if type(ctx) is not AuthorizedContext:
-        raise TypeError("pont : AuthorizedContext attendu")
-    outer = conn.get_transaction()
-    _require_live(conn, outer)
-    session = _BridgeSession(conn)
-    try:
-        result = entry(session, ctx.principal.user_id, operation)  # flush final explicite, puis vue
-        _require_live(conn, outer)
-    except BaseException:
-        try:
-            session._release()
-        except Exception as cleanup:  # jamais au détriment de l'échec d'origine
-            logger.warning("decryptage_bridge cleanup_failed error=%s", type(cleanup).__name__)
-        raise
-    session._release()
-    return result
-
-
 # --------------------------------------------------------------------------
 # R1 PR 9-C1-A — primitives privées de la future finalisation F2 (dormantes)
 # --------------------------------------------------------------------------
 
-# Motifs FERMÉS d'annulation LOCALE du SAVEPOINT C1 (la transaction du runner
-# continue). C1-A ne connaît que l'écart de revalidation du contexte
-# cognitif préparé ; tout autre motif sera ajouté explicitement par C1-B.
+# Motifs FERMÉS et PRIVÉS d'annulation LOCALE du SAVEPOINT C1 (aucun statut
+# public nouveau). C1-A : context_changed ; C1-B (freeze V1.2.1) : les
+# cinq autres. Leur traitement après l'annulation appartient aux adaptateurs
+# SQL : context_changed / preparation_refused -> vue métier sans mutation ;
+# legacy_collision -> relecture et blocage conditionnel prouvé ; lease_stale
+# -> CONFLICT, intent_mismatch -> IDEMPOTENCY_CONFLICT, not_found -> ABSENT
+# (ROLLBACK global du runner).
 CONTEXT_CHANGED = "context_changed"
-LOCAL_ROLLBACK_REASONS = (CONTEXT_CHANGED,)
+PREPARATION_REFUSED = "preparation_refused"
+LEGACY_COLLISION = "legacy_collision"
+LEASE_STALE = "lease_stale"
+INTENT_MISMATCH = "intent_mismatch"
+NOT_FOUND = "not_found"
+LOCAL_ROLLBACK_REASONS = (CONTEXT_CHANGED, PREPARATION_REFUSED, LEGACY_COLLISION, LEASE_STALE, INTENT_MISMATCH,
+                          NOT_FOUND)
 # Classements V2 qu'une décision préparée peut porter (jamais V1).
 _PREPARED_INPUT_ACTIONS = (dcr.NO_OPEN_EVENT, dcr.NO_USER_CONTRIBUTION, dcr.CONTRIBUTION_APPENDED,
                            dcr.CONTEXT_SWITCHED)
 _STEP_MAX_CHARS = 32
 
 
-class PendingWritesBeforeSavepoint(_adapters.AdapterInvariantBroken):
+class PendingWritesBeforeSavepoint(contracts.AdapterInvariantBroken):
     """Écriture ORM non flushée à l'ouverture du SAVEPOINT C1 (begin_nested()
     la flusherait HORS du SAVEPOINT) : refus, jamais un flush implicite."""
 
     alert = "decryptage_bridge_pending_writes"
 
 
-class PreparedTurnUnusable(_adapters.AdapterInvariantBroken):
+class PreparedTurnUnusable(contracts.AdapterInvariantBroken):
     """Décision préparée ou SAVEPOINT C1 inutilisable : hors du SAVEPOINT
     courant, après une annulation locale, seconde application, autre
     principal, préparation qui écrit, construction directe."""
@@ -470,11 +459,16 @@ class _LocalRollback(Exception):
     du pont pour un motif FERMÉ (LOCAL_ROLLBACK_REASONS). Toute autre
     exception annule le SAVEPOINT puis est propagée (refus global)."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, detail=None):
         if type(reason) is not str or reason not in LOCAL_ROLLBACK_REASONS:
             raise ValueError("motif d'annulation locale hors vocabulaire fermé")
+        # Seul preparation_refused porte un détail : le motif B2 fermé.
+        if (reason == PREPARATION_REFUSED) != (detail is not None) or (
+                detail is not None and (type(detail) is not str or detail not in dc.REFUSAL_REASONS)):
+            raise ValueError("détail d'annulation locale hors contrat")
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail
 
 
 _OPEN, _RELEASED, _ROLLED_BACK, _FAILED = "open", "released", "rolled_back", "failed"
@@ -485,10 +479,11 @@ class _SavepointScope:
     (RELEASE), annulé localement (motif fermé) ou en échec (exception
     propagée). Non sérialisable ; aucune donnée métier."""
 
-    __slots__ = ("_db", "_transaction", "_state", "_reason")
+    __slots__ = ("_db", "_transaction", "_savepoint", "_state", "_reason", "_detail")
 
     def __init__(self, db):
-        self._db, self._transaction, self._state, self._reason = db, None, _OPEN, None
+        self._db, self._transaction, self._savepoint = db, None, None
+        self._state, self._reason, self._detail = _OPEN, None, None
 
     def __reduce_ex__(self, protocol):
         raise TypeError("SAVEPOINT C1 non sérialisable")
@@ -508,12 +503,21 @@ class _SavepointScope:
     def reason(self):
         return self._reason
 
+    @property
+    def detail(self):
+        return self._detail
+
+    @property
+    def is_open(self) -> bool:
+        return self._state == _OPEN
+
     def _require_current(self, db) -> None:
         """Ce SAVEPOINT est ouvert, actif et le SAVEPOINT courant de CETTE
         Session (aucun autre ouvert au-dessus)."""
-        transaction = self._transaction
+        transaction, savepoint = self._transaction, self._savepoint
         if (self._state != _OPEN or db is not self._db or transaction is None or not transaction.is_active
-                or db.get_nested_transaction() is not transaction):
+                or db.get_nested_transaction() is not transaction or savepoint is None or not savepoint.is_active
+                or db.bind.get_nested_transaction() is not savepoint):
             raise PreparedTurnUnusable("hors du SAVEPOINT C1 courant")
 
 
@@ -521,17 +525,8 @@ def _has_pending_writes(db) -> bool:
     return bool(db.new or db.dirty or db.deleted)
 
 
-def _require_session_live(db) -> None:
-    """Sonde intermédiaire : la transaction du runner (connexion de la
-    Session du pont) est active et PostgreSQL l'accepte encore (même sonde
-    que _require_live, qui échoue sur une transaction ou une sous-transaction
-    avortée)."""
-    conn = db.bind
-    _require_live(conn, conn.get_transaction())
-
-
 @contextmanager
-def _business_savepoint(db):
+def _business_savepoint(db, probe):
     """SAVEPOINT métier C1 (phases 3 et 8), sur la Session du pont, dans la
     transaction du runner ; jamais imbriqué dans un autre SAVEPOINT.
 
@@ -544,35 +539,46 @@ def _business_savepoint(db):
     seulement chargés), sonde ; scope.rolled_back, la transaction du runner
     continue. Toute autre exception : ROLLBACK TO SAVEPOINT, scope en échec,
     exception propagée (le runner annule tout). Jamais de COMMIT ni de
-    ROLLBACK global ; les SAVEPOINT des services s'imbriquent dedans."""
+    ROLLBACK global ; les SAVEPOINT des services s'imbriquent dedans.
+
+    R1 PR 9-C1-B : chaque sonde passe par la capacité TransactionProbe de
+    l'opération (SQL dans les adaptateurs, jamais ici), liée à la connexion
+    de CETTE Session. Si la capacité est le FinalizationReadPort de la
+    finalisation, il est lié UNE fois à ce SAVEPOINT (bind_scope) : sa
+    relecture B2 n'est valide que dans ce SAVEPOINT ouvert et courant."""
     if type(db) is not _BridgeSession:
         raise TypeError("SAVEPOINT C1 : Session du pont attendue")
+    _require_probe(probe, db.bind)
     if db.get_nested_transaction() is not None:
         raise PreparedTurnUnusable("SAVEPOINT C1 imbriqué dans un autre SAVEPOINT")
     if _has_pending_writes(db):
         raise PendingWritesBeforeSavepoint("écriture non flushée avant le SAVEPOINT C1")
-    _require_session_live(db)
+    probe.require_live()
     scope = _SavepointScope(db)
     try:
         with db.begin_nested() as transaction:
             scope._transaction = transaction
+            db._materialize_savepoint()  # SAVEPOINT émis MAINTENANT sur la connexion du runner
+            scope._savepoint = db.bind.get_nested_transaction()
+            if type(probe) is contracts.implementation(contracts.FinalizationReadPort):
+                probe.bind_scope(scope)  # association unique port <-> CE SAVEPOINT
             try:
                 yield scope
             except _LocalRollback:
-                _require_session_live(db)  # sous-transaction avortée : refus global, jamais une annulation locale
+                probe.require_live()  # sous-transaction avortée : refus global, jamais une annulation locale
                 raise
             db.flush()
     except _LocalRollback as refusal:
-        scope._state, scope._reason = _ROLLED_BACK, refusal.reason
+        scope._state, scope._reason, scope._detail = _ROLLED_BACK, refusal.reason, refusal.detail
         db.expunge_all()
-        _require_session_live(db)
+        probe.require_live()
         logger.info("decryptage_bridge savepoint=rolled_back reason=%s", refusal.reason)
         return
     except BaseException:
         scope._state = _FAILED
         raise
     scope._state = _RELEASED
-    _require_session_live(db)
+    probe.require_live()
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,3 +806,196 @@ def _apply_prepared_turn(db, scope, user_id: str, prepared, *, method_id, step_m
     return PreparedTurnApplied(decision.delivery.id, link.input_action,
                                progress.action if progress is not None else None,
                                decision.delivery.analysis_session_id)
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-C1-B — finalisation atomique d'un candidat B2 (troisième opération)
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CandidateFinalization:
+    """Opération PRIVÉE : finaliser UN candidat B2 déjà vérifié sous le
+    verrou de sa réservation par les adaptateurs SQL (HMAC, epoch, jeton,
+    échéance). Données pures : aucun user_id (principal autorisé), aucune
+    Session, connexion, fonction ni SQL."""
+    candidate: dcand.GeneratedDecryptageCandidate
+
+    def __post_init__(self):
+        c._revalidate_candidate(self.candidate)
+
+    def __repr__(self) -> str:
+        return f"CandidateFinalization({self.candidate!r})"
+
+
+@dataclass(frozen=True, slots=True)
+class FinalizationRolledBack:
+    """Vue fermée : SAVEPOINT C1 annulé localement pour un motif fermé ;
+    aucune écriture de la finalisation ne subsiste. Les adaptateurs SQL en
+    décident l'issue (vue métier, blocage prouvé ou ROLLBACK global)."""
+    reason: str
+    detail: object  # motif B2 fermé (preparation_refused) ou None
+
+    def __post_init__(self):
+        _LocalRollback(self.reason, self.detail)  # même validation fermée
+
+
+def _delivery_request_fingerprint(candidate) -> str:
+    """SHA-256 historique de la livraison (core.assistant_delivery.
+    decryptage_request_fingerprint) : identité SERVEUR, entrées ORIGINALES
+    normalisées du tour et niveau du snapshot du candidat (jamais le niveau
+    courant du profil). Distinct du HMAC d'intention B1 et de l'empreinte du
+    snapshot B2."""
+    return ad.decryptage_request_fingerprint(**candidate.delivery_fingerprint_inputs())
+
+
+def _exactly(exc, expected) -> bool:
+    return type(exc) is expected
+
+
+def _same_preparation(candidate, view, context) -> bool:
+    """Phase 6 complète : snapshot B2 RECONSTRUIT depuis la vue PostgreSQL
+    relue dans le SAVEPOINT (méthode recalculée par le sélecteur partagé
+    avec la génération B2) ET identique à celui du candidat (contenu
+    canonique ET empreinte), PUIS décision cognitive préparée compatible
+    avec ce snapshot. Les deux conditions sont exigées."""
+    turn, snapshot = candidate.turn, candidate.preparation
+    selection = dms.select_method(has_active_session=view.active_session is not None, question=turn.question,
+                                  context=turn.context, last_method_id=turn.last_method_id,
+                                  market_name=candidate.market.name, ticker=view.ticker)
+    rebuilt = dcand.build_snapshot(view, turn.ticker_input, selection.method_id, selection.basis)
+    if rebuilt.fingerprint != snapshot.fingerprint or rebuilt.canonical() != snapshot.canonical():
+        return False
+    return _cognitive_context_matches(context, ticker=snapshot.ticker, anchor=snapshot.anchor,
+                                      active_session=snapshot.active_session)
+
+
+def _finalize_candidate(db, user_id: str, operation: CandidateFinalization, probe):
+    """Phases 6 à 13 du protocole figé (les phases 1 à 5 et 14 à 17
+    appartiennent au runner et aux adaptateurs SQL) :
+
+    SAVEPOINT C1 -> claim_delivery provisoire (une livraison préexistante
+    n'est JAMAIS adoptée : created=False ou AssistantTurnIdentityCollision
+    -> annulation locale legacy_collision) -> Prepare (seules
+    AmbiguousActiveAnalysisSessions et StaleConversationContext deviennent
+    preparation_refused) -> UNE relecture B2 par le FinalizationReadPort
+    (lease_stale / preparation_refused) -> snapshot reconstruit et comparé
+    + décision cognitive compatible (sinon context_changed) -> Apply
+    (décision préparée, progression sur la session préparée) -> flush,
+    RELEASE. Toute autre erreur : ROLLBACK TO SAVEPOINT puis propagation
+    (refus global). N'écrit jamais la réservation."""
+    candidate = operation.candidate
+    if candidate.owner_user_id != user_id:
+        raise ProvenanceIncoherent("candidat d'un autre principal")
+    turn, snapshot = candidate.turn, candidate.preparation
+    payload = candidate.payload.as_dict()
+    request_fingerprint = _delivery_request_fingerprint(candidate)
+    facts = json.dumps(dfin.progress_facts(candidate.market), allow_nan=False)
+    applied = None
+    with _business_savepoint(db, probe) as scope:
+        try:
+            delivery, created = ad.claim_delivery(
+                db, user_id=user_id, conversation_key=turn.conversation_key, surface=ad.DECRYPTAGE_SURFACE,
+                source_user_turn_id=turn.client_turn_id, delivery_ordinal=DELIVERY_ORDINAL,
+                request_fingerprint=request_fingerprint,
+                visible_content_fingerprint=ad.visible_content_fingerprint(payload["analysis"]),
+                response_payload=payload, private_metadata=dcr.runtime_private_metadata(candidate.step_marker),
+                delivery_schema_version=ad.ASSISTANT_DELIVERY_SCHEMA_VERSION,
+            )
+        except ad.AssistantTurnIdentityCollision as exc:
+            if not _exactly(exc, ad.AssistantTurnIdentityCollision):
+                raise
+            raise _LocalRollback(LEGACY_COLLISION) from None
+        if not created:  # livraison préexistante (même empreinte comprise) : jamais adoptée
+            raise _LocalRollback(LEGACY_COLLISION)
+        try:
+            prepared = _prepare_turn(db, scope, user_id, delivery, ticker=snapshot.ticker, user_text=turn.question)
+        except dcr.AmbiguousActiveAnalysisSessions as exc:
+            if not _exactly(exc, dcr.AmbiguousActiveAnalysisSessions):
+                raise
+            raise _LocalRollback(PREPARATION_REFUSED, dc.MULTIPLE_ACTIVE_SESSIONS) from None
+        except dcr.StaleConversationContext as exc:
+            if not _exactly(exc, dcr.StaleConversationContext):
+                raise
+            raise _LocalRollback(PREPARATION_REFUSED, dc.STALE_CONVERSATION_CONTEXT) from None
+        current = probe.read_preparation(db, scope)
+        if current is contracts.CONFLICT:
+            raise _LocalRollback(LEASE_STALE)
+        if current is contracts.IDEMPOTENCY_CONFLICT:
+            raise _LocalRollback(INTENT_MISMATCH)
+        if current is contracts.ABSENT:
+            raise _LocalRollback(NOT_FOUND)
+        if type(current) is dc.DecryptagePreparationRefused:
+            raise _LocalRollback(PREPARATION_REFUSED, current.reason)
+        if type(current) is not dc.DecryptagePreparationView:
+            raise contracts.AdapterInvariantBroken("relecture de préparation hors contrat")
+        if not _same_preparation(candidate, current, prepared.context):
+            raise _LocalRollback(CONTEXT_CHANGED)
+        applied = _apply_prepared_turn(db, scope, user_id, prepared, method_id=snapshot.method_id,
+                                       step_marker=candidate.step_marker, financial_snapshot=facts)
+    if scope.rolled_back:
+        return FinalizationRolledBack(scope.reason, scope.detail)
+    if not scope.released or type(applied) is not PreparedTurnApplied:
+        raise contracts.AdapterInvariantBroken("SAVEPOINT C1 dans un état inattendu")
+    return applied
+
+
+# Inventaire FERMÉ : type exact d'opération -> point d'entrée privé.
+OPERATIONS = MappingProxyType({
+    TurnFinalization: _finalize_turn,
+    DeliveryAcknowledgement: _acknowledge,
+    CandidateFinalization: _finalize_candidate,
+})
+# Capacité EXACTE exigée par opération : les opérations historiques n'ont
+# que la sonde ; seule la finalisation reçoit la relecture B2.
+CAPABILITIES = MappingProxyType({
+    TurnFinalization: contracts.TransactionProbe,
+    DeliveryAcknowledgement: contracts.TransactionProbe,
+    CandidateFinalization: contracts.FinalizationReadPort,
+})
+
+
+def _require_probe(probe, conn, user_id=None) -> None:
+    """Capacité scellée (classe EXACTE implémentée par les adaptateurs SQL),
+    ouverte, liée à CETTE connexion (et, si donné, à ce principal)."""
+    admitted = {contracts.implementation(contracts.TransactionProbe),
+                contracts.implementation(contracts.FinalizationReadPort)} - {None}
+    if type(probe) not in admitted or not probe.bound_to(conn, probe.user_id if user_id is None else user_id):
+        raise contracts.CapabilityRefused("capacité de transaction hors contrat")
+
+
+def _require_live(probe) -> None:
+    """La transaction du runner est toujours LA transaction active, et
+    PostgreSQL l'accepte encore (sonde de la capacité : une erreur SQL
+    avalée laisse la transaction avortée alors que SQLAlchemy la croit
+    active ; mesuré : son COMMIT devient alors un ROLLBACK silencieux)."""
+    probe.require_live()
+
+
+def _execute(conn, ctx, operation, probe):
+    """Exécute UNE opération de l'inventaire dans la transaction du runner
+    (adaptateur d'exécution, après T_authorization), avec la capacité
+    EXACTE de cette opération, construite par les adaptateurs SQL pour
+    cette connexion et ce principal. Rend une vue immuable, ou ABSENT ;
+    toute exception est propagée au runner (ROLLBACK)."""
+    entry = OPERATIONS.get(type(operation))
+    if entry is None:
+        raise UnknownOperation("opération hors de l'inventaire fermé du pont")
+    if type(ctx) is not AuthorizedContext:
+        raise TypeError("pont : AuthorizedContext attendu")
+    required = contracts.implementation(CAPABILITIES[type(operation)])
+    if required is None or type(probe) is not required:
+        raise contracts.CapabilityRefused("capacité non admise pour cette opération")
+    _require_probe(probe, conn, ctx.principal.user_id)
+    _require_live(probe)
+    session = _BridgeSession(conn)
+    try:
+        result = entry(session, ctx.principal.user_id, operation, probe)  # flush final explicite, puis vue
+        _require_live(probe)
+    except BaseException:
+        try:
+            session._release()
+        except Exception as cleanup:  # jamais au détriment de l'échec d'origine
+            logger.warning("decryptage_bridge cleanup_failed error=%s", type(cleanup).__name__)
+        raise
+    session._release()
+    return result

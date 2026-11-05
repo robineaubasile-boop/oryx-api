@@ -80,12 +80,27 @@ nouveau, aucun verrou métier, aucune écriture), dormante :
   user_id, une Session, une connexion ni un callable. Résultat fermé :
   DecryptagePreparationView ou DecryptagePreparationRefused
   (core.authz_f2.decryptage_context).
+
+R1 PR 9-C1-B : dix-huitième commande, sous le plan DECRYPTAGE_MUTATION
+inchangé (aucun plan nouveau), dormante :
+
+- FinalizeDecryptageCandidate : porte EXCLUSIVEMENT le candidat B2 immuable
+  (core.authz_f2.decryptage_candidate.GeneratedDecryptageCandidate, type
+  exact, invariants revérifiés à la construction : version, sous-objets,
+  empreinte financière, PreparationSnapshot et son empreinte, payload,
+  cohérence du bail). Jamais un user_id, une Session, une connexion, un
+  rappel, du SQL, un statut ou un motif forcé, une décision cognitive ni une
+  option de contrôle. Ces validations ne sont PAS une autorisation : la
+  réservation propre, le HMAC d'intention, l'epoch, le jeton et l'échéance
+  sont revérifiés sous verrou par les adaptateurs SQL ; le propriétaire
+  reste AuthorizedContext.principal.
 """
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_fingerprint as dfp
 from core.authz_f2 import decryptage_reservation as dr
@@ -811,3 +826,39 @@ class ReadDecryptagePreparationContext(Command):
         return cls(lease.reservation_id, lease.lease_epoch, lease.token, reservation.conversation_key,
                    reservation.client_turn_id, reservation.ticker_input, reservation.question, reservation.context,
                    reservation.last_method_id, resolved_ticker)
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-C1-B : finalisation d'un candidat Décrypter (plan DECRYPTAGE_MUTATION)
+# --------------------------------------------------------------------------
+
+def _revalidate_candidate(candidate) -> None:
+    """Revérifie, sur l'objet REÇU, tous les invariants structurels du
+    candidat et de ses sous-objets (un objet gelé peut avoir été altéré par
+    object.__setattr__) : version, types exacts, bail, tour, instrument,
+    empreinte financière, snapshot et son empreinte, payload."""
+    if type(candidate) is not dcand.GeneratedDecryptageCandidate:
+        raise ValueError("candidate : GeneratedDecryptageCandidate (type exact) attendu")
+    dcand.GeneratedDecryptageCandidate.__post_init__(candidate)
+    for part in (candidate.turn, candidate.lease, candidate.market, candidate.preparation, candidate.payload):
+        type(part).__post_init__(part)
+    if candidate.preparation.compute_fingerprint() != candidate.preparation.fingerprint:
+        raise ValueError("candidate : empreinte de snapshot incohérente")
+    if candidate.market_fingerprint != dcand.market_fingerprint(candidate.market):
+        raise ValueError("candidate : empreinte financière incohérente")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class FinalizeDecryptageCandidate(Command):
+    """Finalise UN candidat B2 en livraison canonique F2 (une transaction :
+    livraison, capture cognitive, progression, réservation finalized).
+    repr() ne révèle ni jeton ni texte."""
+    candidate: dcand.GeneratedDecryptageCandidate
+
+    def __post_init__(self):
+        _revalidate_candidate(self.candidate)
+
+    def __repr__(self) -> str:
+        return f"FinalizeDecryptageCandidate({self.candidate!r})"
+
+    __str__ = __repr__

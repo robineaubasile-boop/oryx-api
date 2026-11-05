@@ -73,12 +73,12 @@ from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
 from core.authz_f2 import decryptage_instrument as di
 from core.authz_f2 import decryptage_market_data as dm
+from core.authz_f2 import decryptage_method_selection as dms
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2.principal import AuthorizedPrincipal
 from core.authz_f2.runner import (AUTHORIZED, IDEMPOTENCY_CONFLICT, NOT_FOUND, REVISION_CONFLICT, SESSION_INVALID,
                                   UNAVAILABLE, AuthorizationOutcome, AuthorizedTransactionRunner)
 from core.decryptage_engine import build_system_prompt, build_user_message
-from core.pedagogie_library import METHODES, lookup_method
 
 logger = logging.getLogger("oryx.decryptage_f2")
 
@@ -246,15 +246,6 @@ class _ProviderFailure(Exception):
     def __init__(self, failure):
         super().__init__(failure)
         self.failure = failure
-
-
-def _forced_construction_these() -> dict:
-    """Méthode construction_these forcée (copie de
-    api._force_construction_these_method, sans import de api)."""
-    method = METHODES[dcand.CONSTRUCTION_THESE]
-    return {"method_id": dcand.CONSTRUCTION_THESE, "title": method["title"],
-            "method_content": method["method_content"], "example_company": method["example_company"],
-            "keywords_matched": []}
 
 
 FIELD_LABELS = MappingProxyType({
@@ -475,18 +466,14 @@ class _Run:
     def _prepare_prompt(self, view, market):
         question, context = self._reservation.texts
         ticker = view.ticker
-        company_name = market.name or ticker
-        if view.active_session is not None:
-            method, basis = _forced_construction_these(), dcand.BASIS_ACTIVE_ANALYSIS
-        elif not context:
-            method, basis = _forced_construction_these(), dcand.BASIS_INITIAL_TURN
-        else:
-            lookup_text = question if question else f"analyser bilan états financiers {company_name}"
-            # log=False : sélection historique identique, sans jamais imprimer la question (audit P1-01).
-            method = lookup_method(lookup_text, context=context, last_method_id=self._reservation.last_method_id, log=False)
-            basis = dcand.BASIS_LOOKUP
-        method_id = method["method_id"] if method else None
-        snapshot = dcand.build_snapshot(view, self._reservation.ticker, method_id, basis)
+        company_name = dms.company_name(market.name, ticker)
+        # R1 PR 9-C1-B : sélecteur PUR partagé avec la revalidation de la
+        # finalisation (mêmes règles, jamais dupliquées ; lookup_method silencieux).
+        selection = dms.select_method(has_active_session=view.active_session is not None, question=question,
+                                      context=context, last_method_id=self._reservation.last_method_id,
+                                      market_name=market.name, ticker=ticker)
+        method = selection.method
+        snapshot = dcand.build_snapshot(view, self._reservation.ticker, selection.method_id, selection.basis)
         system = build_system_prompt(market.prompt_data(), method, snapshot.level, snapshot.existing_thesis(),
                                      snapshot.in_progress_analysis()) + provenance_block(market)
         user = build_user_message(question if question else f"Aide-moi à analyser {company_name} ({ticker}).",

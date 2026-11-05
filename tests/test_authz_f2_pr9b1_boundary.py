@@ -98,8 +98,10 @@ def test_dispatch_gives_each_family_only_to_its_commands():
     assert keyed == {c.CreatePortfolioPosition, c.ReplacePortfolioPosition, c.DeletePortfolioPosition}
     # R1 PR 9-B2 : la lecture de préparation (plan READ) revérifie l'intention
     # B1 par le MÊME dispatch ; aucune autre commande ne reçoit ce trousseau.
+    # R1 PR 9-C1-B : la finalisation revérifie aussi l'intention B1 par le
+    # MÊME dispatch (aucune autre famille de clés).
     assert decryptage == {c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,
-                          c.ReadDecryptagePreparationContext}
+                          c.ReadDecryptagePreparationContext, c.FinalizeDecryptageCandidate}
     assert list(inspect.signature(AuthorizedTransactionRunner.run).parameters) == ["self", "credential", "command"]
     assert {n for n in vars(AuthorizedTransactionRunner) if not n.startswith("_")} == {"run"}
     assert "_decryptage" in AuthorizedTransactionRunner.__slots__
@@ -210,4 +212,5 @@ def test_failure_classes_and_reasons_are_closed_vocabularies():
     assert dr.FAILURE_CLASSES == ("market_data_unavailable", "generation_unavailable", "generation_unusable")
     assert not hasattr(c, "ForceBlockReservation") and not hasattr(c, "ResetReservation")
     assert {n for n in dir(c) if "Decryptage" in n} == {"ReserveDecryptageTurn", "RecordDecryptageAttemptFailure",
-                                                        "ReadDecryptagePreparationContext"}  # R1 PR 9-B2 : lecture
+                                                        "ReadDecryptagePreparationContext",  # R1 PR 9-B2 : lecture
+                                                        "FinalizeDecryptageCandidate"}  # R1 PR 9-C1-B

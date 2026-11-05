@@ -39,6 +39,11 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | _insert_reservation | decryptage_turn_reservations | INSERT en SAVEPOINT, user_id serveur | (users déjà FOR NO KEY UPDATE) |
 | _grant_lease / _block_reservation / _release_lease | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch [ET compteur / jeton haché / échéance] | (ligne déjà verrouillée) |
 | _record_attempt_failure : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
+| _finalize_candidate (R1 PR 9-C1-B) : verrou | decryptage_turn_reservations | id ET user_id | FOR UPDATE (après T_authorization) |
+| _FinalizationReadPort.read_preparation (R1 PR 9-C1-B) | _PREPARATION_CONTEXT (même instruction que B2) | user_id serveur ET réservation / conversation / ticker FIGÉS dans le port | - (dans le SAVEPOINT C1, réservation déjà verrouillée) |
+| _finalize_reservation (R1 PR 9-C1-B) | decryptage_turn_reservations | id ET user_id ET state reserved ET epoch ET compteur ET jeton haché ET échéance > T_finalize (clock_timestamp() capturé PAR l'UPDATE) ET identité complète ET aucune livraison liée | (ligne déjà verrouillée) |
+| _block_proven_collision (R1 PR 9-C1-B) | assistant_deliveries (preuve, identité complète du tour) puis decryptage_turn_reservations (mêmes conditions que la finalisation) | user_id | (ligne déjà verrouillée) |
+| _recognize_finalized (R1 PR 9-C1-B) | assistant_deliveries (_LINKED_DELIVERY) | id ET user_id | - |
 | _read_preparation_context (R1 PR 9-B2) | UNE instruction : decryptage_turn_reservations, users, conversation_identities, assistant_deliveries + decryptage_cognitive_links (ancre), cognitive_events, analysis_sessions, analysis_facts, user_statements, investment_theses | user_id serveur (unique paramètre :u, propagé par la CTE o) ET id de réservation / conversation / ticker résolu | - (plan READ, aucune écriture) |
 
 Une ressource étrangère et une ressource inexistante rendent le même
@@ -176,6 +181,20 @@ core.decryptage_cognitive_runtime.precheck_conversation_context), contenus
 hors bornes, valeur non finie. Contenus bornés DANS la projection (texte
 transféré seulement sous sa borne, longueur toujours projetée ; 65 lignes au
 plus pour 64 admises) ; flottants lus par float8send.
+
+R1 PR 9-C1-B (plan DECRYPTAGE_MUTATION INCHANGÉ, trousseau Décrypter du
+dispatch existant) : FinalizeDecryptageCandidate. Les adaptateurs restent le
+SEUL propriétaire du SQL, de B1, du HMAC, du fencing et des mutations de
+réservation ; ils appellent le pont ORM privé (unique importateur) avec une
+capacité scellée qu'ils construisent : _TransactionProbe (sonde de la
+transaction) ou _FinalizationReadPort (+ UNE relecture B2 dans le SAVEPOINT
+C1). Ordre : réservation propre FOR UPDATE -> T_lease_decision -> identité
+du tour -> HMAC d'intention (version de clé enregistrée) -> finalized :
+reconnaissance terminale (aucune écriture) ; blocked : vue terminale ;
+reserved : epoch, jeton, échéance -> pont -> après RELEASE : UNIQUE UPDATE
+reserved -> finalized, qui capture lui-même T_finalize (aucune ligne :
+CONFLICT, ROLLBACK global de TOUTES les écritures ORM) ; ou issue de l'annulation locale (vue métier,
+blocage d'une collision PROUVÉE, ou sentinelle de ROLLBACK).
 """
 import uuid
 from dataclasses import dataclass
@@ -184,8 +203,11 @@ from types import MappingProxyType
 
 import sqlalchemy as sa
 
+from core.authz_f2 import _bridge_contracts as contracts
+from core.authz_f2 import _decryptage_orm_bridge as bridge
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_context as dc
+from core.authz_f2 import decryptage_finalization as dfin
 from core.authz_f2 import decryptage_fingerprint as dfp
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2 import portfolio_fingerprint as fp
@@ -193,40 +215,13 @@ from core.authz_f2 import portfolio_results as results
 from core.authz_f2 import portfolio_values as pv
 
 
-class _Absent:
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "ABSENT"
-
-
-ABSENT = _Absent()
-
-
-class _Conflict:
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "CONFLICT"
-
-
-CONFLICT = _Conflict()  # révision attendue périmée : aucune écriture
-
-
-class _IdempotencyConflict:
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "IDEMPOTENCY_CONFLICT"
-
-
-IDEMPOTENCY_CONFLICT = _IdempotencyConflict()  # même triplet, autre intention : aucune écriture
-
-
-class AdapterInvariantBroken(RuntimeError):
-    """État impossible constaté sous verrou : la transaction est annulée."""
-
-    alert = None  # nom d'alerte interne journalisé par le runner (sans détail)
+# R1 PR 9-C1-B (F-01) : sentinelles et exception racine DÉFINIES dans les
+# contrats communs purs et réexportées ici (MÊMES objets) : le pont ORM ne
+# dépend plus de ce module, qui peut donc l'appeler sans cycle.
+ABSENT = contracts.ABSENT
+CONFLICT = contracts.CONFLICT  # révision ou capacité périmée : aucune écriture
+IDEMPOTENCY_CONFLICT = contracts.IDEMPOTENCY_CONFLICT  # même identité, autre intention : aucune écriture
+AdapterInvariantBroken = contracts.AdapterInvariantBroken
 
 
 class RevisionExhausted(AdapterInvariantBroken):
@@ -818,7 +813,7 @@ _REGISTER_CONVERSATION = ("INSERT INTO conversation_identities (conversation_key
 _RESERVATION_LIST_COLUMNS = ("id, user_id, conversation_key, surface, source_user_turn_id, delivery_ordinal, "
                        "fingerprint_version, fingerprint_key_version, request_fingerprint, state, blocked_reason, "
                        "lease_epoch, lease_token_hash, lease_expires_at, attempts_used, retry_not_before_at, "
-                       "assistant_delivery_id, finalized_at")
+                       "assistant_delivery_id, finalized_at, resolved_ticker")
 _RESERVATION_COLUMNS = "SELECT " + _RESERVATION_LIST_COLUMNS + " FROM decryptage_turn_reservations "
 _RESERVATION_RETURNING = "RETURNING " + _RESERVATION_LIST_COLUMNS
 _LOCK_RESERVATION_TURN = (_RESERVATION_COLUMNS + "WHERE user_id = :u AND conversation_key = :k AND surface = :s "
@@ -828,7 +823,8 @@ _LOCK_RESERVATION = _RESERVATION_COLUMNS + "WHERE id = :id AND user_id = :u FOR 
 _LEASE_DECISION_CLOCK = "SELECT clock_timestamp()"
 _LEGACY_DELIVERY = ("SELECT id FROM assistant_deliveries WHERE user_id = :u AND conversation_key = :k "
                     "AND surface = :s AND source_user_turn_id = :t AND delivery_ordinal = :o")
-_LINKED_DELIVERY = ("SELECT id, conversation_key, surface, source_user_turn_id, delivery_ordinal "
+_LINKED_DELIVERY = ("SELECT id, conversation_key, surface, source_user_turn_id, delivery_ordinal, "
+                    "request_fingerprint, status, delivery_schema_version "
                     "FROM assistant_deliveries WHERE id = :id AND user_id = :u")
 _INSERT_RESERVATION = {
     # Première attribution : epoch 1, une tentative, jeton haché, échéance
@@ -889,6 +885,7 @@ class _Reservation:
     retry_not_before_at: object
     assistant_delivery_id: object
     finalized_at: object
+    resolved_ticker: object = None  # R1 PR 9-C1-B : écrit seulement par la finalisation
 
 
 def _sqlstate_and_constraint(exc) -> tuple:
@@ -952,7 +949,7 @@ def _reservation(row, user_id: str, turn=None) -> _Reservation:
                            row["fingerprint_version"], row["fingerprint_key_version"], row["request_fingerprint"],
                            row["state"], row["blocked_reason"], row["lease_epoch"], row["lease_token_hash"],
                            row["lease_expires_at"], row["attempts_used"], row["retry_not_before_at"],
-                           row["assistant_delivery_id"], row["finalized_at"])
+                           row["assistant_delivery_id"], row["finalized_at"], row["resolved_ticker"])
         valid = (type(res.id) is uuid.UUID and row["user_id"] == user_id and row["surface"] == dfp.SURFACE
                  and row["delivery_ordinal"] == dfp.DELIVERY_ORDINAL and type(res.conversation_key) is str
                  and type(res.source_user_turn_id) is uuid.UUID
@@ -962,7 +959,8 @@ def _reservation(row, user_id: str, turn=None) -> _Reservation:
                  and type(res.attempts_used) is int and 0 <= res.attempts_used <= dr.MAX_ATTEMPTS
                  and all(_aware_or_none(v) for v in (res.lease_expires_at, res.retry_not_before_at,
                                                      res.finalized_at))
-                 and res.state in dr.STATES)
+                 and res.state in dr.STATES
+                 and (res.resolved_ticker is None or dc.valid_resolved_ticker(res.resolved_ticker)))
         if valid and turn is not None:
             valid = (res.conversation_key, res.source_user_turn_id) == (turn["k"], turn["t"])
         if valid and res.state == dr.RESERVED:
@@ -1355,7 +1353,14 @@ def _preparation(row, res: _Reservation, user_id: str, command, at):
 
 
 def _read_preparation_context(conn, ctx, command, locked, keys):
-    user_id = ctx.principal.user_id
+    return _preparation_outcome(conn, keys, ctx.principal.user_id, command)
+
+
+def _preparation_outcome(conn, keys, user_id: str, command):
+    """Projection _PREPARATION_CONTEXT et décision fermée, partagées par la
+    lecture B2 (ReadDecryptagePreparationContext) et par la relecture de la
+    finalisation C1-B (FinalizationReadPort.read_preparation, _TurnIntent) :
+    une seule instruction, un seul code de décision."""
     row = _first(conn, _PREPARATION_CONTEXT, u=user_id, rid=command.reservation_id, k=command.conversation_key,
                  t=command.resolved_ticker)
     if row is None or _count(row, "reservation_rows", 1) == 0:
@@ -1379,6 +1384,334 @@ def _read_preparation_context(conn, ctx, command, locked, keys):
         return dc.DecryptagePreparationRefused(dc.CONTEXT_VALUE_INVALID)
     except (KeyError, TypeError, ValueError):
         raise _incoherent("contexte de préparation incohérent") from None
+
+
+# --------------------------------------------------------------------------
+# R1 PR 9-C1-B : finalisation atomique d'un candidat Décrypter
+# (plan DECRYPTAGE_MUTATION inchangé, trousseau Décrypter dédié)
+# --------------------------------------------------------------------------
+
+# T_finalize (correctif d'audit P1, PR #233) : l'instant de décision est
+# capturé PAR l'instruction d'écriture elle-même — CTE MATERIALIZED (une
+# fonction volatile : UNE évaluation de clock_timestamp(), jamais inlinée),
+# réutilisée pour l'échéance (lease_expires_at > decision.at) ET pour les
+# horodatages écrits. Aucun instant n'est lu avant ni transmis par le code :
+# un bail échu au moment de l'écriture n'est jamais finalisé ni bloqué, même
+# si une lecture antérieure le voyait encore valide. Ligne déjà verrouillée
+# FOR UPDATE par cette transaction : aucune attente entre la capture et
+# l'écriture.
+_DECISION_CLOCK = "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+# Seule mutation de finalisation : reserved -> finalized, après RELEASE.
+# Efface les champs actifs du bail ; ne réécrit jamais l'intention.
+_FINALIZE_RESERVATION = (_DECISION_CLOCK + "UPDATE decryptage_turn_reservations SET state = 'finalized', "
+                         "assistant_delivery_id = :d, resolved_ticker = :rt, finalized_at = decision.at, "
+                         "updated_at = decision.at, lease_token_hash = NULL, lease_expires_at = NULL, "
+                         "retry_not_before_at = NULL FROM decision "
+                         "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                         "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
+                         "AND assistant_delivery_id IS NULL AND blocked_reason IS NULL AND finalized_at IS NULL "
+                         # identité COMPLÈTE et intention revérifiées dans l'instruction
+                         "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
+                         "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
+                         "AND request_fingerprint = :f "
+                         + _RESERVATION_RETURNING + ", decision.at AS decided_at")
+# Blocage d'une collision legacy PROUVÉE : jeton et échéance vérifiés DANS
+# l'instruction (contrairement à _BLOCK_RESERVATION de B1) ; motif existant.
+_BLOCK_PROVEN_COLLISION = (_DECISION_CLOCK + "UPDATE decryptage_turn_reservations SET state = 'blocked', "
+                           "blocked_reason = 'legacy_collision', lease_token_hash = NULL, lease_expires_at = NULL, "
+                           "retry_not_before_at = NULL, updated_at = decision.at FROM decision "
+                           "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                           "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
+                           "AND assistant_delivery_id IS NULL "
+                           "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
+                           "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
+                           "AND request_fingerprint = :f "
+                           + _RESERVATION_RETURNING + ", decision.at AS decided_at")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _TurnIntent:
+    """Intention ORIGINALE normalisée d'un candidat (trame HMAC B1) et
+    capacité de bail : même forme que ReadDecryptagePreparationContext pour
+    _fingerprint et _preparation_outcome (aucun code de décision dupliqué).
+    Construite depuis le candidat validé ; jamais depuis une saisie client."""
+    reservation_id: uuid.UUID
+    lease_epoch: int
+    lease_token: dr.LeaseToken
+    conversation_key: str
+    client_turn_id: uuid.UUID
+    ticker: str            # ticker SAISI normalisé (trame B1), jamais le ticker résolu
+    question: str
+    context: str
+    last_method_id: object
+    resolved_ticker: str
+
+    @classmethod
+    def of(cls, candidate) -> "_TurnIntent":
+        turn, lease = candidate.turn, candidate.lease
+        return cls(lease.reservation_id, lease.lease_epoch, lease.token, turn.conversation_key, turn.client_turn_id,
+                   turn.ticker_input, turn.question, turn.context, turn.last_method_id, candidate.preparation.ticker)
+
+    @property
+    def texts(self) -> tuple:
+        return self.question, self.context
+
+    def __repr__(self) -> str:
+        return "_TurnIntent(<secret>)"  # ni jeton, ni texte, ni identité
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("intention de tour non sérialisable")
+
+
+_CAPABILITY = object()  # seules les fabriques de ce module construisent une capacité
+
+
+class _TransactionProbe(contracts.TransactionProbe):
+    """Implémentation SCELLÉE de TransactionProbe : liée à la connexion
+    EXACTE du runner, à l'objet de transaction externe actif constaté à la
+    construction, au principal autorisé et à la durée d'UNE opération du
+    pont (_close). require_live() : identité et activité de la transaction,
+    puis sonde PostgreSQL READ COMMITTED (échoue sur une transaction
+    avortée, même si SQLAlchemy la croit active). Aucune autre capacité."""
+
+    __slots__ = ("_conn", "_outer", "_user_id", "_open")
+
+    def __init__(self, token, conn, user_id: str):
+        if token is not _CAPABILITY:
+            raise contracts.CapabilityRefused("capacité construite hors des adaptateurs SQL")
+        outer = conn.get_transaction()
+        if type(user_id) is not str or not user_id or outer is None or not outer.is_active:
+            raise contracts.TransactionLost("aucune transaction active du runner")
+        for name, value in (("_conn", conn), ("_outer", outer), ("_user_id", user_id), ("_open", True)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("capacité immuable")
+
+    def __delattr__(self, name):
+        raise AttributeError("capacité immuable")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("capacité non sérialisable")
+
+    def __copy__(self):
+        raise TypeError("capacité non copiable")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("capacité non copiable")
+
+    def __repr__(self) -> str:
+        return "TransactionProbe(<private>)"
+
+    @property
+    def user_id(self) -> str:
+        return self._user_id
+
+    def bound_to(self, conn, user_id: str) -> bool:
+        return self._open and conn is self._conn and user_id == self._user_id
+
+    def require_live(self) -> None:
+        if not self._open:
+            raise contracts.CapabilityRefused("opération du pont close")
+        outer = self._outer
+        if not outer.is_active or self._conn.get_transaction() is not outer:
+            raise contracts.TransactionLost("transaction externe inactive ou remplacée")
+        require_read_committed(self._conn, c.DECRYPTAGE_MUTATION)
+
+    def _close(self) -> None:
+        object.__setattr__(self, "_open", False)
+
+
+class _FinalizationReadPort(_TransactionProbe, contracts.FinalizationReadPort):
+    """Implémentation SCELLÉE de FinalizationReadPort, construite seulement
+    par _finalize_candidate APRÈS l'autorisation du principal ET le
+    verrouillage + la vérification de la réservation (HMAC, epoch, jeton,
+    échéance). Réservation, identité du tour, epoch, capacité de bail,
+    ticker résolu, principal et paramètres de projection sont FIGÉS ici :
+    l'opération du pont ne peut en substituer aucun. Seule lecture métier :
+    read_preparation, UNE fois, dans le SAVEPOINT C1 lié par bind_scope (une
+    seule association, faite par le pont à l'ouverture du SAVEPOINT).
+    Aucune méthode d'exécution SQL ni de rappel."""
+
+    __slots__ = ("_keys", "_intent", "_reservation_id", "_scope", "_consumed")
+
+    def __init__(self, token, conn, user_id: str, keys, reservation: _Reservation, intent: _TurnIntent):
+        super().__init__(token, conn, user_id)
+        if type(intent) is not _TurnIntent or type(reservation) is not _Reservation \
+                or reservation.id != intent.reservation_id:
+            raise contracts.CapabilityRefused("réservation ou intention hors contrat")
+        for name, value in (("_keys", keys), ("_intent", intent), ("_reservation_id", reservation.id),
+                            ("_scope", None), ("_consumed", False)):
+            object.__setattr__(self, name, value)
+
+    def bind_scope(self, scope) -> None:
+        if (not self._open or self._scope is not None or type(scope) is not bridge._SavepointScope
+                or not scope.is_open or scope._db.bind is not self._conn):
+            raise contracts.CapabilityRefused("association au SAVEPOINT C1 refusée")
+        object.__setattr__(self, "_scope", scope)
+
+    def read_preparation(self, db, scope):
+        """Relecture B2 (_PREPARATION_CONTEXT, une instruction) de LA
+        réservation de ce port, sur la connexion du runner, DANS le
+        SAVEPOINT C1 lié, ouvert et courant de la Session du pont. Consommée
+        avant tout contrôle ; hors contrat : refus SANS requête métier.
+        Réservation absente ou intention divergente sous le verrou déjà
+        détenu : impossibles, jamais présentées comme une absence (503)."""
+        if self._consumed:
+            raise contracts.CapabilityRefused("relecture de préparation déjà consommée")
+        object.__setattr__(self, "_consumed", True)
+        if not self._open or type(db) is not bridge._BridgeSession or db.bind is not self._conn:
+            raise contracts.CapabilityRefused("relecture hors de la Session du pont de cette opération")
+        if self._scope is None or scope is not self._scope:
+            raise contracts.CapabilityRefused("relecture hors du SAVEPOINT C1 lié")
+        scope._require_current(db)
+        outer = self._outer
+        if not outer.is_active or self._conn.get_transaction() is not outer:
+            raise contracts.TransactionLost("transaction externe inactive ou remplacée")
+        outcome = _preparation_outcome(self._conn, self._keys, self._user_id, self._intent)
+        if outcome is ABSENT or outcome is IDEMPOTENCY_CONFLICT:
+            raise DecryptageUnavailable("réservation verrouillée relue absente ou divergente",
+                                        "decryptage_finalization_incoherent")
+        return outcome
+
+
+def _transaction_probe(conn, ctx) -> _TransactionProbe:
+    """Sonde SEULE pour une opération historique du pont (TurnFinalization,
+    DeliveryAcknowledgement : bancs d'essai PR 9-A / C1-A ; aucune commande
+    de production) : jamais de relecture B2."""
+    return _TransactionProbe(_CAPABILITY, conn, ctx.principal.user_id)
+
+
+def _identity_params(user_id: str, res: _Reservation) -> dict:
+    return {"id": res.id, "u": user_id, "e": res.lease_epoch, "a": res.attempts_used, "k": res.conversation_key,
+            "s": dfp.SURFACE, "t": res.source_user_turn_id, "o": dfp.DELIVERY_ORDINAL,
+            "fv": res.fingerprint_version, "kv": res.fingerprint_key_version, "f": res.request_fingerprint}
+
+
+def _lease_is_held(res: _Reservation, intent: _TurnIntent, at) -> bool:
+    return (res.state == dr.RESERVED and res.lease_epoch == intent.lease_epoch and res.lease_token_hash is not None
+            and intent.lease_token.matches(res.lease_token_hash) and at < res.lease_expires_at)
+
+
+def _recognize_finalized(conn, user_id: str, res: _Reservation, candidate):
+    """Reconnaissance terminale (aucun SAVEPOINT, aucune écriture, aucun
+    jeton exigé : effacé par la finalisation). Intention HMAC déjà revérifiée
+    avec la version de clé ENREGISTRÉE. Le candidat doit être celui qui a été
+    finalisé (epoch, ticker résolu, SHA historique recalculé avec le niveau
+    DU CANDIDAT) : sinon CONFLICT. Lien persisté incohérent (livraison absente
+    ou d'autrui, identité, statut, version de schéma, ticker non enregistré) :
+    503, jamais de réparation."""
+    if res.lease_epoch != candidate.lease.lease_epoch:
+        return CONFLICT
+    if res.resolved_ticker is None:
+        raise DecryptageUnavailable("réservation finalisée sans ticker résolu", "decryptage_reservation_incoherent")
+    if res.resolved_ticker != candidate.preparation.ticker:
+        return CONFLICT
+    linked = _first(conn, _LINKED_DELIVERY, id=res.assistant_delivery_id, u=user_id)
+    if linked is None or (linked["conversation_key"], linked["surface"], linked["source_user_turn_id"],
+                          linked["delivery_ordinal"]) != (res.conversation_key, dfp.SURFACE, res.source_user_turn_id,
+                                                          dfp.DELIVERY_ORDINAL) \
+            or linked["status"] not in bridge.DELIVERY_STATUSES \
+            or linked["delivery_schema_version"] != bridge.DELIVERY_SCHEMA_VERSION:
+        raise DecryptageUnavailable("réservation finalisée incohérente", "decryptage_reservation_incoherent")
+    if linked["request_fingerprint"] != bridge._delivery_request_fingerprint(candidate):
+        return CONFLICT  # autre candidat (niveau, entrées) que celui finalisé : jamais substitué
+    return dfin.AlreadyFinalized(res.id, res.assistant_delivery_id)
+
+
+def _finalize_reservation(conn, user_id: str, res: _Reservation, intent: _TurnIntent, applied):
+    """Après RELEASE SAVEPOINT : UNIQUE mutation reserved -> finalized,
+    conditionnelle (identité complète, état, epoch, compteur, jeton,
+    échéance à T_finalize capturé PAR l'UPDATE, aucune livraison liée).
+    Aucune ligne : CONFLICT,
+    donc ROLLBACK GLOBAL du runner — livraison, lien, contribution,
+    progression, UserStatements, thèse et faits écrits dans le SAVEPOINT
+    libéré disparaissent avec la transaction externe."""
+    row = _first(conn, _FINALIZE_RESERVATION, d=applied.assistant_turn_id, rt=intent.resolved_ticker,
+                 h=intent.lease_token.digest(), **_identity_params(user_id, res))
+    if row is None:
+        return CONFLICT
+    out = _reservation(row, user_id)
+    if (out.id, out.state, out.lease_epoch, out.attempts_used, out.assistant_delivery_id, out.resolved_ticker,
+            out.lease_token_hash, out.lease_expires_at) != (
+            res.id, dr.FINALIZED, res.lease_epoch, res.attempts_used, applied.assistant_turn_id, intent.resolved_ticker,
+            None, None) or type(row["decided_at"]) is not datetime or out.finalized_at != row["decided_at"]:
+        raise AdapterInvariantBroken("finalisation écrite inattendue")
+    return dfin.DecryptageFinalized(res.id, applied.assistant_turn_id)
+
+
+def _block_proven_collision(conn, user_id: str, res: _Reservation, intent: _TurnIntent):
+    """Après l'annulation locale legacy_collision (aucun objet ORM du
+    SAVEPOINT réutilisé) : livraison gagnante relue par l'identité complète
+    du tour, filtrée par le propriétaire ; collision non prouvée : 503.
+    Puis blocage conditionnel (epoch, compteur, jeton, échéance à
+    T_finalize capturé PAR l'UPDATE, identité) ; bail expiré ou capacité
+    périmée : CONFLICT,
+    rien n'est committé. LegacyCollisionBlocked seulement si le blocage est
+    écrit (et rendu après COMMIT par le runner)."""
+    if not _legacy_delivery(conn, _turn(user_id, res.conversation_key, res.source_user_turn_id)):
+        raise DecryptageUnavailable("collision legacy non prouvée", "decryptage_collision_unproven")
+    row = _first(conn, _BLOCK_PROVEN_COLLISION, h=intent.lease_token.digest(), **_identity_params(user_id, res))
+    if row is None:
+        return CONFLICT
+    out = _mutated(row, user_id, res, dr.BLOCKED, res.lease_epoch, res.attempts_used)
+    if out.blocked_reason != dr.LEGACY_COLLISION or type(row["decided_at"]) is not datetime:
+        raise AdapterInvariantBroken("blocage écrit inattendu")
+    return dfin.LegacyCollisionBlocked(res.id)
+
+
+def _finalize_candidate(conn, ctx, command, locked, keys):
+    """Phases 2 à 5 et 14 à 15 du protocole figé (autorisation et COMMIT :
+    runner ; phases 6 à 13 : pont ORM privé). Ordre de décision : candidat
+    d'un autre principal ou réservation absente / d'autrui -> ABSENT (rien
+    n'est verrouillé chez autrui) ; réservation d'un autre tour -> CONFLICT ;
+    intention HMAC divergente -> IDEMPOTENCY_CONFLICT (clé introuvable :
+    503) ; finalized -> reconnaissance terminale ; blocked -> vue terminale ;
+    reserved : epoch, jeton, échéance (T_lease_decision) -> sinon CONFLICT ;
+    puis pont ; puis UPDATE final ou issue de l'annulation locale."""
+    user_id = ctx.principal.user_id
+    candidate = command.candidate
+    if candidate.owner_user_id != user_id:
+        return ABSENT
+    intent = _TurnIntent.of(candidate)
+    row = _first(conn, _LOCK_RESERVATION, id=intent.reservation_id, u=user_id)
+    if row is None:
+        return ABSENT
+    at = _lease_clock(conn)  # T_lease_decision : après le verrou
+    res = _reservation(row, user_id)
+    if (res.conversation_key, res.source_user_turn_id) != (intent.conversation_key, intent.client_turn_id):
+        return CONFLICT
+    computed = _fingerprint(keys, res.fingerprint_version, res.fingerprint_key_version, user_id, intent)
+    if not dfp.same_fingerprint(computed, res.request_fingerprint):
+        return IDEMPOTENCY_CONFLICT
+    if res.state == dr.FINALIZED:
+        return _recognize_finalized(conn, user_id, res, candidate)
+    if res.state == dr.BLOCKED:
+        return dr.ReservationBlocked(res.id, res.blocked_reason)
+    if not _lease_is_held(res, intent, at):
+        return CONFLICT  # ancien epoch, jeton faux, bail libéré ou expiré : rien n'est écrit
+    port = _FinalizationReadPort(_CAPABILITY, conn, user_id, keys, res, intent)
+    try:
+        outcome = bridge._execute(conn, ctx, bridge.CandidateFinalization(candidate), port)
+    finally:
+        port._close()
+    if type(outcome) is bridge.PreparedTurnApplied:
+        return _finalize_reservation(conn, user_id, res, intent, outcome)
+    if type(outcome) is not bridge.FinalizationRolledBack:
+        raise AdapterInvariantBroken("issue de finalisation hors contrat")
+    if outcome.reason == bridge.CONTEXT_CHANGED:
+        return dfin.FinalizationContextChanged(res.id)
+    if outcome.reason == bridge.PREPARATION_REFUSED:
+        return dfin.FinalizationPreparationRefused(res.id, outcome.detail)
+    if outcome.reason == bridge.LEGACY_COLLISION:
+        return _block_proven_collision(conn, user_id, res, intent)
+    if outcome.reason == bridge.LEASE_STALE:
+        return CONFLICT
+    if outcome.reason == bridge.INTENT_MISMATCH:
+        return IDEMPOTENCY_CONFLICT
+    if outcome.reason == bridge.NOT_FOUND:
+        return ABSENT
+    raise AdapterInvariantBroken("motif d'annulation locale hors contrat")
 
 
 class SpecError(TypeError):
@@ -1429,4 +1762,9 @@ REGISTRY = MappingProxyType({
     # par le dispatch existant (revérification de l'intention B1), aucune écriture.
     c.ReadDecryptagePreparationContext: Spec(c.READ, _no_business_lock, _read_preparation_context,
                                              decryptage_keyed=True),
+    # R1 PR 9-C1-B : finalisation, plan DECRYPTAGE_MUTATION INCHANGÉ (aucun
+    # verrou préparatoire : réservation verrouillée par l'adaptateur après la
+    # décision), trousseau Décrypter par le dispatch existant.
+    c.FinalizeDecryptageCandidate: Spec(c.DECRYPTAGE_MUTATION, _no_business_lock, _finalize_candidate,
+                                        decryptage_keyed=True),
 })

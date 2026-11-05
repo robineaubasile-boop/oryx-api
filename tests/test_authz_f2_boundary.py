@@ -55,6 +55,8 @@ BOUNDARY_FILES = sorted(list(AUTHZ.glob("*.py")) + list(AUTHZ_HTTP.glob("*.py"))
 ADAPTERS = AUTHZ / "_adapters.py"
 # R1 PR 9-A : unique module privilégié (exception nominative, V2.2-03).
 BRIDGE = AUTHZ / "_decryptage_orm_bridge.py"
+# R1 PR 9-C1-B : contrats communs purs (aucun SQL, aucune Session).
+CONTRACTS = AUTHZ / "_bridge_contracts.py"
 TRANSACTION_METHODS = {"commit", "rollback", "begin", "begin_nested", "connect", "close", "invalidate", "detach",
                        "exec_driver_sql", "execution_options", "raw_connection", "get_transaction"}
 FORBIDDEN_SQL = re.compile(r"\b(COMMIT|ROLLBACK|BEGIN|SAVEPOINT|RELEASE|SET|RESET|LOCK|DELETE|INSERT|TRUNCATE|DROP|"
@@ -115,31 +117,47 @@ def test_no_boundary_module_controls_a_transaction():
             # R1 PR 9-C1-A : SAVEPOINT métier C1 privé (_business_savepoint :
             # UN `with db.begin_nested()`, RELEASE / ROLLBACK TO par le seul
             # gestionnaire de contexte SQLAlchemy, jamais commit() ni
-            # rollback() appelés) et sonde intermédiaire (_require_session_live).
-            assert _attr_calls(tree) & TRANSACTION_METHODS == {"close", "begin", "get_transaction", "begin_nested"}
+            # rollback() appelés).
+            # R1 PR 9-C1-B : plus AUCUN get_transaction() dans le pont — la
+            # vérification de la transaction (identité, activité, sonde SQL)
+            # appartient à la capacité TransactionProbe des adaptateurs SQL ;
+            # le SAVEPOINT C1 est matérialisé dès son ouverture par l'UNIQUE
+            # super().connection() de _BridgeSession._materialize_savepoint
+            # (la méthode publique connection() reste refusée aux services).
+            assert _attr_calls(tree) & TRANSACTION_METHODS == {"close", "begin", "begin_nested"}
             located = {(n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
                        for n in _calls(f) if isinstance(n.func, ast.Attribute) and n.func.attr in TRANSACTION_METHODS}
-            assert located == {("close", "_release"), ("begin", "begin"), ("get_transaction", "_require_live"),
-                               ("get_transaction", "_execute"), ("get_transaction", "_require_session_live"),
-                               ("begin_nested", "_business_savepoint")}
+            assert located == {("close", "_release"), ("begin", "begin"), ("begin_nested", "_business_savepoint")}
             for call in _calls(tree):
                 if isinstance(call.func, ast.Attribute) and call.func.attr in ("close", "begin", "begin_nested"):
                     assert ast.unparse(call) in ("super().close()", "super().begin(nested=True)",
                                                  "db.begin_nested()"), ast.unparse(call)
+            connections = {(ast.unparse(n), f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                           for n in _calls(f) if isinstance(n.func, ast.Attribute) and n.func.attr == "connection"}
+            assert connections == {("super().connection()", "_materialize_savepoint")}
             withs = [ast.unparse(item.context_expr) for n in ast.walk(tree) if isinstance(n, ast.With)
                      for item in n.items]
-            assert withs == ["db.begin_nested()"]
+            # R1 PR 9-C1-B : la finalisation est le SEUL usage du SAVEPOINT C1.
+            assert sorted(withs) == ["_business_savepoint(db, probe)", "db.begin_nested()"]
             assert not {"commit", "rollback"} & _attr_calls(tree)
             assert not names & {"SessionLocal", "get_db", "sessionmaker", "create_engine"}, path.name
             assert "Session" in names
             continue
         if path == ADAPTERS:
-            # Exception nominative R1 PR 9-B1 : deux SAVEPOINT locaux, rien d'autre.
-            assert _attr_calls(tree) & TRANSACTION_METHODS == {"begin_nested"}
+            # Exception nominative R1 PR 9-B1 : deux SAVEPOINT locaux.
+            # R1 PR 9-C1-B : get_transaction() en LECTURE seule dans les trois
+            # méthodes des capacités scellées (constat de la transaction externe
+            # à la construction, sonde, relecture B2) ; rien d'autre.
+            assert _attr_calls(tree) & TRANSACTION_METHODS == {"begin_nested", "get_transaction"}
             located = sorted((n.func.attr, f.name) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
                              for n in _calls(f) if isinstance(n.func, ast.Attribute)
                              and n.func.attr in TRANSACTION_METHODS)
-            assert located == [("begin_nested", "_insert_reservation"), ("begin_nested", "_register_conversation")]
+            assert located == [("begin_nested", "_insert_reservation"), ("begin_nested", "_register_conversation"),
+                               ("get_transaction", "__init__"), ("get_transaction", "read_preparation"),
+                               ("get_transaction", "require_live")]
+            probes = {ast.unparse(n) for n in _calls(tree) if isinstance(n.func, ast.Attribute)
+                      and n.func.attr == "get_transaction"}
+            assert probes == {"conn.get_transaction()", "self._conn.get_transaction()"}
             withs = [ast.unparse(item.context_expr) for n in ast.walk(tree) if isinstance(n, ast.With)
                      for item in n.items]
             assert withs == ["conn.begin_nested()", "conn.begin_nested()"]
@@ -203,6 +221,12 @@ WRITES = {
     "_GRANT_LEASE": "UPDATE decryptage_turn_reservations SET ",
     "_BLOCK_RESERVATION": "UPDATE decryptage_turn_reservations SET ",
     "_RELEASE_LEASE": "UPDATE decryptage_turn_reservations SET ",
+    # R1 PR 9-C1-B : finalisation et blocage d'une collision PROUVÉE ; l'instant
+    # de décision est capturé PAR l'instruction (CTE MATERIALIZED, audit P1).
+    "_FINALIZE_RESERVATION": "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+                             "UPDATE decryptage_turn_reservations SET ",
+    "_BLOCK_PROVEN_COLLISION": "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+                               "UPDATE decryptage_turn_reservations SET ",
 }
 # R1 PR 9-B1 : instructions fermées, chacune avec son filtre propriétaire exact.
 PR9B1_FILTERS = {
@@ -221,6 +245,23 @@ PR9B1_FILTERS = {
                           "AND attempts_used = :a ",
     "_RELEASE_LEASE": "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
                       "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > :at ",
+    # R1 PR 9-C1-B : jeton, échéance (T_finalize capturé par l'instruction),
+    # identité COMPLÈTE et intention vérifiés DANS l'instruction ; jamais une
+    # livraison déjà liée.
+    "_FINALIZE_RESERVATION": "FROM decision "
+                             "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                             "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
+                             "AND assistant_delivery_id IS NULL AND blocked_reason IS NULL AND finalized_at IS NULL "
+                             "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
+                             "AND delivery_ordinal = :o AND fingerprint_version = :fv AND fingerprint_key_version = :kv "
+                             "AND request_fingerprint = :f ",
+    "_BLOCK_PROVEN_COLLISION": "FROM decision "
+                               "WHERE id = :id AND user_id = :u AND state = 'reserved' AND lease_epoch = :e "
+                               "AND attempts_used = :a AND lease_token_hash = :h AND lease_expires_at > decision.at "
+                               "AND assistant_delivery_id IS NULL "
+                               "AND conversation_key = :k AND surface = :s AND source_user_turn_id = :t "
+                               "AND delivery_ordinal = :o AND fingerprint_version = :fv "
+                               "AND fingerprint_key_version = :kv AND request_fingerprint = :f ",
 }
 
 
@@ -242,11 +283,25 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
         "_LEASE_DECISION_CLOCK", "_LEGACY_DELIVERY", "_LINKED_DELIVERY", "_INSERT_RESERVATION[leased]",
         "_INSERT_RESERVATION[blocked]", "_GRANT_LEASE", "_BLOCK_RESERVATION", "_RELEASE_LEASE",
         # R1 PR 9-B2 : UNE instruction de lecture de préparation.
-        "_PREPARATION_CONTEXT"}
+        "_PREPARATION_CONTEXT",
+        # R1 PR 9-C1-B : finalisation et blocage prouvé, chacun capturant son
+        # instant de décision (_DECISION_CLOCK, fragment de CTE).
+        "_DECISION_CLOCK", "_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"}
     # Seules requêtes sans user_id : l'isolation active de la transaction et
     # (R1 PR 9-B1) l'horloge T_lease_decision lue après le verrou.
     assert statements.pop("_TRANSACTION_ISOLATION") == "SELECT current_setting('transaction_isolation')"
     assert statements.pop("_LEASE_DECISION_CLOCK") == "SELECT clock_timestamp()"
+    # R1 PR 9-C1-B (audit P1) : AUCUNE horloge lue séparément avant l'écriture ;
+    # T_finalize est UNE évaluation de clock_timestamp() DANS chaque UPDATE,
+    # réutilisée pour l'échéance et les horodatages ; aucun instant en paramètre.
+    assert statements.pop("_DECISION_CLOCK") == "WITH decision AS MATERIALIZED (SELECT clock_timestamp() AS at) "
+    for name in ("_FINALIZE_RESERVATION", "_BLOCK_PROVEN_COLLISION"):
+        sql = statements[name]
+        assert sql.count("clock_timestamp()") == 1 and ":at" not in sql, name
+        assert "lease_expires_at > decision.at" in sql and "updated_at = decision.at" in sql, name
+        assert sql.endswith(", decision.at AS decided_at"), name
+    assert "finalized_at = decision.at" in statements["_FINALIZE_RESERVATION"]
+    assert "_FINALIZATION_DECISION_CLOCK" not in vars(_adapters) and "_finalization_clock" not in vars(_adapters)
     _check_preparation_statement(statements.pop("_PREPARATION_CONTEXT"))
     for name in PR9B1_FILTERS:
         sql = statements.pop(name)
@@ -259,8 +314,17 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
             assigned = sql[sql.index(" SET ") + 5:sql.index(" WHERE ")]
             columns = {part.split("=")[0].strip() for part in assigned.split(", ")}
             # Identité, empreinte, versions et created_at ne sont jamais réécrits.
-            assert columns <= {"lease_epoch", "attempts_used", "lease_token_hash", "lease_expires_at",
-                               "retry_not_before_at", "updated_at", "state", "blocked_reason"}, (name, columns)
+            # R1 PR 9-C1-B : seule la finalisation écrit en plus le lien de
+            # livraison, le ticker résolu et l'instant de finalisation.
+            allowed = {"lease_epoch", "attempts_used", "lease_token_hash", "lease_expires_at",
+                       "retry_not_before_at", "updated_at", "state", "blocked_reason"}
+            if name == "_FINALIZE_RESERVATION":
+                allowed |= {"assistant_delivery_id", "resolved_ticker", "finalized_at"}
+                assert columns == {"state", "assistant_delivery_id", "resolved_ticker", "finalized_at", "updated_at",
+                                   "lease_token_hash", "lease_expires_at", "retry_not_before_at"}, columns
+            if name == "_BLOCK_PROVEN_COLLISION":
+                assert "blocked_reason = 'legacy_collision'" in assigned  # motif existant, jamais un nouveau
+            assert columns <= allowed, (name, columns)
     for name, sql in statements.items():
         assert ";" not in sql and "--" not in sql and "/*" not in sql, name
         prefix = WRITES.get(name, "SELECT ")
@@ -334,11 +398,13 @@ def test_closed_registry_and_lock_plans():
                  c.ReplacePortfolioPosition: c.PORTFOLIO_MUTATION, c.DeletePortfolioPosition: c.PORTFOLIO_MUTATION,
                  # R1 PR 9-B1
                  c.ReserveDecryptageTurn: c.DECRYPTAGE_MUTATION,
-                 c.RecordDecryptageAttemptFailure: c.DECRYPTAGE_MUTATION}
+                 c.RecordDecryptageAttemptFailure: c.DECRYPTAGE_MUTATION,
+                 # R1 PR 9-C1-B
+                 c.FinalizeDecryptageCandidate: c.DECRYPTAGE_MUTATION}
     # R1 PR 9-B2 : une lecture sous READ qui reçoit le trousseau Décrypter
     # (revérification de l'intention B1 par le dispatch existant).
     keyed_reads = {c.ReadDecryptagePreparationContext}
-    assert set(_adapters.REGISTRY) == reads | keyed_reads | set(mutations) and len(_adapters.REGISTRY) == 17
+    assert set(_adapters.REGISTRY) == reads | keyed_reads | set(mutations) and len(_adapters.REGISTRY) == 18
     # R1 PR 7 : la mutation de démonstration sans CAS n'est plus invocable.
     assert c.UpdatePositionQuantity not in _adapters.REGISTRY
     for command, spec in _adapters.REGISTRY.items():
@@ -353,7 +419,9 @@ def test_closed_registry_and_lock_plans():
             assert spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
             assert spec.lock is _adapters._no_business_lock
             assert spec.execute is {c.ReserveDecryptageTurn: _adapters._reserve_turn,
-                                    c.RecordDecryptageAttemptFailure: _adapters._record_attempt_failure}[command]
+                                    c.RecordDecryptageAttemptFailure: _adapters._record_attempt_failure,
+                                    # R1 PR 9-C1-B : même dispatch, aucun plan nouveau.
+                                    c.FinalizeDecryptageCandidate: _adapters._finalize_candidate}[command]
         elif command in keyed_reads:
             assert spec.decryptage_keyed and not spec.keyed and spec.states == (type(None),)
             assert spec.lock is _adapters._no_business_lock and spec.execute is _adapters._read_preparation_context
@@ -373,7 +441,8 @@ def test_closed_registry_and_lock_plans():
     assert c.DECRYPTAGE_MUTATION == c.LockPlan("decryptage_mutation", "FOR NO KEY UPDATE", (), True)
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
-        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}  # R1 PR 9-B1
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure,  # R1 PR 9-B1
+        c.FinalizeDecryptageCandidate}  # R1 PR 9-C1-B (plan inchangé, aucun plan nouveau)
     assert _adapters._LOCK_PROFILE["FOR NO KEY UPDATE"] == "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE"
     assert dict(_adapters.ISOLATION_ALERTS) == {"portfolio_mutation": "portfolio_isolation_refused",
                                                 "decryptage_mutation": "decryptage_isolation_refused"}
@@ -405,7 +474,10 @@ def test_no_operation_conn_principal_contract_remains():
                     receiving.add(node.name)
         # R1 PR 9-A : seules trois fonctions PRIVÉES du pont reçoivent la
         # connexion du runner (point d'entrée, contrôle, Session du pont).
-        assert receiving == ({"_execute", "_require_live", "__init__"} if path == BRIDGE else set()), path.name
+        # R1 PR 9-C1-B : le contrôle de capacité (_require_probe) remplace
+        # _require_live(conn, outer) ; le contrat scellé déclare bound_to(conn).
+        expected = {BRIDGE: {"_execute", "_require_probe", "__init__"}, CONTRACTS: {"bound_to"}}
+        assert receiving == expected.get(path, set()), path.name
     public_adapters = {n.name for n in _tree(ADAPTERS).body if isinstance(n, ast.FunctionDef)
                        and not n.name.startswith("_")}
     # Seuls appels du runner hors registre : verrou users, isolation (R1 PR 7).

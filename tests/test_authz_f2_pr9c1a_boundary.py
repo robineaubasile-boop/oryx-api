@@ -49,8 +49,18 @@ from tests.test_authz_f2_pr9a_boundary import (
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 from tests.test_migration_0004_drop_company_analyses import _code_tokens
 
+# R1 PR 9-C1-B : _require_session_live est remplacée par la sonde de la
+# capacité TransactionProbe (SQL des adaptateurs), passée à _business_savepoint.
 C1A_PRIMITIVES = ("_business_savepoint", "_prepare_turn", "_apply_prepared_turn", "_cognitive_context_matches",
-                  "_require_session_live", "_context_of", "_has_pending_writes")
+                  "_context_of", "_has_pending_writes")
+# R1 PR 9-C1-B : SEULS attributs du pont utilisés par les adaptateurs SQL (unique
+# importateur) : l'exécution, la troisième opération, ses vues fermées, ses
+# motifs, le SHA historique, et deux types vérifiés par le FinalizationReadPort.
+ADAPTERS_BRIDGE_ATTRIBUTES = {
+    "_execute", "CandidateFinalization", "PreparedTurnApplied", "FinalizationRolledBack", "CONTEXT_CHANGED",
+    "PREPARATION_REFUSED", "LEGACY_COLLISION", "LEASE_STALE", "INTENT_MISMATCH", "NOT_FOUND",
+    "_delivery_request_fingerprint", "DELIVERY_STATUSES", "DELIVERY_SCHEMA_VERSION", "_BridgeSession",
+    "_SavepointScope"}
 C1A_SERVICE_ENTRIES = ("prepare_locked_cognitive_turn", "apply_prepared_cognitive_turn",
                        "apply_prepared_construction_these_progress")
 
@@ -101,15 +111,21 @@ def _class(path, name):
 # --------------------------------------------------------------------------
 
 def test_production_registry_and_bridge_inventory_are_unchanged():
-    assert len(_adapters.REGISTRY) == 17
+    # R1 PR 9-C1-B : 18 commandes (FinalizeDecryptageCandidate) et 3 opérations
+    # (CandidateFinalization) ; aucune autre. La commande n'est nommée que par
+    # sa définition et par les adaptateurs SQL ; jamais par une route.
+    assert len(_adapters.REGISTRY) == 18
     assert {cmd for cmd, spec in _adapters.REGISTRY.items() if spec.plan is c.DECRYPTAGE_MUTATION} == {
-        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure}
+        c.ReserveDecryptageTurn, c.RecordDecryptageAttemptFailure, c.FinalizeDecryptageCandidate}
     assert dict(bridge.OPERATIONS) == {bridge.TurnFinalization: bridge._finalize_turn,
-                                       bridge.DeliveryAcknowledgement: bridge._acknowledge}
-    assert not hasattr(c, "FinalizeDecryptageCandidate")
+                                       bridge.DeliveryAcknowledgement: bridge._acknowledge,
+                                       bridge.CandidateFinalization: bridge._finalize_candidate}
+    naming = set()
     for root in (REPO_ROOT / "core", REPO_ROOT / "scripts", REPO_ROOT / "ci"):
         for path in root.rglob("*.py"):
-            assert "FinalizeDecryptageCandidate" not in path.read_text(encoding="utf-8"), path
+            if "FinalizeDecryptageCandidate" in _code_tokens(path.read_text(encoding="utf-8")):
+                naming.add(path.relative_to(REPO_ROOT).as_posix())
+    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py"}
     for path in (REPO_ROOT / "api.py", REPO_ROOT / "web-v2" / "index.html"):
         assert "FinalizeDecryptageCandidate" not in path.read_text(encoding="utf-8")
 
@@ -118,7 +134,10 @@ def test_c1a_primitives_are_private_and_unreachable_from_production():
     bridge_functions = _functions(BRIDGE)
     for name in C1A_PRIMITIVES:
         assert name in bridge_functions and name.startswith("_"), name
-    # Aucun point d'entrée existant du pont ne les atteint.
+    # Aucun point d'entrée HISTORIQUE du pont ne les atteint ; seule la
+    # finalisation C1-B (_finalize_candidate) les compose (R1 PR 9-C1-B).
+    called = _called_names(bridge_functions["_finalize_candidate"])
+    assert {"_business_savepoint", "_prepare_turn", "_apply_prepared_turn", "_same_preparation"} <= called
     for entry in ("_execute", "_finalize_turn", "_acknowledge", "_require_owned_provenance"):
         called = _called_names(bridge_functions[entry])
         assert not called & set(C1A_PRIMITIVES) - {"_require_live"}, entry
@@ -129,11 +148,20 @@ def test_c1a_primitives_are_private_and_unreachable_from_production():
     names = C1A_PRIMITIVES[:4] + C1A_SERVICE_ENTRIES + ("_PreparedTurn", "PreparedCognitiveContext",
                                                           "_LocalRollback", "PreparedTurnApplied")
     services = {REPO_ROOT / "core" / "decryptage_cognitive_runtime.py", REPO_ROOT / "core" / "decryptage_progress.py"}
+    adapters = REPO_ROOT / "core" / "authz_f2" / "_adapters.py"
     for root in (REPO_ROOT / "core", REPO_ROOT / "scripts", REPO_ROOT / "ci"):
         for path in root.rglob("*.py"):
             if path == BRIDGE or path in services:
                 continue
             text = path.read_text(encoding="utf-8")
+            if path == adapters:  # R1 PR 9-C1-B : attributs du pont FERMÉS, jamais une primitive C1-A
+                used = {n.attr for n in ast.walk(_tree(path)) if isinstance(n, ast.Attribute)
+                        and isinstance(n.value, ast.Name) and n.value.id == "bridge"}
+                assert used == ADAPTERS_BRIDGE_ATTRIBUTES, used ^ ADAPTERS_BRIDGE_ATTRIBUTES
+                tokens = _code_tokens(text).split("\n")
+                assert not [n for n in C1A_PRIMITIVES[:4] + C1A_SERVICE_ENTRIES + (
+                    "_PreparedTurn", "PreparedCognitiveContext", "_LocalRollback") if n in tokens], path
+                continue
             assert not [n for n in names if n in text], path
     for path in (REPO_ROOT / "api.py", REPO_ROOT / "web-v2" / "index.html"):
         text = path.read_text(encoding="utf-8")
@@ -162,11 +190,16 @@ def test_no_migration_is_added():
 
 
 def test_http_routers_and_runner_know_nothing_of_c1a():
+    # R1 PR 9-C1-B : les adaptateurs SQL importent le pont (freeze) mais ne
+    # nomment aucune primitive C1-A ni aucun point d'entrée des services.
     for path in list((REPO_ROOT / "core" / "authz_f2_http").glob("*.py")) + [
             REPO_ROOT / "core" / "authz_f2" / "runner.py", REPO_ROOT / "core" / "authz_f2" / "_adapters.py",
             REPO_ROOT / "core" / "authz_f2" / "commands.py"]:
-        tokens = _code_tokens(path.read_text(encoding="utf-8"))  # hors docstrings (historique)
-        for name in C1A_PRIMITIVES[:4] + C1A_SERVICE_ENTRIES + ("_decryptage_orm_bridge",):
+        tokens = _code_tokens(path.read_text(encoding="utf-8")).split("\n")  # hors docstrings (historique)
+        forbidden = C1A_PRIMITIVES[:4] + C1A_SERVICE_ENTRIES
+        if path.name != "_adapters.py":
+            forbidden += ("_decryptage_orm_bridge",)
+        for name in forbidden:
             assert name not in tokens, (path.name, name)
 
 
@@ -185,10 +218,18 @@ def test_no_import_cycle_between_adapters_and_the_bridge():
                 imported |= {node.module} | {f"{node.module}.{a.name}" for a in node.names}
             elif isinstance(node, ast.Call) and ast.unparse(node.func) in ("importlib.import_module", "__import__"):
                 pytest.fail(f"import dynamique dans {path.name}")
-        if path != BRIDGE:
+        # R1 PR 9-C1-B (F-01) : UNIQUE arête _adapters -> pont ; le pont
+        # n'importe plus _adapters ; les contrats communs n'importent rien.
+        if path.name not in ("_adapters.py", "_decryptage_orm_bridge.py"):
             assert not any("_decryptage_orm_bridge" in i for i in imported), path.name
-    assert "core.authz_f2._adapters" in {n.module + "." + a.name for n in ast.walk(_tree(BRIDGE))
-                                         if isinstance(n, ast.ImportFrom) and n.module for a in n.names}
+        if path.name == "_bridge_contracts.py":
+            assert imported == set(), imported
+    bridge_imports = {f"{n.module}.{a.name}" for n in ast.walk(_tree(BRIDGE)) if isinstance(n, ast.ImportFrom)
+                      and n.module for a in n.names}
+    assert "core.authz_f2._adapters" not in bridge_imports and "core.authz_f2._bridge_contracts" in bridge_imports
+    adapters_imports = {f"{n.module}.{a.name}" for n in ast.walk(_tree(REPO_ROOT / "core" / "authz_f2" / "_adapters.py"))
+                        if isinstance(n, ast.ImportFrom) and n.module for a in n.names}
+    assert "core.authz_f2._decryptage_orm_bridge" in adapters_imports
 
 
 # --------------------------------------------------------------------------
@@ -299,8 +340,12 @@ def test_business_savepoint_structure_is_exact():
     assert isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant)
     source = "\n".join(["@" + ast.unparse(d) for d in fn.decorator_list] + [ast.unparse(stmt) for stmt in fn.body[1:]])
     assert [ast.unparse(d) for d in fn.decorator_list] == ["contextmanager"]
-    order = ["type(db) is not _BridgeSession", "db.get_nested_transaction() is not None", "_has_pending_writes(db)",
-             "_require_session_live(db)", "with db.begin_nested() as transaction:", "yield scope",
+    # R1 PR 9-C1-B : capacité exigée d'abord ; SAVEPOINT matérialisé dès
+    # l'ouverture ; port lié UNE fois à CE SAVEPOINT ; sondes par la capacité.
+    order = ["type(db) is not _BridgeSession", "_require_probe(probe, db.bind)",
+             "db.get_nested_transaction() is not None", "_has_pending_writes(db)", "probe.require_live()",
+             "with db.begin_nested() as transaction:", "db._materialize_savepoint()",
+             "scope._savepoint = db.bind.get_nested_transaction()", "probe.bind_scope(scope)", "yield scope",
              "except _LocalRollback:", "db.flush()", "except _LocalRollback as refusal:", "db.expunge_all()",
              "except BaseException:", "scope._state = _RELEASED"]
     assert [source.index(m) for m in order] == sorted(source.index(m) for m in order)
@@ -308,20 +353,20 @@ def test_business_savepoint_structure_is_exact():
     assert sorted(ast.unparse(h.type) for h in handlers) == ["BaseException", "_LocalRollback", "_LocalRollback"]
     for handler in handlers:  # toute exception est re-levée, sauf l'annulation locale fermée (traitée)
         body = ast.unparse(handler)
-        assert "raise" in body or ("db.expunge_all()" in body and "_require_session_live(db)" in body)
-    assert source.count("_require_session_live(db)") == 4
+        assert "raise" in body or ("db.expunge_all()" in body and "probe.require_live()" in body)
+    assert source.count("probe.require_live()") == 4
     assert source.count("expunge_all") == 1
     assert "commit" not in source and "rollback(" not in source
 
 
 def test_savepoint_refuses_any_other_session_before_touching_it():
     with pytest.raises(TypeError):
-        with bridge._business_savepoint(object()):
+        with bridge._business_savepoint(object(), None):
             pass
     engine = sa.create_engine("postgresql+psycopg2://nobody@127.0.0.1:1/oryx_never_test")
     plain = sa.orm.Session(bind=engine)
     with pytest.raises(TypeError):
-        with bridge._business_savepoint(plain):
+        with bridge._business_savepoint(plain, None):
             pass
     assert engine.pool.checkedout() == 0
     plain.close()
@@ -332,11 +377,22 @@ def test_savepoint_refuses_any_other_session_before_touching_it():
 # --------------------------------------------------------------------------
 
 def test_local_rollback_reasons_are_closed():
-    assert bridge.LOCAL_ROLLBACK_REASONS == ("context_changed",)
+    # R1 PR 9-C1-B (freeze V1.2.1) : six motifs PRIVÉS et fermés, aucun statut
+    # public nouveau ; seul preparation_refused porte un détail (motif B2 fermé).
+    assert bridge.LOCAL_ROLLBACK_REASONS == ("context_changed", "preparation_refused", "legacy_collision",
+                                             "lease_stale", "intent_mismatch", "not_found")
     assert bridge._LocalRollback("context_changed").reason == "context_changed"
+    for reason in bridge.LOCAL_ROLLBACK_REASONS:
+        detail = "stale_conversation_context" if reason == "preparation_refused" else None
+        assert (bridge._LocalRollback(reason, detail).reason, bridge._LocalRollback(reason, detail).detail) == (
+            reason, detail)
     for reason in ("other", "", None, 1, "CONTEXT_CHANGED"):
         with pytest.raises(ValueError):
             bridge._LocalRollback(reason)
+    for reason, detail in (("preparation_refused", None), ("preparation_refused", "autre"),
+                           ("context_changed", "stale_conversation_context")):
+        with pytest.raises(ValueError):
+            bridge._LocalRollback(reason, detail)
     assert not issubclass(bridge._LocalRollback, _adapters.AdapterInvariantBroken)
     for exc, alert in ((bridge.PendingWritesBeforeSavepoint, "decryptage_bridge_pending_writes"),
                        (bridge.PreparedTurnUnusable, "decryptage_bridge_prepared_turn_unusable")):

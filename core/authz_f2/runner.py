@@ -95,6 +95,14 @@ inchangées. Un résultat AUTHORIZED de ces commandes n'autorise aucun appel
 externe : seul un LeaseGranted (capacité rendue après COMMIT confirmé) le
 permettra à PR 9-B2. Un blocage durable est une vue normale, committée
 (jamais une sentinelle de ROLLBACK).
+
+R1 PR 9-C1-B : troisième commande sous DECRYPTAGE_MUTATION,
+FinalizeDecryptageCandidate (même séquence de phase B, même dispatch du
+trousseau Décrypter, aucun code nouveau ici). Le runner reste l'UNIQUE
+propriétaire de la transaction externe et du COMMIT : une finalisation dont
+l'UPDATE B1 échoue après RELEASE SAVEPOINT rend CONFLICT, donc ROLLBACK
+intégral (REVISION_CONFLICT), jamais un objet métier committé ; un COMMIT en
+échec ou incertain rend UNAVAILABLE, sans réexécution.
 """
 import logging
 from dataclasses import dataclass

@@ -19,8 +19,8 @@ module ajoute, le temps d'un test seulement (fixture `c1a`) :
 
 Les points d'observation (SCRIPT) sont des fonctions de TEST appelées aux
 étapes nommées ; la production n'en a aucun. La fixture vérifie qu'après le
-test le registre de production (dix-sept commandes) et l'inventaire du pont
-(deux opérations) sont exactement les objets d'origine.
+test le registre de production (dix-huit commandes) et l'inventaire du pont
+(trois opérations, R1 PR 9-C1-B) sont exactement les objets d'origine.
 """
 import json
 import sys
@@ -33,11 +33,13 @@ import pytest
 from core import assistant_delivery as ad
 from core import decryptage_cognitive_runtime as dcr
 from core.authz_f2 import _adapters
+from core.authz_f2 import _bridge_contracts as contracts
 from core.authz_f2 import _decryptage_orm_bridge as bridge
 from core.authz_f2 import commands as c
 from tests.authz_f2_pr9a_support import BENCH_REGISTRY, PRODUCTION_REGISTRY, TICKER, BenchTurn, turn
 
 PRODUCTION_OPERATIONS = bridge.OPERATIONS
+PRODUCTION_CAPABILITIES = bridge.CAPABILITIES
 STAGES = ("before_savepoint", "claimed", "prepared", "applied", "after_savepoint")
 
 
@@ -98,16 +100,17 @@ class State:
 
     def __init__(self, db, user_id, operation):
         self.db, self.user_id, self.operation = db, user_id, operation
-        self.scope = self.delivery = self.prepared = self.applied = None
+        self.scope = self.delivery = self.prepared = self.applied = self.probe = None
         self.skip_apply = False  # Prepare seul (aucune application), puis RELEASE
 
 
-def _rehearse(db, user_id, operation):
+def _rehearse(db, user_id, operation, probe):
     t = operation.turn
     state = State(db, user_id, operation)
+    state.probe = probe
     SCRIPT("before_savepoint", state)
     created = False
-    with bridge._business_savepoint(db) as scope:
+    with bridge._business_savepoint(db, probe) as scope:
         state.scope = scope
         payload = json.loads(t.response_payload)
         delivery, created = ad.claim_delivery(
@@ -141,7 +144,13 @@ def _rehearse(db, user_id, operation):
 
 
 def _bench_execute(conn, ctx, command, locked):
-    return bridge._execute(conn, ctx, command.operation)
+    # R1 PR 9-C1-B : la sonde de transaction (SQL) appartient aux adaptateurs ;
+    # une opération historique du pont ne reçoit qu'elle (jamais la relecture B2).
+    probe = _adapters._transaction_probe(conn, ctx)
+    try:
+        return bridge._execute(conn, ctx, command.operation, probe)
+    finally:
+        probe._close()
 
 
 C1A_REGISTRY = MappingProxyType({
@@ -149,21 +158,27 @@ C1A_REGISTRY = MappingProxyType({
     BenchRehearsal: _adapters.Spec(c.DECRYPTAGE_MUTATION, _adapters._no_business_lock, _bench_execute),
 })
 C1A_OPERATIONS = MappingProxyType({**PRODUCTION_OPERATIONS, Rehearsal: _rehearse})
+# R1 PR 9-C1-B : l'opération de test ne reçoit que la sonde (jamais la relecture B2).
+C1A_CAPABILITIES = MappingProxyType({**PRODUCTION_CAPABILITIES, Rehearsal: contracts.TransactionProbe})
 
 
 @pytest.fixture
 def c1a(monkeypatch, bench):
     """Registre et inventaire de TEST le temps d'un test, puis objets de
-    production d'origine (17 commandes, 2 opérations)."""
-    assert bridge.OPERATIONS is PRODUCTION_OPERATIONS and len(PRODUCTION_OPERATIONS) == 2
+    production d'origine (18 commandes, 3 opérations)."""
+    # R1 PR 9-C1-B : trois opérations de production dans l'inventaire du pont.
+    assert bridge.OPERATIONS is PRODUCTION_OPERATIONS and len(PRODUCTION_OPERATIONS) == 3
+    assert bridge.CAPABILITIES is PRODUCTION_CAPABILITIES
     script = Script()
     monkeypatch.setattr(_adapters, "REGISTRY", C1A_REGISTRY)
     monkeypatch.setattr(bridge, "OPERATIONS", C1A_OPERATIONS)
+    monkeypatch.setattr(bridge, "CAPABILITIES", C1A_CAPABILITIES)
     monkeypatch.setattr(sys.modules[__name__], "SCRIPT", script)
     yield script
     monkeypatch.undo()
-    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 17
-    assert bridge.OPERATIONS is PRODUCTION_OPERATIONS and len(bridge.OPERATIONS) == 2
+    assert _adapters.REGISTRY is PRODUCTION_REGISTRY and len(_adapters.REGISTRY) == 18
+    assert bridge.OPERATIONS is PRODUCTION_OPERATIONS and len(bridge.OPERATIONS) == 3
+    assert bridge.CAPABILITIES is PRODUCTION_CAPABILITIES
     assert BenchRehearsal not in _adapters.REGISTRY and Rehearsal not in bridge.OPERATIONS
 
 

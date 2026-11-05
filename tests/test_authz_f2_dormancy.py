@@ -60,12 +60,24 @@ HEAD_FILE = "0021_decryptage_turn_reservations.py"
 IMPORT_MATRIX = {
     "core/authz_f2/__init__.py": set(),
     "core/authz_f2/principal.py": set(),
+    # R1 PR 9-C1-B : la commande de finalisation porte le candidat B2 (module pur).
     "core/authz_f2/commands.py": {"core.authz_f2.portfolio_values", "core.authz_f2.decryptage_fingerprint",
-                                  "core.authz_f2.decryptage_reservation", "core.authz_f2.decryptage_context"},
+                                  "core.authz_f2.decryptage_reservation", "core.authz_f2.decryptage_context",
+                                  "core.authz_f2.decryptage_candidate"},
+    # R1 PR 9-C1-B (freeze) : les adaptateurs SQL appellent le pont ORM privé
+    # (UNIQUE importateur) ; sentinelles et exceptions des contrats communs.
     "core/authz_f2/_adapters.py": {"core.authz_f2.commands", "core.authz_f2.portfolio_fingerprint",
                                    "core.authz_f2.portfolio_results", "core.authz_f2.portfolio_values",
                                    "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_reservation",
-                                   "core.authz_f2.decryptage_context"},
+                                   "core.authz_f2.decryptage_context", "core.authz_f2._bridge_contracts",
+                                   "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.decryptage_finalization"},
+    # R1 PR 9-C1-B : contrats communs PURS (aucun import), vues de finalisation
+    # et sélecteur de méthode PURS.
+    "core/authz_f2/_bridge_contracts.py": set(),
+    "core/authz_f2/decryptage_finalization.py": {"core.authz_f2.decryptage_context",
+                                                 "core.authz_f2.decryptage_market_data",
+                                                 "core.authz_f2.decryptage_reservation"},
+    "core/authz_f2/decryptage_method_selection.py": {"core.authz_f2.decryptage_candidate", "core.pedagogie_library"},
     "core/authz_f2/runner.py": {"core.auth_f2.sessions", "core.auth_f2.keys", "core.auth_f2.txn",
                                 "core.authz_f2._adapters", "core.authz_f2.commands", "core.authz_f2.principal",
                                 "core.authz_f2.portfolio_fingerprint", "core.authz_f2.decryptage_fingerprint"},
@@ -89,7 +101,8 @@ IMPORT_MATRIX = {
                                                "core.authz_f2.decryptage_market_data",
                                                "core.authz_f2.decryptage_reservation", "core.authz_f2.principal",
                                                "core.authz_f2.runner", "core.decryptage_engine",
-                                               "core.pedagogie_library"},
+                                               # R1 PR 9-C1-B : sélection de méthode extraite (module pur)
+                                               "core.authz_f2.decryptage_method_selection"},
     # R1 PR 7 : modules purs du portefeuille (aucune base, aucun réseau).
     "core/authz_f2/portfolio_values.py": set(),
     "core/authz_f2/portfolio_fingerprint.py": set(),
@@ -114,12 +127,16 @@ IMPORT_MATRIX = {
     # R1 PR 9-A : pont ORM privé, seul module de la frontière qui importe
     # des services métier et core.models (exception nominative, V2.2-03).
     # R1 PR 9-C1-A : + vue de préparation B2 (module pur, déjà chargé par
-    # commands) pour la revalidation cognitive ; aucun import de _adapters
-    # vers le pont (F-01).
+    # commands) pour la revalidation cognitive.
+    # R1 PR 9-C1-B (F-01) : le pont N'IMPORTE PLUS _adapters (cycle supprimé),
+    # mais les contrats communs purs ; + candidat, vues de finalisation et
+    # sélecteur de méthode (purs) pour la revalidation complète.
     "core/authz_f2/_decryptage_orm_bridge.py": {"core.assistant_delivery", "core.decryptage_cognitive_runtime",
-                                                "core.decryptage_progress", "core.authz_f2._adapters",
+                                                "core.decryptage_progress", "core.authz_f2._bridge_contracts",
                                                 "core.authz_f2.commands", "core.authz_f2.principal",
-                                                "core.authz_f2.decryptage_context", "core.models"},
+                                                "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_candidate",
+                                                "core.authz_f2.decryptage_finalization",
+                                                "core.authz_f2.decryptage_method_selection", "core.models"},
     # R1 PR 8 : codec pur (commandes et vues seulement) et routeur de lecture.
     "core/authz_f2_http/consultation_codec.py": {"core.authz_f2.commands"},
     "core/authz_f2_http/consultation.py": {"core.auth_f2.crypto", "core.auth_f2.service",
@@ -335,10 +352,30 @@ def test_importing_the_boundary_opens_nothing():
             "          'core.authz_f2_http.portfolio', 'core.authz_f2_http.consultation_codec',\n"
             "          'core.authz_f2_http.consultation', 'core.authz_f2_http.isolated'):\n"
             "    importlib.import_module(m)\n"
-            "print(' '.join(str(x in sys.modules) for x in ('api', 'httpx', 'core.db', 'core.models')), attempts)\n")
+            "import core.db\n"
+            "print(' '.join(str(x in sys.modules) for x in ('api', 'httpx', 'core.db', 'core.models')),\n"
+            "      core.db.engine is None, attempts)\n")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True,
                          env=_clean_env({}), check=True)
-    assert out.stdout.strip() == "False False False False []"
+    # R1 PR 9-C1-B — EXCEPTION NOMINATIVE ET BORNÉE : le freeze impose que les
+    # adaptateurs SQL appellent le pont ORM privé par un import STATIQUE (aucun
+    # import dynamique) ; le pont importe les services Décrypter, donc
+    # core.models et core.db. Importer la frontière charge désormais ces deux
+    # modules, mais n'ouvre toujours AUCUNE connexion (psycopg2.connect et
+    # socket jamais appelés), ne crée aucun moteur sans DATABASE_URL, et ne
+    # charge ni api ni httpx. Les modules PURS restent sans core.db (ci-dessous).
+    assert out.stdout.strip() == "False False True True True []"
+    pure = ("import sys, importlib\n"
+            "for m in ('core.authz_f2._bridge_contracts', 'core.authz_f2.decryptage_context',\n"
+            "          'core.authz_f2.decryptage_fingerprint', 'core.authz_f2.decryptage_reservation',\n"
+            "          'core.authz_f2.decryptage_finalization', 'core.authz_f2.portfolio_values',\n"
+            "          'core.authz_f2.principal'):\n"
+            "    importlib.import_module(m)\n"
+            "print(' '.join(str(x in sys.modules) for x in ('core.db', 'core.models', 'core.authz_f2._adapters',\n"
+            "                                                 'core.authz_f2._decryptage_orm_bridge')))\n")
+    out = subprocess.run([sys.executable, "-c", pure], cwd=REPO_ROOT, capture_output=True, text=True,
+                         env=_clean_env({}), check=True)
+    assert out.stdout.strip() == "False False False False"
 
 
 def test_only_the_additive_0021_migration_and_no_new_production_dependency():
