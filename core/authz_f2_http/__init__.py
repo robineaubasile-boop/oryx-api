@@ -26,7 +26,12 @@ Adaptateur HTTP autour de core.authz_f2.AuthorizedTransactionRunner
                   query stricte, curseurs versionnés Base64URL canoniques,
                   bornes de restitution 131072 / 512 octets, aucune
                   troncature) ;
-- isolated.py   : application personnelle ISOLÉE (tests uniquement).
+- isolated.py   : application personnelle ISOLÉE (tests uniquement) ;
+- R1 PR 9-C3    : orchestration HTTP Décrypter ISOLÉE (module dédié du
+                  paquet), trois POST ajoutés à l'application isolée
+                  seulement si une configuration Décrypter complète et
+                  fermée est fournie à sa composition ; sinon l'application
+                  reste strictement identique.
 
 Dormance : api.py n'importe ni ce paquet ni core.authz_f2 ; GET /api/v2/me,
 PUT /api/v2/me/level, les routes /api/v2/me/portfolio,

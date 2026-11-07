@@ -23,6 +23,16 @@ isolation explicitement configurée autre que READ COMMITTED est refusée
 (le runner la vérifie en outre dans chaque transaction portefeuille). La
 construction n'ouvre aucune connexion et n'écrit rien. Le bootstrap CSRF
 (GET /api/auth/f2/csrf/bootstrap) reste dans l'application F2 isolée.
+
+R1 PR 9-C3 : paramètre facultatif decryptage (DecryptageHttpConfig, type
+exact). Absent : application et runner STRICTEMENT identiques au
+comportement historique (aucun trousseau Décrypter, aucun transport, aucune
+route C3). Présent : le runner UNIQUE reçoit le trousseau Décrypter dédié
+(indépendance des clés F2 / portefeuille vérifiée par le runner, des clés
+CSRF vérifiée ici), puis build_decryptage_router construit
+l'orchestrateur B2 avec CE runner et ajoute exactement les trois routes
+POST /api/v2/me/decryptage/{turns,replay,ack}. Toute configuration
+partielle ou incompatible : PersonalHttpConfigError.
 """
 import time
 
@@ -35,6 +45,7 @@ from core.auth_f2_http.provenance import validate_allowed_origins
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.runner import AuthorizationConfigError, AuthorizedTransactionRunner
 from core.authz_f2_http.consultation import build_consultation_router
+from core.authz_f2_http.decryptage import DecryptageHttpConfig, build_decryptage_router
 from core.authz_f2_http.portfolio import build_portfolio_router
 from core.authz_f2_http.routes import PersonalDependencies, build_personal_router
 
@@ -44,7 +55,7 @@ class PersonalHttpConfigError(ValueError):
 
 
 def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyring, clock=None, fault_hook=None,
-                                wall_clock=time.time, portfolio_keyring=None) -> FastAPI:
+                                wall_clock=time.time, portfolio_keyring=None, decryptage=None) -> FastAPI:
     try:
         origins = validate_allowed_origins(allowed_origins)
     except ValueError as exc:
@@ -55,7 +66,11 @@ def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyrin
         raise PersonalHttpConfigError("horloge murale attendue")
     if portfolio_keyring is not None and type(portfolio_keyring) is not PortfolioKeyring:
         raise PersonalHttpConfigError("trousseau portefeuille attendu")
+    if decryptage is not None and type(decryptage) is not DecryptageHttpConfig:
+        raise PersonalHttpConfigError("configuration C3 attendue")
     kwargs = {"fault_hook": fault_hook, "portfolio_keyring": portfolio_keyring}
+    if decryptage is not None:
+        kwargs["decryptage_keyring"] = decryptage.decryptage_keyring
     if clock is not None:
         kwargs["clock"] = clock
     try:
@@ -80,7 +95,19 @@ def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyrin
         for version in portfolio_keyring.versions():
             if csrf_keyring.has_key_value(portfolio_keyring.key(version)):
                 raise PersonalHttpConfigError("clé portefeuille identique à une clé CSRF")
-    return make_personal_app(PersonalDependencies(runner, origins, csrf_keyring, wall_clock))
+    deps = PersonalDependencies(runner, origins, csrf_keyring, wall_clock)
+    if decryptage is None:
+        return make_personal_app(deps)
+    # R1 PR 9-C3 : clés Décrypter indépendantes des clés CSRF (F2 et
+    # portefeuille : vérifiées par le runner, sans repli).
+    keys = decryptage.decryptage_keyring
+    if any(csrf_keyring.has_key_value(keys.key(version)) for version in keys.versions()):
+        raise PersonalHttpConfigError("clé Décrypter identique à une clé CSRF")
+    try:
+        router = build_decryptage_router(deps, decryptage)  # orchestrateur B2 lié à CE runner
+    except (TypeError, ValueError) as exc:
+        raise PersonalHttpConfigError(str(exc)) from None
+    return _personal_app(deps, router)
 
 
 def make_personal_app(deps: PersonalDependencies) -> FastAPI:
@@ -88,10 +115,17 @@ def make_personal_app(deps: PersonalDependencies) -> FastAPI:
     /api/v2/me/level, les routes /api/v2/me/portfolio et les lectures
     /api/v2/me/analysis-overview et /api/v2/me/theses (aucune documentation
     OpenAPI, aucun CORS, en-têtes no-store sur toute réponse y compris
-    404 / 405)."""
+    404 / 405). Jamais de route C3 : elles n'existent que par
+    build_isolated_personal_app(decryptage=...)."""
+    return _personal_app(deps, None)
+
+
+def _personal_app(deps: PersonalDependencies, decryptage_router) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.include_router(build_personal_router(deps))
     app.include_router(build_portfolio_router(deps))
     app.include_router(build_consultation_router(deps))
+    if decryptage_router is not None:
+        app.include_router(decryptage_router)
     app.add_middleware(_NoStore)
     return app

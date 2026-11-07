@@ -132,7 +132,9 @@ def test_production_registry_and_bridge_inventory_are_unchanged():
         for path in root.rglob("*.py"):
             if "FinalizeDecryptageCandidate" in _code_tokens(path.read_text(encoding="utf-8")):
                 naming.add(path.relative_to(REPO_ROOT).as_posix())
-    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py"}
+    # R1 PR 9-C3 (nominatif) : + le routeur HTTP isolé, qui construit la
+    # commande à partir du candidat B2 (aucune autre voie, aucune route publique).
+    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py", "core/authz_f2_http/decryptage.py"}
     for path in (REPO_ROOT / "api.py", REPO_ROOT / "web-v2" / "index.html"):
         assert "FinalizeDecryptageCandidate" not in path.read_text(encoding="utf-8")
 

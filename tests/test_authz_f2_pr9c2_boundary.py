@@ -263,13 +263,21 @@ def test_no_route_no_activation_no_migration():
         assert not [n for n in names if n in text], path
     for path in (REPO_ROOT / "core" / "authz_f2_http").glob("*.py"):
         text = path.read_text(encoding="utf-8")
+        if path.name == "decryptage.py":
+            # R1 PR 9-C3 (nominatif) : /replay et /ack invoquent les deux
+            # commandes et vérifient la vue fermée ; jamais l'attestation privée.
+            assert [n for n in names if n in text] == list(names[:3]), path.name
+            continue
+        if path.name == "isolated.py":
+            assert not [n for n in names if n in text], path.name
+            continue
         assert not [n for n in names if n in text] and "decryptage" not in text.lower(), path.name
     naming = set()
     for root in (REPO_ROOT / "core", REPO_ROOT / "scripts", REPO_ROOT / "ci"):
         for path in root.rglob("*.py"):
             if any(n in _code_tokens(path.read_text(encoding="utf-8")).split("\n") for n in names[:2]):
                 naming.add(path.relative_to(REPO_ROOT).as_posix())
-    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py"}
+    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py", "core/authz_f2_http/decryptage.py"}
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert len(versions) == 21 and versions[-1] == "0021_decryptage_turn_reservations.py"
 

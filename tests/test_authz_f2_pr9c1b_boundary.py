@@ -365,6 +365,17 @@ def test_no_route_no_activation_no_migration():
         assert name not in api_source, name
     for path in (REPO_ROOT / "core" / "authz_f2_http").glob("*.py"):
         text = path.read_text(encoding="utf-8")
+        if path.name == "decryptage.py":
+            # R1 PR 9-C3 (nominatif) : seule la commande fermée est nommée ;
+            # ni opération du pont, ni capacité, ni vue interne de la finalisation.
+            tokens = set(_code_tokens(text).split("\n"))
+            assert "FinalizeDecryptageCandidate" in tokens and not tokens & {
+                "CandidateFinalization", "TurnFinalization", "FinalizationReadPort", "PreparedTurnApplied",
+                "FinalizationRolledBack", "_finalize_candidate"}, path.name
+            continue
+        if path.name == "isolated.py":
+            assert "Finalize" not in text, path.name  # composition : aucune commande nommée
+            continue
         assert "Finalize" not in text and "decryptage" not in text.lower(), path.name
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert len(versions) == 21 and versions[-1] == "0021_decryptage_turn_reservations.py"

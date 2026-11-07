@@ -170,6 +170,13 @@ def test_the_transports_read_no_configuration_and_log_nothing():
 B2_MARKERS = ("decryptage_generation", "decryptage_candidate", "decryptage_context", "decryptage_instrument",
               "decryptage_market_data", "decryptage_providers", "ReadDecryptagePreparationContext",
               "GeneratedDecryptageCandidate", "DecryptageGenerationOrchestrator", "/api/v2/me/decryptage")
+# R1 PR 9-C3 : seuls fichiers applicatifs hors core/authz_f2 autorisés à
+# nommer B2, avec l'ensemble EXACT (ordonné comme B2_MARKERS) des marqueurs.
+C3_B2_MARKERS = {
+    "core/authz_f2_http/decryptage.py": ["decryptage_generation", "decryptage_candidate", "decryptage_context",
+                                         "DecryptageGenerationOrchestrator", "/api/v2/me/decryptage"],
+    "core/authz_f2_http/isolated.py": ["/api/v2/me/decryptage"],
+}
 
 
 def test_no_application_module_imports_b2_and_api_never_mentions_it():
@@ -187,7 +194,15 @@ def test_no_application_module_imports_b2_and_api_never_mentions_it():
             if path == PROVIDERS or AUTHZ in path.parents:
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
-            offenders += [(str(path.relative_to(REPO_ROOT)), m) for m in B2_MARKERS if m in text]
+            hits = [m for m in B2_MARKERS if m in text]
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            if relative in C3_B2_MARKERS:
+                # R1 PR 9-C3 (nominatif) : le routeur isolé construit
+                # l'orchestrateur B2 avec le runner de la composition ; jamais
+                # les transports réels, jamais la lecture de préparation directe.
+                assert hits == C3_B2_MARKERS[relative], (relative, hits)
+                continue
+            offenders += [(relative, m) for m in hits]
     assert offenders == []
 
 
