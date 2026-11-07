@@ -25,6 +25,7 @@ import sqlalchemy as sa
 
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_context as dc
+from core.authz_f2 import decryptage_finalization as dfin
 from core.authz_f2 import decryptage_generation as dg
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2.decryptage_fingerprint import DecryptageKeyring
@@ -846,6 +847,83 @@ def test_the_closed_c1b_status_matrix(env, alice, monkeypatch, status, expected)
     response = turn(env, app, alice, turn_fields())
     assert_error(response, *expected)
     assert b"LVMH" not in response.content  # aucun candidat restitué
+
+
+def _injected_finalization(env, monkeypatch, make_view):
+    """C1-B NON exécutée : le runner rend AuthorizationOutcome(AUTHORIZED,
+    make_view(bail), principal B1 attendu) — réponse interne hors contrat ou
+    conforme, injectée pour juger C3 sur le seul contrat. Toutes les commandes
+    réellement soumises au runner sont consignées."""
+    seen = []
+    original = AuthorizedTransactionRunner.run
+
+    def run(self, credential, command):
+        seen.append(type(command))
+        if type(command) is c.FinalizeDecryptageCandidate:
+            reserved = next(o for t, o in env.c3_outcomes if t is c.ReserveDecryptageTurn)
+            lease = reserved.value.lease
+            return AuthorizationOutcome(AUTHORIZED, make_view(lease), reserved.principal)
+        outcome = original(self, credential, command)
+        env.c3_outcomes.append((type(command), outcome))
+        return outcome
+
+    env.c3_outcomes = []
+    monkeypatch.setattr(AuthorizedTransactionRunner, "run", run)
+    return seen
+
+
+BLOCKED_VIEWS = {
+    "legacy_collision": lambda rid: dfin.LegacyCollisionBlocked(rid),
+    "blocked_legacy_collision": lambda rid: dr.ReservationBlocked(rid, dr.LEGACY_COLLISION),
+    "blocked_attempts_exhausted": lambda rid: dr.ReservationBlocked(rid, dr.ATTEMPTS_EXHAUSTED),
+}
+
+
+@pytest.mark.parametrize("coherent", [True, False], ids=["same_reservation", "other_reservation"])
+@pytest.mark.parametrize("view", sorted(BLOCKED_VIEWS))
+def test_a_blocked_finalization_is_409_only_for_the_leased_reservation(env, alice, monkeypatch, caplog, view,
+                                                                        coherent):
+    """C3-V12-02 : LegacyCollisionBlocked / ReservationBlocked rendus AUTHORIZED
+    par C1-B ne sont présentés (409) que pour la réservation du bail ; un autre
+    identifiant est une réponse interne hors contrat : 503 fermé, alerte
+    c1b_reservation_mismatch, aucune lecture C2, aucune nouvelle génération."""
+    other = uuid.uuid4()
+    seen = _injected_finalization(env, monkeypatch, lambda lease: BLOCKED_VIEWS[view](
+        lease.reservation_id if coherent else other))
+    app = env.c3_app()
+    caplog.set_level(logging.INFO)
+    response = turn(env, app, alice, turn_fields())
+    if coherent:
+        assert_error(response, 409, "reservation_blocked")
+        assert "alert=c1b_reservation_mismatch" not in caplog.text
+    else:
+        assert_error(response, 503, "temporarily_unavailable")
+        assert "authz_f2 http decryptage.turns status=503 alert=c1b_reservation_mismatch" in caplog.text
+    # Une seule chaîne B1 -> B2 -> C1-B ; jamais de lecture C2, jamais de seconde génération.
+    assert seen == [c.ReserveDecryptageTurn, c.ReadProfile, c.ReadDecryptagePreparationContext,
+                    c.ReadDecryptagePreparationContext, c.FinalizeDecryptageCandidate]
+    assert env.claude.methods() == ["create_message"]
+    # Aucun identifiant ni contenu privé dans le corps ni dans les journaux C3.
+    [row] = env.reservations()
+    c3_lines = "\n".join(r.getMessage() for r in caplog.records if r.name == "oryx.authz_f2.http")
+    for private in (str(other), str(row["id"]), CONV, "LVMH", "Commençons"):
+        assert private.encode() not in response.content and private not in c3_lines, private
+    # C1-B injectée, non exécutée : aucune écriture de finalisation ni de livraison.
+    assert (row["state"], row["assistant_delivery_id"]) == ("reserved", None)
+    assert env.count("assistant_deliveries") == 0
+
+
+def test_a_real_coherent_collision_keeps_its_historical_409(env, alice):
+    """Sans injection : la collision legacy PROUVÉE par C1-B (même réservation)
+    reste 409 reservation_blocked, blocage durable committé, aucune lecture C2."""
+    clock = env.transports()
+    fields = turn_fields()
+    env.claude = FakeClaude(clock, actions={"create_message": lambda: env.claim_legacy(
+        USER_A, CONV, uuid.UUID(fields["client_turn_id"]))})
+    app = env.c3_app()
+    assert_error(turn(env, app, alice, fields), 409, "reservation_blocked")
+    row = _lease_row(env)
+    assert (row["state"], row["blocked_reason"], row["assistant_delivery_id"]) == ("blocked", "legacy_collision", None)
 
 
 # --------------------------------------------------------------------------

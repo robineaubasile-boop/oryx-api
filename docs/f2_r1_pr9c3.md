@@ -178,6 +178,12 @@ C3 n'invente jamais une libération de bail et ne déclare jamais d'échec à la
 `409 revision_conflict` ; `IDEMPOTENCY_CONFLICT` → `409 idempotency_conflict` ; `UNAVAILABLE` → `503`
 (COMMIT potentiellement effectué, jamais un rollback prétendu).
 
+Pour **chaque** vue C1-B portant un `reservation_id` (finalisée, déjà finalisée, contexte modifié, préparation
+refusée, `LegacyCollisionBlocked`, `ReservationBlocked`), cet identifiant doit être celui du bail B1 ; sinon
+`503 temporarily_unavailable`, alerte interne fermée `c1b_reservation_mismatch`, aucune lecture C2, aucun
+identifiant ni contenu dans la réponse ou les journaux (corrective d'audit P1, C3-V12-02 : les deux vues de
+blocage étaient auparavant présentées en `409` sans cette comparaison).
+
 **C2 (replay et ACK)** : `AUTHORIZED` + vue exacte → `200` ; `SESSION_INVALID` → `401` ; `NOT_FOUND` → `404` ;
 `REVISION_CONFLICT` → `409 revision_conflict` ; `UNAVAILABLE` → `503`. Tout statut non inventorié
 (`IDEMPOTENCY_CONFLICT` compris) ou toute vue incorrecte : `503`.

@@ -610,6 +610,8 @@ class _Orchestration:
                 return _alert(label, "c1b_reservation_mismatch")
             return _CONTEXT_CONFLICT
         if kind in (dfin.LegacyCollisionBlocked, dr.ReservationBlocked):
+            if view.reservation_id != lease.reservation_id:  # C3-V12-02 : identité de réservation cohérente
+                return _alert(label, "c1b_reservation_mismatch")
             return _error(409, "reservation_blocked")
         return _alert(label, "c1b_view_out_of_contract")
 
