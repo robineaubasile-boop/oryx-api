@@ -321,7 +321,23 @@ assertion fermée sur le nouveau contrat.
 
 ## 19. Résultats des tests
 
-_RESULTATS_
+Mesures réelles (suite Python complète, sans filtrage, Python 3.11.18, dépendances verrouillées
+`ci/requirements-ci.txt`, PostgreSQL jetables des images épinglées du CI par digest — récupérées via
+`mirror.gcr.io`, Docker Hub refusant les téléchargements par limitation de débit) :
+
+| Exécution | Serveur | Résultat | Durée |
+|---|---|---|---|
+| référence `main` `a3b8e8b` (avant C3) | PostgreSQL 18.6 | 12 731 passed, 0 failed, 0 skipped, 1 warning | 31 min 04 s |
+| PR9-C3 | PostgreSQL 16.15 | **12 998 passed**, 0 failed, 0 skipped, 1 warning | 31 min 44 s |
+| PR9-C3 | PostgreSQL 18.6 | **12 998 passed**, 0 failed, 0 skipped, 1 warning | 34 min 25 s |
+
+12 998 − 12 731 = 267 tests nouveaux : `test_authz_f2_pr9c3.py` (199), `test_authz_f2_pr9c3_boundary.py`
+(55), `test_authz_f2_pr9c3_concurrency.py` (13). L'unique avertissement est **préexistant et identique** à la
+référence (`SAWarning: nested transaction already deassociated from connection`, dans
+`test_authz_f2_pr9c1a.py::test_transaction_lost_inside_the_savepoint_is_refused`) : aucun avertissement
+nouveau. Aucun test historique n'a été supprimé ; les huit tests adaptés nominativement (§ 18) passent sur les
+deux versions. Les contrôles Alembic (`ci / migrations-*`) et la suite web n'ont pas été rejoués localement :
+aucune migration ni aucun fichier frontend n'est modifié.
 
 ## 20. Points d'implémentation signalés à l'audit
 
