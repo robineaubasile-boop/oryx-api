@@ -118,10 +118,25 @@ IMPORT_MATRIX = {
                                      "core.auth_f2_http.csrf", "core.auth_f2_http.provenance", "core.auth_f2_http.routes",
                                      "core.authz_f2.commands", "core.authz_f2.principal", "core.authz_f2.runner",
                                      "core.authz_f2_http.provenance"},
+    # R1 PR 9-C3 (nominatif) : + la configuration fermée et le routeur C3.
     "core/authz_f2_http/isolated.py": {"core.auth_f2.keys", "core.auth_f2_http.csrf", "core.auth_f2_http.isolated",
                                        "core.auth_f2_http.provenance", "core.authz_f2.runner",
                                        "core.authz_f2_http.routes", "core.authz_f2.portfolio_fingerprint",
-                                       "core.authz_f2_http.portfolio", "core.authz_f2_http.consultation"},
+                                       "core.authz_f2_http.portfolio", "core.authz_f2_http.consultation",
+                                       "core.authz_f2_http.decryptage"},
+    # R1 PR 9-C3 : orchestration HTTP Décrypter isolée — mêmes primitives HTTP
+    # F2 que les routes personnelles, commandes et vues fermées B1 / C1-B / C2,
+    # orchestrateur B2 (construit avec le runner de la composition) ; ni
+    # _adapters, ni pont ORM, ni contrats de capacités, ni transports réels.
+    "core/authz_f2_http/decryptage.py": {"core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies",
+                                         "core.auth_f2_http.provenance", "core.auth_f2_http.routes",
+                                         "core.authz_f2.commands", "core.authz_f2.decryptage_candidate",
+                                         "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_finalization",
+                                         "core.authz_f2.decryptage_fingerprint",
+                                         "core.authz_f2.decryptage_generation",
+                                         "core.authz_f2.decryptage_reservation", "core.authz_f2.principal",
+                                         "core.authz_f2.runner", "core.authz_f2_http.provenance",
+                                         "core.authz_f2_http.routes"},
     "core/authz_f2_http/portfolio.py": {"core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies",
                                         "core.auth_f2_http.provenance", "core.auth_f2_http.routes",
                                         "core.authz_f2.portfolio_values", "core.authz_f2.commands",
@@ -354,7 +369,8 @@ def test_importing_the_boundary_opens_nothing():
             "          'core.authz_f2.portfolio_results', 'core.authz_f2.decryptage_fingerprint',\n"
             "          'core.authz_f2.decryptage_reservation', 'core.authz_f2_http', 'core.authz_f2_http.routes',\n"
             "          'core.authz_f2_http.portfolio', 'core.authz_f2_http.consultation_codec',\n"
-            "          'core.authz_f2_http.consultation', 'core.authz_f2_http.isolated'):\n"
+            "          'core.authz_f2_http.consultation', 'core.authz_f2_http.isolated',\n"
+            "          'core.authz_f2_http.decryptage'):\n"
             "    importlib.import_module(m)\n"
             "import core.db\n"
             "print(' '.join(str(x in sys.modules) for x in ('api', 'httpx', 'core.db', 'core.models')),\n"

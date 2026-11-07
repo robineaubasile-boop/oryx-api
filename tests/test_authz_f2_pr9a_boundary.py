@@ -40,6 +40,7 @@ from core.authz_f2 import commands as c
 from core.authz_f2.runner import AuthorizedTransactionRunner, UnknownCommand
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
+from tests.test_migration_0004_drop_company_analyses import _code_tokens
 
 BRIDGE = REPO_ROOT / "core" / "authz_f2" / "_decryptage_orm_bridge.py"
 SERVICES = {
@@ -484,7 +485,13 @@ def test_production_registry_stays_closed_at_twenty_commands():
         "self", "engine", "keyring", "portfolio_keyring", "decryptage_keyring", "clock", "fault_hook"]
     for path in (REPO_ROOT / "core" / "authz_f2_http").glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        assert "DECRYPTAGE_MUTATION" not in text and "TurnFinalization" not in text and "decryptage" not in text.lower()
+        assert "DECRYPTAGE_MUTATION" not in text and "TurnFinalization" not in text
+        # R1 PR 9-C3 (nominatif) : seuls le routeur C3 et sa composition parlent
+        # de Décrypter ; ils ne nomment ni plan, ni opération du pont, ni pont.
+        if path.name in ("decryptage.py", "isolated.py"):
+            assert "_decryptage_orm_bridge" not in _code_tokens(text).split("\n"), path.name
+        else:
+            assert "decryptage" not in text.lower(), path.name
 
 
 def test_bench_commands_are_unknown_outside_the_isolated_fixture():

@@ -182,9 +182,11 @@ def _check_content_type(request: Request) -> None:
         raise Refusal(415, "invalid_request")
 
 
-def _announced_length(request: Request):
+def _announced_length(request: Request, *, limit=None):
     """Framing (anomalies : 400) puis taille annoncée (413) ; None si
-    Content-Length est absent."""
+    Content-Length est absent. limit : borne en octets (MAX_BODY_BYTES par
+    défaut ; R1 PR 9-C3 : une route appelante peut fixer sa propre borne)."""
+    limit = MAX_BODY_BYTES if limit is None else limit
     if request.headers.getlist("transfer-encoding"):
         raise Refusal(400, "invalid_request")
     lengths = request.headers.getlist("content-length")
@@ -195,22 +197,25 @@ def _announced_length(request: Request):
     if not _CONTENT_LENGTH_RE.fullmatch(lengths[0]):
         raise Refusal(400, "invalid_request")
     digits = lengths[0].lstrip("0")
-    if len(digits) > len(str(MAX_BODY_BYTES)) or int(digits or "0") > MAX_BODY_BYTES:
+    if len(digits) > len(str(limit)) or int(digits or "0") > limit:
         raise Refusal(413, "request_too_large")
     return int(digits or "0")
 
 
-async def _read_body(request: Request, announced) -> bytes:
+async def _read_body(request: Request, announced, *, limit=None) -> bytes:
     """Taille cumulée jugée AVANT l'ajout de chaque fragment : le tampon
-    applicatif ne dépasse jamais la longueur annoncée ni 4096 octets (la
-    taille du fragment ASGI déjà reçu relève du serveur)."""
+    applicatif ne dépasse jamais la longueur annoncée ni la borne (4096
+    octets par défaut ; la taille du fragment ASGI déjà reçu relève du
+    serveur). La borne est jugée sur le flux REÇU, jamais sur la seule
+    longueur annoncée."""
+    limit = MAX_BODY_BYTES if limit is None else limit
     body = bytearray()
     try:
         async for chunk in request.stream():
             new_size = len(body) + len(chunk)
             if announced is not None and new_size > announced:
                 raise Refusal(400, "invalid_request")  # discordance de longueur : framing, prioritaire
-            if new_size > MAX_BODY_BYTES:
+            if new_size > limit:
                 raise Refusal(413, "request_too_large")
             body += chunk
     except ClientDisconnect:

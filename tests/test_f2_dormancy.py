@@ -60,6 +60,11 @@ F2_REFERENCE_MATRIX = {
     "core/authz_f2_http/consultation.py": frozenset({
         "core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies", "core.auth_f2_http.provenance",
         "core.auth_f2_http.routes"}),
+    # R1 PR 9-C3 : orchestration HTTP Décrypter isolée (mêmes primitives que
+    # le portefeuille ; vérification CSRF par la fonction partagée de routes.py).
+    "core/authz_f2_http/decryptage.py": frozenset({
+        "core.auth_f2.crypto", "core.auth_f2.service", "core.auth_f2_http.cookies", "core.auth_f2_http.provenance",
+        "core.auth_f2_http.routes"}),
 }
 # Noms importables depuis F2 par la matrice (aucun F2AuthService, aucune
 # composition F2, aucun fournisseur, aucune initialisation anti-abus).

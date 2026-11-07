@@ -205,6 +205,13 @@ def test_no_application_module_invokes_the_b1_commands():
         if path == REPO_ROOT / "core" / "models.py":
             assert hits == ["decryptage_turn_reservations"], hits  # modèle de la table, seul
             continue
+        if path == REPO_ROOT / "core" / "authz_f2_http" / "decryptage.py":
+            # R1 PR 9-C3 (nominatif) : la route /turns construit la réservation
+            # (commande, vue LeaseGranted, type du trousseau dédié) ; elle ne
+            # déclare JAMAIS d'échec (RecordDecryptageAttemptFailure : B2 seul)
+            # et ne lit jamais la table.
+            assert hits == ["ReserveDecryptageTurn", "DecryptageKeyring", "LeaseGranted"], hits
+            continue
         assert hits == [], (path, hits)
 
 
