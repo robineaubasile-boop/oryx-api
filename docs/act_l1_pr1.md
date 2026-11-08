@@ -172,7 +172,11 @@ absent ou une session invalide gardent leur `401 session_invalid`.
   `AUTHORIZATION_UNAVAILABLE` ni `SESSION_REFUSED`. Le refus est levé par `_f2` **avant l'étape suivante** :
   réautorisation `ReadProfile` refusée → aucun appel (recherche, EODHD, FMP, Claude) ; lecture de contexte
   refusée → aucun appel ultérieur, aucune déclaration d'échec. Une déclaration d'échec refusée pour ce motif
-  reste `DECLARATION_REFUSED` (bail jamais présumé libéré).
+  reste `DECLARATION_REFUSED` (bail jamais présumé libéré) et C3 répond, selon sa matrice figée
+  `_PROVIDER_REPLIES`, `503 temporarily_unavailable` (jamais `provider_unavailable`, réservé à une déclaration
+  confirmée) ; la même intention retrouve ensuite le bail actif par B1 (`202 in_progress`). Ce cas n'est
+  atteignable que si l'identité devient non admissible entre la réautorisation B2 et la déclaration (aucune
+  écriture F2 ne le produit) ; il est signalé au § 15.4 (réserve R-2).
 - **C1-B** : refus sans livraison écrite ; la réservation reste `reserved` (B1 gouverne la reprise).
 - **C2** : replay et ACK refusés sans effet ; une fois l'identité admissible, l'ACK s'applique (idempotence
   inchangée).
@@ -288,3 +292,89 @@ contre-épreuve des treize routes échoue (mutations temporaires, restaurées).
 - Le frontend F2 (hors PR) devra traiter `403 identity_link_required` en dirigeant vers le parcours de liaison
   e-mail ; aucune logique d'autorisation ne doit y être reportée.
 - Activation publique, montage dans `api.py` et validation Railway : PR ultérieures du chantier.
+
+## 15. Fermeture de l'audit indépendant (SHA audité `e585c4f`)
+
+### 15.1 Référence architecturale V1.2 : origine et limite
+
+Recherche effectuée (8 novembre 2026) : dépôt complet (`git grep` sur `ACT-L1`, `Activation F2`, `V1.2`,
+`Lot 1`, `identity_link`), issues et pull requests GitHub (seule la #236 mentionne ACT-L1, sans commentaire ni
+revue publiés), artefacts claude.ai accessibles, sessions Claude Code antérieures (aucune session
+d'architecture « Activation F2 Lot 1 »). **Le document V1.2 intégral n'est accessible dans aucune de ces
+sources.**
+
+Référence réellement utilisée, et seule source normative disponible : **le cahier des charges transmis par le
+fondateur au lancement de l'implémentation** (message d'ouverture de la session Claude Code
+`session_01XArXqoVqvNudSH6VtbRKXU`, 8 novembre 2026), qui déclare l'architecture « Activation F2 Lot 1
+V1.2 figée » et en reprend le contrat cible (sections OBJECTIF, FRONTIÈRES À PRÉSERVER, CONTRAT CIBLE,
+IMPLÉMENTATION ATTENDUE, CONTRE-ÉPREUVES OBLIGATOIRES). Il complète les contrats R1 figés du dépôt que la
+V1.2 déclare préserver (`docs/f2_r1_pr2.md` § 6, `docs/f2_r1_pr4.md`, `docs/f2_r1_pr9b2.md`,
+`docs/f2_r1_pr9c3.md`). La description de la PR n'a servi de référence pour aucune exigence ci-dessous.
+
+Conséquence : la conformité est démontrée **à ce cahier des charges**. Toute décision de la V1.2 qui n'y
+figurerait pas est **non vérifiable** ici (§ 15.4, R-1).
+
+### 15.2 Matrice exigences → implémentation → tests
+
+Exigences citées du cahier des charges (abrégées) ; tests de `tests/test_act_l1_pr1_identity.py` sauf mention.
+
+| # | Exigence | Implémentation | Tests |
+|---|---|---|---|
+| E1 | Statut fermé `IDENTITY_LINK_REQUIRED = "identity_link_required"`, distinct de SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT, IDEMPOTENCY_CONFLICT | `runner.IDENTITY_LINK_REQUIRED`, `STATUSES` (7) | `test_identity_link_required_is_a_seventh_distinct_closed_status` ; `test_authz_f2_runner::test_revision_conflict_is_a_distinct_closed_status` |
+| E2 | Règle dans le runner F2, unique autoriseur ; aucun contrôle frontend ni dépendance HTTP comme seule protection | `_run` / `_decide` ; aucune route ne décide | `test_an_unlinked_invitation_session_is_refused_for_all_twenty_commands` (runner direct, sans HTTP) |
+| E3 | Contrôle serveur, transactionnel, dans la transaction d'autorisation | rang identité de la phase B, avant `T_authorization` | `test_the_refusal_takes_no_business_lock_and_decides_after_the_identity_rank` ; `test_a_linked_session_uses_the_identity_rank_before_business_locks` |
+| E4 | Ordre des verrous non modifié arbitrairement ; BF1/BF2 et revalidations à T_authorization conservés | insertion après génération (ordre global F2 `… génération -> identité`), aucun rang remonté | `test_authz_f2_boundary::test_runner_lock_order_and_t_authorization` ; `test_authz_f2_runner::test_profile_mutation_lock_order_and_t_authorization` ; suites boundary existantes |
+| E5 | Session invalide, expirée ou révoquée : priorité et résultat existants (401), sans fuite sur l'identité | `_decide` : validité jugée en premier | `test_an_invalid_session_keeps_session_invalid_whatever_the_identity` ; `test_an_invalid_session_keeps_its_401_over_http` |
+| E6 | Absence de profil / état incohérent : refus fermé selon la priorité existante | `_INCOHERENT` avant la règle d'identité | `test_a_missing_profile_stays_unavailable_and_is_never_created` ; `test_a_profile_mismatch_stays_unavailable_before_the_identity_rule` |
+| E7 | Refus sans principal, donnée personnelle, résultat métier ni information sur l'identité | `AuthorizationOutcome(IDENTITY_LINK_REQUIRED)` ; instruction sans PII | `refused()` dans tous les tests ; `test_the_identity_statement_reads_no_personal_data_and_is_owner_scoped` ; corps HTTP exact vérifié octet pour octet |
+| E8 | Preuve = `auth_identities` durable du `user_id` autorisé, vérification fournisseur/e-mail établie | `lock_linked_identities` (fournisseur `supabase`, `email_verified_at`) | `test_identity_rows_are_admitted_only_with_a_durable_verification` ; `test_otp_linking_admits_the_same_profile_and_a_later_sign_in_finds_it` |
+| E9 | Jamais une preuve : e-mail d'invitation, `user_id` navigateur, localStorage, seul `auth_method`, ligne sans vérification | aucune de ces sources n'est lue ; aucun `user_id` client n'existe dans les commandes | `test_an_invitation_email_is_never_a_proof_of_link` ; `test_a_sign_in_session_is_not_admitted_on_its_auth_method_alone` ; `test_identity_rows_are_admitted_only_with_a_durable_verification[False-False-False]` ; `test_authz_f2_runner::test_commands_carry_no_owner_and_validate_their_fields` |
+| E10 | E-mail effacé pour confidentialité : n'invalide pas automatiquement une vérification durable prouvée | admise si `email_verified_at` ET `pii_redacted_at` | `test_identity_rows_are_admitted_only_with_a_durable_verification[True-True-True]` ; `test_redacting_a_linked_identity_keeps_access` ; refus si jamais vérifiée : `[False-True-False]` |
+| E11 | Invitation : profil et session créés selon les contrats existants ; liaison e-mail fonctionnelle | `core/auth_f2*` inchangés | `test_http_invitation_then_http_linking_then_http_sign_in_reach_the_same_profile` ; suites `test_f2_pr4_*` inchangées |
+| E12 | Après liaison OTP : même profil admissible ; connexion OTP ultérieure retrouve le profil sans création ni fusion | — (effet de la règle) | `test_otp_linking_admits_the_same_profile_and_a_later_sign_in_finds_it` ; test HTTP E11 |
+| E13 | Liaison au profil d'autrui : refus sans transfert | `conflict_other_profile` (inchangé) | `test_linking_an_identity_owned_by_another_profile_transfers_nothing` |
+| E14 | HTTP 403 `{"error":"identity_link_required"}` sur profil/niveau, portefeuille, consultation, Décrypter B1/C1-B/C2 ; jamais 401/404/409/503 | `routes.py`, `portfolio.py`, `consultation.py`, `decryptage.py` | `test_every_personal_route_answers_403_without_a_linked_identity` (13 routes, inventaire comparé) ; `test_http_matrices_map_identity_link_required_to_403` ; `test_authz_f2_pr9c3_boundary::test_the_closed_matrices_cover_exactly_the_frozen_vocabularies` |
+| E15 | B2 : sens préservé à la réautorisation ReadProfile et aux lectures de contexte, aucun fournisseur après un refus | motif `IDENTITY_REQUIRED` ; `_f2` lève avant l'étape suivante | `test_b2_reauthorization_refusal_calls_no_provider` ; `test_b2_context_read_refusal_stops_before_any_further_provider` ; `test_http_turn_refusals_from_b1_b2_and_c1b_are_403` ; `test_authz_f2_pr9c3::test_the_closed_b2_refusal_matrix_never_declares[identity_link_required]` |
+| E16 | Réponses canoniques, COMMIT incertain, idempotence, protection inter-utilisateurs conservés | aucun code de résultat modifié | suites R1 PR5–PR9-C3 vertes ; `test_an_invited_user_cannot_replay_or_ack_another_users_delivery` ; `test_each_user_is_judged_on_their_own_identities` ; `test_a_bob_session_is_unaffected_by_another_profiles_identity_state` |
+| E17 | Reprises Décrypter et ACK | — | `test_replay_and_ack_are_403_without_identity_and_the_ack_applies_once_restored` ; `test_http_provider_failure_with_a_refused_declaration_is_503_and_b1_governs_the_resumption` |
+| E18 | Aucune écriture métier ni appel fournisseur sur refus | ROLLBACK avant exécution, aucun verrou métier | test E2 (état durable et xmin inchangés) ; `test_http_c1b_refusal_writes_no_delivery` |
+| E19 | Liaison concurrente à une lecture ou mutation : résultat transactionnel cohérent | sérialisation au rang users | `test_a_linking_committed_while_the_runner_waits_is_seen_at_t_authorization[×4 plans]` ; `test_a_linking_started_after_the_runner_locks_waits_and_the_command_is_refused[×4]` ; `test_a_sign_in_finalization_never_waits_on_the_identity_rank` ; `test_authz_f2_portfolio_concurrency::test_email_linking_finalization_and_portfolio_mutation_in_both_orders` |
+| E20 | Aucun contournement via les 20 commandes | contrôle dans `_run` | test E2 (`set(REGISTRY)` comparé) |
+| E21 | Dormance : aucun montage `api.py`, aucune route activée, aucun Railway, aucun frontend ; anciennes routes publiques inchangées | `api.py`, `web*`, `alembic/` non modifiés | `test_api_app_still_exposes_no_f2_personal_route` ; `test_authz_f2_dormancy` (inventaire étendu) ; suite historique complète |
+| E22 | Ne pas modifier moteurs pédagogiques, données financières, schémas de preuve, progression, analyse | aucun fichier de ces domaines modifié | `git diff 564a19a..HEAD --stat` (§ 2) |
+
+### 15.3 Points vérifiés à la demande de l'audit
+
+- **Identité vérifiée puis expurgée** : admise (E10) — conforme à l'exigence explicite « ne doit pas
+  automatiquement invalider ». Une ligne expurgée **jamais** vérifiée reste refusée.
+- **Fournisseur Supabase** : liste fermée `("supabase",)`, identique à `ck_auth_identities_provider`.
+  **Issuer** : le cahier des charges ne demande pas de filtrage par issuer (« identité fournisseur liée et
+  vérifiée », « vérification fournisseur/e-mail établie ») ; R1 PR 2 (§ 6) enregistre l'issuer configuré à la
+  liaison. Aucun filtrage n'est ajouté (il exigerait une dépendance nouvelle du runner) : non vérifiable contre
+  la V1.2 intégrale (R-1).
+- **Priorités et ordre des verrous** : E4 à E6, vérifiés par tests ; les verrous existants sont pris dans le
+  même ordre et le rang identité s'insère à sa place dans l'ordre global F2 déjà figé.
+- **B2, échec fournisseur puis `RecordDecryptageAttemptFailure` refusé `identity_link_required`** : comportement
+  confirmé et désormais fixé par deux contre-épreuves (ajoutées par cette fermeture) :
+  `test_b2_provider_failure_then_refused_declaration_keeps_the_lease[identity_lost]` (DECLARATION_REFUSED, un
+  seul appel Claude, déclaration refusée avant exécution, réservation et xmin inchangés ; témoin `[control]` :
+  DECLARED, réservation écrite) et
+  `test_http_provider_failure_with_a_refused_declaration_is_503_and_b1_governs_the_resumption` (HTTP `503
+  temporarily_unavailable`, bail conservé, reprise de la même intention → `202 in_progress`, aucun nouvel appel
+  Claude). **Aucun comportement modifié** (R-2).
+
+### 15.4 Réserves restantes
+
+- **R-1 — V1.2 intégrale inaccessible.** Conformité démontrée au cahier des charges du fondateur seulement ;
+  toute décision de la V1.2 absente de ce cahier (notamment un éventuel filtrage par issuer) n'est pas
+  vérifiable. À lever par le fondateur en confirmant que le cahier des charges reproduit intégralement les
+  décisions ACT-L1-PR1 de la V1.2, ou en versant la V1.2 au dépôt.
+- **R-2 — Déclaration B2 refusée pour identité → 503.** Le cahier des charges impose que le refus ne soit
+  « jamais transformé silencieusement en 401, 404, 409 ou 503 » ; les contrats R1 figés imposent que B2
+  rapporte une déclaration refusée comme `DECLARATION_REFUSED` (vocabulaire fermé de trois valeurs, sans
+  motif) et que C3 la présente en `503 temporarily_unavailable`. Dans ce chemin, la réponse décrit l'échec
+  fournisseur dont la déclaration n'a pas été confirmée, pas le refus de la commande principale. Le chemin
+  n'est atteignable que si l'identité devient non admissible après la réautorisation B2 (aucune écriture F2
+  ne le produit : pas de déliaison, FK composites). Le présenter en 403 exigerait d'étendre le vocabulaire figé
+  `DECLARATIONS` et la matrice `_PROVIDER_REPLIES` : décision d'architecture **non prise ici**, à arbitrer par
+  le fondateur. Le comportement fail-closed est préservé (bail jamais présumé libéré).

@@ -644,6 +644,63 @@ def test_http_turn_refusals_from_b1_b2_and_c1b_are_403(env, alice, invited):
     restore_identity(env)
 
 
+@pytest.mark.parametrize("degrade", [True, False], ids=["identity_lost", "control"])
+def test_b2_provider_failure_then_refused_declaration_keeps_the_lease(env, alice, degrade):
+    """Échec fournisseur (Claude) PUIS RecordDecryptageAttemptFailure refusé
+    IDENTITY_LINK_REQUIRED (identité retirée après coup, état forcé) :
+    DECLARATION_REFUSED, bail JAMAIS présumé libéré (réservation, jeton et
+    xmin inchangés : la transaction de déclaration a été annulée). Témoin :
+    même scénario sans retrait -> DECLARED, réservation écrite."""
+    command, reserved = env.reserve(alice)
+    lease_id = reserved.value.lease.reservation_id
+    before = env.reservation(lease_id)
+    clock = FakeClock()
+
+    def fail():
+        if degrade:
+            degrade_identity(env)
+        raise TimeoutError("Claude lent")
+
+    orchestrator = env.orchestrator(clock, claude=FakeClaude(clock, actions={"create_message": fail}))
+    env.hook_calls.clear()
+    outcome = orchestrator.generate(alice.credential(), command, reserved)
+    assert (outcome.status, outcome.reason, outcome.candidate) == (dg.PROVIDER_FAILED, dr.GENERATION_UNAVAILABLE,
+                                                                   None)
+    assert env.claude.methods() == ["create_message"]  # un seul appel, aucun rejeu
+    if degrade:
+        assert outcome.declaration == dg.DECLARATION_REFUSED
+        assert env.hook_calls[-2:] == ["prevalidated", "locked"]  # déclaration refusée avant toute exécution
+        assert env.reservation(lease_id) == before  # rien libéré, rien écrit
+    else:
+        assert outcome.declaration == dg.DECLARED
+        assert env.reservation(lease_id) != before
+
+
+def test_http_provider_failure_with_a_refused_declaration_is_503_and_b1_governs_the_resumption(env, alice):
+    """Matrice C3 figée (R1 PR 9-C3, _PROVIDER_REPLIES) : DECLARATION_REFUSED
+    -> 503 temporarily_unavailable, jamais provider_unavailable (déclaration
+    non confirmée). La même intention, l'identité rétablie, retrouve le bail
+    ACTIF (202 in_progress) : il n'a pas été présumé libéré."""
+    clock = env.transports()
+
+    def fail():
+        degrade_identity(env)
+        raise TimeoutError("Claude lent")
+
+    env.claude = FakeClaude(clock, actions={"create_message": fail})
+    app = env.c3_app()
+    fields = turn_fields()
+    response = post(app, TURNS, body_of(fields), c3_headers(alice))
+    assert (response.status_code, response.json()) == (503, {"error": "temporarily_unavailable"})
+    (row,) = env.reservations()
+    assert row["state"] == "reserved" and row["lease_token_hash"] is not None and row["retry_not_before_at"] is None
+    restore_identity(env)
+    resumed = post(app, TURNS, body_of(fields), c3_headers(alice))
+    assert resumed.status_code == 202 and resumed.json()["status"] == "in_progress"
+    assert env.reservations() == [row]  # B1 rend le bail actif, sans nouvelle attribution
+    assert env.claude.methods() == ["create_message"]
+
+
 def test_http_c1b_refusal_writes_no_delivery(env, alice):
     clock = env.transports()
     env.claude = FakeClaude(clock, actions={"create_message": lambda: degrade_identity(env)})
