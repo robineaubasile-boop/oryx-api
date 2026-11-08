@@ -238,6 +238,29 @@ le résultat attendu de l'ordre « mutation d'abord » devient `IDENTITY_LINK_RE
 puis la même mutation, rejouée après la liaison, est autorisée — même nombre final de positions et
 d'identités.
 
+## 12 bis. Résultats des tests (mesurés)
+
+Commit testé : `5ae727a` (code identique au commit final, qui n'ajoute que cette section).
+
+| Exécution | Serveur | Résultat |
+|---|---|---|
+| CI `ci / postgres-16` (run 42462642159, Python 3.11.9) | PostgreSQL 16.15 (image épinglée) | **13 047 passed**, 0 failed, 0 skipped, 1 warning (préexistant : `SAWarning` de `test_authz_f2_pr9c1a.py`) |
+| CI `ci / postgres-18` | PostgreSQL 18.6 (image épinglée) | job `success` (contrôle `check_test_report`) |
+| CI `ci / migrations-16`, `ci / migrations-18`, `ci / web`, `ci / required` | — | `success` |
+| locale, suite complète, Python 3.13 | PostgreSQL 16.15 | **13 047 passed**, 0 failed |
+| locale, suite complète, Python 3.13 | PostgreSQL 18.6 (même image par digest, via `mirror.gcr.io`) | 13 046 passed, **1 failed** : `test_migration_0016_portfolio_idempotency.py::test_pg_concurrent_same_key_after_rollback_inserts_once` |
+
+L'échec local PG 18 est un test de migration sur SQL brut, sans lien avec le code modifié (« la seconde
+transaction n'a jamais attendu le verrou » : fenêtre d'observation de 10 s), survenu pendant que deux suites
+complètes partageaient 4 CPU ; rejoué isolément trois fois sur le même serveur : 10/10 passed à chaque fois ;
+vert en CI. Les ~2 000 avertissements locaux sont des `DeprecationWarning` de `datetime.utcnow()` propres à
+Python 3.13 (CI : 3.11.9, un seul avertissement).
+
+Suites ciblées : `tests/test_act_l1_pr1_identity.py` 41 passed (PG 16 et 18) ; frontières, concurrence F2,
+dormance, runner, B2, C3 : verts dans les deux suites complètes. Contre-épreuves vérifiées discriminantes :
+règle d'identité neutralisée (toujours admise) → 22 échecs + 1 erreur ; mapping HTTP retiré d'une route → la
+contre-épreuve des treize routes échoue (mutations temporaires, restaurées).
+
 ## 13. Points d'implémentation signalés à l'audit
 
 1. **Issuer non comparé** : le runner ne reçoit aucune configuration Supabase (dépendances figées :
