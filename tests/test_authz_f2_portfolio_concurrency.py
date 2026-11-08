@@ -26,7 +26,7 @@ import sqlalchemy as sa
 
 from core.auth_f2.service import F2AuthService
 from core.authz_f2 import commands as c
-from core.authz_f2.runner import AUTHORIZED, NOT_FOUND, REVISION_CONFLICT, SESSION_INVALID
+from core.authz_f2.runner import AUTHORIZED, IDENTITY_LINK_REQUIRED, NOT_FOUND, REVISION_CONFLICT, SESSION_INVALID
 from tests.authz_f2_portfolio_worker import worker
 from tests.authz_f2_support import (
     BOB,
@@ -368,7 +368,13 @@ def test_portfolio_mutation_waits_behind_an_otp_finalization_holding_the_user_ra
 @pytest.mark.parametrize("linking_first", [True, False])
 def test_email_linking_finalization_and_portfolio_mutation_in_both_orders(env, pg_url, linking_first):  # noqa: F811
     """Liaison e-mail (PR 4) : sa finalisation prend users FOR UPDATE du
-    profil invité, comme PORTFOLIO_MUTATION. Aucun cycle dans les deux ordres."""
+    profil invité, comme PORTFOLIO_MUTATION. Aucun cycle dans les deux ordres.
+
+    ACT-L1-PR1 (adaptation nominative) : le profil invité n'a aucune identité
+    avant la liaison. Liaison d'abord : la mutation attend au rang users puis
+    voit l'identité committée (AUTHORIZED). Mutation d'abord : la liaison
+    attend la mutation, qui est refusée IDENTITY_LINK_REQUIRED sans rien
+    écrire ; la même mutation, rejouée après la liaison, est autorisée."""
     engine = sa.create_engine(pg_url, poolclass=sa.pool.NullPool, connect_args={"application_name": CONCURRENT_APP})
     supabase, mailer = FakeSupabase(), FakeMailer()
     paused, resume = threading.Event(), threading.Event()
@@ -403,13 +409,17 @@ def test_email_linking_finalization_and_portfolio_mutation_in_both_orders(env, p
             assert verify.outcome().status == "email_linked"
             assert mutation.outcome().status == AUTHORIZED
         else:
-            def during_receipt():
+            def during_decision_locks():
                 verify.start()
                 wait_until(lambda: waiting(env, CONCURRENT_APP) == 1, message="la liaison n'attend pas")
 
-            env.hooks["receipt_written"] = during_receipt
-            assert env.runner().run(session.credential(), create_command()).status == AUTHORIZED
+            env.hooks["locked"] = during_decision_locks  # verrous de décision détenus, avant T_authorization
+            refused = env.runner().run(session.credential(), create_command())
+            assert refused.status == IDENTITY_LINK_REQUIRED and refused.value is None and refused.principal is None
             assert verify.outcome().status == "email_linked"
+            assert positions_of(env, user_id) == 0 and env.receipts(user_id) == []
+            env.hooks.pop("locked")
+            assert env.runner().run(session.credential(), create_command()).status == AUTHORIZED
     finally:
         resume.set()
         engine.dispose()

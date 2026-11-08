@@ -310,7 +310,10 @@ def test_api_source_never_mentions_the_authorization_boundary():
                       # R1 PR 9-B1
                       "ReserveDecryptageTurn", "RecordDecryptageAttemptFailure", "DecryptageKeyring",
                       "decryptage_turn_reservations", "LeaseGranted", "LeaseToken", "decryptage_reservation",
-                      "decryptage_fingerprint", "lease_epoch"):
+                      "decryptage_fingerprint", "lease_epoch",
+                      # ACT-L1-PR1 : règle d'identité liée du runner
+                      "identity_link_required", "IDENTITY_LINK_REQUIRED", "lock_linked_identities",
+                      "_LOCK_LINKED_IDENTITIES"):
         assert forbidden not in source, forbidden
 
 

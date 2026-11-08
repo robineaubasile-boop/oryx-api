@@ -371,14 +371,20 @@ def test_the_closed_matrices_cover_exactly_the_frozen_vocabularies():
         503, "provider_unavailable")
     for reason in dc.REFUSAL_REASONS + (dg.CONTEXT_CHANGED,):
         assert (c3._B2_REFUSALS[reason].status, c3._B2_REFUSALS[reason].code) == (409, "context_conflict")
-    assert set(c3._C2_REFUSALS) == {"session_invalid", "not_found", "revision_conflict", "unavailable"}
+    # ACT-L1-PR1 : + identity_link_required dans chaque matrice du runner (403).
+    assert set(c3._C2_REFUSALS) == {"session_invalid", "not_found", "revision_conflict", "unavailable",
+                                    "identity_link_required"}
     assert set(c3._B1_REFUSALS) == set(c3._C1B_REFUSALS) == {"session_invalid", "not_found",
                                                             "idempotency_conflict", "revision_conflict",
-                                                            "unavailable"}
+                                                            "unavailable", "identity_link_required"}
+    for matrix, key in ((c3._B1_REFUSALS, "identity_link_required"), (c3._C2_REFUSALS, "identity_link_required"),
+                        (c3._B2_REFUSALS, dg.IDENTITY_REQUIRED)):
+        assert (matrix[key].status, matrix[key].code) == (403, "identity_link_required")
     codes = {r.code for m in (c3._B1_REFUSALS, c3._C2_REFUSALS, c3._B2_REFUSALS, c3._PROVIDER_REPLIES)
              for r in m.values()}
     assert codes == {"session_invalid", "not_found", "idempotency_conflict", "revision_conflict",
-                     "temporarily_unavailable", "context_conflict", "instrument_unavailable", "provider_unavailable"}
+                     "temporarily_unavailable", "context_conflict", "instrument_unavailable", "provider_unavailable",
+                     "identity_link_required"}
 
 
 def test_frozen_constants():

@@ -20,16 +20,20 @@ Phase B — autorisation définitive (nouvelle transaction) :
      filtre candidate_user_id ;
   2. oryx_sessions FOR SHARE puis oryx_session_generations FOR SHARE
      (core.auth_f2.sessions.lock_session) ;
-  3. verrous métiers de la commande (lignes filtrées par id ET user_id) ;
+  2 bis. (ACT-L1-PR1) auth_identities du candidate_user_id FOR KEY SHARE
+     (_adapters.lock_linked_identities), si le profil est présent ;
+  3. verrous métiers de la commande (lignes filtrées par id ET user_id),
+     seulement si le profil est présent ET une identité admissible lue ;
   4. T_authorization = clock_timestamp(), lu APRÈS ces verrous ;
   5. session, génération, révocation, expiration (T_authorization <
      absolute_expires_at, l'égalité refuse), secret et livraison confirmée
      revérifiés ; session.user_id = candidate_user_id ; profil présent ;
+     (ACT-L1-PR1) identité fournisseur liée et vérifiée admissible ;
   6. appartenance de la ressource ;
   7. exécution par l'adaptateur, puis COMMIT ; toute erreur : ROLLBACK.
 
 Ordre compatible avec l'ordre global F2 (... -> users -> ... -> session ->
-génération -> ...) : aucun rang n'est remonté. Une révocation committée
+génération -> identité -> ...) : aucun rang n'est remonté. Une révocation committée
 avant l'étape 2 est vue (FOR SHARE relit la dernière version) : refus. Une
 révocation commencée après l'étape 2 attend le COMMIT (son FOR UPDATE sur
 oryx_sessions attend notre FOR SHARE). Une expiration survenue pendant une
@@ -96,6 +100,30 @@ externe : seul un LeaseGranted (capacité rendue après COMMIT confirmé) le
 permettra à PR 9-B2. Un blocage durable est une vue normale, committée
 (jamais une sentinelle de ROLLBACK).
 
+ACT-L1-PR1 (identité e-mail liée et vérifiée) : résultat fermé
+IDENTITY_LINK_REQUIRED, distinct des cinq autres refus. Il signifie :
+justificatif F2 valide à T_authorization, profil propriétaire présent et
+cohérent avec la session, mais AUCUNE identité fournisseur admissible dans
+auth_identities pour ce user_id (règle : _adapters.lock_linked_identities ;
+jamais l'e-mail d'invitation, jamais un user_id client, jamais le seul
+auth_method de la session, jamais une ligne sans vérification). Priorité de
+la décision, inchangée pour les refus existants : SESSION_INVALID (phase A
+ou T_authorization) > UNAVAILABLE (profil absent ou incohérent) >
+IDENTITY_LINK_REQUIRED > exécution. Ce refus rend ROLLBACK avant toute
+exécution : aucun verrou métier pris, aucune écriture, ni valeur ni
+principal transportés. Le contrôle s'applique aux VINGT commandes du
+registre, quel que soit leur plan : aucune commande personnelle ne
+l'évite. La liaison e-mail (core.auth_f2.service) reste hors du runner et
+fonctionne depuis une session d'invitation non liée. Concurrence : la
+finalisation de liaison prend users FOR UPDATE avant d'insérer l'identité,
+ce qui entre en conflit avec chacun des trois verrous de plan (FOR KEY
+SHARE, FOR NO KEY UPDATE, FOR UPDATE) : une liaison committée avant notre
+verrou users est vue (READ COMMITTED, instruction postérieure à
+l'attente) ; une liaison commencée après attend notre COMMIT et la
+commande est refusée sans effet. Sous un niveau d'isolation plus strict
+(instantané antérieur à l'attente), le contrôle ne peut que refuser :
+jamais une autorisation sans identité.
+
 R1 PR 9-C1-B : troisième commande sous DECRYPTAGE_MUTATION,
 FinalizeDecryptageCandidate (même séquence de phase B, même dispatch du
 trousseau Décrypter, aucun code nouveau ici). Le runner reste l'UNIQUE
@@ -126,7 +154,10 @@ NOT_FOUND = "not_found"
 UNAVAILABLE = "unavailable"
 REVISION_CONFLICT = "revision_conflict"
 IDEMPOTENCY_CONFLICT = "idempotency_conflict"
-STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT, IDEMPOTENCY_CONFLICT)
+# ACT-L1-PR1 : justificatif valide, profil identifié, aucune identité fournisseur liée et vérifiée.
+IDENTITY_LINK_REQUIRED = "identity_link_required"
+STATUSES = (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE, REVISION_CONFLICT, IDEMPOTENCY_CONFLICT,
+            IDENTITY_LINK_REQUIRED)
 
 # Points d'interruption des tests (aucun en production).
 HOOK_POINTS = ("prevalidated", "locked", "authorized", "position_written", "receipt_ready", "receipt_written",
@@ -157,6 +188,7 @@ class _Refused(Exception):
 
 
 _INCOHERENT = object()
+_IDENTITY_REQUIRED = object()
 
 
 class AuthorizedTransactionRunner:
@@ -244,13 +276,16 @@ class AuthorizedTransactionRunner:
                 return None
             return locked[0]["user_id"]
 
-    def _decide(self, profile_locked: bool, locked, at, candidate_user_id):
-        """Décision à T_authorization sur des lignes déjà verrouillées."""
+    def _decide(self, profile_locked: bool, locked, at, candidate_user_id, identity_linked: bool):
+        """Décision à T_authorization sur des lignes déjà verrouillées ;
+        priorité : session, puis profil, puis identité liée (ACT-L1-PR1)."""
         if not self._valid(locked, at):
             return None
         session, generation, _ = locked
         if session["user_id"] != candidate_user_id or not profile_locked:
             return _INCOHERENT  # session valide, profil incohérent : 503, rien n'est créé
+        if identity_linked is not True:
+            return _IDENTITY_REQUIRED  # aucune identité admissible : 403, rien n'est exécuté
         return AuthorizedPrincipal(session["user_id"], session["id"], generation["id"], session["auth_method"])
 
     def _run(self, credential, command, spec) -> AuthorizationOutcome:
@@ -264,14 +299,18 @@ class AuthorizedTransactionRunner:
                     _adapters.require_read_committed(conn, spec.plan)  # isolation réellement active, avant tout verrou
                 profile_locked = _adapters.lock_profile(conn, candidate_user_id, spec.plan)
                 locked = sessions.lock_session(conn, credential, generation_lock=GENERATION_LOCK)
-                business = spec.lock(conn, candidate_user_id, command) if profile_locked else None
+                # ACT-L1-PR1 : rang identité (après génération, avant tout verrou métier).
+                linked = _adapters.lock_linked_identities(conn, candidate_user_id) if profile_locked else False
+                business = spec.lock(conn, candidate_user_id, command) if profile_locked and linked else None
                 self._hook("locked")
                 at = self._clock(conn)  # T_authorization : après tous les verrous de la décision
-                principal = self._decide(profile_locked, locked, at, candidate_user_id)
+                principal = self._decide(profile_locked, locked, at, candidate_user_id, linked)
                 if principal is None:
                     raise _Refused(SESSION_INVALID)
                 if principal is _INCOHERENT:
                     raise _Refused(UNAVAILABLE)
+                if principal is _IDENTITY_REQUIRED:
+                    raise _Refused(IDENTITY_LINK_REQUIRED)  # avant toute exécution ; rien n'a été écrit
                 if type(business) not in spec.states:  # état verrouillé hors du registre fermé
                     raise _adapters.AdapterInvariantBroken("état verrouillé hors contrat")
                 context = AuthorizedContext(principal, at)
