@@ -275,6 +275,42 @@ frontière F2.
 **L'activation publique de F2 reste interdite** tant que les routes
 `/api/user/{user_id}/*` (dont celle-ci) existent sans adaptation.
 
+**Correctif de stabilité (run CI #50, PostgreSQL 18), transitoire** : la
+route `PUT /api/user/{user_id}/level` verrouille désormais la ligne `users`
+(`SELECT … FOR UPDATE`, ORM `with_for_update()`) **avant** d'écrire le
+niveau, dans la même transaction. Avant ce correctif, son `UPDATE` nu
+(mise à jour sans changement de clé, sans verrou préalable) pouvait former
+avec un `FOR KEY SHARE` (plan `READ`) et un `FOR UPDATE` (plans
+`PROFILE_MUTATION`, `PORTFOLIO_MUTATION`) du même compte un interblocage
+PostgreSQL : le `FOR KEY SHARE` passe une telle mise à jour sans l'attendre
+et verrouille les versions suivantes de la ligne, le `FOR UPDATE` réveillé
+fait de même en sens inverse (`heap_lock_tuple`, PostgreSQL 16 et 18). Un
+`UPDATE` précédé de `FOR UPDATE` est marqué « clé modifiée » : le
+`FOR KEY SHARE` l'attend et le cycle disparaît (mesuré : 0 interblocage,
+contre 24 en 40 s sur le mélange témoin en SQL pur).
+
+- Comportement historique conservé : même méthode, même chemin, mêmes
+  validations, même réponse `{"success": true}`, création du profil absent
+  (le verrou ne porte alors sur aucune ligne, puis `INSERT`), niveau seul
+  écrit, **`level_revision` jamais avancé** : le contournement ci-dessus
+  reste entier (test négatif inchangé).
+- Effet nouveau : l'écriture historique attend désormais chacun des trois
+  verrous de plan `users` (y compris `FOR KEY SHARE` des lectures F2), et
+  une lecture F2 du même compte attend le `COMMIT` de l'écriture
+  historique ; l'ordre global F2, le runner, les plans, BF1/BF2 et
+  `T_authorization` sont inchangés ; aucun retry.
+- Tests : `tests/test_legacy_level_lock.py` (SQL émis par la vraie route,
+  création, contrat de révision, attente derrière chaque verrou de plan,
+  mécanisme déterministe, charge mixte) ; dans
+  `tests/test_authz_f2_concurrency.py`, les trois acteurs historiques
+  appellent la vraie fonction de route (`legacy_set_level`), assertions
+  inchangées ou renforcées.
+- Limite résiduelle : tout autre `UPDATE users` nu concurrent (script,
+  console SQL, future route) reproduirait le risque ; l'issue reste fermée
+  (503 F2 ou erreur de l'écrivain, transaction annulée, aucun effet
+  partiel). Ce correctif ne remplace pas la fermeture des routes
+  personnelles historiques (F-02), préalable à toute activation.
+
 Dormance (`tests/test_authz_f2_dormancy.py`, `tests/test_f2_dormancy.py`,
 `tests/test_f2_http_dormancy.py`) : sur le vrai `api:app`, en
 sous-processus, avec ou sans variables évoquant une activation,
@@ -308,6 +344,9 @@ sans relâchement.
 
 - Contournement historique ci-dessus : **bloquant pour l'activation
   publique**.
+- Interblocage `FOR KEY SHARE` / `FOR UPDATE` avec un `UPDATE users` nu
+  (run CI #50) : corrigé pour la seule route historique du niveau (§9) ;
+  résiduel pour tout autre écrivain nu de `users`.
 - `Content-Length` à zéros initiaux (`0004097`) : admis comme `1*DIGIT`
   (RFC 9110) et jugé sur sa valeur.
 - Requête sans `Content-Length` ni `Transfer-Encoding` (HTTP/2 par

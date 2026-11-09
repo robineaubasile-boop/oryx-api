@@ -35,7 +35,7 @@ from core.auth_f2.service import F2AuthService
 from core.authz_f2 import commands as c
 from core.authz_f2 import runner as runner_module
 from core.authz_f2.runner import AUTHORIZED, SESSION_INVALID
-from tests.authz_f2_support import USER_A, AuthzEnv, replace_command
+from tests.authz_f2_support import USER_A, AuthzEnv, legacy_set_level, replace_command
 from tests.f2_support import ISSUER, FakeMailer, FakeSupabase, prepare_schema, rows, scalar
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
 
@@ -323,10 +323,9 @@ def test_mixed_load_produces_no_deadlock_and_no_spurious_refusal(env, alice, pg_
         barrier.wait(10)
         out = []
         for i in range(15):
-            with engine.begin() as conn:  # écriture historique du profil (FOR NO KEY UPDATE implicite)
-                conn.execute(sa.text("UPDATE users SET level = :l WHERE id = :u"),
-                             {"l": "debutant" if i % 2 else "intermediaire", "u": USER_A})
-            out.append("ok")
+            # Écriture historique du profil : la vraie route (users FOR UPDATE, puis UPDATE du niveau).
+            response = legacy_set_level(engine, USER_A, "debutant" if i % 2 else "intermediaire")
+            out.append("ok" if response == {"success": True} else response)
         return out
 
     actors = [Background(fn) for fn in (mutate, read, resolve, legacy_level)]
@@ -592,15 +591,15 @@ def test_profile_mutation_waits_behind_an_f2_finalization_holding_the_user_rank(
 
 
 def test_legacy_write_waits_behind_a_profile_mutation_and_is_invisible_to_the_revision(env, pg_url):  # noqa: F811
-    """Écriture historique (PUT /api/user/{id}/level : UPDATE users SET
-    level, sans révision) concurrente : elle attend le verrou du profil, ne
-    crée aucun interblocage, puis écrit SANS faire avancer level_revision."""
+    """Écriture historique (PUT /api/user/{id}/level, la vraie route : users
+    FOR UPDATE puis UPDATE du niveau, sans révision) concurrente : elle
+    attend le verrou du profil, ne crée aucun interblocage, puis écrit SANS
+    faire avancer level_revision."""
     issued = env.confirmed()
     engine = sa.create_engine(pg_url, poolclass=sa.pool.NullPool, connect_args={"application_name": CONCURRENT_APP})
 
     def legacy():
-        with engine.begin() as conn:
-            conn.execute(sa.text("UPDATE users SET level = 'debutant' WHERE id = :u"), {"u": USER_A})
+        assert legacy_set_level(engine, USER_A, "debutant") == {"success": True}
 
     writer = Background(legacy)
 
@@ -648,11 +647,12 @@ def test_mixed_profile_load_produces_no_deadlock_and_only_cas_outcomes(env, alic
 
     def legacy_level():
         barrier.wait(10)
+        out = []
         for i in range(12):
-            with engine.begin() as conn:
-                conn.execute(sa.text("UPDATE users SET level = :l WHERE id = :u"),
-                             {"l": "debutant" if i % 2 else "avance", "u": USER_A})
-        return ["ok"] * 12
+            # Vraie route historique (users FOR UPDATE, puis UPDATE du niveau).
+            response = legacy_set_level(engine, USER_A, "debutant" if i % 2 else "avance")
+            out.append("ok" if response == {"success": True} else response)
+        return out
 
     def reads():
         barrier.wait(10)
@@ -669,6 +669,7 @@ def test_mixed_profile_load_produces_no_deadlock_and_only_cas_outcomes(env, alic
     toggles = results[0] + results[1]
     assert {status for status, _ in toggles} <= {AUTHORIZED, runner_module.REVISION_CONFLICT}
     assert results[2] == [AUTHORIZED] * 12 and results[3] == ["ok"] * 12 and results[5] == [AUTHORIZED] * 12
+    assert results[4] == ["ok"] * 12  # chaque écriture historique a répondu {"success": True}
     increments = sum(1 for _, changed in toggles if changed)
     assert profile_of(env)[1] == increments  # chaque changement committé : exactement +1
     assert increments >= 1

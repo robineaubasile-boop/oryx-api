@@ -1221,7 +1221,12 @@ def get_user(user_id: str, db: Session = Depends(get_db)):
 
 @app.put("/api/user/{user_id}/level")
 def set_user_level(user_id: str, request: UserLevelRequest, db: Session = Depends(get_db)):
-	user = db.query(User).filter(User.id == user_id).first()
+	# Ligne users verrouillée (SELECT ... FOR UPDATE) AVANT l'écriture, dans
+	# la même transaction : sans ce verrou, un UPDATE nu concurrent de
+	# FOR KEY SHARE et de FOR UPDATE sur la même ligne peut former un
+	# interblocage PostgreSQL (diagnostic du run CI #50). Comportement
+	# inchangé : création si le profil manque, niveau seul écrit.
+	user = db.query(User).filter(User.id == user_id).with_for_update().first()
 	if not user:
 		user = User(id=user_id, level=request.level)
 		db.add(user)

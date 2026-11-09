@@ -406,6 +406,18 @@ jamais un conflit métier.
   historique d'une ligne non verrouillée n'attend pas une mutation PR 7
   (seule une insertion historique attend, via la FK vers users). Les
   garanties ne valent qu'à la frontière F2.
+- **Interblocage avec une écriture historique du profil** (run CI #50) :
+  un `UPDATE users` nu concurrent d'une lecture F2 (`users FOR KEY SHARE`)
+  et d'une mutation PR 7 (`users FOR UPDATE`) du même compte pouvait former
+  un cycle PostgreSQL. Corrigé de façon transitoire pour la route
+  `PUT /api/user/{user_id}/level`, qui verrouille la ligne `users`
+  (`FOR UPDATE`) avant d'écrire (`docs/f2_r1_pr6.md` §9) ; la charge mixte
+  du §11 reste à `pg_stat_database.deadlocks` inchangé avec la vraie route.
+  Les autres routes historiques (`GET /api/user/{user_id}`,
+  `POST /api/user/{user_id}/portfolio`) n'écrivent `users` que par
+  l'insertion d'un profil absent, jamais par `UPDATE` d'une ligne
+  existante : hors du mécanisme ; tout autre `UPDATE users` nu reste une
+  limite.
 - Frontière de confiance : serveur + rôle SQL (§9).
 - Garanties logiques (registre fermé, inventaire SQL audité, tests
   négatifs), pas un bac à sable Python.
