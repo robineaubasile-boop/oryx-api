@@ -378,3 +378,113 @@ Exigences citées du cahier des charges (abrégées) ; tests de `tests/test_act_
   ne le produit : pas de déliaison, FK composites). Le présenter en 403 exigerait d'étendre le vocabulaire figé
   `DECLARATIONS` et la matrice `_PROVIDER_REPLIES` : décision d'architecture **non prise ici**, à arbitrer par
   le fondateur. Le comportement fail-closed est préservé (bail jamais présumé libéré).
+
+## 16. Clôture des réserves (audit sur `d6de88f`, 9 novembre 2026)
+
+### 16.1 Référence contractuelle
+
+Le fondateur a identifié la référence du chantier : la **corrective architecturale « Activation F2 V1.2 » du
+8 novembre 2026**, établie sur `564a19a`, explicitement validée et figée dans la conversation d'architecture.
+Sa section **F-01** est la référence contractuelle de PR1 ; les autres sections, notamment **F-05**, fixent les
+contraintes transversales à préserver.
+
+Limite de preuve : le texte de cette corrective n'est versé ni au dépôt ni dans la PR, et n'a pas été transmis
+à cette session. La conformité ci-dessous est donc établie contre (a) le cahier des charges du fondateur
+(§ 15.1), qui en reprend le contrat cible, et (b) les trois clarifications formulées par le fondateur et par
+l'audit le 9 novembre 2026. Elle ne prétend à aucune lecture directe de F-01 ou F-05.
+
+Les § 16.2 à 16.4 sont des **clarifications d'interprétation** de comportements existants, vérifiés par tests.
+Ils ne présentent aucune règle nouvelle comme faisant partie du freeze historique et ne modifient aucun code de
+production.
+
+### 16.2 Expurgation
+
+- Une identité **durablement vérifiée** (`email_verified_at` renseigné) puis **expurgée** (`verified_email_normalized`
+  NULL, `pii_redacted_at` renseigné) **reste admissible**.
+- Une identité **jamais vérifiée** (`email_verified_at` NULL) **n'est jamais admissible**, qu'elle soit
+  expurgée ou non.
+- Une ligne vérifiée sans adresse **ni** expurgation (état jamais écrit par F2) n'est pas admissible : refus fermé.
+- Code : `_adapters.lock_linked_identities`. Tests :
+  `test_identity_rows_are_admitted_only_with_a_durable_verification[True-True-True]` (admise),
+  `[False-False-False]` et `[False-True-False]` (jamais admises), `test_redacting_a_linked_identity_keeps_access`,
+  `test_a_verified_timestamp_without_address_nor_redaction_proves_nothing`.
+
+### 16.3 Issuer
+
+**Comportement actuel du runner** : il vérifie le fournisseur (liste fermée `LINKED_IDENTITY_PROVIDERS =
+("supabase",)`, identique à `ck_auth_identities_provider`), la vérification e-mail durable et l'appartenance au
+`user_id` autorisé. **Il ne compare pas l'issuer.** Il ne reçoit aucune configuration Supabase. Aucune
+dépendance nouvelle n'est ajoutée : décision non prise ici. Test :
+`test_the_runner_checks_the_provider_but_not_the_issuer_current_behaviour`. Ce test force une ligne d'un autre
+issuer par SQL direct ; elle est admise par le runner, ce qui fixe le comportement sans le présenter comme une
+garantie.
+
+**Les écritures existantes imposent l'issuer configuré.** Constats vérifiés sur `d6de88f` :
+
+1. Il n'existe **qu'une seule** écriture d'identité dans le code de production : l'`INSERT` de
+   `F2AuthService._prepare_linked_identity` (`core/auth_f2/service.py`). On n'y trouve aucune autre insertion,
+   aucune suppression, aucune construction ORM `AuthIdentity(...)`. Cela vaut pour `api.py`, `scripts/` et les
+   migrations, où `0017` crée la table sans donnée. Les deux seules mises à jour portent sur
+   `last_authenticated_at` (connexion) et `created_at` / `email_verified_at` (liaison). Aucune ne touche
+   `issuer`, `subject`, `provider` ni `user_id`. Test d'inventaire :
+   `test_identities_are_written_only_by_the_f2_linking_with_the_configured_issuer`.
+2. Cet `INSERT` lie `issuer = self._supabase.issuer`, l'issuer du fournisseur injecté dans le moteur F2.
+   - `F2AuthService.__init__` refuse tout fournisseur dont l'issuer ne respecte pas `https://<hôte>/auth/v1`
+     (`is_valid_issuer`).
+   - `HttpSupabaseOtpProvider` le dérive de l'URL configurée du projet : `base_url + "/auth/v1"`.
+3. Le `subject` vient exclusivement d'une `VerifiedIdentity`. Celle-ci n'est construite qu'à partir d'une
+   réponse `verifyOtp` conforme : HTTP 200, `user.id` UUID canonique, `aud = authenticated`, même e-mail,
+   `email_confirmed_at` non vide, `access_token` présent (`core/auth_f2/providers.py`, R1 PR 2 § 6).
+4. L'insertion n'est conservée qu'après revalidation complète sous verrous. Sinon, le point de sauvegarde est
+   annulé.
+5. La FK composite `auth_operations_proven_identity_fkey` lie toute opération committée au quadruplet
+   `(id, provider, issuer, subject)` de l'identité prouvée. La connexion OTP recherche l'identité par
+   `(supabase, issuer configuré, subject)` : une identité d'un autre issuer ne peut jamais ouvrir de session.
+6. Tests existants : `test_f2_service.py` (issuer enregistré = issuer configuré),
+   `test_f2_normalize_providers.py` (`is_valid_issuer`, dérivation de l'issuer).
+   Ajouté : `test_otp_linking_records_the_configured_provider_issuer_and_proven_subject`.
+
+**Conclusion** : aucun chemin applicatif actuel ne permet d'introduire une identité arbitraire, ni avec un
+issuer non configuré. **Limite résiduelle** : PostgreSQL contraint l'issuer seulement à `^https://`. Une
+écriture SQL directe, hors application (exploitation, import manuel), pourrait créer une ligne d'un autre
+issuer, que le runner admettrait. Toute future voie d'écriture d'identité devra conserver ces invariants ; le
+test d'inventaire la signalera.
+
+### 16.4 Décrypter B2 : deux cas distincts
+
+| Cas | Ce que refuse le runner | Résultat B2 | HTTP |
+|---|---|---|---|
+| **Refus direct d'identité** : la commande nécessaire au tour (B1, réautorisation `ReadProfile`, lecture de contexte, C1-B, C2) rend `IDENTITY_LINK_REQUIRED` | la commande demandée par l'utilisateur | `REFUSED` / `IDENTITY_REQUIRED` (B2) ou statut runner (B1, C1-B, C2) | **403 `identity_link_required`** |
+| **Échec fournisseur, puis déclaration refusée** : EODHD, FMP ou Claude échoue ; la déclaration interne `RecordDecryptageAttemptFailure` rend `IDENTITY_LINK_REQUIRED` | la **déclaration** de l'échec, opération de comptabilité interne du bail, après l'échec | `PROVIDER_FAILED` / `DECLARATION_REFUSED` | **503 `temporarily_unavailable`** |
+
+**Pourquoi le second cas n'est pas une conversion d'un refus d'identité en indisponibilité :**
+
+1. **Cause de l'échec.** L'issue du tour est déjà fixée avant la déclaration : le fournisseur a échoué
+   (`PROVIDER_FAILED`). Le tour ne peut pas produire de réponse, quelle que soit la déclaration. La
+   déclaration ne demande aucun accès personnel. Elle informe B1 de l'échec pour libérer le bail par
+   anticipation.
+2. **Vocabulaire figé R1 PR 9-B2.** L'issue d'une déclaration est l'une de trois valeurs fermées (`DECLARED`,
+   `DECLARATION_REFUSED`, `DECLARATION_UNCERTAIN`), rapportée telle quelle. Une déclaration refusée signifie
+   seulement que le bail n'est pas présumé libéré. Le motif du refus n'est pas transporté, par construction.
+3. **Matrice figée R1 PR 9-C3 (`_PROVIDER_REPLIES`).** `provider_unavailable` (503) est réservé à une
+   déclaration **confirmée**. Toute déclaration non confirmée donne `503 temporarily_unavailable`, quel qu'en
+   soit le motif : session révoquée, réservation, conflit, identité. Le refus d'identité n'y est pas traité à
+   part ; il suit la règle déjà figée pour toute déclaration non confirmée.
+4. **Fail-closed et reprise.** Le bail n'est pas présumé libéré. Toute reprise, même à bail actif, repasse par
+   B1, donc par le runner, qui exige à nouveau l'identité :
+   - tant qu'elle n'est pas admissible, la reprise obtient **403 `identity_link_required`**, sans écriture.
+     L'indisponibilité ne masque donc jamais le refus d'identité au-delà de la réponse à l'échec fournisseur.
+   - une fois l'identité admissible, la même intention retrouve le bail actif (`202 in_progress`), sans nouvel
+     appel Claude.
+5. **Atteignabilité.** Ce cas suppose que l'identité, admise par B1 et par la réautorisation B2 quelques
+   instants plus tôt, cesse d'être admissible avant la déclaration. Aucune écriture F2 ne le produit : il
+   n'existe aucune déliaison, et les FK composites figent l'identité. Il n'est atteignable que par un état forcé.
+
+Comportement **conservé**, vérifié par :
+- `test_http_turn_refusals_from_b1_b2_and_c1b_are_403` et `test_b2_reauthorization_refusal_calls_no_provider`
+  (refus direct → 403, aucun fournisseur) ;
+- `test_b2_provider_failure_then_refused_declaration_keeps_the_lease[identity_lost|control]` ;
+- `test_http_provider_failure_with_a_refused_declaration_is_503_and_b1_governs_the_resumption`.
+
+La réserve R-2 du § 15.4 est ainsi close **par interprétation documentée**, sous réserve de sa conformité à
+F-01 et F-05 (texte non consulté, § 16.1).

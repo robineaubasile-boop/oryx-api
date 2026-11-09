@@ -25,6 +25,7 @@ test explicites) pour éprouver le refus fermé et les lectures postérieures à
 une première autorisation.
 """
 import json
+import re
 import threading
 import uuid
 
@@ -376,6 +377,58 @@ def test_a_sign_in_session_is_not_admitted_on_its_auth_method_alone(env, alice):
     assert env.run(alice, c.ReadProfile()).status == AUTHORIZED
 
 
+# Clarification ISSUER (audit sur d6de88f) : le runner vérifie le fournisseur
+# (liste fermée) sans comparer l'issuer ; l'issuer est imposé par la SEULE
+# écriture applicative d'identités, la liaison F2, qui enregistre l'issuer
+# configuré du fournisseur Supabase du moteur F2.
+
+REPO = __import__("pathlib").Path(__file__).resolve().parents[1]
+
+
+def test_identities_are_written_only_by_the_f2_linking_with_the_configured_issuer():
+    writers = []
+    for path in REPO.rglob("*.py"):
+        relative = path.relative_to(REPO)
+        if relative.parts[0] in ("tests", ".git") or "__pycache__" in relative.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for pattern in ("INSERT INTO auth_identities", "UPDATE auth_identities", "DELETE FROM auth_identities"):
+            writers += [(str(relative), pattern)] * text.count(pattern)
+        # Construction ORM (hors définition du modèle core/models.py).
+        writers += [(str(relative), "AuthIdentity(")] * len(re.findall(r"(?<!class )\bAuthIdentity\(", text))
+    # Une seule insertion (liaison), aucune suppression ni ORM ; mises à jour
+    # par _update (colonnes listées dans le service, jamais issuer ni subject).
+    assert writers == [("core/auth_f2/service.py", "INSERT INTO auth_identities")]
+    service = (REPO / "core" / "auth_f2" / "service.py").read_text(encoding="utf-8")
+    prepare = service[service.index("def _prepare_linked_identity"):service.index("def _commit_linking")]
+    assert 'params = {"p": PROVIDER, "i": self._supabase.issuer, "s": subject}' in prepare
+    updates = [line.strip() for line in service.splitlines() if '_update(conn, "auth_identities"' in line]
+    assert updates == ['_update(conn, "auth_identities", identity["id"], last_authenticated_at=at)',
+                       '_update(conn, "auth_identities", identity["id"], created_at=at, email_verified_at=at)']
+
+
+def test_otp_linking_records_the_configured_provider_issuer_and_proven_subject(env, invited):
+    owner = env.owner(invited)
+    assert env.link_email(invited, CAROL).status == "email_linked"
+    (identity,) = env.identities(owner)
+    assert (identity["provider"], identity["issuer"], identity["subject"]) == (
+        "supabase", env.supabase.issuer, env.supabase.subject_for(CAROL))
+    assert identity["email_verified_at"] is not None and identity["pii_redacted_at"] is None
+
+
+def test_the_runner_checks_the_provider_but_not_the_issuer_current_behaviour(env, invited):
+    """État FORCÉ hors de tout chemin applicatif (écriture SQL directe) :
+    identité vérifiée d'un autre issuer https -> admise par le runner, qui ne
+    reçoit aucune configuration Supabase. Comportement actuel documenté
+    (docs/act_l1_pr1.md § 16.2), pas une garantie supplémentaire."""
+    owner = env.owner(invited)
+    env.force_identity(owner)
+    env.update("auth_identities", "issuer = 'https://other-project.supabase.co/auth/v1'", "user_id = :u", u=owner)
+    assert env.run(invited, c.ReadProfile()).status == AUTHORIZED
+    with pytest.raises(sa.exc.IntegrityError):  # fournisseur hors liste : refusé dès PostgreSQL
+        env.update("auth_identities", "provider = 'other'", "user_id = :u", u=owner)
+
+
 # --------------------------------------------------------------------------
 # 5. Concurrence : liaison e-mail et runner, dans les deux ordres
 # --------------------------------------------------------------------------
@@ -694,6 +747,9 @@ def test_http_provider_failure_with_a_refused_declaration_is_503_and_b1_governs_
     assert (response.status_code, response.json()) == (503, {"error": "temporarily_unavailable"})
     (row,) = env.reservations()
     assert row["state"] == "reserved" and row["lease_token_hash"] is not None and row["retry_not_before_at"] is None
+    # Toute reprise repasse par B1, donc par le runner : sans identité, refus direct 403 (jamais masqué).
+    assert_identity_refusal(post(app, TURNS, body_of(fields), c3_headers(alice)))
+    assert env.reservations() == [row]
     restore_identity(env)
     resumed = post(app, TURNS, body_of(fields), c3_headers(alice))
     assert resumed.status_code == 202 and resumed.json()["status"] == "in_progress"
