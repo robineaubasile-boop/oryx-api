@@ -38,7 +38,8 @@ aucun refus de transport n'ouvre de transaction) :
      target_percent, envelope (chaînes ou null)     -> 400 invalid_request ;
  14. cookie __Host-oryx-active-<generation_id> EXACT -> 401 session_invalid ;
  15. runner disponible                              -> 503 ;
- 16. autorisation transactionnelle (runner)          -> 401 / 404 / 409 / 503 ;
+ 16. autorisation transactionnelle (runner)          -> 401 / 403
+     identity_link_required (ACT-L1-PR1) / 404 / 409 / 503 ;
  17. résultat vérifié avant sérialisation           -> sinon 503.
 
 Réponses : GET collection {"positions": [vue...]} (position_id croissant),
@@ -46,7 +47,7 @@ GET individuel : la vue ; mutations : corps JSON canonique du résultat
 portfolio-write-result-v1, identique octet pour octet au rejeu ; POST 201
 avec Location: /api/v2/me/portfolio/{position_id}. Erreurs
 {"error": code} : invalid_request, session_invalid, origin_refused,
-csrf_invalid, position_not_found, idempotency_conflict,
+csrf_invalid, identity_link_required, position_not_found, idempotency_conflict,
 position_revision_conflict, request_too_large, temporarily_unavailable.
 Toute réponse : no-store, nosniff, no-referrer, aucun Set-Cookie, aucun
 CORS. Les journaux ne portent que route, statut et code : ni secret,
@@ -83,6 +84,7 @@ from core.authz_f2.principal import AuthorizedPrincipal
 from core.authz_f2.runner import (
     AUTHORIZED,
     IDEMPOTENCY_CONFLICT,
+    IDENTITY_LINK_REQUIRED,
     NOT_FOUND,
     REVISION_CONFLICT,
     SESSION_INVALID,
@@ -90,6 +92,8 @@ from core.authz_f2.runner import (
 )
 from core.authz_f2_http.provenance import personal_get_origin, personal_mutation_origin
 from core.authz_f2_http.routes import (
+    IDENTITY_LINK_CODE,
+    IDENTITY_LINK_HTTP_STATUS,
     NAMESPACE,
     PersonalDependencies,
     Refusal,
@@ -238,6 +242,7 @@ def build_portfolio_router(deps: PersonalDependencies) -> APIRouter:
         """Résultat fermé non autorisé -> réponse, ou None."""
         status = getattr(outcome, "status", None)
         mapping = {SESSION_INVALID: (401, "session_invalid"), NOT_FOUND: (404, "position_not_found"),
+                   IDENTITY_LINK_REQUIRED: (IDENTITY_LINK_HTTP_STATUS, IDENTITY_LINK_CODE),
                    REVISION_CONFLICT: (409, "position_revision_conflict"),
                    IDEMPOTENCY_CONFLICT: (409, "idempotency_conflict")}
         if status in mapping:
@@ -257,7 +262,7 @@ def build_portfolio_router(deps: PersonalDependencies) -> APIRouter:
         if isinstance(ran, Response):
             return ran
         outcome, generation_id, _ = ran
-        if getattr(outcome, "status", None) == SESSION_INVALID:
+        if getattr(outcome, "status", None) in (SESSION_INVALID, IDENTITY_LINK_REQUIRED):
             return refusal(label, outcome)
         views = getattr(outcome, "value", None)
         if (not _authorized(outcome, generation_id) or type(views) is not tuple
@@ -275,7 +280,7 @@ def build_portfolio_router(deps: PersonalDependencies) -> APIRouter:
         if isinstance(ran, Response):
             return ran
         outcome, generation_id, _ = ran
-        if getattr(outcome, "status", None) in (SESSION_INVALID, NOT_FOUND):
+        if getattr(outcome, "status", None) in (SESSION_INVALID, IDENTITY_LINK_REQUIRED, NOT_FOUND):
             return refusal(label, outcome)
         view = getattr(outcome, "value", None)
         if not _authorized(outcome, generation_id) or type(view) is not PositionView \

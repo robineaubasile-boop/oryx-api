@@ -290,6 +290,8 @@ def test_adapter_statements_are_owner_scoped_and_non_transactional():
     assert set(statements) == {
         "_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_PROFILE[FOR NO KEY UPDATE]",
         "_READ_PROFILE", "_LIST_POSITIONS",
+        # ACT-L1-PR1 : identités fournisseur du propriétaire (rang identité).
+        "_LOCK_LINKED_IDENTITIES",
         "_READ_POSITION", "_LIST_THESES", "_LIST_THESES_FOR_TICKER", "_READ_DELIVERY", "_LIST_CONVERSATION_DELIVERIES",
         "_UPDATE_PROFILE_LEVEL", "_TRANSACTION_ISOLATION", "_LOCK_RECEIPT", "_LOCK_POSITION", "_CREATE_POSITION",
         "_REPLACE_POSITION", "_DELETE_POSITION", "_INSERT_RECEIPT",
@@ -550,14 +552,17 @@ def test_no_operation_conn_principal_contract_remains():
         assert receiving == expected.get(path, set()), path.name
     public_adapters = {n.name for n in _tree(ADAPTERS).body if isinstance(n, ast.FunctionDef)
                        and not n.name.startswith("_")}
-    # Seuls appels du runner hors registre : verrou users, isolation (R1 PR 7).
-    assert public_adapters == {"lock_profile", "require_read_committed"}
+    # Seuls appels du runner hors registre : verrou users, isolation (R1 PR 7),
+    # identités liées (ACT-L1-PR1, rang identité de la phase B).
+    assert public_adapters == {"lock_profile", "require_read_committed", "lock_linked_identities"}
 
 
 def test_runner_lock_order_and_t_authorization():
     source = inspect.getsource(AuthorizedTransactionRunner._run)
     order = [source.index(marker) for marker in ("_adapters.require_read_committed(", "_adapters.lock_profile(",
                                                  "sessions.lock_session(",
+                                                 # ACT-L1-PR1 : rang identité, après génération, avant le métier.
+                                                 "_adapters.lock_linked_identities(",
                                                  "spec.lock(", 'self._hook("locked")', "self._clock(conn)",
                                                  "self._decide(", 'self._hook("authorized")', "spec.execute(")]
     assert order == sorted(order)
@@ -603,6 +608,9 @@ def test_business_locks_match_the_announced_plan():
     locking = {name for name, sql in statements.items() if re.search(r"\bFOR (UPDATE|SHARE|NO KEY UPDATE|KEY SHARE)\b",
                                                                      sql)}
     assert locking == {"_LOCK_PROFILE[FOR KEY SHARE]", "_LOCK_PROFILE[FOR UPDATE]", "_LOCK_PROFILE[FOR NO KEY UPDATE]",
+                       # ACT-L1-PR1 : verrou d'IDENTITÉ (rang identité de l'ordre
+                       # global F2), jamais un verrou métier ni un spec.lock.
+                       "_LOCK_LINKED_IDENTITIES",
                        "_LOCK_RECEIPT", "_LOCK_POSITION",
                        # R1 PR 9-B1 : verrous d'EXÉCUTION (après T_authorization),
                        # jamais dans spec.lock ; réservation propre seulement.

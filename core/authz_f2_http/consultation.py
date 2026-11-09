@@ -24,14 +24,15 @@ d'encodage ou de paramètre n'ouvre de transaction) :
      -> 400 (413 au-delà de 4096) ; troncature ou déconnexion -> 400 ;
   8. cookie __Host-oryx-active-<generation_id> EXACT -> 401 session_invalid ;
   9. runner disponible                              -> 503 ;
- 10. autorisation transactionnelle (runner, plan READ) -> 401 / 404 / 503 ;
+ 10. autorisation transactionnelle (runner, plan READ) -> 401 / 403
+     identity_link_required (ACT-L1-PR1) / 404 / 503 ;
  11. lecture SQL métier (une instruction) ;
  12. vue validée (types exacts, génération, ordre, curseur, filtre) ;
  13. sérialisation complète, puis taille <= 131072 octets -> sinon 503 ;
  14. émission : 200 JSON canonique.
 
 Erreurs {"error": code} : invalid_request, session_invalid, origin_refused,
-thesis_not_found (étrangère et inexistante : corps identiques),
+identity_link_required (403, ACT-L1-PR1), thesis_not_found (étrangère et inexistante : corps identiques),
 request_too_large, temporarily_unavailable. Toute réponse : no-store,
 no-cache, nosniff, no-referrer, aucun Set-Cookie, aucun CORS. Aucun jeton
 CSRF n'est exigé (GET). Les journaux ne portent que route, statut et code
@@ -50,11 +51,18 @@ from core.auth_f2_http.provenance import ProvenanceRejected
 from core.auth_f2_http.routes import NO_STORE_HEADERS, error_response
 from core.authz_f2.commands import ReadThesis
 from core.authz_f2.principal import AuthorizedPrincipal
-from core.authz_f2.runner import AUTHORIZED, NOT_FOUND, SESSION_INVALID, AuthorizationOutcome
+from core.authz_f2.runner import AUTHORIZED, IDENTITY_LINK_REQUIRED, NOT_FOUND, SESSION_INVALID, AuthorizationOutcome
 from core.authz_f2_http import consultation_codec as codec
 from core.authz_f2_http.portfolio import _refuse_body
 from core.authz_f2_http.provenance import personal_get_origin
-from core.authz_f2_http.routes import NAMESPACE, PersonalDependencies, Refusal, _generation_id
+from core.authz_f2_http.routes import (
+    IDENTITY_LINK_CODE,
+    IDENTITY_LINK_HTTP_STATUS,
+    NAMESPACE,
+    PersonalDependencies,
+    Refusal,
+    _generation_id,
+)
 
 logger = logging.getLogger("oryx.authz_f2.http")
 
@@ -151,6 +159,9 @@ def build_consultation_router(deps: PersonalDependencies) -> APIRouter:
         if status == SESSION_INVALID:
             logger.info("authz_f2 http %s status=401 code=session_invalid", label)
             return error_response(401, "session_invalid")
+        if status == IDENTITY_LINK_REQUIRED:
+            logger.info("authz_f2 http %s status=403 code=identity_link_required", label)
+            return error_response(IDENTITY_LINK_HTTP_STATUS, IDENTITY_LINK_CODE)
         if status == NOT_FOUND and not_found is not None:
             logger.info("authz_f2 http %s status=404 code=%s", label, not_found)
             return error_response(404, not_found)

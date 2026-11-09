@@ -49,6 +49,17 @@ présumée). Une panne SQL, une session révoquée, un contexte incohérent, un
 instrument introuvable ou ambigu, un budget épuisé avant une étape ne sont
 JAMAIS déguisés en échec fournisseur : refus sans déclaration.
 
+ACT-L1-PR1 : IDENTITY_LINK_REQUIRED du runner (aucune identité fournisseur
+liée et vérifiée) devient le motif fermé IDENTITY_REQUIRED
+("identity_link_required"), quel que
+soit l'appel F2 qui le rend (réautorisation ReadProfile, lectures de
+contexte) : jamais AUTHORIZATION_UNAVAILABLE, jamais SESSION_REFUSED. Le
+refus est levé AVANT l'étape suivante : après une réautorisation refusée,
+aucun fournisseur (recherche, EODHD, FMP, Claude) n'est appelé ; après une
+lecture de contexte refusée, aucun appel ultérieur n'est lancé et aucune
+déclaration d'échec n'est tentée. Une déclaration d'échec refusée pour ce
+motif reste DECLARATION_REFUSED (bail jamais présumé libéré).
+
 Idempotence réseau : un appel Claude au plus par exécution (garde locale) ;
 un même bail (reservation_id, epoch) n'est confié qu'à une exécution à la
 fois par orchestrateur (registre EN MÉMOIRE, borné, sans persistance ni
@@ -76,8 +87,9 @@ from core.authz_f2 import decryptage_market_data as dm
 from core.authz_f2 import decryptage_method_selection as dms
 from core.authz_f2 import decryptage_reservation as dr
 from core.authz_f2.principal import AuthorizedPrincipal
-from core.authz_f2.runner import (AUTHORIZED, IDEMPOTENCY_CONFLICT, NOT_FOUND, REVISION_CONFLICT, SESSION_INVALID,
-                                  UNAVAILABLE, AuthorizationOutcome, AuthorizedTransactionRunner)
+from core.authz_f2.runner import (AUTHORIZED, IDEMPOTENCY_CONFLICT, IDENTITY_LINK_REQUIRED, NOT_FOUND,
+                                  REVISION_CONFLICT, SESSION_INVALID, UNAVAILABLE, AuthorizationOutcome,
+                                  AuthorizedTransactionRunner)
 from core.decryptage_engine import build_system_prompt, build_user_message
 
 logger = logging.getLogger("oryx.decryptage_f2")
@@ -193,9 +205,11 @@ INSTRUMENT_AMBIGUOUS = "instrument_ambiguous"
 CONTEXT_CHANGED = "context_changed"
 BUDGET_EXHAUSTED = "budget_exhausted"
 LEASE_EXPIRED = "lease_expired"
+IDENTITY_REQUIRED = "identity_link_required"  # ACT-L1-PR1
 REFUSAL_REASONS = (LEASE_NOT_GRANTED, LEASE_MISMATCH, LEASE_ALREADY_USED, SESSION_REFUSED, RESERVATION_NOT_FOUND,
                    LEASE_STALE, INTENT_MISMATCH, AUTHORIZATION_UNAVAILABLE, OWNER_CHANGED, INSTRUMENT_NOT_FOUND,
-                   INSTRUMENT_AMBIGUOUS, CONTEXT_CHANGED, BUDGET_EXHAUSTED, LEASE_EXPIRED) + dc.REFUSAL_REASONS
+                   INSTRUMENT_AMBIGUOUS, CONTEXT_CHANGED, BUDGET_EXHAUSTED, LEASE_EXPIRED,
+                   IDENTITY_REQUIRED) + dc.REFUSAL_REASONS
 
 DECLARED = "declared"
 DECLARATION_REFUSED = "declaration_refused"
@@ -204,7 +218,7 @@ DECLARATIONS = (DECLARED, DECLARATION_REFUSED, DECLARATION_UNCERTAIN)
 
 _F2_REFUSALS = MappingProxyType({SESSION_INVALID: SESSION_REFUSED, NOT_FOUND: RESERVATION_NOT_FOUND,
                                  REVISION_CONFLICT: LEASE_STALE, IDEMPOTENCY_CONFLICT: INTENT_MISMATCH,
-                                 UNAVAILABLE: AUTHORIZATION_UNAVAILABLE})
+                                 UNAVAILABLE: AUTHORIZATION_UNAVAILABLE, IDENTITY_LINK_REQUIRED: IDENTITY_REQUIRED})
 
 
 @dataclass(frozen=True, slots=True, repr=False)

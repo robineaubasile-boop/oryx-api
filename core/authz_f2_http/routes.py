@@ -13,7 +13,8 @@ Ordre des contrôles, tous avant l'autorisation :
   7. cookie __Host-oryx-active-<generation_id> EXACT (jamais choisi
      implicitement parmi d'autres)                       -> 401 session_invalid ;
   8. AuthorizedTransactionRunner + ReadProfile           -> 200, 401
-     session_invalid, 503 temporarily_unavailable.
+     session_invalid, 403 identity_link_required (ACT-L1-PR1), 503
+     temporarily_unavailable.
 
 Réponse 200 (R1 PR 6) : {"level": ..., "level_revision": "<décimal>",
 "user_id": ...}, valeurs lues ENSEMBLE dans PostgreSQL (user_id du
@@ -54,8 +55,16 @@ contrôles (le premier échec répond, aucun contrôle suivant ne s'exécute) :
      <= 2^63 - 1)                                        -> 400 invalid_request ;
  11. cookie __Host-oryx-active-<generation_id> EXACT     -> 401 session_invalid ;
  12. runner disponible                                   -> 503 temporarily_unavailable ;
- 13. AuthorizedTransactionRunner + UpdateProfileLevel    -> 200, 401, 409
-     level_revision_conflict, 503 ; résultat vérifié avant sérialisation.
+ 13. AuthorizedTransactionRunner + UpdateProfileLevel    -> 200, 401, 403
+     identity_link_required, 409 level_revision_conflict, 503 ; résultat
+     vérifié avant sérialisation.
+
+ACT-L1-PR1 : IDENTITY_LINK_REQUIRED du runner (justificatif valide, profil
+identifié, aucune identité fournisseur liée et vérifiée) devient TOUJOURS
+403 {"error": "identity_link_required"} sur toutes les routes personnelles
+F2 (IDENTITY_LINK_REPLY), jamais 401, 404, 409 ni 503. Le corps ne porte
+aucun principal, aucune donnée personnelle, aucun résultat métier ni aucune
+information sur l'identité fournisseur.
 """
 import json
 import logging
@@ -82,7 +91,13 @@ from core.authz_f2.commands import (
     valid_revision,
 )
 from core.authz_f2.principal import AuthorizedPrincipal
-from core.authz_f2.runner import AUTHORIZED, REVISION_CONFLICT, SESSION_INVALID, AuthorizationOutcome
+from core.authz_f2.runner import (
+    AUTHORIZED,
+    IDENTITY_LINK_REQUIRED,
+    REVISION_CONFLICT,
+    SESSION_INVALID,
+    AuthorizationOutcome,
+)
 from core.authz_f2_http.provenance import personal_get_origin, personal_mutation_origin
 
 logger = logging.getLogger("oryx.authz_f2.http")
@@ -96,6 +111,9 @@ LEVEL_KEYS = frozenset({"level", "expected_revision"})
 # (jamais str.isdigit() ni \d, qui admettent d'autres chiffres Unicode).
 _REVISION_RE = re.compile(r"0|[1-9][0-9]{0,18}")
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]+")
+# ACT-L1-PR1 : réponse unique de IDENTITY_LINK_REQUIRED sur toutes les routes personnelles F2.
+IDENTITY_LINK_HTTP_STATUS = 403
+IDENTITY_LINK_CODE = "identity_link_required"
 
 
 class Refusal(Exception):
@@ -290,6 +308,9 @@ def build_personal_router(deps: PersonalDependencies) -> APIRouter:
         if getattr(outcome, "status", None) == SESSION_INVALID:
             logger.info("authz_f2 http me status=401 code=session_invalid")
             return error_response(401, "session_invalid")
+        if getattr(outcome, "status", None) == IDENTITY_LINK_REQUIRED:
+            logger.info("authz_f2 http me status=403 code=identity_link_required")
+            return error_response(IDENTITY_LINK_HTTP_STATUS, IDENTITY_LINK_CODE)
         if not _profile_ok(outcome, generation_id):
             logger.info("authz_f2 http me status=503 code=temporarily_unavailable")
             return error_response(503, "temporarily_unavailable")
@@ -333,6 +354,9 @@ def build_personal_router(deps: PersonalDependencies) -> APIRouter:
         if status == SESSION_INVALID:
             logger.info("authz_f2 http me/level status=401 code=session_invalid")
             return error_response(401, "session_invalid")
+        if status == IDENTITY_LINK_REQUIRED:
+            logger.info("authz_f2 http me/level status=403 code=identity_link_required")
+            return error_response(IDENTITY_LINK_HTTP_STATUS, IDENTITY_LINK_CODE)
         if status == REVISION_CONFLICT:
             logger.info("authz_f2 http me/level status=409 code=level_revision_conflict")
             return error_response(409, "level_revision_conflict")

@@ -13,6 +13,7 @@ Inventaire (vérifié par tests/test_authz_f2_boundary.py) :
 | Opération | Table | Filtre | Verrou |
 |---|---|---|---|
 | lock_profile | users | id | plan (FOR KEY SHARE / FOR UPDATE / FOR NO KEY UPDATE) |
+| lock_linked_identities (ACT-L1-PR1) | auth_identities | user_id (projection fermée : id, provider, email_verified_at, présence de l'e-mail, expurgation ; jamais l'e-mail, l'issuer ni le subject) | FOR KEY SHARE (rang identité, après génération, avant tout verrou métier) |
 | _read_profile | users | id (level ET level_revision, une requête) | - |
 | _list_positions | portfolio_positions | user_id | - |
 | _read_position | portfolio_positions | id ET user_id | - |
@@ -308,6 +309,13 @@ _LOCK_PROFILE = {
     "FOR NO KEY UPDATE": "SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE",
 }
 _READ_PROFILE = "SELECT id, level, level_revision FROM users WHERE id = :u"
+# ACT-L1-PR1 : identités fournisseur du propriétaire (rang identité de l'ordre
+# global F2). Aucune donnée personnelle projetée : ni l'adresse e-mail, ni
+# l'issuer, ni le subject ; seulement leur présence / expurgation en booléens.
+_LOCK_LINKED_IDENTITIES = ("SELECT id, provider, email_verified_at, "
+                           "verified_email_normalized IS NOT NULL AS email_present, "
+                           "pii_redacted_at IS NOT NULL AS pii_redacted FROM auth_identities WHERE user_id = :u "
+                           "ORDER BY id FOR KEY SHARE")
 # Flottants lus en octets IEEE 754 exacts (float8send), jamais en texte.
 _POSITION_COLUMNS = ("SELECT id, position_revision, ticker, float8send(quantity) AS quantity, "
                      "float8send(purchase_price) AS purchase_price, float8send(target_percent) AS target_percent, "
@@ -439,6 +447,34 @@ def _first(conn, sql: str, **params):
 def lock_profile(conn, user_id: str, plan: c.LockPlan) -> bool:
     """Premier verrou de la phase B (rang users). False : profil absent."""
     return _first(conn, _LOCK_PROFILE[plan.users_lock], u=user_id) is not None
+
+
+# ACT-L1-PR1 : seul fournisseur admis (liste fermée, ck_auth_identities_provider).
+LINKED_IDENTITY_PROVIDERS = ("supabase",)
+
+
+def lock_linked_identities(conn, user_id: str) -> bool:
+    """Rang identité de la phase B (après génération, avant tout verrou
+    métier et avant T_authorization) : verrouille FOR KEY SHARE les identités
+    fournisseur du user_id serveur et rend True si l'une d'elles est
+    ADMISSIBLE, False sinon. Aucune écriture, aucune donnée personnelle lue.
+
+    Admissible : fournisseur de la liste fermée, vérification e-mail durable
+    (email_verified_at renseigné) ET preuve encore portée par la ligne —
+    adresse vérifiée présente, ou expurgée pour confidentialité
+    (pii_redacted_at renseigné : l'expurgation n'invalide pas une
+    vérification durable). Une ligne sans vérification, ou vérifiée sans
+    adresse ni expurgation (état jamais écrit par F2), ne prouve rien.
+
+    FOR KEY SHARE : bloque jusqu'au COMMIT toute suppression ou tout
+    changement de clé (id, user_id, provider, issuer, subject) d'une identité
+    lue ; compatible avec la connexion OTP (FOR NO KEY UPDATE puis
+    last_authenticated_at) et avec une expurgation (colonnes non clés).
+    L'insertion d'une identité (liaison e-mail) est sérialisée en amont par
+    le rang users (liaison : users FOR UPDATE ; runner : plan)."""
+    rows = conn.execute(sa.text(_LOCK_LINKED_IDENTITIES), {"u": user_id}).mappings().all()
+    return any(row["provider"] in LINKED_IDENTITY_PROVIDERS and row["email_verified_at"] is not None
+               and (row["email_present"] is True or row["pii_redacted"] is True) for row in rows)
 
 
 def _float(raw):

@@ -46,7 +46,7 @@ from core.authz_f2.runner import (
     AuthorizedTransactionRunner,
     UnknownCommand,
 )
-from tests.authz_f2_support import BOB, USER_A, USER_B, AuthzEnv, replace_command
+from tests.authz_f2_support import BOB, IDENTITY_LOCK_SQL, USER_A, USER_B, AuthzEnv, replace_command
 from tests.f2_support import SimulatedCrash, fake_key, prepare_schema, rows, scalar
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
 
@@ -595,9 +595,12 @@ def test_revision_conflict_is_a_distinct_closed_status():
     assert runner_module.REVISION_CONFLICT == "revision_conflict"
     # R1 PR 7 : sixième résultat fermé, distinct des cinq autres.
     assert runner_module.IDEMPOTENCY_CONFLICT == "idempotency_conflict"
+    # ACT-L1-PR1 : septième résultat fermé, distinct des six autres.
+    assert runner_module.IDENTITY_LINK_REQUIRED == "identity_link_required"
     assert runner_module.STATUSES == (AUTHORIZED, SESSION_INVALID, NOT_FOUND, UNAVAILABLE,
-                                      runner_module.REVISION_CONFLICT, runner_module.IDEMPOTENCY_CONFLICT)
-    assert len(set(runner_module.STATUSES)) == 6
+                                      runner_module.REVISION_CONFLICT, runner_module.IDEMPOTENCY_CONFLICT,
+                                      runner_module.IDENTITY_LINK_REQUIRED)
+    assert len(set(runner_module.STATUSES)) == 7
 
 
 def test_cycle_produces_two_increments_and_stale_retry_conflicts(env):
@@ -867,8 +870,9 @@ def test_profile_lock_timeout_is_unavailable(env):
 
 def test_profile_mutation_lock_order_and_t_authorization(env):
     """PROFILE_MUTATION : users FOR UPDATE -> oryx_sessions FOR SHARE ->
-    oryx_session_generations FOR SHARE -> T_authorization -> lecture du
-    couple -> UPDATE conditionnel ; aucun verrou métier (ni portefeuille)."""
+    oryx_session_generations FOR SHARE -> (ACT-L1-PR1) auth_identities FOR
+    KEY SHARE -> T_authorization -> lecture du couple -> UPDATE
+    conditionnel ; aucun verrou métier (ni portefeuille)."""
     issued = env.confirmed()
     statements = []
 
@@ -885,6 +889,7 @@ def test_profile_mutation_lock_order_and_t_authorization(env):
     markers = ["SELECT id FROM users WHERE id = %(u)s FOR UPDATE",
                "SELECT * FROM oryx_sessions WHERE id = %(s)s FOR SHARE",
                "SELECT * FROM oryx_session_generations WHERE id = %(g)s FOR SHARE",
+               IDENTITY_LOCK_SQL,
                "SELECT clock_timestamp()",
                "SELECT id, level, level_revision FROM users WHERE id = %(u)s"]
     positions = [phase_b.index(m) for m in markers]
@@ -893,6 +898,7 @@ def test_profile_mutation_lock_order_and_t_authorization(env):
     assert phase_b.index(update) > positions[-1]
     assert update.startswith("UPDATE users SET level = %(l)s, level_revision = level_revision + 1 "
                              "WHERE id = %(u)s AND level_revision = %(r)s RETURNING")
-    assert not any("portfolio_positions" in s or "KEY SHARE" in s for s in phase_b)
+    # ACT-L1-PR1 : seul KEY SHARE admis, le verrou d'identité (jamais métier).
+    assert not any("portfolio_positions" in s or ("KEY SHARE" in s and s != IDENTITY_LOCK_SQL) for s in phase_b)
     locks = [s for s in statements if " FOR " in s]
-    assert len(locks) == 3  # phase A sans verrou
+    assert len(locks) == 4  # phase A sans verrou

@@ -688,6 +688,8 @@ B2_EXPECTED = {
     dg.OWNER_CHANGED: (503, "temporarily_unavailable"), dg.LEASE_NOT_GRANTED: (503, "temporarily_unavailable"),
     dg.LEASE_MISMATCH: (503, "temporarily_unavailable"), dg.LEASE_ALREADY_USED: (503, "temporarily_unavailable"),
     **{reason: (409, "context_conflict") for reason in dc.REFUSAL_REASONS},
+    # ACT-L1-PR1 : aucune identité liée et vérifiée (réautorisation ou lecture B2).
+    dg.IDENTITY_REQUIRED: (403, "identity_link_required"),
 }
 
 

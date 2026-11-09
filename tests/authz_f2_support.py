@@ -28,6 +28,7 @@ from core.auth_f2.service import F2AuthService
 from core.auth_f2_http import csrf
 from core.auth_f2_http.isolated import build_isolated_f2_app
 from core.auth_f2_http.routes import NO_STORE_HEADERS
+from core.authz_f2 import _adapters
 from core.authz_f2 import commands as c
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.portfolio_values import float_from_float8send
@@ -48,6 +49,8 @@ from tests.f2_support import (
 )
 
 ALICE, BOB = "alice@example.com", "bob@example.com"
+# ACT-L1-PR1 : instruction du verrou d'identité telle que psycopg2 la reçoit.
+IDENTITY_LOCK_SQL = _adapters._LOCK_LINKED_IDENTITIES.replace(":u", "%(u)s")
 USER_A, USER_B = "user-a", "user-b"
 ME = "/api/v2/me"
 ME_LEVEL = "/api/v2/me/level"
@@ -108,6 +111,56 @@ class AuthzEnv:
         issued = self.sign_in(email, user_id, profile=profile)
         assert self.service.authenticate_session(issued.credential()) is not None
         return issued
+
+    # -- ACT-L1-PR1 : invitation sans liaison, liaison OTP réelle --------
+
+    def invited(self, *, confirm=True, cohort="act-l1", recipient_email=None):
+        """IssuedSession d'activation d'invitation (moteur F2 réel) : profil
+        créé par le backend, AUCUNE identité fournisseur ; livraison confirmée
+        (même effet que /session/resolve) si confirm."""
+        token = self.service.create_invitation(cohort=cohort, recipient_email=recipient_email).token
+        begin = self.service.begin_invitation_activation(token=token)
+        assert begin.status == "candidate_issued", begin
+        done = self.service.complete_invitation_activation(operation_id=begin.operation_id, candidate=begin.candidate)
+        assert done.status == "invitation_activated", done
+        issued = done.session
+        if confirm:
+            assert self.service.authenticate_session(issued.credential()) is not None
+        return issued
+
+    def link_email(self, issued, email, *, client_ip="203.0.113.71", service=None, mailer=None):
+        """Liaison e-mail OTP réelle (start puis verify) depuis la session
+        d'invitation ; rend l'Outcome de verify_email_linking."""
+        service, mailer = service or self.service, mailer or self.mailer
+        start = service.start_email_linking(session=issued.credential(), email=email, client_ip=client_ip)
+        assert start.status == "issued", start
+        return service.verify_email_linking(operation_id=start.operation_id, session=issued.credential(),
+                                            code=mailer.last_code(email), client_ip=client_ip)
+
+    def age_otp_requests(self, delta="2 minutes"):
+        """Journal anti-abus vieilli (donnée de test explicite) : l'intervalle
+        minimal entre deux envois OTP à la même adresse est écoulé."""
+        with self.observer.begin() as conn:
+            conn.execute(sa.text("UPDATE auth_abuse_events SET occurred_at = occurred_at - CAST(:d AS interval) "
+                                 "WHERE event_kind = 'otp_request'"), {"d": delta})
+
+    def owner(self, issued):
+        return scalar(self.observer, "SELECT user_id FROM oryx_sessions WHERE id = :s", s=issued.session_id)
+
+    def identities(self, user_id):
+        return [dict(r) for r in select_rows(self.observer, "SELECT *, xmin::text AS xmin FROM auth_identities "
+                                                            "WHERE user_id = :u ORDER BY id", u=user_id)]
+
+    def force_identity(self, user_id, *, subject=None, email="forced@example.com", verified=True, redacted=False):
+        """Ligne d'identité écrite DIRECTEMENT (état que F2 n'écrit pas
+        forcément : non vérifiée, expurgée) ; rend son id."""
+        with self.observer.begin() as conn:
+            return conn.execute(sa.text(
+                "INSERT INTO auth_identities (id, user_id, provider, issuer, subject, verified_email_normalized, "
+                "email_verified_at, created_at, pii_redacted_at) VALUES (gen_random_uuid(), :u, 'supabase', :i, :s, "
+                ":e, CASE WHEN :v THEN now() END, now(), CASE WHEN :r THEN now() END) RETURNING id"),
+                {"u": user_id, "i": self.supabase.issuer, "s": subject or f"forced-{uuid.uuid4()}",
+                 "e": None if redacted or not verified else email, "v": verified, "r": redacted}).scalar_one()
 
     def generation(self, generation_id):
         with self.observer.connect() as conn:

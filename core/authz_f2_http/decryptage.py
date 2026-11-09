@@ -89,7 +89,10 @@ six chiffres de microsecondes, suffixe Z, aucun Retry-After) ; ACK 200
 code} : invalid_request, session_invalid, origin_refused, csrf_invalid,
 not_found, idempotency_conflict, revision_conflict, reservation_blocked,
 context_conflict, instrument_unavailable, request_too_large,
-temporarily_unavailable, provider_unavailable, capacity_unavailable. Toute
+temporarily_unavailable, provider_unavailable, capacity_unavailable,
+identity_link_required (ACT-L1-PR1 : 403 pour IDENTITY_LINK_REQUIRED de B1,
+C1-B, C2 et pour le motif B2 IDENTITY_REQUIRED, jamais 401, 404, 409 ni
+503 ; une session invalide garde son 401 prioritaire). Toute
 réponse : no-store, no-cache, nosniff, no-referrer, aucun Set-Cookie, aucun
 CORS. Les journaux ne portent que route, statut, code et motifs fermés :
 jamais un corps, un texte, un jeton, un cookie, un HMAC ni du SQL.
@@ -133,6 +136,7 @@ from core.authz_f2.principal import AuthorizedPrincipal
 from core.authz_f2.runner import (
     AUTHORIZED,
     IDEMPOTENCY_CONFLICT,
+    IDENTITY_LINK_REQUIRED,
     NOT_FOUND,
     REVISION_CONFLICT,
     SESSION_INVALID,
@@ -142,6 +146,8 @@ from core.authz_f2.runner import (
 )
 from core.authz_f2_http.provenance import personal_mutation_origin
 from core.authz_f2_http.routes import (
+    IDENTITY_LINK_CODE,
+    IDENTITY_LINK_HTTP_STATUS,
     NAMESPACE,
     PersonalDependencies,
     Refusal,
@@ -387,14 +393,18 @@ def _error(status: int, code: str) -> _Reply:
 
 
 UNAVAILABLE_REPLY = _error(503, "temporarily_unavailable")
+# ACT-L1-PR1 : réponse unique de IDENTITY_LINK_REQUIRED (runner) et du motif B2 équivalent.
+IDENTITY_LINK_REPLY = _error(IDENTITY_LINK_HTTP_STATUS, IDENTITY_LINK_CODE)
 _B1_REFUSALS = MappingProxyType({SESSION_INVALID: _error(401, "session_invalid"), NOT_FOUND: _error(404, "not_found"),
                                  IDEMPOTENCY_CONFLICT: _error(409, "idempotency_conflict"),
-                                 REVISION_CONFLICT: _error(409, "revision_conflict"), UNAVAILABLE: UNAVAILABLE_REPLY})
+                                 REVISION_CONFLICT: _error(409, "revision_conflict"), UNAVAILABLE: UNAVAILABLE_REPLY,
+                                 IDENTITY_LINK_REQUIRED: IDENTITY_LINK_REPLY})
 # C1-B : même matrice fermée que B1 pour les statuts du runner.
 _C1B_REFUSALS = _B1_REFUSALS
 # C2 (replay et ACK) : IDEMPOTENCY_CONFLICT n'est pas inventorié -> 503.
 _C2_REFUSALS = MappingProxyType({SESSION_INVALID: _error(401, "session_invalid"), NOT_FOUND: _error(404, "not_found"),
-                                 REVISION_CONFLICT: _error(409, "revision_conflict"), UNAVAILABLE: UNAVAILABLE_REPLY})
+                                 REVISION_CONFLICT: _error(409, "revision_conflict"), UNAVAILABLE: UNAVAILABLE_REPLY,
+                                 IDENTITY_LINK_REQUIRED: IDENTITY_LINK_REPLY})
 
 _CONTEXT_CONFLICT = _error(409, "context_conflict")
 # Refus B2 (vocabulaire FERMÉ dg.REFUSAL_REASONS) -> réponse ; les motifs
@@ -405,6 +415,7 @@ _B2_REFUSALS = MappingProxyType({
     dg.CONTEXT_CHANGED: _CONTEXT_CONFLICT,
     **{reason: _CONTEXT_CONFLICT for reason in dc.REFUSAL_REASONS},
     dg.SESSION_REFUSED: _error(401, "session_invalid"),
+    dg.IDENTITY_REQUIRED: IDENTITY_LINK_REPLY,
     dg.RESERVATION_NOT_FOUND: _error(404, "not_found"),
     dg.INTENT_MISMATCH: _error(409, "revision_conflict"),
     dg.LEASE_STALE: _error(409, "revision_conflict"),
