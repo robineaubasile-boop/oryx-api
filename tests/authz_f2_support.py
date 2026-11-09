@@ -273,6 +273,24 @@ class AuthzEnv:
         self.observer.dispose()
 
 
+def legacy_set_level(engine, user_id, level):
+    """Écriture historique EXACTE de PUT /api/user/{user_id}/level : appelle
+    la fonction de route api.set_user_level elle-même, avec une Session
+    configurée comme core.db.SessionLocal (autocommit=False, autoflush=False)
+    sur `engine`, fermée comme le fait get_db. Aucun SQL recopié : les
+    acteurs concurrents reproduisent la route telle qu'elle est (depuis le
+    correctif du run CI #50 : SELECT ... FOR UPDATE de la ligne users, puis
+    UPDATE du seul niveau, dans une transaction). Rend la réponse JSON."""
+    import api
+    from sqlalchemy.orm import sessionmaker
+
+    session = sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+    try:
+        return api.set_user_level(user_id, api.UserLevelRequest(level=level), db=session)
+    finally:
+        session.close()
+
+
 def create_command(operation_id=None, ticker="AIR.PA", quantity="4", purchase_price=None, target_percent=None,
                    envelope="PEA"):
     return c.CreatePortfolioPosition(operation_id or uuid.uuid4(), ticker, quantity, purchase_price, target_percent,
