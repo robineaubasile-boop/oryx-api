@@ -324,6 +324,13 @@ seule installation de production. F04-A ne modifie pas `requirements.txt`.
   Supabase / Resend, sessions `requests` EODHD / FMP, client Anthropic.
 - Chaque ressource possédée est **fermée explicitement** une fois et une seule, dans l'ordre inverse de
   construction, après drainage.
+- **Fin d'usage d'une ressource** : une ressource n'est réputée libre d'usage que si **tous** les travaux
+  suivis qui peuvent l'utiliser (§ 10.3), y compris les fils C3 qui poursuivent après l'annulation de leur
+  requête HTTP, ont **effectivement terminé**. L'expiration d'un délai de drainage **ne prouve pas** la fin des
+  fils C3 et **n'autorise pas** à considérer leur usage du moteur PostgreSQL, des connexions du pool ou des
+  clients fournisseurs comme terminé. Une fermeture effectuée alors que des fils sont encore actifs relève du
+  cas « délai dépassé » ou « arrêt forcé » du § 10.3 et **NE DOIT PAS** être présentée comme une fermeture
+  gracieuse.
 - **[constaté]** Les adaptateurs actuels n'exposent pas tous de fermeture : EODHD / FMP acceptent une session
   injectée (fermable par son propriétaire) ; Supabase / Resend créent leur `httpx.Client` en interne autour d'un
   transport injectable ; `ClaudeTransport` crée son client Anthropic en interne. La manière de garantir la
@@ -360,6 +367,15 @@ seule installation de production. F04-A ne modifie pas `requirements.txt`.
   gestionnaires de démarrage / arrêt, soit les exécuter explicitement et en propager l'échec. **CANDIDAT** :
   refus (les compositions actuelles n'en déclarent pas). Le lifespan est **possédé par l'enveloppe**, pas par
   la porte.
+- **Détection d'un lifespan aval actif** : elle **NE DOIT PAS** confondre le mécanisme standard implicite de
+  FastAPI avec des gestionnaires explicitement déclarés. **[constaté]** Avec FastAPI 0.110.0 / Starlette
+  0.36.3 (versions verrouillées en CI), toute application FastAPI, y compris les compositions isolées
+  actuelles, porte un contexte de lifespan **par défaut** (`_DefaultLifespan` de Starlette) dont les listes
+  `on_startup` / `on_shutdown` sont vides : ce mécanisme implicite, sans gestionnaire, **n'est pas** un lifespan
+  actif et ne justifie aucun refus. Est en revanche un lifespan aval **actif** : un contexte `lifespan=`
+  explicitement fourni, ou au moins un gestionnaire de démarrage / arrêt déclaré (directement ou par un routeur
+  inclus). Le critère exact de détection est figé en F04-C et testé dans les deux sens : compositions actuelles
+  **acceptées**, application déclarant un contexte ou un gestionnaire **refusée** (ou exécutée explicitement).
 
 ### 9.3 Sonde et maintenance
 
@@ -401,13 +417,30 @@ couvert par ce contrat et exigerait une révision.
 
 1. **Maintenance avant arrêt** : fermeture des **nouvelles** admissions F2 avant tout arrêt volontaire.
 2. **Suivi des travaux actifs** par l'enveloppe, y compris requêtes d'authentification, `/turns`, `/replay` et
-   `/ack` (pas seulement les places C3).
+   `/ack` (pas seulement les places C3). Le suivi porte sur les travaux **réellement engagés**, et non sur les
+   requêtes HTTP ouvertes : un fil C3 qui poursuit après l'annulation ou la déconnexion de sa requête reste
+   suivi jusqu'à sa fin effective. Ce suivi relève du contrat de conception **F04-C** (§ 13).
 3. **Drainage avant fermeture des ressources** : moteur et clients ne sont fermés qu'après la fin observée des
-   travaux suivis, ou après l'échéance de drainage (à figer).
-4. **Aucune reprise automatique** d'un fil perdu (crash, `SIGKILL`, perte de conteneur).
-5. **Reprise par la même intention** : l'utilisateur rejoue la même intention ; B1 (bail, attributions,
+   travaux suivis, ou après l'échéance de drainage (à figer), selon les trois issues distinguées ci-dessous.
+4. **Trois issues d'arrêt distinctes**, jamais confondues (dans les journaux, les rapports de qualification ni
+   la documentation d'exploitation) :
+
+   | Issue | Définition | Ce qui est établi | Ce qui ne l'est pas |
+   |---|---|---|---|
+   | **Fermeture gracieuse** | tous les travaux suivis, fils C3 compris, ont **effectivement terminé** avant l'échéance ; les ressources sont fermées ensuite | aucun travail suivi n'utilise plus les ressources au moment de leur fermeture | rien au-delà : l'issue métier de chaque tour reste celle que B1 / C1-B / C2 ont durablement enregistrée |
+   | **Délai dépassé** | l'échéance de drainage expire alors qu'au moins un travail suivi n'a pas terminé | seulement que l'échéance est atteinte | **ni** la fin des fils C3, **ni** la fin de leur usage des ressources, **ni** l'issue de leurs transactions ou appels fournisseurs ; les fils restants sont réputés **encore actifs** |
+   | **Arrêt forcé** | le processus est interrompu sans attendre la fin des travaux (`SIGKILL`, perte de conteneur, crash, arrêt après délai dépassé) | aucun fil ne survit au processus | **ni** l'issue des transactions en cours, **ni** celle des appels fournisseurs engagés |
+
+   Dans les deux derniers cas, l'issue de chaque travail non terminé est **inconnue** ; elle ne se déduit
+   que de l'état durable PostgreSQL, relu par les mécanismes B1 / C2 lors d'une reprise.
+5. **COMMIT incertain** : un COMMIT dont l'acquittement n'a pas été observé (connexion coupée, délai dépassé,
+   arrêt forcé, fermeture du pool pendant l'attente) **n'est jamais présumé annulé**, ni présumé réussi. Aucune
+   compensation, aucun rejeu automatique et aucune écriture correctrice ne sont déclenchés sur la base d'une
+   telle présomption ; seule la relecture de l'état durable (B1 / C2) fait foi.
+6. **Aucune reprise automatique** d'un fil perdu (crash, `SIGKILL`, perte de conteneur).
+7. **Reprise par la même intention** : l'utilisateur rejoue la même intention ; B1 (bail, attributions,
    backoff) et C2 (replay canonique) sont les seuls mécanismes durables de reprise.
-6. **Aucune promesse d'exécution fournisseur exactement une fois** : après une interruption antérieure à la
+8. **Aucune promesse d'exécution fournisseur exactement une fois** : après une interruption antérieure à la
    finalisation, un appel fournisseur supplémentaire (EODHD, FMP, Claude) peut être nécessaire ; seule la
    livraison canonique est unique (C1-B / C2).
 
@@ -484,8 +517,9 @@ expérimentale exigée.
 
 | Rubrique | Contenu |
 |---|---|
-| Préconditions | F04-B fusionné ; freeze F04-C (enveloppe, état de maintenance, contrat du refus de maintenance) |
-| Tests requis | égalité exacte 14 / 13 avec le registre ; absence de `api` dans `sys.modules` ; aucun effet à l'import ; `startup.complete` seulement après prérequis ; `startup.failed` et fermeture des ressources partielles ; refus d'un lifespan aval ; refus F-02A identiques octet pour octet derrière l'enveloppe ; dormance : `api:app` inchangé |
+| Préconditions | F04-B fusionné ; freeze F04-C (enveloppe, état de maintenance, contrat du refus de maintenance, **contrat de suivi des travaux engagés**, critère de détection d'un lifespan aval actif) |
+| Contrat de conception | Le **suivi des travaux réellement engagés** appartient à F04-C : l'enveloppe connaît à tout instant les travaux en cours (requêtes d'authentification, `/turns`, `/replay`, `/ack`), **y compris les fils C3 qui continuent après l'annulation ou la déconnexion de leur requête HTTP** ; un travail n'est retiré du suivi qu'à sa fin effective, jamais à la fin de sa requête ni à l'expiration d'un délai. Ce suivi alimente les trois issues d'arrêt du § 10.3 (fermeture gracieuse, délai dépassé, arrêt forcé). |
+| Tests requis | égalité exacte 14 / 13 avec le registre ; absence de `api` dans `sys.modules` ; aucun effet à l'import ; `startup.complete` seulement après prérequis ; `startup.failed` et fermeture des ressources partielles ; détection du lifespan aval : compositions actuelles (lifespan implicite FastAPI) acceptées, contexte ou gestionnaire explicite refusé ; suivi des travaux engagés en fonctionnement nominal et après annulation d'une requête (fil toujours suivi) ; refus F-02A identiques octet pour octet derrière l'enveloppe ; dormance : `api:app` inchangé |
 | Preuves attendues | **Exp** : sous-processus avec gardes réseau / base ; vrai serveur Uvicorn local |
 | Refus attendus | composition incomplète, application legacy, documentation, CORS → échec de construction |
 | Blocage | repli vers `api` ; démarrage partiel ; lifespan ignoré ; Railway modifié ; variable d'activation |
@@ -507,10 +541,10 @@ expérimentale exigée.
 | Rubrique | Contenu |
 |---|---|
 | Préconditions | F04-D fusionné ; pilote 1 processus / 1 réplique / 1 routeur C3 |
-| Tests requis | parcours complets (authentification, profil, portefeuille, consultations, C3) derrière Uvicorn ; `SIGTERM`, `SIGKILL`, annulation, déconnexion, COMMIT incertain (§ 10.4) ; reprise de la même intention ; maintenance avant arrêt ; drainage avant fermeture ; mesure des délais Railway / Uvicorn |
+| Tests requis | parcours complets (authentification, profil, portefeuille, consultations, C3) derrière Uvicorn ; `SIGTERM`, `SIGKILL`, annulation, déconnexion, COMMIT incertain (§ 10.4) ; **comportement du suivi F04-C lors des arrêts et interruptions** (fils C3 poursuivant après annulation de leur requête toujours suivis, ressources non fermées comme si ces fils avaient terminé) ; distinction observable des trois issues fermeture gracieuse / délai dépassé / arrêt forcé ; COMMIT incertain jamais présumé annulé ; reprise de la même intention ; maintenance avant arrêt ; drainage avant fermeture ; mesure des délais Railway / Uvicorn |
 | Preuves attendues | **Exp** : rapports de tests et mesures ; **Doc** : paramètres de drainage figés avec leur justification |
 | Refus attendus | nouvelles admissions F2 refusées en maintenance ; aucune double livraison |
-| Blocage | reprise automatique d'un fil perdu ; promesse d'exécution fournisseur exactement une fois ; fermeture des ressources avant drainage ; paramètres non mesurés |
+| Blocage | reprise automatique d'un fil perdu ; promesse d'exécution fournisseur exactement une fois ; fermeture des ressources avant drainage ; délai dépassé ou arrêt forcé présenté comme une fermeture gracieuse ; COMMIT incertain présumé annulé ; paramètres non mesurés |
 | Frontière | tests d'intégration, scripts de qualification, documentation ; aucune modification Railway servie |
 
 ### Critère global d'activation (hors F-04)
