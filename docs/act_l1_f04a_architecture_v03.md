@@ -420,8 +420,11 @@ couvert par ce contrat et exigerait une révision.
    `/ack` (pas seulement les places C3). Le suivi porte sur les travaux **réellement engagés**, et non sur les
    requêtes HTTP ouvertes : un fil C3 qui poursuit après l'annulation ou la déconnexion de sa requête reste
    suivi jusqu'à sa fin effective. Ce suivi relève du contrat de conception **F04-C** (§ 13).
-3. **Drainage avant fermeture des ressources** : moteur et clients ne sont fermés qu'après la fin observée des
-   travaux suivis, ou après l'échéance de drainage (à figer), selon les trois issues distinguées ci-dessous.
+3. **Drainage avant fermeture des ressources :** la fermeture gracieuse du moteur PostgreSQL et des clients
+   fournisseurs n'est autorisée qu'après la fin effectivement constatée des travaux suivis. Si le délai expire
+   alors que des travaux restent actifs, le processus entre dans une situation de délai dépassé ou d'arrêt
+   forcé, dont le comportement exact reste à qualifier en F04-E. Cette situation ne constitue jamais une
+   fermeture gracieuse et ne présume pas l'issue des transactions.
 4. **Trois issues d'arrêt distinctes**, jamais confondues (dans les journaux, les rapports de qualification ni
    la documentation d'exploitation) :
 
