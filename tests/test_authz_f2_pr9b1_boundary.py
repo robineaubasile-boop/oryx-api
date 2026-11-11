@@ -32,6 +32,7 @@ from core.authz_f2.decryptage_fingerprint import DecryptageKeyring
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
 from core.authz_f2.runner import UNAVAILABLE, AuthorizationConfigError, AuthorizedTransactionRunner, UnknownCommand
 from tests.f2_support import make_keyring
+from tests.test_f2_dormancy import F04B_B1_MARKERS
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 ENGINE_URL = "postgresql+psycopg2://nobody@127.0.0.1:1/oryx_never_test"
@@ -211,6 +212,13 @@ def test_no_application_module_invokes_the_b1_commands():
             # déclare JAMAIS d'échec (RecordDecryptageAttemptFailure : B2 seul)
             # et ne lit jamais la table.
             assert hits == ["ReserveDecryptageTurn", "DecryptageKeyring", "LeaseGranted"], hits
+            continue
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative in F04B_B1_MARKERS:
+            # ACT-L1 / F04-B (nominatif) : la configuration construit le trousseau
+            # Décrypter dédié ; le précontrôle vérifie la PRÉSENCE de la table
+            # (lecture seule). Aucune commande B1, aucune ligne lue ou écrite.
+            assert hits == F04B_B1_MARKERS[relative], (relative, hits)
             continue
         assert hits == [], (path, hits)
 

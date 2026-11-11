@@ -28,7 +28,7 @@ import sys
 
 import pytest
 
-from tests.test_f2_dormancy import F2_REFERENCE_MATRIX, MAIN_ROUTES
+from tests.test_f2_dormancy import F04B_REFERENCE_MATRIX, F2_REFERENCE_MATRIX, MAIN_ROUTES
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 HTTP_PACKAGE = REPO_ROOT / "core" / "auth_f2_http"
@@ -145,7 +145,11 @@ def test_only_tests_compose_the_isolated_application():
         if relative.parts[0] in ("tests", "docs") or HTTP_PACKAGE in path.parents:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if "build_isolated_f2_app" in text or ("auth_f2_http" in text and str(relative) not in F2_REFERENCE_MATRIX):
+        # ACT-L1 / F04-B : core/f2_runtime/config.py réutilise les trousseau et
+        # validateur d'origine HTTP F2 (matrice fermée F04B_REFERENCE_MATRIX) ;
+        # aucun fichier hors tests ne nomme jamais la composition.
+        if "build_isolated_f2_app" in text or ("auth_f2_http" in text and str(relative) not in F2_REFERENCE_MATRIX
+                                               and str(relative) not in F04B_REFERENCE_MATRIX):
             offenders.append(str(relative))
     assert offenders == []
 
@@ -179,8 +183,7 @@ def test_importing_the_http_package_starts_nothing():
 
 
 def test_production_requirements_gain_no_dependency():
-    from tests.test_f2_dormancy import MAIN_REQUIREMENTS
-    lines = [l.strip() for l in (REPO_ROOT / "requirements.txt").read_text().splitlines() if l.strip()]
-    assert lines == MAIN_REQUIREMENTS
+    from tests.test_f2_dormancy import MAIN_REQUIREMENTS, production_requirements
+    assert production_requirements() == MAIN_REQUIREMENTS
     ci_inputs = (REPO_ROOT / "ci" / "requirements-ci.in").read_text()
     assert "\nhttpx\n" in ci_inputs  # httpx : dépendance de test explicite, verrouillée par empreinte
