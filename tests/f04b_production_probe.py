@@ -14,6 +14,10 @@ site utilisateur, ni répertoire courant). Elle :
   isolées), les deux compositions isolées, la porte F-02A ; puis ferme les
   ressources ;
 - écrit un rapport JSON sur la sortie standard (dernière ligne).
+
+Le rapport ne contient AUCUN identifiant de source (nom de module, de classe
+ou de paquet F2) : seulement des compteurs, booléens et versions. Il est
+publié dans reports/ en CI, que les balayages de dormance parcourent.
 """
 import importlib
 import importlib.util
@@ -57,7 +61,8 @@ def main() -> dict:
     for name in PRODUCTION_MODULES:
         importlib.import_module(name)
         imported.append(name)
-    report["imported"] = imported
+    report["imported_count"] = len(imported)
+    report["all_imported"] = imported == list(PRODUCTION_MODULES)
 
     import psycopg2
 
@@ -96,13 +101,13 @@ def main() -> dict:
     report["components"] = {
         "engine_driver": resources.engine.dialect.driver,
         "engine_checked_out": resources.engine.pool.checkedout(),
-        "supabase_client": type(resources.supabase._client).__module__ + "." + type(resources.supabase._client).__name__,
+        "supabase_client_is_httpx": type(resources.supabase._client) is httpx.Client,
         "claude_max_retries": resources.claude.max_retries,
         "isolated_session_trust_env": session.trust_env,
         "isolated_session_type": type(session) is requests.Session,
         "auth_pairs": pairs(auth_app),
         "personal_pairs": pairs(personal_app),
-        "gate": type(gate).__name__,
+        "gate_built": type(gate) is RoutePolicyGate,
         "alembic_head": expected_alembic_head(),
         "httpx_version": httpx.__version__,
     }

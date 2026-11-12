@@ -10,6 +10,7 @@ environnement en mode isolé : imports de production, absence d'outil de
 développement, construction des composants dormants sans réseau ni secret.
 
 Journal : chaque commande, son code de retour, ses sorties et les versions
+(aucun identifiant de source : les balayages de dormance parcourent reports/)
 sont écrits dans <racine>/reports/f04b-production-install/ lorsque ce
 répertoire de rapports existe (jobs ci / postgres-NN : publié comme artefact
 « reports-postgres-NN ») ; sinon dans le répertoire temporaire du test.
@@ -140,14 +141,15 @@ def test_a_clean_environment_installs_and_runs_from_requirements_txt_alone(tmp_p
         assert report["python"] == _runtime_version() and report["isolated_flag"] == 1
         assert report["prefix"] == str(venv) and report["prefix"] != report["base_prefix"]
         assert report["dev_tools_importable"] == []
+        assert report["all_imported"] is True and report["imported_count"] == 29
         assert report["network_attempts"] == []
         components = report["components"]
         assert components["engine_driver"] == "psycopg2" and components["engine_checked_out"] == 0
-        assert components["supabase_client"] == "httpx.Client" and components["httpx_version"] == "0.28.1"
+        assert components["supabase_client_is_httpx"] is True and components["httpx_version"] == "0.28.1"
         assert components["claude_max_retries"] == 0
         assert components["isolated_session_trust_env"] is False and components["isolated_session_type"] is True
         assert (components["auth_pairs"], components["personal_pairs"]) == (14, 13)
-        assert components["gate"] == "RoutePolicyGate"
+        assert components["gate_built"] is True
         assert components["alembic_head"] == "0021_decryptage_reservations"
         assert report["close"]["closed"] == ["claude", "fmp", "eodhd", "resend", "supabase", "engine"]
         summary["status"] = "success"
@@ -158,3 +160,19 @@ def test_a_clean_environment_installs_and_runs_from_requirements_txt_alone(tmp_p
         raise
     finally:
         journal.close(summary)
+    _assert_journal_triggers_no_dormancy_scan(journal.directory)
+
+
+# Marqueurs des balayages de dormance qui parcourent tout le dépôt (reports/
+# compris en CI) : le journal publié ne doit en contenir aucun.
+_SCANNED_MARKERS = ("auth_f2", "authz_f2", "F2AuthService", "build_isolated", "route_policy", "RoutePolicyGate",
+                    "legacy_personal_api_retired", "F-02A", "RouteGateConfigError", "/api/v2/me",
+                    "PortfolioKeyring", "DecryptageKeyring", "ReserveDecryptageTurn", "LeaseGranted",
+                    "decryptage_turn_reservations", "decryptage_providers", "decryptage_generation",
+                    "AuthorizedTransactionRunner", "ORYX_F2_", "f2_runtime")
+
+
+def _assert_journal_triggers_no_dormancy_scan(directory):
+    for path in directory.iterdir():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        assert not [m for m in _SCANNED_MARKERS if m in text], (path.name, [m for m in _SCANNED_MARKERS if m in text])
