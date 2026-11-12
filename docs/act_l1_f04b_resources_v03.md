@@ -28,6 +28,9 @@ implémentation → PR → audit indépendant → merge par le fondateur → val
 | B05 | `core/auth_f2/http_providers.py`, `core/decryptage_providers.py` | extensions **techniques** (fermeture, sessions par appel) |
 | B06 | `core/f2_runtime/preflight.py` | précontrôles PostgreSQL en **lecture seule** |
 
+Traçabilité exigence → implémentation → tests : `docs/act_l1_f04b_traceability_v03.md` (reconstruction, pas
+le texte du freeze).
+
 Aucun de ces modules n'est importé par `api.py`, un worker, un script, la CI ou un point d'entrée : ils
 ne sont exercés que par les tests (`tests/test_f04b_*.py`).
 
@@ -166,6 +169,19 @@ configuration synthétique (non servies) ; `uvicorn api:app` démarre et `GET /h
 `200 {"status":"ok"}`. Les suites de tests s'exécutent ensuite dans l'environnement CI
 (`ci/requirements-ci.txt` = verrou de production + outils de test, versions et empreintes identiques).
 
+**Preuve rejouée et journalisée en CI (réserve d'audit 2)** :
+`tests/test_f04b_production_install.py::test_a_clean_environment_installs_and_runs_from_requirements_txt_alone`
+crée un environnement **vierge** (`python -m venv --clear`), y exécute **uniquement**
+`pip install --no-cache-dir -r requirements.txt` (jamais `ci/requirements-ci.txt`), puis `pip check` et
+`pip freeze --all` (fermeture exacte des 47 versions exigée), puis exécute `tests/f04b_production_probe.py`
+avec l'interpréteur de cet environnement en mode isolé (`python -I`) : aucun outil de développement
+importable (`pytest`, `yaml`…), imports de production (legacy, worker, Auth F2, Décrypter, F04-B, porte
+F-02A), construction sans réseau (sockets interdits) des composants dormants. Chaque commande, son code de
+retour et ses sorties sont écrits dans `reports/f04b-production-install/install.log` et `summary.json`, publiés
+avec l'artefact `reports-postgres-16` / `reports-postgres-18` des jobs CI. Aucun workflow n'est modifié : la
+CI exécute déjà toute la suite et publie `reports/`, et refuse tout test sauté (le test ne peut donc pas être
+contourné en CI).
+
 ## 5. B03 / B04 — Moteur PostgreSQL F2 et pool
 
 - `normalize_f2_database_url(raw)` : formats PostgreSQL existants (`postgres://`, `postgresql://`,
@@ -264,7 +280,8 @@ transaction du précontrôle est refusée par PostgreSQL. Tout état absent ou i
 | `tests/test_f04b_resources.py` | ordre, propriété, fermeture unique et idempotente, nettoyage partiel à chaque étape, ressources injectées jamais fermées, contrats des cinq fournisseurs, sessions isolées sous concurrence, combinaison ambiguë refusée, mêmes trousseaux et moteur acceptés par les deux compositions |
 | `tests/test_f04b_preflight.py` | **PostgreSQL** : nominal, instructions en lecture seule, aucune écriture, écriture refusée, état anti-abus absent ou incompatible, tête Alembic décalée, absente ou multiple, tables / colonnes manquantes, serveur inattendu, version non qualifiée, isolation, serveur injoignable |
 | `tests/test_f04b_dependencies.py` | dépendances directes, verrou complet et empreintes, cohérence CI, `runtime.txt`, aucun alias httpx |
-| `tests/test_f04b_dormancy.py` | fichiers figés inchangés (sha256), aucun module applicatif ne référence F04-B, `api:app` identique avec une configuration F2 complète |
+| `tests/test_f04b_dormancy.py` | fichiers figés inchangés (sha256), aucun module applicatif ne référence F04-B ; avec les **quinze** variables (dont `DATABASE_URL` synthétique) : `api:app` identique, aucun moteur F2 ni module F04-B, vrai serveur Uvicorn identique ; chargeur F2 appelé explicitement : complet accepté, chaque variable manquante refusée |
+| `tests/test_f04b_production_install.py` (+ `tests/f04b_production_probe.py`) | installation de production seule dans un environnement vierge, journalisée (voir § 4.3) |
 
 Tests existants ajustés (nominativement, sans affaiblir leurs garanties) :
 
