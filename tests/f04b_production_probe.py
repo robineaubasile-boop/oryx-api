@@ -113,8 +113,72 @@ def main() -> dict:
     }
     session.close()
     report["close"] = {"closed": list(resources.close().closed)}
+    report["simulated_calls"] = _simulated_adapter_calls()
     report["network_attempts"] = list(attempts)
     return report
+
+
+def _simulated_adapter_calls() -> dict:
+    """Freeze F04-B V0.3 § 3.2 : appels SIMULÉS des cinq adaptateurs dans
+    l'environnement de production (transports et sessions factices, aucun
+    réseau, aucune clé réelle)."""
+    import httpx
+    import httpx2
+
+    from core.auth_f2.crypto import Redacted
+    from core.auth_f2.http_providers import HttpResendMailer, HttpSupabaseOtpProvider
+    from core.decryptage_providers import ClaudeTransport, EodhdTransport, FmpTransport
+
+    seen = []
+
+    def http_handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"id": "x"})
+
+    class Response:
+        status_code = 200
+
+        def iter_content(self, size):
+            yield b'[{"Code": "MC"}]'
+
+        def close(self):
+            pass
+
+    class Session:
+        closed = 0
+
+        def get(self, url, **kwargs):
+            seen.append(url.split("?")[0])
+            return Response()
+
+        def close(self):
+            Session.closed += 1
+
+    def claude_handler(request):
+        seen.append(request.url.path)
+        return httpx2.Response(200, json={"id": "m", "type": "message", "role": "assistant", "model": "m",
+                                          "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                                          "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    supabase = HttpSupabaseOtpProvider(base_url="https://synthetic.supabase.co", service_key=Redacted("s"),
+                                       api_key=Redacted("v"), transport=httpx.MockTransport(http_handler))
+    mailer = HttpResendMailer(api_key=Redacted("r"), sender="a@b.example", transport=httpx.MockTransport(http_handler))
+    supabase.generate_email_otp("a@b.example")
+    supabase.verify_email_otp("a@b.example", "12345678")
+    mailer.send_otp(to="a@b.example", code="12345678", idempotency_key="k")
+    eodhd = EodhdTransport("k", session_factory=Session)
+    fmp = FmpTransport("k", session_factory=Session)
+    search = eodhd.search("MC", timeout_s=5.0)
+    profile = fmp.profile("MC", timeout_s=5.0)
+    claude_client = httpx2.Client(transport=httpx2.MockTransport(claude_handler))
+    message = ClaudeTransport("k", http_client=claude_client).create_message(
+        model="m", system="s", user="u", max_tokens=8, timeout_s=10.0)
+    claude_client.close()
+    for adapter in (supabase, mailer):
+        adapter.close()
+    return {"requests": len(seen), "market_results": [search == [{"Code": "MC"}], profile == [{"Code": "MC"}]],
+            "market_sessions_closed": Session.closed, "claude_text": message["content"] == [{"type": "text",
+                                                                                            "text": "ok"}]}
 
 
 if __name__ == "__main__":

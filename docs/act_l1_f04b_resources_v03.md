@@ -28,8 +28,9 @@ implémentation → PR → audit indépendant → merge par le fondateur → val
 | B05 | `core/auth_f2/http_providers.py`, `core/decryptage_providers.py` | extensions **techniques** (fermeture, sessions par appel) |
 | B06 | `core/f2_runtime/preflight.py` | précontrôles PostgreSQL en **lecture seule** |
 
-Traçabilité exigence → implémentation → tests : `docs/act_l1_f04b_traceability_v03.md` (reconstruction, pas
-le texte du freeze).
+Texte normatif du freeze (transcription littérale) : `docs/act_l1_f04b_freeze_v03.md`. Traçabilité exigence
+du freeze → implémentation → tests : `docs/act_l1_f04b_traceability_v03.md`. En cas de divergence, le texte du
+freeze prévaut.
 
 Aucun de ces modules n'est importé par `api.py`, un worker, un script, la CI ou un point d'entrée : ils
 ne sont exercés que par les tests (`tests/test_f04b_*.py`).
@@ -67,14 +68,13 @@ sans être lues.
 
 ### 3.2 Documents JSON des trousseaux
 
+Format **exact** du freeze (§ 2.2 de `docs/act_l1_f04b_freeze_v03.md`) :
+
 ```json
 {"schema": "oryx-f2-auth-keys-v1",
- "purposes": {"candidate":  {"current": "v1", "keys": {"v1": "<43 car.>"}},
-              "derive":     {"current": "v1", "keys": {"v1": "<43 car.>"}},
-              "active":     {"current": "v1", "keys": {"v1": "<43 car.>"}},
-              "otp":        {"current": "v1", "keys": {"v1": "<43 car.>"}},
-              "invitation": {"current": "v1", "keys": {"v1": "<43 car.>"}},
-              "abuse":      {"current": "v1", "keys": {"v1": "<43 car.>"}}}}
+ "keys": {"candidate": {"v1": "<43 car.>"}, "derive": {"v1": "<43 car.>"}, "active": {"v1": "<43 car.>"},
+          "otp": {"v1": "<43 car.>"}, "invitation": {"v1": "<43 car.>"}, "abuse": {"v1": "<43 car.>"}},
+ "current": {"candidate": "v1", "derive": "v1", "active": "v1", "otp": "v1", "invitation": "v1", "abuse": "v1"}}
 
 {"schema": "oryx-f2-csrf-keys-v1",       "current": "c1", "keys": {"c1": "<43 car.>"}}
 {"schema": "oryx-f2-portfolio-keys-v1",  "current": "p1", "keys": {"p1": "<43 car.>"}}
@@ -84,7 +84,9 @@ sans être lues.
 - JSON strict : propriétés dupliquées (à tout niveau), `NaN` / `Infinity`, BOM, texte résiduel refusés ;
   64 Kio au plus ; blancs JSON (espaces, retours à la ligne) admis à l'intérieur.
 - Propriétés **exactes** : aucun champ inconnu, aucun champ manquant, schéma versionné exact, six usages
-  exacts pour le trousseau F2.
+  exacts dans `keys` **et** dans `current` pour le trousseau F2. Un seul format est accepté : l'ancien format
+  de cette PR (racine `purposes`, `keys` / `current` par usage) est refusé (`unknown_property`), sans
+  conversion ni double format (correction de conformité B01, voir § 8 bis).
 - Clé : base64url **canonique sans remplissage**, exactement **32 octets** (43 caractères ; réencodage
   identique), via `core.auth_f2.crypto.b64url_decode_secret`.
 - Versions : au moins une ; la version courante doit figurer dans `keys` ; les **versions historiques**
@@ -139,7 +141,12 @@ Aucun alias global `httpx` / `httpx2` : chaque module importe son paquet sous so
 `requirements.txt` (point d'entrée Railway, nom inchangé) est désormais le **verrou complet** de
 `requirements.in` : 47 distributions, toutes épinglées, toutes avec empreintes sha256 (toutes les
 distributions publiées de chaque version). Sa présence d'empreintes fait passer `pip install -r
-requirements.txt` en mode *hash-checking* sans option supplémentaire. Régénération (mêmes paramètres que
+requirements.txt` en mode *hash-checking* sans option supplémentaire. Mécanisme retenu au regard du freeze § 3.2 :
+le freeze cite comme « solution autorisée » un verrou distinct **référencé** depuis `requirements.txt` ; la PR
+retient la variante où `requirements.txt` **est** lui-même le verrou complet (dépendances directes dans
+`requirements.in`). Les exigences de fond (point d'entrée inchangé, versions complètes, empreintes, verrou CI
+distinct avec outils de test, démonstration par installation propre) sont tenues ; le choix de forme est
+signalé à l'audit (traçabilité, écart E-2). Régénération (mêmes paramètres que
 le verrou CI, aucune publication de moins de deux semaines au moment du verrou) :
 
 ```bash
@@ -294,6 +301,18 @@ Tests existants ajustés (nominativement, sans affaiblir leurs garanties) :
 - `tests/test_authz_f2_pr9b1_boundary.py`, `tests/test_authz_f2_pr9b2_boundary.py` : exceptions
   nominatives avec liste **exacte** des marqueurs (`DecryptageKeyring` pour la configuration,
   `decryptage_turn_reservations` pour le précontrôle, `decryptage_providers` pour les ressources).
+
+## 8 bis. Corrections de conformité au freeze
+
+1. **B01, format `ORYX_F2_AUTH_KEYS_JSON`** : la première version de la PR attendait une racine `purposes`
+   avec `keys` / `current` par usage, alors que le freeze (§ 2.2) fixe `schema`, `keys` (six usages → versions
+   → valeurs) et `current` (six usages → version) à la racine. Corrigé : seul le format du freeze est accepté ;
+   test contractuel `test_contract_auth_document_has_exactly_the_frozen_structure` (exemple du freeze recopié)
+   et refus `test_the_former_purposes_format_is_refused`.
+2. **Preuves complétées** après comparaison exigence par exigence avec le freeze (aucun changement de
+   comportement) : mots de passe encodés (§ 4), concurrence des clients httpx partagés (§ 6.2), fermeture des
+   sessions sur annulation (§ 6.3), immuabilité de la configuration (§ 2.3), appels simulés des cinq
+   adaptateurs dans l'environnement de production seule (§ 3.2). Détail : `docs/act_l1_f04b_traceability_v03.md`.
 
 ## 9. Risques résiduels et réserves
 

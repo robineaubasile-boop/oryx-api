@@ -166,7 +166,7 @@ def test_missing_abuse_key_state_fails_closed_and_is_not_initialized(engine, key
 
 def test_keyring_incompatible_with_the_recorded_state_fails_closed(engine, migrated):
     document = s.auth_document()
-    document["purposes"]["abuse"] = {"current": "v2", "keys": {"v2": s.key(900)}}
+    s.set_purpose(document, "abuse", {"v2": s.key(900)}, "v2")
     other = load_f2_config(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(document))).keyring
     before = _snapshot(migrated)
     _refused(engine, other, p.ABUSE_KEY_STATE_UNAVAILABLE)

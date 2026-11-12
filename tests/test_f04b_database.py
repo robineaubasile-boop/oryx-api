@@ -12,12 +12,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 
 import pytest
 import sqlalchemy as sa
 
 from core.f2_runtime import database as d
+from tests.pg_guard import assert_disposable_connection
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, pg_url  # noqa: F401 — fixture
 
@@ -268,3 +270,49 @@ def test_unreachable_server_fails_once_without_retry():
         assert engine.pool.checkedout() == 0
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Freeze F04-B V0.3 § 4 : la normalisation n'altère pas les mots de passe encodés
+# --------------------------------------------------------------------------
+
+ENCODED = [
+    ("postgres://u:p%40ss%2Fw%3A%25@h:5432/d", "p@ss/w:%"),
+    ("postgresql://u:a%2Bb%20c%23%3F%26@h/d?sslmode=require", "a+b c#?&"),
+    ("postgresql+psycopg2://u:%C3%A9t%C3%A9@h/d", "été"),
+]
+
+
+@pytest.mark.parametrize("raw, password", ENCODED)
+def test_normalization_keeps_encoded_passwords_exactly(raw, password):
+    url = d.normalize_f2_database_url(raw)
+    assert url.password == password
+    engine = d.create_f2_engine(url)
+    try:
+        _, kwargs = engine.dialect.create_connect_args(engine.url)
+        assert kwargs["password"] == password  # valeur transmise telle quelle au pilote
+    finally:
+        engine.dispose()
+
+
+def test_an_encoded_password_really_authenticates(pg_url):  # noqa: F811
+    """Rôle temporaire de la base jetable dont le mot de passe contient des
+    caractères réservés ; connexion par une URL postgres:// encodée."""
+    admin = sa.create_engine(pg_url, poolclass=sa.pool.NullPool)
+    role = f"oryx_f04b_pw_{uuid.uuid4().hex[:10]}"
+    password = "p@ss/w:%#?& +é"
+    encoded = urllib.parse.quote(password, safe="")
+    base = sa.engine.make_url(pg_url)
+    raw = f"postgres://{role}:{encoded}@{base.host}:{base.port}/{base.database}"
+    with admin.begin() as conn:
+        assert_disposable_connection(conn)
+        conn.execute(sa.text(f"CREATE ROLE {role} LOGIN PASSWORD :p"), {"p": password})
+    engine = d.create_f2_engine(d.normalize_f2_database_url(raw))
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(sa.text("SELECT current_user")).scalar_one() == role
+    finally:
+        engine.dispose()
+        with admin.begin() as conn:
+            conn.execute(sa.text(f"DROP ROLE {role}"))
+        admin.dispose()

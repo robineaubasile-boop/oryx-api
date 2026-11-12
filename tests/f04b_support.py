@@ -29,9 +29,18 @@ def key(n: int) -> str:
 
 
 def auth_document(**overrides) -> dict:
-    purposes = {p: {"current": "v1", "keys": {"v1": key(100 + i)}} for i, p in enumerate(PURPOSES)}
-    document = {"schema": "oryx-f2-auth-keys-v1", "purposes": purposes}
+    """Format EXACT du freeze F04-B V0.3 § 2.2 : {schema, keys, current}."""
+    document = {"schema": "oryx-f2-auth-keys-v1",
+                "keys": {p: {"v1": key(100 + i)} for i, p in enumerate(PURPOSES)},
+                "current": {p: "v1" for p in PURPOSES}}
     document.update(overrides)
+    return document
+
+
+def set_purpose(document: dict, purpose: str, versions: dict, current: str) -> dict:
+    """Remplace les versions et la version courante d'un usage Auth F2."""
+    document["keys"][purpose] = versions
+    document["current"][purpose] = current
     return document
 
 

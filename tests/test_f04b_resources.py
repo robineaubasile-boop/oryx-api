@@ -524,3 +524,65 @@ def test_both_isolated_compositions_accept_the_same_keyrings_and_engine(config):
     assert len(pairs(auth_app)) == 14 and len(pairs(personal_app)) == 13
     assert resources.engine.pool.checkedout() == 0  # aucune connexion ouverte par les constructions
     resources.close()
+
+
+# --------------------------------------------------------------------------
+# Freeze F04-B V0.3 § 6.2 et § 6.3 : concurrence et annulation
+# --------------------------------------------------------------------------
+
+def test_shared_httpx_clients_serve_concurrent_calls_then_close(config):
+    """§ 6.2 : partage des clients httpx autorisé sous réserve des tests de
+    concurrence et de fermeture."""
+    lock, seen = threading.Lock(), []
+
+    def handler(request):
+        with lock:
+            seen.append((request.url.path, threading.get_ident()))
+        return httpx.Response(200, json={"id": "x"})
+
+    resources = r.build_f2_resources(config, supabase_transport=RecordingTransport(handler),
+                                     resend_transport=RecordingTransport(handler), session_factory=SessionFactory())
+    barrier = threading.Barrier(16, timeout=20)
+    errors = []
+
+    def call(i):
+        try:
+            barrier.wait()
+            if i % 2:
+                resources.mailer.send_otp(to=f"u{i}@oryx-f04b.example", code="12345678", idempotency_key=f"k{i}")
+            else:
+                resources.supabase.generate_email_otp(f"u{i}@oryx-f04b.example")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(type(exc).__name__)
+
+    threads = [threading.Thread(target=call, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == [] and len(seen) == 16
+    assert len({ident for _, ident in seen}) > 1  # appels réellement concurrents
+    report = resources.close()
+    assert report.ok and resources.supabase._client.is_closed is False  # transport injecté : client non possédé
+    owned = r.build_f2_resources(config)
+    owned.close()
+    assert owned.supabase._client.is_closed and owned.mailer._client.is_closed  # observation seulement
+
+
+class _Cancelled(BaseException):
+    """Annulation observée à la frontière de l'appel (hors Exception)."""
+
+
+@pytest.mark.parametrize("where", ["get", "body"])
+def test_factory_sessions_are_closed_on_cancellation(where):
+    """§ 6.3 : la session de l'appel est fermée « y compris sur erreur ou
+    annulation observée à la frontière de l'appel »."""
+    if where == "get":
+        factory = SessionFactory(error=_Cancelled())
+    else:
+        factory = SessionFactory(response=FakeResponse(error=_Cancelled()))
+    for transport, call in ((providers.EodhdTransport("k", session_factory=factory), "search"),
+                            (providers.FmpTransport("k", session_factory=factory), "profile")):
+        with pytest.raises(_Cancelled):
+            getattr(transport, call)("MC", timeout_s=5.0)
+    assert len(factory.sessions) == 2 and all(session.closed == 1 for session in factory.sessions)

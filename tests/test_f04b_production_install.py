@@ -152,6 +152,9 @@ def test_a_clean_environment_installs_and_runs_from_requirements_txt_alone(tmp_p
         assert components["gate_built"] is True
         assert components["alembic_head"] == "0021_decryptage_reservations"
         assert report["close"]["closed"] == ["claude", "fmp", "eodhd", "resend", "supabase", "engine"]
+        # Freeze § 3.2 : appels simulés des cinq adaptateurs dans l'environnement de production.
+        assert report["simulated_calls"] == {"requests": 6, "market_results": [True, True],
+                                             "market_sessions_closed": 2, "claude_text": True}
         summary["status"] = "success"
     except pytest.skip.Exception:
         raise

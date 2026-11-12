@@ -35,11 +35,16 @@ Trousseaux : JSON UTF-8 strict (propriétés dupliquées, constantes NaN /
 Infinity, BOM refusés ; 64 Kio au plus), propriétés EXACTES (aucun champ
 inconnu, aucun champ manquant), schéma versionné :
 
-    ORYX_F2_AUTH_KEYS_JSON :
+    ORYX_F2_AUTH_KEYS_JSON (freeze F04-B V0.3 § 2.2,
+    docs/act_l1_f04b_freeze_v03.md) :
       {"schema": "oryx-f2-auth-keys-v1",
-       "purposes": {"candidate":  {"current": "<v>", "keys": {"<v>": "<clé>", ...}},
-                    "derive": {...}, "active": {...}, "otp": {...},
-                    "invitation": {...}, "abuse": {...}}}
+       "keys": {"candidate": {"<v>": "<clé>", ...}, "derive": {...}, "active": {...},
+                "otp": {...}, "invitation": {...}, "abuse": {...}},
+       "current": {"candidate": "<v>", "derive": "<v>", "active": "<v>",
+                   "otp": "<v>", "invitation": "<v>", "abuse": "<v>"}}
+
+    Aucun autre format n'est accepté (en particulier aucune propriété
+    racine « purposes ») : pas de double format, pas de conversion implicite.
 
     ORYX_F2_CSRF_KEYS_JSON / _PORTFOLIO_ / _DECRYPTAGE_ :
       {"schema": "oryx-f2-csrf-keys-v1" | "oryx-f2-portfolio-keys-v1"
@@ -349,14 +354,19 @@ def _no_reuse(groups) -> None:
 
 
 def _auth_keyring(value):
+    """Format exact du freeze : racine {schema, keys, current} ; keys et
+    current ont exactement les six usages (refus localisé « keys » /
+    « current », puis par usage)."""
     document = _document(value)
-    _exact(document, ("schema", "purposes"))
+    _exact(document, ("schema", "keys", "current"))
     if document["schema"] != AUTH_SCHEMA:
         raise _Problem(UNKNOWN_SCHEMA)
-    _exact(document["purposes"], PURPOSES)
+    _exact(document["keys"], PURPOSES, "keys")
+    _exact(document["current"], PURPOSES, "current")
     keys, current = {}, {}
     for purpose in PURPOSES:
-        keys[purpose], current[purpose] = _versions(document["purposes"][purpose], purpose)
+        keys[purpose], current[purpose] = _versions(
+            {"current": document["current"][purpose], "keys": document["keys"][purpose]}, purpose)
     _no_reuse([(p, keys[p]) for p in PURPOSES])
     try:
         keyring = Keyring(keys, current)

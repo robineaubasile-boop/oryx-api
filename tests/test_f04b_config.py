@@ -232,8 +232,10 @@ def test_duplicate_properties_are_refused_at_every_level():
         s.key(200), s.key(201))
     assert _codes(s.environ(ORYX_F2_CSRF_KEYS_JSON=nested), c.CSRF_KEYS_JSON) == {(c.DUPLICATE_PROPERTY, None)}
     auth = json.dumps(s.auth_document())
-    auth_dup = auth.replace('"purposes": {', '"purposes": {"otp": {"current": "v1", "keys": {}}, ', 1)
+    auth_dup = auth.replace('"keys": {', '"keys": {"otp": {"v9": "%s"}, ' % s.key(950), 1)
     assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=auth_dup), c.AUTH_KEYS_JSON) == {(c.DUPLICATE_PROPERTY, None)}
+    current_dup = auth.replace('"current": {', '"current": {"abuse": "v1", ', 1)
+    assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=current_dup), c.AUTH_KEYS_JSON) == {(c.DUPLICATE_PROPERTY, None)}
 
 
 @pytest.mark.parametrize("family, name, base", [("csrf", c.CSRF_KEYS_JSON, 200),
@@ -259,21 +261,71 @@ def test_single_keyring_documents_have_exact_properties(family, name, base):
         assert _codes(s.environ(**{name: json.dumps(document)}), name) == {(code, None)}, (document, code)
 
 
+FREEZE_AUTH_EXAMPLE = """{
+  "schema": "oryx-f2-auth-keys-v1",
+  "keys": {
+    "candidate": {"v1": "%s"},
+    "derive": {"v1": "%s"},
+    "active": {"v1": "%s"},
+    "otp": {"v1": "%s"},
+    "invitation": {"v1": "%s"},
+    "abuse": {"v1": "%s"}
+  },
+  "current": {
+    "candidate": "v1",
+    "derive": "v1",
+    "active": "v1",
+    "otp": "v1",
+    "invitation": "v1",
+    "abuse": "v1"
+  }
+}"""
+
+
+def test_contract_auth_document_has_exactly_the_frozen_structure():
+    """Freeze F04-B V0.3 § 2.2 (docs/act_l1_f04b_freeze_v03.md) : document
+    Auth F2 recopié sur l'exemple contractuel, clés synthétiques."""
+    text = FREEZE_AUTH_EXAMPLE % tuple(s.key(800 + i) for i in range(6))
+    config = c.load_f2_config(s.environ(ORYX_F2_AUTH_KEYS_JSON=text))
+    for i, purpose in enumerate(PURPOSES):
+        assert config.keyring.current(purpose) == ("v1", s.raw_key(800 + i))
+        assert config.keyring.versions(purpose) == ("v1",)
+    assert list(json.loads(text)) == ["schema", "keys", "current"]
+
+
+def test_the_former_purposes_format_is_refused():
+    """Ancien format de la PR (racine « purposes », keys/current par usage) :
+    refusé, sans conversion ni double format."""
+    former = {"schema": "oryx-f2-auth-keys-v1",
+              "purposes": {p: {"current": "v1", "keys": {"v1": s.key(100 + i)}} for i, p in enumerate(PURPOSES)}}
+    assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(former)), c.AUTH_KEYS_JSON) == {
+        (c.UNKNOWN_PROPERTY, None)}
+    mixed = {**s.auth_document(), "purposes": former["purposes"]}
+    assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(mixed)), c.AUTH_KEYS_JSON) == {
+        (c.UNKNOWN_PROPERTY, None)}
+
+
 def test_auth_document_has_exact_properties_and_six_purposes():
     good = s.auth_document()
-    purposes = good["purposes"]
+    keys, current = good["keys"], good["current"]
     cases = [
         ({**good, "extra": 1}, (c.UNKNOWN_PROPERTY, None)),
-        ({"schema": good["schema"]}, (c.MISSING_PROPERTY, None)),
+        ({"schema": good["schema"], "keys": keys}, (c.MISSING_PROPERTY, None)),
+        ({"schema": good["schema"], "current": current}, (c.MISSING_PROPERTY, None)),
+        ({"keys": keys, "current": current}, (c.MISSING_PROPERTY, None)),
         ({**good, "schema": "oryx-f2-auth-keys-v0"}, (c.UNKNOWN_SCHEMA, None)),
-        ({**good, "purposes": {k: v for k, v in purposes.items() if k != "abuse"}}, (c.MISSING_PROPERTY, None)),
-        ({**good, "purposes": {**purposes, "csrf": purposes["otp"]}}, (c.UNKNOWN_PROPERTY, None)),
-        ({**good, "purposes": []}, (c.NOT_AN_OBJECT, None)),
-        ({**good, "purposes": {**purposes, "otp": {"keys": purposes["otp"]["keys"]}}}, (c.MISSING_PROPERTY, "otp")),
-        ({**good, "purposes": {**purposes, "otp": {**purposes["otp"], "x": 1}}}, (c.UNKNOWN_PROPERTY, "otp")),
-        ({**good, "purposes": {**purposes, "derive": {"current": "v1", "keys": {}}}}, (c.NO_KEY_VERSION, "derive")),
-        ({**good, "purposes": {**purposes, "active": {**purposes["active"], "current": "v9"}}},
-         (c.CURRENT_VERSION_ABSENT, "active")),
+        ({**good, "keys": {k: v for k, v in keys.items() if k != "abuse"}}, (c.MISSING_PROPERTY, "keys")),
+        ({**good, "keys": {**keys, "csrf": {"v1": s.key(960)}}}, (c.UNKNOWN_PROPERTY, "keys")),
+        ({**good, "keys": []}, (c.NOT_AN_OBJECT, "keys")),
+        ({**good, "current": {k: v for k, v in current.items() if k != "otp"}}, (c.MISSING_PROPERTY, "current")),
+        ({**good, "current": {**current, "csrf": "v1"}}, (c.UNKNOWN_PROPERTY, "current")),
+        ({**good, "current": "v1"}, (c.NOT_AN_OBJECT, "current")),
+        ({**good, "keys": {**keys, "otp": []}}, (c.NOT_AN_OBJECT, "otp")),
+        ({**good, "keys": {**keys, "derive": {}}}, (c.NO_KEY_VERSION, "derive")),
+        ({**good, "current": {**current, "active": "v9"}}, (c.CURRENT_VERSION_ABSENT, "active")),
+        ({**good, "current": {**current, "invitation": 1}}, (c.INVALID_VERSION_FIELD, "invitation")),
+        ({**good, "current": {**current, "abuse": ""}}, (c.INVALID_VERSION_FIELD, "abuse")),
+        ({**good, "current": {**current, "candidate": None}}, (c.INVALID_VERSION_FIELD, "candidate")),
     ]
     for document, expected in cases:
         assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(document)), c.AUTH_KEYS_JSON) == {expected}, document
@@ -307,7 +359,7 @@ def test_non_canonical_or_wrong_length_keys_are_refused(encoded):
 
 def test_non_canonical_auth_key_is_refused_with_its_purpose():
     document = s.auth_document()
-    document["purposes"]["invitation"]["keys"]["v1"] += "="
+    document["keys"]["invitation"]["v1"] += "="
     assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(document)), c.AUTH_KEYS_JSON) == {
         (c.INVALID_KEY_ENCODING, "invitation")}
 
@@ -318,7 +370,7 @@ def test_non_canonical_auth_key_is_refused_with_its_purpose():
 
 def test_historical_versions_are_kept_next_to_the_current_one():
     auth = s.auth_document()
-    auth["purposes"]["abuse"] = {"current": "v2", "keys": {"v1": s.key(500), "v2": s.key(501)}}
+    s.set_purpose(auth, "abuse", {"v1": s.key(500), "v2": s.key(501)}, "v2")
     csrf = s.single_document("csrf", 200, current="c2", keys={"c1": s.key(510), "c2": s.key(511)})
     portfolio = s.single_document("portfolio", 300, current="p1", keys={"p0": s.key(520), "p1": s.key(521)})
     decryptage = s.single_document("decryptage", 400, keys={"d1": s.key(530), "d0": s.key(531)})
@@ -345,7 +397,7 @@ def test_historical_versions_are_kept_next_to_the_current_one():
 ])
 def test_version_syntax_is_the_one_of_each_existing_class(version, auth_ok, csrf_ok, scoped_ok):
     auth = s.auth_document()
-    auth["purposes"]["otp"] = {"current": version, "keys": {version: s.key(600)}}
+    s.set_purpose(auth, "otp", {version: s.key(600)}, version)
     results = {}
     env = s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(auth),
                     ORYX_F2_CSRF_KEYS_JSON=json.dumps(s.single_document("csrf", 200, current=version,
@@ -378,11 +430,11 @@ def test_a_key_reused_across_versions_of_one_keyring_is_refused():
 
 def test_a_key_reused_across_auth_purposes_or_versions_is_refused():
     shared = s.auth_document()
-    shared["purposes"]["active"]["keys"]["v1"] = shared["purposes"]["candidate"]["keys"]["v1"]
+    shared["keys"]["active"]["v1"] = shared["keys"]["candidate"]["v1"]
     assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(shared)), c.AUTH_KEYS_JSON) == {
         (c.KEY_REUSED, "active")}
     versions = s.auth_document()
-    versions["purposes"]["otp"]["keys"]["v0"] = versions["purposes"]["otp"]["keys"]["v1"]
+    versions["keys"]["otp"]["v0"] = versions["keys"]["otp"]["v1"]
     assert _codes(s.environ(ORYX_F2_AUTH_KEYS_JSON=json.dumps(versions)), c.AUTH_KEYS_JSON) == {
         (c.KEY_REUSED, "otp")}
 
@@ -433,3 +485,16 @@ def test_no_secret_is_generated_and_nothing_defaults():
     env = s.environ(ORYX_F2_AUTH_KEYS_JSON=None, ORYX_F2_CSRF_KEYS_JSON=None)
     assert _problems(env) == _problems(dict(env)) == {(c.AUTH_KEYS_JSON, c.MISSING, None),
                                                       (c.CSRF_KEYS_JSON, c.MISSING, None)}
+
+
+def test_loaded_configuration_is_immutable():
+    """Freeze F04-B V0.3 § 2.3 : objets typés et immuables."""
+    import dataclasses
+
+    config = c.load_f2_config(s.environ())
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.decryptage_model = "autre"
+    with pytest.raises((AttributeError, TypeError)):
+        config.extra = 1
+    with pytest.raises(TypeError):
+        config.keyring._keys["otp"] = {}  # MappingProxyType : lecture seule
