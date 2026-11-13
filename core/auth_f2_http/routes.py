@@ -123,6 +123,10 @@ class Dependencies:
     # Admission HTTP de R1 PR 4 (core.auth_f2.http_admission.HttpAdmission) ;
     # absente : les sept routes PR 4 refusent (503) sans appeler le moteur.
     admission: object = None
+    # ACT-L1 / F04-C : soumetteur des travaux synchrones (même interface que
+    # run_in_threadpool). None : run_in_threadpool historique (compositions
+    # hors F04-C) ; la composition F04-C injecte TOUJOURS son soumetteur suivi.
+    submit: object = None
 
 
 def json_response(http_status: int, body: dict, cookies=()) -> Response:
@@ -265,7 +269,7 @@ def build_router(deps: Dependencies) -> APIRouter:
 
     async def call(fn, *args, **kwargs):
         try:
-            return await run_in_threadpool(fn, *args, **kwargs)
+            return await (run_in_threadpool if deps.submit is None else deps.submit)(fn, *args, **kwargs)
         except Exception as exc:  # refus fermé : aucun détail, aucun secret
             logger.warning("f2 http engine_error type=%s", type(exc).__name__)
             raise Refusal(503, "temporarily_unavailable") from None

@@ -338,10 +338,12 @@ class _TurnSlot:
         capacity._released += 1
 
 
-async def _submit(work):
+async def _submit(work, submit=None):
     """Soumission au fil de travail (hors de la boucle événementielle). Point
-    unique, remplaçable par les tests de course annulation / démarrage."""
-    return await run_in_threadpool(work)
+    unique, remplaçable par les tests de course annulation / démarrage.
+    ACT-L1 / F04-C : submit = soumetteur injecté (PersonalDependencies.submit) ;
+    None : run_in_threadpool historique."""
+    return await (run_in_threadpool if submit is None else submit)(work)
 
 
 # --------------------------------------------------------------------------
@@ -806,7 +808,9 @@ def build_decryptage_router(deps: PersonalDependencies, config: DecryptageHttpCo
                 slot.finish()
 
         try:
-            reply = await _submit(work)
+            # F04-C : le soumetteur injecté est transmis à _submit ; sans injection,
+            # appel historique inchangé (_submit reste remplaçable par les tests).
+            reply = await _submit(work) if deps.submit is None else await _submit(work, deps.submit)
         except Exception as exc:  # noqa: BLE001 — soumission impossible : refus fermé
             logger.warning("authz_f2 http %s submit_error type=%s", label, type(exc).__name__)
             reply = UNAVAILABLE_REPLY
@@ -822,7 +826,8 @@ def build_decryptage_router(deps: PersonalDependencies, config: DecryptageHttpCo
             logger.info("authz_f2 http %s status=%s code=%s", label, refusal.http_status, refusal.code)
             return error_response(refusal.http_status, refusal.code)
         try:
-            reply = await run_in_threadpool(perform, credential, generation_id, command)
+            reply = await (run_in_threadpool if deps.submit is None else deps.submit)(
+                perform, credential, generation_id, command)
         except Exception as exc:  # refus fermé : aucun détail
             logger.warning("authz_f2 http %s runner_error type=%s", label, type(exc).__name__)
             reply = UNAVAILABLE_REPLY
