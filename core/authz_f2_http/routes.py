@@ -132,6 +132,10 @@ class PersonalDependencies:
     # murale ; absents ou défaillants : PUT /me/level refuse (503) au stade CSRF.
     csrf_keyring: object = None
     wall_clock: object = None
+    # ACT-L1 / F04-C : soumetteur des travaux synchrones (même interface que
+    # run_in_threadpool). None : run_in_threadpool historique (compositions
+    # hors F04-C) ; la composition F04-C injecte TOUJOURS son soumetteur suivi.
+    submit: object = None
 
 
 async def _refuse_body(request: Request) -> None:
@@ -298,7 +302,8 @@ def build_personal_router(deps: PersonalDependencies) -> APIRouter:
                 raise Refusal(503, "temporarily_unavailable")
             credential = SessionCredential(generation_id, Redacted(secret))
             try:
-                outcome = await run_in_threadpool(deps.runner.run, credential, ReadProfile())
+                outcome = await (run_in_threadpool if deps.submit is None else deps.submit)(
+                    deps.runner.run, credential, ReadProfile())
             except Exception as exc:  # refus fermé : aucun détail
                 logger.warning("authz_f2 http me runner_error type=%s", type(exc).__name__)
                 raise Refusal(503, "temporarily_unavailable") from None
@@ -343,7 +348,8 @@ def build_personal_router(deps: PersonalDependencies) -> APIRouter:
             credential = SessionCredential(generation_id, Redacted(secret))
             command = UpdateProfileLevel(level, expected_revision)
             try:
-                outcome = await run_in_threadpool(deps.runner.run, credential, command)
+                outcome = await (run_in_threadpool if deps.submit is None else deps.submit)(
+                    deps.runner.run, credential, command)
             except Exception as exc:  # refus fermé : aucun détail
                 logger.warning("authz_f2 http me/level runner_error type=%s", type(exc).__name__)
                 raise Refusal(503, "temporarily_unavailable") from None

@@ -150,6 +150,30 @@ F04B_B1_MARKERS = {"core/f2_runtime/config.py": ["DecryptageKeyring"],
                    "core/f2_runtime/preflight.py": ["decryptage_turn_reservations"]}
 F04B_B2_MARKERS = {"core/f2_runtime/resources.py": ["decryptage_providers"]}
 
+# ACT-L1 / F04-C V0.3 — arbitrage E-1 (fondateur, 13/11/2026 ; voir
+# docs/act_l1_f04c_traceability_v03.md § 6) : le point d'entrée DORMANT F04-C est
+# le SEUL fichier applicatif autorisé à composer F2 (Auth, Personnel, C3, porte
+# F-02A) et à lire os.environ (copie au démarrage). Exceptions NOMINATIVES et
+# EXACTES (imports, noms, marqueurs dans l'ordre de chaque balayage), utilisées par
+# les autres tests de dormance ; tout autre fichier reste soumis aux règles
+# historiques (tests négatifs ci-dessous et dans chaque balayage).
+F04C_ENTRYPOINT = "core/f2_runtime/entrypoint.py"
+F04C_REFERENCE_MATRIX = {F04C_ENTRYPOINT: frozenset({"core.auth_f2_http.client_ip", "core.auth_f2_http.isolated"})}
+F04C_REFERENCE_NAMES = {
+    "core.auth_f2_http.client_ip": {"PeerAddressResolver"},
+    "core.auth_f2_http.isolated": {"build_isolated_f2_app"},
+}
+# Imports COMPLETS et exacts du point d'entrée : ni api, ni core.db, ni
+# core.models, ni module legacy, ni service / runner / adaptateur F2 directs.
+F04C_ENTRYPOINT_IMPORTS = frozenset({
+    "asyncio", "os", "threading", "starlette.routing", "core.auth_f2_http.client_ip", "core.auth_f2_http.isolated",
+    "core.authz_f2_http.decryptage", "core.authz_f2_http.isolated", "core.f2_runtime.config",
+    "core.f2_runtime.preflight", "core.f2_runtime.resources", "core.f2_runtime.work_registry", "core.route_policy",
+    "core.route_policy.gate"})
+F04C_BOUNDARY_MARKERS = {F04C_ENTRYPOINT: ["authz_f2", "build_isolated_personal_app"]}
+F04C_ROUTE_POLICY_MARKERS = {F04C_ENTRYPOINT: ["route_policy", "RoutePolicyGate", "F-02A"]}
+F04C_C3_MARKERS = {F04C_ENTRYPOINT: ["DecryptageHttpConfig", "authz_f2_http.decryptage"]}
+
 
 def _app_calls(tree):
     routes, others = [], []
@@ -174,6 +198,13 @@ def test_api_routes_and_hooks_are_exactly_those_of_main():
         assert forbidden not in source, forbidden
 
 
+def unauthorized_f2_reference(relative: str, text: str) -> bool:
+    """Fichier applicatif (hors paquets F2) qui mentionne F2 sans figurer dans
+    une matrice fermée (R1 PR 5, F04-B, F04-C nominatif)."""
+    return ("auth_f2" in text or "F2AuthService" in text) and relative not in F2_REFERENCE_MATRIX \
+        and relative not in F04B_REFERENCE_MATRIX and relative not in F04C_REFERENCE_MATRIX
+
+
 def test_no_application_module_references_the_f2_package():
     offenders = []
     roots = [REPO_ROOT / "api.py", REPO_ROOT / "test.py", REPO_ROOT / "alembic", REPO_ROOT / "scripts",
@@ -186,8 +217,7 @@ def test_no_application_module_references_the_f2_package():
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             relative = str(path.relative_to(REPO_ROOT))
-            if ("auth_f2" in text or "F2AuthService" in text) and relative not in F2_REFERENCE_MATRIX \
-                    and relative not in F04B_REFERENCE_MATRIX:
+            if unauthorized_f2_reference(relative, text):
                 offenders.append(relative)
     assert offenders == []
 
@@ -217,7 +247,9 @@ def test_f04b_reference_matrix_is_closed_and_exact():
     création de sujets), aucun cookie."""
     mentioning = {str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "core" / "f2_runtime").glob("*.py")
                   if "auth_f2" in p.read_text(encoding="utf-8")}
-    assert mentioning == set(F04B_REFERENCE_MATRIX)
+    # F04-C (arbitrage E-1) : le seul point d'entrée s'ajoute, vérifié exactement
+    # par test_f04c_reference_matrix_is_closed_and_exact.
+    assert mentioning == set(F04B_REFERENCE_MATRIX) | set(F04C_REFERENCE_MATRIX)
     for relative, expected in F04B_REFERENCE_MATRIX.items():
         path = REPO_ROOT / relative
         imports = f2_imports(path)
@@ -232,6 +264,80 @@ def test_f04b_reference_matrix_is_closed_and_exact():
             n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
         assert not names & {"initialize_abuse_key_state", "rotate_abuse_key", "retire_previous_abuse_key",
                             "purge_abuse_history", "ensure_subjects", "lock_key_state", "F2AuthService"}, relative
+
+
+def _all_imports(tree) -> set:
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found.add(node.module)
+    return found
+
+
+def test_f04c_reference_matrix_is_closed_and_exact():
+    """ACT-L1 / F04-C (arbitrage E-1) : UNE seule entrée, imports F2 exacts et
+    noms autorisés ; imports complets fermés (ni api, ni core.db, ni
+    core.models) ; jamais de service, d'admission HTTP, d'acte anti-abus, de
+    cookie, de moteur ou de session legacy."""
+    assert set(F04C_REFERENCE_MATRIX) == {F04C_ENTRYPOINT}
+    path = REPO_ROOT / F04C_ENTRYPOINT
+    imports = f2_imports(path)
+    assert set(imports) == F04C_REFERENCE_MATRIX[F04C_ENTRYPOINT]
+    for module, names in imports.items():
+        assert names <= F04C_REFERENCE_NAMES[module], (module, names)
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    assert _all_imports(tree) == F04C_ENTRYPOINT_IMPORTS
+    for forbidden in ("F2AuthService", "HttpAdmission", "initialize_abuse_key_state", "http_providers", "set_cookie",
+                      "clear_cookie", "SessionLocal", "get_db"):
+        assert forbidden not in text, forbidden
+    # api / core.db / core.models : exclus par l'égalité EXACTE des imports ci-dessus
+    # (le module ne fait que DOCUMENTER le chargement indirect de core.db, Q2 / O1).
+    names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
+        n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert not names & {"initialize_abuse_key_state", "rotate_abuse_key", "retire_previous_abuse_key",
+                        "purge_abuse_history", "ensure_subjects", "lock_key_state", "F2AuthService", "SessionLocal",
+                        "get_db", "AuthorizedTransactionRunner", "create_engine", "create_f2_engine"}
+
+
+def test_the_f04c_exception_is_nominative_and_refuses_any_other_module():
+    """Négatif : le texte EXACT du point d'entrée, placé dans tout autre fichier
+    applicatif (autre module F2, api.py, worker, script, paquet core), reste
+    refusé ; seul le point d'entrée nominatif est accepté."""
+    text = (REPO_ROOT / F04C_ENTRYPOINT).read_text(encoding="utf-8")
+    assert not unauthorized_f2_reference(F04C_ENTRYPOINT, text)
+    for other in ("core/f2_runtime/entrypoint_copy.py", "core/f2_runtime/work_registry.py", "core/entrypoint.py",
+                  "api.py", "core/evaluation_worker.py", "scripts/serve_f2.py", "alembic/env.py"):
+        assert unauthorized_f2_reference(other, text), other
+
+
+def test_no_application_entrypoint_imports_or_serves_the_f04c_entrypoint():
+    """Dormance F04-C : ni api.py, ni le worker, ni un script, la CI, Alembic,
+    les frontends ou un fichier de configuration n'importent ou ne servent le
+    point d'entrée (aucune cible « entrypoint:app » hors de son propre module)."""
+    offenders = []
+    roots = [REPO_ROOT / "api.py", REPO_ROOT / "test.py", REPO_ROOT / "alembic", REPO_ROOT / "scripts",
+             REPO_ROOT / "core", REPO_ROOT / "ci", REPO_ROOT / "web", REPO_ROOT / "web-v2", REPO_ROOT / ".github"]
+    roots += [p for p in REPO_ROOT.iterdir() if p.is_file() and p.suffix in ("", ".txt", ".toml", ".json", ".yml",
+                                                                             ".yaml", ".cfg", ".ini", ".in")]
+    for root in roots:
+        for path in ([root] if root.is_file() else [p for p in root.rglob("*") if p.is_file()]):
+            relative = str(path.relative_to(REPO_ROOT))
+            if "__pycache__" in path.parts or "node_modules" in path.parts or relative == F04C_ENTRYPOINT:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "entrypoint:app" in text or "F2Envelope" in text:
+                offenders.append(relative)
+            if path.suffix == ".py" and any(m == "core.f2_runtime.entrypoint" or m.endswith(".entrypoint")
+                                            for m in _all_imports(ast.parse(text))):
+                offenders.append(relative)
+            if path.suffix == ".py" and any(isinstance(n, ast.ImportFrom) and n.module == "core.f2_runtime"
+                                            and any(a.name == "entrypoint" for a in n.names)
+                                            for n in ast.walk(ast.parse(text))):
+                offenders.append(relative)
+    assert offenders == []
 
 
 def test_f2_package_reads_no_configuration_and_sets_no_cookie():

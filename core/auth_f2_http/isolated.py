@@ -19,7 +19,11 @@ l'environnement :
 - allowed_origins : origines https exactes ;
 - clock / fault_hook : transmis au moteur et à l'admission HTTP de R1 PR 4
   (tests de frontières et de panne) ; wall_clock / monotonic : horloges de
-  la couche HTTP.
+  la couche HTTP ;
+- submitter (ACT-L1 / F04-C) : soumetteur des travaux synchrones, même
+  interface que run_in_threadpool ; None (défaut) : run_in_threadpool
+  historique, chemin de compatibilité NON supervisé, jamais accepté par la
+  composition F04-C (qui vérifie app.state.oryx_f2_submitter).
 
 L'admission HTTP de R1 PR 4 (core.auth_f2.http_admission) est construite
 ici avec le même moteur PostgreSQL et le même trousseau que le moteur F2 ;
@@ -70,7 +74,8 @@ class _NoStore:
 
 
 def build_isolated_f2_app(*, engine, keyring, supabase, mailer, csrf_keyring, ip_resolver, allowed_origins,
-                          clock=None, fault_hook=None, wall_clock=time.time, monotonic=time.monotonic) -> FastAPI:
+                          clock=None, fault_hook=None, wall_clock=time.time, monotonic=time.monotonic,
+                          submitter=None) -> FastAPI:
     if not isinstance(engine, sa.engine.Engine) or engine.dialect.name != "postgresql":
         raise F2HttpConfigError("moteur PostgreSQL attendu")
     if not isinstance(keyring, Keyring):
@@ -89,6 +94,8 @@ def build_isolated_f2_app(*, engine, keyring, supabase, mailer, csrf_keyring, ip
         raise F2HttpConfigError("résolveur d'IP attendu")
     if not callable(wall_clock) or not callable(monotonic):
         raise F2HttpConfigError("horloges attendues")
+    if submitter is not None and not callable(submitter):
+        raise F2HttpConfigError("soumetteur appelable attendu")
     try:
         origins = validate_allowed_origins(allowed_origins)
     except ValueError as exc:
@@ -101,7 +108,8 @@ def build_isolated_f2_app(*, engine, keyring, supabase, mailer, csrf_keyring, ip
         admission = HttpAdmission(engine, keyring, **kwargs)
     except (TypeError, ValueError) as exc:
         raise F2HttpConfigError(str(exc)) from None
-    return make_app(Dependencies(service, csrf_keyring, ip_resolver, origins, wall_clock, monotonic, admission))
+    return make_app(Dependencies(service, csrf_keyring, ip_resolver, origins, wall_clock, monotonic, admission,
+                                 submitter))
 
 
 def make_app(deps: Dependencies) -> FastAPI:
@@ -110,4 +118,5 @@ def make_app(deps: Dependencies) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.include_router(build_router(deps))
     app.add_middleware(_NoStore)
+    app.state.oryx_f2_submitter = deps.submit  # F04-C : soumetteur effectivement injecté
     return app

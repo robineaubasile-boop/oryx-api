@@ -140,7 +140,8 @@ def build_consultation_router(deps: PersonalDependencies) -> APIRouter:
                 raise Refusal(503, "temporarily_unavailable")
             credential = SessionCredential(generation_id, Redacted(secret))
             try:
-                outcome = await run_in_threadpool(deps.runner.run, credential, command)
+                outcome = await (run_in_threadpool if deps.submit is None else deps.submit)(
+                    deps.runner.run, credential, command)
             except Exception as exc:  # refus fermé : aucun détail
                 logger.warning("authz_f2 http %s runner_error type=%s", label, type(exc).__name__)
                 raise Refusal(503, "temporarily_unavailable") from None

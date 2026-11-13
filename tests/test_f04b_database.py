@@ -20,6 +20,7 @@ import sqlalchemy as sa
 
 from core.f2_runtime import database as d
 from tests.pg_guard import assert_disposable_connection
+from tests.test_f2_dormancy import F04C_ENTRYPOINT
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, pg_url  # noqa: F401 — fixture
 
@@ -106,20 +107,132 @@ def test_importing_f04b_has_no_external_effect_and_builds_no_engine(database_url
     assert result == {"attempts": [], "engines": 0, "loaded": []}
 
 
+# ACT-L1 / F04-C (arbitrage E-1) : le point d'entrée dormant est le SEUL module
+# de core/f2_runtime autorisé à lire l'environnement, et seulement par cette
+# lecture-copie au démarrage (freeze F04-C § 6.2 : load_f2_config(copie de
+# os.environ), aucune mutation, rien à l'import).
+F04C_ENVIRONMENT_READ = "source = os.environ if self._environ is None else self._environ"
+F04C_ENVIRONMENT_COPY = "config = load_f2_config(dict(source))"
+F04C_ENVIRONMENT_FUNCTION = "_startup"
+
+
+def _statement_and_function(node, parents):
+    statement, function = node, None
+    while statement in parents and not isinstance(statement, ast.stmt):
+        statement = parents[statement]
+    current = node
+    while current in parents:
+        current = parents[current]
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function = current.name
+            break
+    return statement, function
+
+
+def environment_read_only_at_startup(tree) -> list:
+    """Problèmes d'usage de l'environnement du point d'entrée F04-C : seul
+    « import os » ; os n'est utilisé que pour os.environ ; exactement UNE
+    lecture, dans _startup, sous la forme F04C_ENVIRONMENT_READ ; la valeur lue
+    n'est utilisée que copiée (F04C_ENVIRONMENT_COPY) ; aucune écriture."""
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    problems = []
+    reads = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "os":
+            attribute = parents.get(node)
+            if not (isinstance(attribute, ast.Attribute) and attribute.attr == "environ"):
+                problems.append(f"usage de os hors os.environ : {ast.unparse(parents.get(node, node))}")
+                continue
+            if not isinstance(attribute.ctx, ast.Load) or not isinstance(node.ctx, ast.Load):
+                problems.append("écriture de os.environ")
+            statement, function = _statement_and_function(attribute, parents)
+            if ast.unparse(statement) != F04C_ENVIRONMENT_READ or function != F04C_ENVIRONMENT_FUNCTION:
+                problems.append(f"lecture hors de la copie de démarrage : {ast.unparse(statement)} ({function})")
+            reads += 1
+        elif isinstance(node, ast.Attribute) and node.attr == "environ" and not (
+                isinstance(node.value, ast.Name) and node.value.id == "os"):
+            problems.append(f"environ hors os.environ : {ast.unparse(node)}")
+    if reads != 1:
+        problems.append(f"{reads} lecture(s) de os.environ (une seule attendue)")
+    uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "source"]
+    loads = [n for n in uses if isinstance(n.ctx, ast.Load)]
+    if len(loads) != 1 or ast.unparse(_statement_and_function(loads[0], parents)[0]) != F04C_ENVIRONMENT_COPY:
+        problems.append("la valeur lue doit être utilisée seulement copiée : " + F04C_ENVIRONMENT_COPY)
+    return problems
+
+
+def f04b_source_offences(relative: str, text: str) -> list:
+    """Règles historiques F04-B pour tout module de core/f2_runtime ; seule
+    exception NOMINATIVE : `os` / `environ` pour le point d'entrée F04-C, sous
+    la forme exacte vérifiée par environment_read_only_at_startup."""
+    tree = ast.parse(text)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported |= {node.module} | {f"{node.module}.{a.name}" for a in node.names}
+    nominative = relative == F04C_ENTRYPOINT
+    problems = []
+    roots = ("dotenv", "api") if nominative else ("os", "dotenv", "api")
+    banned = {m for m in imported if m.split(".")[0] in roots}
+    if nominative and {m for m in imported if m.split(".")[0] == "os"} != {"os"}:
+        banned |= {m for m in imported if m.split(".")[0] == "os"}
+    if banned:
+        problems.append(f"imports interdits : {sorted(banned)}")
+    legacy = {m for m in imported if m == "core.db" or m.startswith("core.db.") or m == "core.models"}
+    if legacy:
+        problems.append(f"imports legacy : {sorted(legacy)}")
+    names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
+        n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    forbidden = {"environ", "getenv", "SessionLocal", "get_db", "putenv"} - ({"environ"} if nominative else set())
+    if names & forbidden:
+        problems.append(f"noms interdits : {sorted(names & forbidden)}")
+    if nominative:
+        problems += environment_read_only_at_startup(tree)
+    return problems
+
+
 def test_f04b_sources_never_reference_the_legacy_engine_nor_the_environment():
     for path in sorted((REPO_ROOT / "core" / "f2_runtime").glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported |= {a.name for a in node.names}
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported |= {node.module} | {f"{node.module}.{a.name}" for a in node.names}
-        assert not {m for m in imported if m.split(".")[0] in ("os", "dotenv", "api")}, path.name
-        assert not {m for m in imported if m == "core.db" or m.startswith("core.db.") or m == "core.models"}, path.name
-        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
-            n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        assert not names & {"environ", "getenv", "SessionLocal", "get_db", "putenv"}, path.name
+        relative = str(path.relative_to(REPO_ROOT))
+        assert f04b_source_offences(relative, path.read_text(encoding="utf-8")) == [], path.name
+
+
+ENTRYPOINT_LIKE = """import os
+
+
+class Envelope:
+    def _startup(self):
+        source = os.environ if self._environ is None else self._environ
+        config = load_f2_config(dict(source))
+"""
+
+
+@pytest.mark.parametrize("variant", [
+    ENTRYPOINT_LIKE + "\nSECRET = os.environ['ORYX_F2_AUTH_KEYS_JSON']\n",          # lecture à l'import
+    ENTRYPOINT_LIKE + "\n\ndef later():\n    return os.environ.get('X')\n",         # autre lecture
+    ENTRYPOINT_LIKE.replace("dict(source)", "source"),                              # pas de copie
+    ENTRYPOINT_LIKE + "\nos.environ['DATABASE_URL'] = ''\n",                       # mutation
+    ENTRYPOINT_LIKE + "\nos.environ.pop('DATABASE_URL')\n",                        # mutation
+    ENTRYPOINT_LIKE + "\nos.getenv('X')\n",                                         # autre accès
+    ENTRYPOINT_LIKE.replace("import os", "from os import environ"),                 # import détourné
+    ENTRYPOINT_LIKE + "\nfrom core.db import SessionLocal\n",                       # legacy
+    ENTRYPOINT_LIKE + "\nimport api\n",                                             # point d'entrée servi
+])
+def test_the_environment_exception_refuses_any_other_use(variant):
+    """Négatif : toute lecture à l'import, seconde lecture, absence de copie,
+    mutation, autre accès à os, import détourné ou legacy est refusé, même dans
+    le point d'entrée F04-C ; la forme exacte est admise."""
+    assert f04b_source_offences(F04C_ENTRYPOINT, ENTRYPOINT_LIKE) == []
+    assert f04b_source_offences(F04C_ENTRYPOINT, variant) != []
+
+
+@pytest.mark.parametrize("relative", ["core/f2_runtime/config.py", "core/f2_runtime/work_registry.py",
+                                      "core/f2_runtime/entrypoint_copy.py"])
+def test_no_other_f2_runtime_module_may_read_the_environment(relative):
+    """Négatif : la même forme exacte reste refusée hors du point d'entrée."""
+    assert f04b_source_offences(relative, ENTRYPOINT_LIKE) != []
 
 
 # --------------------------------------------------------------------------

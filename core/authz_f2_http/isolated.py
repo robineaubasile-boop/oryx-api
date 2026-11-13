@@ -33,6 +33,12 @@ CSRF vérifiée ici), puis build_decryptage_router construit
 l'orchestrateur B2 avec CE runner et ajoute exactement les trois routes
 POST /api/v2/me/decryptage/{turns,replay,ack}. Toute configuration
 partielle ou incompatible : PersonalHttpConfigError.
+
+ACT-L1 / F04-C : paramètre facultatif submitter (soumetteur des travaux
+synchrones, même interface que run_in_threadpool), injecté dans les routes
+personnelles, portefeuille, consultations et C3. None (défaut) :
+run_in_threadpool historique, chemin de compatibilité NON supervisé, jamais
+accepté par la composition F04-C (qui vérifie app.state.oryx_f2_submitter).
 """
 import time
 
@@ -55,7 +61,8 @@ class PersonalHttpConfigError(ValueError):
 
 
 def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyring, clock=None, fault_hook=None,
-                                wall_clock=time.time, portfolio_keyring=None, decryptage=None) -> FastAPI:
+                                wall_clock=time.time, portfolio_keyring=None, submitter=None,
+                                decryptage=None) -> FastAPI:
     try:
         origins = validate_allowed_origins(allowed_origins)
     except ValueError as exc:
@@ -68,6 +75,8 @@ def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyrin
         raise PersonalHttpConfigError("trousseau portefeuille attendu")
     if decryptage is not None and type(decryptage) is not DecryptageHttpConfig:
         raise PersonalHttpConfigError("configuration C3 attendue")
+    if submitter is not None and not callable(submitter):
+        raise PersonalHttpConfigError("soumetteur appelable attendu")
     kwargs = {"fault_hook": fault_hook, "portfolio_keyring": portfolio_keyring}
     if decryptage is not None:
         kwargs["decryptage_keyring"] = decryptage.decryptage_keyring
@@ -95,7 +104,7 @@ def build_isolated_personal_app(*, engine, keyring, allowed_origins, csrf_keyrin
         for version in portfolio_keyring.versions():
             if csrf_keyring.has_key_value(portfolio_keyring.key(version)):
                 raise PersonalHttpConfigError("clé portefeuille identique à une clé CSRF")
-    deps = PersonalDependencies(runner, origins, csrf_keyring, wall_clock)
+    deps = PersonalDependencies(runner, origins, csrf_keyring, wall_clock, submitter)
     if decryptage is None:
         return make_personal_app(deps)
     # R1 PR 9-C3 : clés Décrypter indépendantes des clés CSRF (F2 et
@@ -128,4 +137,5 @@ def _personal_app(deps: PersonalDependencies, decryptage_router) -> FastAPI:
     if decryptage_router is not None:
         app.include_router(decryptage_router)
     app.add_middleware(_NoStore)
+    app.state.oryx_f2_submitter = deps.submit  # F04-C : soumetteur effectivement injecté
     return app

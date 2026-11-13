@@ -47,7 +47,8 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from tests.test_f2_dormancy import F04B_BOUNDARY_MARKERS, MAIN_REQUIREMENTS, MAIN_ROUTES, production_requirements
+from tests.test_f2_dormancy import (F04B_BOUNDARY_MARKERS, F04C_BOUNDARY_MARKERS, F04C_ENTRYPOINT, MAIN_REQUIREMENTS,
+                                    MAIN_ROUTES, production_requirements)
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
@@ -317,12 +318,28 @@ def test_api_source_never_mentions_the_authorization_boundary():
         assert forbidden not in source, forbidden
 
 
+BOUNDARY_MARKERS = ("authz_f2", "AuthorizedTransactionRunner", "build_isolated_personal_app", "/api/v2/me",
+                    "PortfolioKeyring", "oryx-portfolio-request-v1", "portfolio-write-result-v1",
+                    # R1 PR 8
+                    "ListAnalysisOverviewPage", "ListThesesPage", "build_consultation_router")
+
+
+def boundary_offence(relative: str, text: str):
+    """Marqueurs de la frontière personnelle trouvés hors tests / docs, ou None
+    si le fichier est admis : aucun marqueur, ou fichier NOMINATIF dont les
+    marqueurs sont EXACTEMENT ceux autorisés (F04-B : configuration ; F04-C,
+    arbitrage E-1 : le point d'entrée dormant compose la frontière par
+    build_isolated_personal_app, jamais le runner ni une route)."""
+    found = [m for m in BOUNDARY_MARKERS if m in text]
+    nominative = F04B_BOUNDARY_MARKERS.get(relative, F04C_BOUNDARY_MARKERS.get(relative))
+    if nominative is not None:
+        return None if found == nominative else found
+    return found or None
+
+
 def test_only_tests_and_docs_reference_the_boundary():
     offenders = []
-    markers = ("authz_f2", "AuthorizedTransactionRunner", "build_isolated_personal_app", "/api/v2/me",
-               "PortfolioKeyring", "oryx-portfolio-request-v1", "portfolio-write-result-v1",
-               # R1 PR 8
-               "ListAnalysisOverviewPage", "ListThesesPage", "build_consultation_router")
+    markers = BOUNDARY_MARKERS
     for path in REPO_ROOT.rglob("*"):
         if (not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts or "node_modules" in path.parts
                 or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh", ".yml", ".yaml", ".toml",
@@ -338,9 +355,27 @@ def test_only_tests_and_docs_reference_the_boundary():
             # jamais une composition, jamais une route.
             assert [m for m in markers if m in text] == F04B_BOUNDARY_MARKERS[str(relative)], relative
             continue
+        if str(relative) in F04C_BOUNDARY_MARKERS:
+            # ACT-L1 / F04-C (arbitrage E-1, nominatif) : le point d'entrée dormant
+            # compose la frontière ; marqueurs EXACTS, jamais le runner ni une route.
+            assert boundary_offence(str(relative), text) is None, (relative, [m for m in markers if m in text])
+            continue
         if any(marker in text for marker in markers):
             offenders.append(str(relative))
     assert offenders == []
+
+
+def test_only_the_nominative_files_may_reference_the_boundary():
+    """Négatif : le texte du point d'entrée hors de son chemin nominatif reste
+    refusé ; un marqueur supplémentaire dans le point d'entrée (runner, route)
+    serait refusé lui aussi."""
+    text = (REPO_ROOT / F04C_ENTRYPOINT).read_text(encoding="utf-8")
+    assert boundary_offence(F04C_ENTRYPOINT, text) is None
+    for other in ("core/f2_runtime/entrypoint_copy.py", "core/f2_runtime/config.py", "api.py",
+                  "core/evaluation_worker.py", "scripts/serve_f2.py"):
+        assert boundary_offence(other, text), other
+    for extra in ("AuthorizedTransactionRunner(engine, keyring)", '"/api/v2/me"', "build_consultation_router"):
+        assert boundary_offence(F04C_ENTRYPOINT, text + extra), extra
 
 
 def test_boundary_import_matrix_is_closed():
