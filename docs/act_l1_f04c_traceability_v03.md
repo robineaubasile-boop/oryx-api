@@ -166,7 +166,7 @@ existe (CI : artefact `reports-postgres-NN`), sinon dans un répertoire temporai
 sites F2 ; les balayages de dormance parcourent `reports/` pour les suffixes `.json`, `.txt`, `.md`… Le suffixe
 `.log` évite qu'un journal de TEST soit pris pour un module applicatif ; à valider par l'audit.
 
-**E-3 — PostgreSQL 18 : NON QUALIFIÉ localement** (pas de Docker, dépôt apt PostgreSQL refusé par le proxy de la
+**E-3 — PostgreSQL 18 : NON QUALIFIÉ localement, QUALIFIÉ par la CI (18.6, § 9)** (pas de Docker, dépôt apt PostgreSQL refusé par le proxy de la
 session). Toute la qualification locale est sur PostgreSQL 16.15. La CI de la PR exécute la suite complète sur 16 **et**
 18 ; seuls ses résultats peuvent qualifier PG18.
 
@@ -230,4 +230,16 @@ condition d'origine, l'exception F04-C étant la seule addition.
 
 **Preuves locales (PostgreSQL 16.15, Python 3.11.9, verrou CI).** Les sept tests précédemment en échec : 7 réussis ;
 les six modules complets : 137 réussis ; tests négatifs et de fermeture ajoutés : 19 réussis. Suite complète et CI
-GitHub (PostgreSQL 16 et 18) : consignées ci-dessous après exécution.
+GitHub (PostgreSQL 16 et 18) : ci-dessous.
+
+**Preuves sur le SHA du correctif `8529aa7f8ceb4b68b8199e0b65333b4bf01e0ede`.**
+
+| Exécution | Résultat |
+|---|---|
+| Suite locale complète (PostgreSQL 16.15) | 13 654 réussis, **0 échec**, 5 sautés (limites locales : index de paquets injoignable pour l'installation de production, historique git absent pour 4 tests T6) |
+| CI `postgres-16` (16.15, run 43461279804) | **13 659 réussis, 0 échec, 0 sauté** |
+| CI `postgres-18` (18.6, run 43461279804) | **13 659 réussis, 0 échec, 0 sauté** — PostgreSQL 18 qualifié par la CI |
+| CI `migrations-16`, `migrations-18`, `web`, `required` | réussis |
+
+Les sept tests précédemment en échec réussissent sur PostgreSQL 16 et 18 ; les 91 tests F04-C restent verts.
+Ce commit de traçabilité (documentation seule) suit le correctif ; il ne modifie aucun test ni code.
