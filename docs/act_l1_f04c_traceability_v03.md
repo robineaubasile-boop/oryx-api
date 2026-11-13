@@ -30,8 +30,9 @@ En cas de divergence, le freeze prévaut. Ce document ne crée aucune exigence.
 | `tests/test_f04c_*.py` (6 fichiers) | nouveaux | tests du chapitre 8 |
 | `docs/act_l1_f04c_freeze_v03.md`, ce document | nouveaux | freeze transcrit, traçabilité |
 
-Les sept fichiers existants modifiés sont exactement ceux du § 2 du freeze. Aucun autre fichier existant n'est
-modifié (voir § 6, écart E-1 : sept tests de dormance existants échouent et demandent un arbitrage).
+Les sept fichiers existants modifiés sont exactement ceux du § 2 du freeze. Arbitrage complémentaire E-1 (§ 9) :
+six fichiers de tests de dormance existants sont en outre adaptés, sur autorisation explicite et nominative du
+fondateur ; aucun autre fichier existant n'est modifié.
 
 ## 3. Architecture implémentée
 
@@ -138,13 +139,15 @@ brut (recensement physique à la fermeture).
 
 ## 6. Écarts et points soumis à l'arbitrage
 
-**E-1 — Sept tests de dormance existants échouent (BLOQUANT, arbitrage fondateur requis).** Ils encodent « seuls les
+**E-1 — Sept tests de dormance existants échouaient : RÉSOLU par arbitrage complémentaire du fondateur
+(13/11/2026, § 9).** Constat initial : Ils encodent « seuls les
 tests composent F2 / C3 » et « `core/f2_runtime` ne lit pas l'environnement », ce que le point d'entrée F04-C contredit par
 nature (le freeze § 2 propose `core/f2_runtime/entrypoint.py` et § 6.2 exige `load_f2_config(copie_de_os.environ)`).
 Aucun emplacement hors `tests/` / `docs/` n'y échappe ; ces fichiers ne figurent pas dans les sept fichiers
-modifiables : **ils n'ont pas été modifiés**. Seul `core/f2_runtime/entrypoint.py` est mis en cause.
+modifiables du freeze : ils n'ont pas été modifiés AVANT l'arbitrage. Seul `core/f2_runtime/entrypoint.py` est mis
+en cause. Les ajustements nominatifs ci-dessous ont été autorisés puis implémentés (§ 9).
 
-| Test | Cause | Ajustement nominatif proposé (non appliqué) |
+| Test | Cause | Ajustement nominatif (autorisé, implémenté § 9) |
 |---|---|---|
 | `test_f2_dormancy::test_no_application_module_references_the_f2_package` | `auth_f2` dans `entrypoint.py` | matrice fermée `F04C_REFERENCE_MATRIX = {"core/f2_runtime/entrypoint.py": {"core.auth_f2_http.client_ip": {"PeerAddressResolver"}, "core.auth_f2_http.isolated": {"build_isolated_f2_app"}}}` |
 | `test_f2_dormancy::test_f04b_reference_matrix_is_closed_and_exact` | `core/f2_runtime` contient un fichier F2 hors matrice F04-B | `mentioning == F04B ∪ F04C` ; imports F04-C exacts ; mêmes interdits (`F2AuthService`, `HttpAdmission`, anti-abus, cookies) |
@@ -200,3 +203,31 @@ scénario sont écrites par `save_evidence` (§ E-2).
 - Aucune route, aucun contrat HTTP, aucune règle métier ou transactionnelle modifiés ; compositions isolées
   historiques inchangées par défaut (`submitter=None`).
 - P1 et P2 restent des **réserves ouvertes**.
+
+## 9. Arbitrage complémentaire E-1 (fondateur, 13/11/2026)
+
+**Décision.** Après diagnostic des sept échecs de la CI (PostgreSQL 16 et 18, SHA `c05088c`), le fondateur autorise
+explicitement, et uniquement, la modification de six fichiers de tests : `tests/test_f2_dormancy.py`,
+`tests/test_f2_http_dormancy.py`, `tests/test_authz_f2_dormancy.py`, `tests/test_route_policy_dormancy.py`,
+`tests/test_f04b_database.py`, `tests/test_authz_f2_pr9c3_boundary.py`, ainsi que la présente traçabilité.
+Exceptions strictement limitées à `core/f2_runtime/entrypoint.py` ; aucun `skip` / `xfail`, aucune suppression
+d'assertion, aucune exclusion de répertoire, aucune exception générale. Ce n'est PAS une modification du freeze
+normatif (`docs/act_l1_f04c_freeze_v03.md`, inchangé) mais un arbitrage complémentaire.
+
+**Implémentation (tests seulement ; aucun code de production, aucune route, aucun fichier Railway).**
+
+| Fichier | Changement |
+|---|---|
+| `tests/test_f2_dormancy.py` | Source unique des constantes F04-C : `F04C_ENTRYPOINT`, `F04C_REFERENCE_MATRIX` / `F04C_REFERENCE_NAMES` (2 imports F2, 2 noms), `F04C_ENTRYPOINT_IMPORTS` (ensemble COMPLET et exact des imports : ni `api`, ni `core.db`, ni `core.models`), marqueurs exacts `F04C_BOUNDARY_MARKERS`, `F04C_ROUTE_POLICY_MARKERS`, `F04C_C3_MARKERS`. Prédicat `unauthorized_f2_reference` (même condition + matrice F04-C). `mentioning == F04B ∪ F04C`. Nouveaux : `test_f04c_reference_matrix_is_closed_and_exact` (imports exacts ; interdits `F2AuthService`, `HttpAdmission`, anti-abus, cookies, `SessionLocal`, `get_db`, runner, création de moteur), `test_the_f04c_exception_is_nominative_and_refuses_any_other_module` (négatif), `test_no_application_entrypoint_imports_or_serves_the_f04c_entrypoint` (ni `api.py`, ni worker, scripts, CI, Alembic, frontends, fichiers de configuration racine n'importent ou ne servent le point d'entrée). |
+| `tests/test_f2_http_dormancy.py` | Prédicat `composes_the_isolated_application` (même condition ; seul le point d'entrée nominatif admis) ; dans le balayage, ses imports F2 doivent égaler la matrice F04-C. Négatif : `test_only_the_f04c_entrypoint_may_compose_the_isolated_application`. |
+| `tests/test_authz_f2_dormancy.py` | Marqueurs en constante `BOUNDARY_MARKERS` (inchangés) ; `boundary_offence` : F04-B et F04-C nominatifs à marqueurs EXACTS. Négatif : `test_only_the_nominative_files_may_reference_the_boundary` (texte ailleurs refusé ; runner, route ou routeur ajoutés au point d'entrée refusés). |
+| `tests/test_route_policy_dormancy.py` | `route_policy_offence` : marqueurs exacts pour le seul point d'entrée. Négatif : `test_only_the_f04c_entrypoint_may_reference_the_route_policy` (refus 410 / configuration de porte ajoutés : refusés). |
+| `tests/test_f04b_database.py` | `f04b_source_offences` : règles historiques pour tout `core/f2_runtime/*.py` ; `os` / `environ` admis pour le seul point d'entrée, sous la forme EXACTE vérifiée par `environment_read_only_at_startup` (seul `import os` ; `os` n'est utilisé que pour `os.environ` ; une seule lecture, dans `_startup`, `source = os.environ if self._environ is None else self._environ` ; seule utilisation `config = load_f2_config(dict(source))` ; aucune écriture). `core.db`, `core.models`, `api`, `getenv`, `putenv`, `SessionLocal`, `get_db` restent interdits. Négatifs : 9 variantes refusées dans le point d'entrée (lecture à l'import, seconde lecture, absence de copie, 2 mutations, `os.getenv`, `from os import environ`, `SessionLocal`, `import api`) ; la forme exacte refusée dans 3 autres modules. |
+| `tests/test_authz_f2_pr9c3_boundary.py` | Marqueurs en constante `C3_PRODUCTION_MARKERS` (inchangés) ; `c3_offences` : marqueurs exacts (`DecryptageHttpConfig`, `authz_f2_http.decryptage`) pour le seul point d'entrée. Négatif : `test_only_the_f04c_entrypoint_may_build_the_c3_configuration` (route, routeur ou code d'erreur C3 ajoutés : refusés). |
+
+Les garanties historiques sont inchangées pour tout autre fichier ; chaque prédicat extrait reproduit exactement la
+condition d'origine, l'exception F04-C étant la seule addition.
+
+**Preuves locales (PostgreSQL 16.15, Python 3.11.9, verrou CI).** Les sept tests précédemment en échec : 7 réussis ;
+les six modules complets : 137 réussis ; tests négatifs et de fermeture ajoutés : 19 réussis. Suite complète et CI
+GitHub (PostgreSQL 16 et 18) : consignées ci-dessous après exécution.

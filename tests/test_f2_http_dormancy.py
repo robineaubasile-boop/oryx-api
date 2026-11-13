@@ -28,7 +28,8 @@ import sys
 
 import pytest
 
-from tests.test_f2_dormancy import F04B_REFERENCE_MATRIX, F2_REFERENCE_MATRIX, MAIN_ROUTES
+from tests.test_f2_dormancy import (F04B_REFERENCE_MATRIX, F04C_ENTRYPOINT, F04C_REFERENCE_MATRIX,
+                                    F2_REFERENCE_MATRIX, MAIN_ROUTES, f2_imports)
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 HTTP_PACKAGE = REPO_ROOT / "core" / "auth_f2_http"
@@ -134,6 +135,17 @@ def test_api_source_never_mentions_f2_configuration():
         assert forbidden not in source, forbidden
 
 
+def composes_the_isolated_application(relative: str, text: str) -> bool:
+    """Fichier hors tests / docs qui nomme la composition isolée ou la couche
+    HTTP F2 sans matrice fermée. ACT-L1 / F04-C (arbitrage E-1) : seul le point
+    d'entrée dormant est admis, et seulement si ses imports F2 sont EXACTEMENT
+    ceux de F04C_REFERENCE_MATRIX (vérifiés par le balayage)."""
+    if relative in F04C_REFERENCE_MATRIX:
+        return False
+    return "build_isolated_f2_app" in text or ("auth_f2_http" in text and relative not in F2_REFERENCE_MATRIX
+                                               and relative not in F04B_REFERENCE_MATRIX)
+
+
 def test_only_tests_compose_the_isolated_application():
     offenders = []
     for path in REPO_ROOT.rglob("*"):
@@ -147,11 +159,23 @@ def test_only_tests_compose_the_isolated_application():
         text = path.read_text(encoding="utf-8", errors="ignore")
         # ACT-L1 / F04-B : core/f2_runtime/config.py réutilise les trousseau et
         # validateur d'origine HTTP F2 (matrice fermée F04B_REFERENCE_MATRIX) ;
-        # aucun fichier hors tests ne nomme jamais la composition.
-        if "build_isolated_f2_app" in text or ("auth_f2_http" in text and str(relative) not in F2_REFERENCE_MATRIX
-                                               and str(relative) not in F04B_REFERENCE_MATRIX):
+        # aucun fichier hors tests ne nomme jamais la composition, hormis le seul
+        # point d'entrée F04-C (arbitrage E-1), dont les imports sont exacts.
+        if str(relative) in F04C_REFERENCE_MATRIX:
+            assert set(f2_imports(path)) == F04C_REFERENCE_MATRIX[str(relative)], relative
+        if composes_the_isolated_application(str(relative), text):
             offenders.append(str(relative))
     assert offenders == []
+
+
+def test_only_the_f04c_entrypoint_may_compose_the_isolated_application():
+    """Négatif : le même texte de composition hors du point d'entrée nominatif
+    (autre module de core/f2_runtime, api.py, worker, script) reste refusé."""
+    text = (REPO_ROOT / F04C_ENTRYPOINT).read_text(encoding="utf-8")
+    assert not composes_the_isolated_application(F04C_ENTRYPOINT, text)
+    for other in ("core/f2_runtime/entrypoint_copy.py", "core/f2_runtime/config.py", "api.py",
+                  "core/evaluation_worker.py", "scripts/serve_f2.py", "web-v2/app.js"):
+        assert composes_the_isolated_application(other, text), other
 
 
 def test_http_package_reads_no_configuration_and_loads_no_client():

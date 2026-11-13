@@ -24,7 +24,8 @@ import sys
 
 import pytest
 
-from tests.test_f2_dormancy import MAIN_REQUIREMENTS, MAIN_ROUTES, production_requirements
+from tests.test_f2_dormancy import (F04C_ENTRYPOINT, F04C_ROUTE_POLICY_MARKERS, MAIN_REQUIREMENTS, MAIN_ROUTES,
+                                    production_requirements)
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
@@ -135,6 +136,19 @@ def test_api_source_never_mentions_the_route_policy():
         assert marker not in source, marker
 
 
+def route_policy_offence(relative: str, text: str):
+    """Marqueurs de la politique F-02A trouvés hors tests / docs / paquet, ou
+    None si le fichier est admis : aucun marqueur, ou point d'entrée F04-C
+    NOMINATIF (arbitrage E-1) dont les marqueurs sont EXACTEMENT ceux autorisés
+    (la porte inchangée est composée ; jamais de refus 410 ni de configuration
+    de porte réimplémentés)."""
+    found = [m for m in MARKERS if m in text]
+    nominative = F04C_ROUTE_POLICY_MARKERS.get(relative)
+    if nominative is not None:
+        return None if found == nominative else found
+    return found or None
+
+
 def test_only_tests_and_docs_reference_the_route_policy():
     offenders = []
     for path in REPO_ROOT.rglob("*"):
@@ -146,9 +160,25 @@ def test_only_tests_and_docs_reference_the_route_policy():
         if relative.parts[0] in ("tests", "docs") or PACKAGE in path.parents:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
+        if str(relative) in F04C_ROUTE_POLICY_MARKERS:
+            # ACT-L1 / F04-C (arbitrage E-1, nominatif) : marqueurs EXACTS.
+            assert route_policy_offence(str(relative), text) is None, (relative, [m for m in MARKERS if m in text])
+            continue
         if any(marker in text for marker in MARKERS):
             offenders.append(str(relative))
     assert offenders == []
+
+
+def test_only_the_f04c_entrypoint_may_reference_the_route_policy():
+    """Négatif : le texte du point d'entrée ailleurs reste refusé ; un marqueur
+    de refus F-02A ajouté au point d'entrée serait refusé."""
+    text = (REPO_ROOT / F04C_ENTRYPOINT).read_text(encoding="utf-8")
+    assert route_policy_offence(F04C_ENTRYPOINT, text) is None
+    for other in ("core/f2_runtime/entrypoint_copy.py", "core/f2_runtime/work_registry.py", "api.py",
+                  "core/evaluation_worker.py", "scripts/serve_f2.py"):
+        assert route_policy_offence(other, text), other
+    for extra in ('"legacy_personal_api_retired"', "RouteGateConfigError"):
+        assert route_policy_offence(F04C_ENTRYPOINT, text + extra), extra
 
 
 def _imports(path):

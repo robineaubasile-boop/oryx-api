@@ -45,6 +45,7 @@ from tests.authz_f2_pr9c3_support import C3_PATHS, Recorder
 from tests.authz_f2_support import K1, K2, portfolio_keyring
 from tests.f2_http_support import ORIGIN, csrf_keyring
 from tests.f2_support import make_keyring
+from tests.test_f2_dormancy import F04C_C3_MARKERS, F04C_ENTRYPOINT
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 from tests.test_migration_0004_drop_company_analyses import _code_tokens
@@ -538,9 +539,24 @@ def test_the_real_entrypoint_has_no_c3_route_whatever_the_environment(flags):
         set(MAIN_ROUTES))
 
 
+C3_PRODUCTION_MARKERS = ("/api/v2/me/decryptage", "DecryptageHttpConfig", "build_decryptage_router",
+                         "authz_f2_http.decryptage", "capacity_unavailable", "provider_unavailable",
+                         "instrument_unavailable", "reservation_blocked")
+
+
+def c3_offences(relative: str, text: str) -> list:
+    """(fichier, marqueur) C3 hors tests / docs / modules C3. ACT-L1 / F04-C
+    (arbitrage E-1) : le point d'entrée dormant construit la configuration
+    complète DecryptageHttpConfig ; ses marqueurs doivent être EXACTEMENT ceux
+    autorisés (aucune route C3, aucun code d'erreur C3, aucun routeur)."""
+    found = [m for m in C3_PRODUCTION_MARKERS if m in text]
+    nominative = F04C_C3_MARKERS.get(relative)
+    if nominative is not None and found == nominative:
+        return []
+    return [(relative, m) for m in found]
+
+
 def test_no_production_file_mentions_c3():
-    markers = ("/api/v2/me/decryptage", "DecryptageHttpConfig", "build_decryptage_router", "authz_f2_http.decryptage",
-               "capacity_unavailable", "provider_unavailable", "instrument_unavailable", "reservation_blocked")
     offenders = []
     for path in REPO_ROOT.rglob("*"):
         if (not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts or "node_modules" in path.parts
@@ -551,11 +567,23 @@ def test_no_production_file_mentions_c3():
         if relative.parts[0] in ("tests", "docs") or path in (C3_MODULE, ISOLATED):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        offenders += [(str(relative), m) for m in markers if m in text]
+        offenders += c3_offences(str(relative), text)
     assert offenders == []
     for path in (REPO_ROOT / "api.py", REPO_ROOT / "web-v2" / "index.html"):
         text = path.read_text(encoding="utf-8")
         assert "decryptage/turns" not in text and "authz_f2" not in text and "/api/v2/" not in text, path
+
+
+def test_only_the_f04c_entrypoint_may_build_the_c3_configuration():
+    """Négatif : le texte du point d'entrée ailleurs reste refusé ; une route
+    ou un code d'erreur C3 ajoutés au point d'entrée seraient refusés."""
+    text = (REPO_ROOT / F04C_ENTRYPOINT).read_text(encoding="utf-8")
+    assert c3_offences(F04C_ENTRYPOINT, text) == []
+    for other in ("core/f2_runtime/entrypoint_copy.py", "core/f2_runtime/resources.py", "api.py",
+                  "core/evaluation_worker.py", "scripts/serve_f2.py"):
+        assert c3_offences(other, text), other
+    for extra in ('"/api/v2/me/decryptage/turns"', "build_decryptage_router", '"capacity_unavailable"'):
+        assert c3_offences(F04C_ENTRYPOINT, text + extra), extra
 
 
 def test_no_new_command_plan_operation_or_migration():
