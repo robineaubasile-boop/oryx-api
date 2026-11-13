@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-from tests.test_f2_dormancy import MAIN_REQUIREMENTS, MAIN_ROUTES
+from tests.test_f2_dormancy import MAIN_REQUIREMENTS, MAIN_ROUTES, production_requirements
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
@@ -187,8 +187,7 @@ def test_the_package_reads_no_configuration_and_starts_nothing():
 
 
 def test_no_migration_and_no_production_dependency():
-    lines = [line.strip() for line in (REPO_ROOT / "requirements.txt").read_text().splitlines() if line.strip()]
-    assert lines == MAIN_REQUIREMENTS
+    assert production_requirements() == MAIN_REQUIREMENTS
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert len(versions) == 21
     assert versions[-1] == "0021_decryptage_turn_reservations.py"

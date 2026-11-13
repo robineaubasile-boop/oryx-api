@@ -11,7 +11,10 @@ rien.
 - core/auth_f2 ne lit aucune variable d'environnement, ne pose aucun
   cookie, n'importe ni FastAPI ni api.py, et n'importe httpx qu'à la
   construction d'un adaptateur HTTP (jamais au chargement).
-- requirements.txt (production) ne gagne aucune dépendance.
+- requirements.txt (production) ne gagne aucune dépendance. ACT-L1 / F04-B
+  V0.3 : les dépendances DIRECTES de production sont celles de
+  requirements.in (MAIN_REQUIREMENTS, liste exacte) et requirements.txt en
+  est le verrou complet avec empreintes (tests/test_f04b_dependencies.py).
 
 R1 PR 5 (C.5.2-B) : la frontière d'autorisation (core/authz_f2) et la
 route personnelle isolée (core/authz_f2_http) importent des modules F2.
@@ -103,8 +106,49 @@ def f2_imports(path) -> dict:
     return found
 
 
-MAIN_REQUIREMENTS = ["fastapi==0.110.0", "uvicorn==0.27.0", "pydantic==2.10.0", "requests", "python-dotenv",
-                     "yfinance", "anthropic>=0.25.0", "sqlalchemy", "psycopg2-binary", "alembic>=1.13"]
+# ACT-L1 / F04-B V0.3 (freeze fondateur) : dépendances DIRECTES de production,
+# exactes et épinglées (requirements.in) ; httpx, httpx2 et starlette y sont
+# désormais explicites. Toute autre modification exige un nouveau freeze.
+MAIN_REQUIREMENTS = ["fastapi==0.110.0", "starlette==0.36.3", "uvicorn==0.27.0", "pydantic==2.10.0",
+                     "requests==2.34.2", "python-dotenv==1.2.4", "yfinance==1.7.0", "anthropic==1.11.0",
+                     "httpx==0.28.1", "httpx2==2.13.1", "sqlalchemy==2.1.3", "psycopg2-binary==2.9.13",
+                     "alembic==1.20.0"]
+
+
+def production_requirements() -> list:
+    """Dépendances directes déclarées par requirements.in (sans commentaire)."""
+    lines = (REPO_ROOT / "requirements.in").read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
+# ACT-L1 / F04-B V0.3 : fichiers de core/f2_runtime (ressources d'exécution F2,
+# dormantes) autorisés à importer F2, avec l'ensemble EXACT de leurs modules F2
+# et les noms importables. Un fichier F04-B hors de cette matrice ne peut
+# mentionner core.auth_f2 ; aucun n'importe F2AuthService, une composition,
+# HttpAdmission, ni n'initialise, ne fait tourner ou ne purge l'état anti-abus.
+F04B_REFERENCE_MATRIX = {
+    "core/f2_runtime/config.py": frozenset({
+        "core.auth_f2.crypto", "core.auth_f2.keys", "core.auth_f2.providers", "core.auth_f2_http.csrf",
+        "core.auth_f2_http.provenance"}),
+    "core/f2_runtime/preflight.py": frozenset({"core.auth_f2.abuse", "core.auth_f2.keys", "core.auth_f2.policy"}),
+    "core/f2_runtime/resources.py": frozenset({"core.auth_f2.http_providers"}),
+}
+F04B_REFERENCE_NAMES = {
+    "core.auth_f2.crypto": {"CryptoContractError", "Redacted", "b64url_decode_secret"},
+    "core.auth_f2.keys": {"PURPOSES", "Keyring", "KeyringError"},
+    "core.auth_f2.providers": {"is_valid_issuer"},
+    "core.auth_f2_http.csrf": {"CsrfConfigError", "CsrfKeyring"},
+    "core.auth_f2_http.provenance": {"validate_allowed_origins"},
+    "core.auth_f2.abuse": {"AbuseUnavailable", "load_key_state"},
+    "core.auth_f2.policy": {"LOCK_TIMEOUT", "STATEMENT_TIMEOUT"},
+    "core.auth_f2.http_providers": {"HttpResendMailer", "HttpSupabaseOtpProvider"},
+}
+# Marqueurs EXACTS (dans l'ordre des listes de marqueurs de chaque balayage)
+# tolérés dans les fichiers F04-B par les autres tests de dormance.
+F04B_BOUNDARY_MARKERS = {"core/f2_runtime/config.py": ["authz_f2", "PortfolioKeyring"]}
+F04B_B1_MARKERS = {"core/f2_runtime/config.py": ["DecryptageKeyring"],
+                   "core/f2_runtime/preflight.py": ["decryptage_turn_reservations"]}
+F04B_B2_MARKERS = {"core/f2_runtime/resources.py": ["decryptage_providers"]}
 
 
 def _app_calls(tree):
@@ -141,8 +185,10 @@ def test_no_application_module_references_the_f2_package():
                                                                                             ".ts", ".json"):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if ("auth_f2" in text or "F2AuthService" in text) and str(path.relative_to(REPO_ROOT)) not in F2_REFERENCE_MATRIX:
-                offenders.append(str(path.relative_to(REPO_ROOT)))
+            relative = str(path.relative_to(REPO_ROOT))
+            if ("auth_f2" in text or "F2AuthService" in text) and relative not in F2_REFERENCE_MATRIX \
+                    and relative not in F04B_REFERENCE_MATRIX:
+                offenders.append(relative)
     assert offenders == []
 
 
@@ -161,6 +207,31 @@ def test_f2_reference_matrix_is_closed_and_exact():
         for forbidden in ("F2AuthService", "build_isolated_f2_app", "HttpAdmission", "initialize_abuse_key_state",
                           "http_providers", "set_cookie", "clear_cookie"):
             assert forbidden not in text, (relative, forbidden)
+
+
+def test_f04b_reference_matrix_is_closed_and_exact():
+    """ACT-L1 / F04-B : chaque fichier de core/f2_runtime qui mentionne F2 est
+    dans la matrice, importe EXACTEMENT ses modules F2 et seulement des noms
+    autorisés ; aucun service, aucune composition, aucune admission HTTP,
+    aucun acte sur l'état anti-abus (initialisation, rotation, retrait, purge,
+    création de sujets), aucun cookie."""
+    mentioning = {str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "core" / "f2_runtime").glob("*.py")
+                  if "auth_f2" in p.read_text(encoding="utf-8")}
+    assert mentioning == set(F04B_REFERENCE_MATRIX)
+    for relative, expected in F04B_REFERENCE_MATRIX.items():
+        path = REPO_ROOT / relative
+        imports = f2_imports(path)
+        assert set(imports) == expected, relative
+        for module, names in imports.items():
+            assert names <= F04B_REFERENCE_NAMES[module], (relative, module, names)
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("F2AuthService", "build_isolated_f2_app", "HttpAdmission", "set_cookie", "clear_cookie"):
+            assert forbidden not in text, (relative, forbidden)
+        tree = ast.parse(text)
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {
+            n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert not names & {"initialize_abuse_key_state", "rotate_abuse_key", "retire_previous_abuse_key",
+                            "purge_abuse_history", "ensure_subjects", "lock_key_state", "F2AuthService"}, relative
 
 
 def test_f2_package_reads_no_configuration_and_sets_no_cookie():
@@ -194,5 +265,4 @@ def test_importing_the_package_loads_no_network_client():
 
 
 def test_production_requirements_are_unchanged():
-    lines = [l.strip() for l in (REPO_ROOT / "requirements.txt").read_text().splitlines() if l.strip()]
-    assert lines == MAIN_REQUIREMENTS
+    assert production_requirements() == MAIN_REQUIREMENTS

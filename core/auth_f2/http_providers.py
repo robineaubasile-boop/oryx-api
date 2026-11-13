@@ -8,8 +8,16 @@ bornés. Les URL viennent de la configuration serveur, jamais d'une entrée
 client. Les corps de requête et de réponse ne sont jamais journalisés ;
 les clés API sont masquées par repr().
 
-httpx n'est importé qu'à la construction (dépendance de test de la CI,
-absente de requirements.txt tant que F2 est dormant).
+httpx n'est importé qu'à la construction (dépendance de production
+qualifiée par F04-B, jamais chargée à l'import de ce module).
+
+F04-B (extension technique) : chaque adaptateur expose close(), qui ferme
+le client httpx qu'il possède, une seule fois. Sans transport injecté
+(composition de production), l'adaptateur possède le client ET son
+transport : close() ferme les deux (sémantique httpx). Avec un transport
+injecté, ce transport appartient à celui qui l'a fourni : close() ne le
+ferme pas (le client n'a alors aucune connexion propre). Méthodes, en-têtes,
+corps, délais, TLS, redirections et classification des erreurs inchangés.
 """
 import re
 
@@ -38,6 +46,13 @@ def _client(base_url: str, transport):
         base_url=base_url, timeout=httpx.Timeout(TIMEOUT_SECONDS), follow_redirects=False, verify=True,
         trust_env=False, transport=transport,
     )
+
+
+def _close(client, owns_transport: bool) -> None:
+    """Fermeture du client possédé ; un transport injecté n'est jamais fermé
+    ici (httpx.Client.close fermerait aussi le transport fourni)."""
+    if owns_transport and not client.is_closed:
+        client.close()
 
 
 def _post(client, path: str, *, headers: dict, payload: dict):
@@ -72,9 +87,14 @@ class HttpSupabaseOtpProvider:
         self._service_key = service_key
         self._api_key = api_key
         self._client = _client(base_url, transport)
+        self._owns_transport = transport is None
 
     def __repr__(self) -> str:
         return f"HttpSupabaseOtpProvider(issuer={self.issuer!r})"
+
+    def close(self) -> None:
+        """Ferme le client httpx possédé (idempotent, voir le module)."""
+        _close(self._client, self._owns_transport)
 
     def generate_email_otp(self, email: str):
         key = self._service_key.reveal()
@@ -104,9 +124,14 @@ class HttpResendMailer:
         self._api_key = api_key
         self._sender = sender
         self._client = _client(RESEND_URL, transport)
+        self._owns_transport = transport is None
 
     def __repr__(self) -> str:
         return "HttpResendMailer()"
+
+    def close(self) -> None:
+        """Ferme le client httpx possédé (idempotent, voir le module)."""
+        _close(self._client, self._owns_transport)
 
     def send_otp(self, *, to: str, code: str, idempotency_key: str):
         result = _post(

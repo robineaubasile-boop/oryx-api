@@ -30,7 +30,7 @@ from alembic.script import ScriptDirectory
 from core.authz_f2 import _adapters
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_reservation as dr
-from tests.test_f2_dormancy import MAIN_ROUTES
+from tests.test_f2_dormancy import F04B_B2_MARKERS, MAIN_ROUTES
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
@@ -196,6 +196,12 @@ def test_no_application_module_imports_b2_and_api_never_mentions_it():
             text = path.read_text(encoding="utf-8", errors="ignore")
             hits = [m for m in B2_MARKERS if m in text]
             relative = path.relative_to(REPO_ROOT).as_posix()
+            if relative in F04B_B2_MARKERS:
+                # ACT-L1 / F04-B (nominatif) : le gestionnaire de ressources
+                # construit les transports réels (EODHD, FMP, Claude) ; jamais
+                # B2, jamais l'orchestrateur, jamais une route.
+                assert hits == F04B_B2_MARKERS[relative], (relative, hits)
+                continue
             if relative in C3_B2_MARKERS:
                 # R1 PR 9-C3 (nominatif) : le routeur isolé construit
                 # l'orchestrateur B2 avec le runner de la composition ; jamais

@@ -47,7 +47,7 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from tests.test_f2_dormancy import MAIN_REQUIREMENTS, MAIN_ROUTES
+from tests.test_f2_dormancy import F04B_BOUNDARY_MARKERS, MAIN_REQUIREMENTS, MAIN_ROUTES, production_requirements
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
@@ -332,6 +332,12 @@ def test_only_tests_and_docs_reference_the_boundary():
         if relative.parts[0] in ("tests", "docs") or AUTHZ in path.parents or AUTHZ_HTTP in path.parents:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
+        if str(relative) in F04B_BOUNDARY_MARKERS:
+            # ACT-L1 / F04-B (nominatif) : la configuration construit les
+            # trousseaux portefeuille / Décrypter dédiés ; jamais le runner,
+            # jamais une composition, jamais une route.
+            assert [m for m in markers if m in text] == F04B_BOUNDARY_MARKERS[str(relative)], relative
+            continue
         if any(marker in text for marker in markers):
             offenders.append(str(relative))
     assert offenders == []
@@ -410,5 +416,4 @@ def test_only_the_additive_0021_migration_and_no_new_production_dependency():
     assert script.get_heads() == [HEAD]
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert len(versions) == 21 and versions[-1] == HEAD_FILE
-    lines = [line.strip() for line in (REPO_ROOT / "requirements.txt").read_text().splitlines() if line.strip()]
-    assert lines == MAIN_REQUIREMENTS
+    assert production_requirements() == MAIN_REQUIREMENTS
