@@ -1,0 +1,13 @@
+# Banc P1-Q (ACT-L1 / F04-D) — dépendances du conteneur de diagnostic UNIQUEMENT.
+# Mêmes versions ET mêmes empreintes que requirements.txt (production) : uvicorn
+# 0.27.0 et ses dépendances h11 / click ; vérifié par tests/test_p1q_isolation.py.
+# Installation : pip install --require-hashes --no-deps -r requirements.txt
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
+    --hash=sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34
+h11==0.16.0 \
+    --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+uvicorn==0.27.0 \
+    --hash=sha256:890b00f6c537d58695d3bb1f28e23db9d9e7a17cbcc76d7457c499935f933e24 \
+    --hash=sha256:c855578045d45625fd027367f7653d249f7c49f9361ba15cf9624186b26b8eb6
