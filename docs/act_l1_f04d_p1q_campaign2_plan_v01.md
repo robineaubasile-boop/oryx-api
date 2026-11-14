@@ -1,4 +1,9 @@
-# ACT-L1 / F04-D / P1-Q — Plan de la campagne 2 (V0.1, PROPOSITION, NON EXÉCUTÉE)
+# ACT-L1 / F04-D / P1-Q — Plan de la campagne 2 (V0.1, révision a, PROPOSITION, NON EXÉCUTÉE)
+
+| Révision | Date | Objet |
+|---|---|---|
+| V0.1 | 14/11/2026 | première version (PR robineaubasile-boop/oryx-api#243, commit `22c5d0e`) |
+| V0.1 a | 14/11/2026 | corrections de l'audit indépendant ChatGPT de la PR #243 (REQUEST CHANGES) : (1) préflight sans aucune valeur proxy ni nom de VPN (§ 3.3) ; (2) traduction NAT64 prouvée côté client seulement, arrêt avant session, aucun reclassement, aucun FAIL masqué (§ 4.1, § 4.1 bis, § 5, § 11) ; (3) R7, R8, R10 en refus par défaut sans ambiguïté (§ 4.4, § 4.5) ; (4) confrontation Q6-B au sein d'un même démarrage, sources périmées exclues, ordre S2 → privé → cibles → privé (§ 6.1, § 6.1 bis, § 6.2, § 9, § 10) |
 
 > **Statut : plan à valider par le fondateur. Rien n'est exécuté.** Aucun déploiement, redéploiement, nettoyage
 > ni changement de variable sans feu vert explicite, étape par étape (§ 9). Le protocole figé
@@ -89,11 +94,18 @@ Désactiver au préalable : VPN, iCloud Private Relay (Réglages → identifiant
 « Limiter le suivi de l'adresse IP » sur l'interface, toute protection web d'antivirus. Utiliser la **box fixe**
 (Ethernet ou Wi-Fi), **jamais** un partage de connexion mobile (NAT64 / CGNAT à rotation, § 4.2).
 
+**Règle de confidentialité du préflight (correction d'audit 1)** : ne jamais enregistrer, afficher dans un
+fichier ni transmettre la **valeur** d'une variable ou d'un réglage proxy (hôte, port, identifiants, URL PAC,
+liste d'exceptions) ni le nom d'un service VPN. Seuls sont consignés : les **noms** des variables d'environnement
+contenant `proxy`, les **drapeaux** d'activation (`…Enable : 0/1`) et le **nombre** de services VPN connectés.
+
 ```bash
-{ date -u; env | grep -i proxy; scutil --proxy; scutil --nc list; } > "$RES/preflight.txt" 2>&1; cat "$RES/preflight.txt"
+{ date -u; "$PY" -c "import os;print('proxy_env_names:',sorted(k for k in os.environ if 'proxy' in k.lower()))"; scutil --proxy | grep -E '^[[:space:]]*[A-Za-z]+Enable[[:space:]]*:'; echo "vpn_connected_count: $(scutil --nc list | grep -c '(Connected)')"; } > "$RES/preflight.txt" 2>&1; cat "$RES/preflight.txt"
 ```
 
-Attendu : aucune variable `*proxy*`, `HTTPEnable/HTTPSEnable/SOCKSEnable : 0`, aucun service VPN `(Connected)`.
+Attendu : `proxy_env_names: []`, tous les drapeaux `…Enable : 0` (HTTP, HTTPS, SOCKS, configuration et découverte
+automatiques), `vpn_connected_count: 0`. Si une condition n'est pas remplie : désactiver le réglage concerné
+**sans en consigner la valeur**, puis refaire le contrôle ; le fichier remis à l'audit ne contient que ces lignes.
 
 ```bash
 "$PY" -c "import ssl,socket;h='p1q-receiver-p1q.up.railway.app';s=ssl.create_default_context().wrap_socket(socket.create_connection((h,443),timeout=10),server_hostname=h);print(s.version(),dict(x[0] for x in s.getpeercert()['issuer']))" >> "$RES/preflight.txt" 2>&1; tail -1 "$RES/preflight.txt"
@@ -127,23 +139,41 @@ pas disponible dans le curl de macOS : consigné, sans contournement.
 | Situation | Comment elle se manifeste | Effet sur l'analyse | Contrôle |
 |---|---|---|---|
 | IPv6 de bout en bout (AAAA réel, client IPv6 natif) | la sonde résout un AAAA global ; l'edge voit une IPv6 ; `X-Real-IP` attendu en IPv6 (`g6:`) | cellule exploitable | `X-Real-IP` de version 6 dans une cellule de famille 6 |
-| **NAT64 / DNS64** (réseau IPv6 seul, typiquement partage mobile) | `getaddrinfo(AF_INET6)` rend une adresse **synthétisée** (`64:ff9b::/96`, `64:ff9b:1::/48` ou préfixe d'opérateur embarquant l'IPv4 du A) ; l'edge voit l'**IPv4 de la passerelle** | cellule « famille 6 » portant un `X-Real-IP` **IPv4** ; l'analyseur classe selon la version de la **valeur** : avec un `--self-ip` IPv4 différent de la passerelle ⇒ **`not_self` = FAIL artificiel** | refuser toute adresse résolue dans ces préfixes ; comparer `dig AAAA` d'un résolveur public (aucun) et du résolveur local (AAAA synthétique = DNS64) |
+| **NAT64 / DNS64** (réseau IPv6 seul, typiquement partage mobile) | `getaddrinfo(AF_INET6)` rend une adresse **synthétisée** (`64:ff9b::/96`, `64:ff9b:1::/48` ou préfixe d'opérateur embarquant l'IPv4 du A) ; l'edge voit l'**IPv4 de la passerelle** | cellule « famille 6 » portant un `X-Real-IP` **IPv4** ; l'analyseur classe selon la version de la **valeur** : avec un `--self-ip` IPv4 différent de la passerelle ⇒ `not_self`, **FAIL** affiché | preuve **côté client** avant toute session (contrôle ci-dessous) ; traduction prouvée ⇒ **arrêt**, aucune session sur ce réseau |
 | IPv4 mappée (`::ffff:a.b.c.d`) | n'apparaît qu'avec `AI_V4MAPPED` ; la sonde n'utilise pas ce drapeau ; socket IPv6 transportant de l'IPv4 | même risque que NAT64 si elle apparaissait | la sonde résout sans drapeau ; contrôle ci-dessous |
 | 464XLAT / CLAT (iPhone en partage) | le Mac reçoit une IPv4 privée traduite ; famille 4 par une passerelle d'opérateur, souvent avec **rotation d'adresse** | X-Real-IP instable ⇒ INCONCLUSIVE ou `not_self` | interdire le partage mobile |
 
 Contrôle préalable (Mac), à archiver :
 
 ```bash
-for r in 1.1.1.1 8.8.8.8 9.9.9.9; do echo "== $r A: $(dig +short A p1q-receiver-p1q.up.railway.app @$r | tr '\n' ' ') AAAA: $(dig +short AAAA p1q-receiver-p1q.up.railway.app @$r | tr '\n' ' ')"; done | tee "$RES/dns_proof.txt"; echo "== local AAAA: $(dig +short AAAA p1q-receiver-p1q.up.railway.app | tr '\n' ' ')" | tee -a "$RES/dns_proof.txt"
+for r in 1.1.1.1 8.8.8.8 9.9.9.9; do echo "== $r A_count: $(dig +short A p1q-receiver-p1q.up.railway.app @$r | grep -c .) AAAA: $(dig +short AAAA p1q-receiver-p1q.up.railway.app @$r | tr '\n' ' ')"; done | tee "$RES/dns_proof.txt"; echo "== local AAAA: $(dig +short AAAA p1q-receiver-p1q.up.railway.app | tr '\n' ' ')" | tee -a "$RES/dns_proof.txt"; echo "== local AAAA ipv4only.arpa (RFC 7050): $(dig +short AAAA ipv4only.arpa | tr '\n' ' ')" | tee -a "$RES/dns_proof.txt"
 ```
 
 ```bash
 "$PY" -c "import socket;print(socket.getaddrinfo('p1q-receiver-p1q.up.railway.app',443,socket.AF_INET6,socket.SOCK_STREAM))" >> "$RES/dns_proof.txt" 2>&1; tail -1 "$RES/dns_proof.txt"
 ```
 
-Attendu aujourd'hui : AAAA vide partout et `socket.gaierror` ; la famille 6 sera `family_unavailable`. **Si**
-une adresse IPv6 est rendue : la conserver, vérifier qu'elle n'est ni dans `64:ff9b::/96`, ni dans
-`64:ff9b:1::/48`, ni dans `::ffff:0:0/96`, et que le résolveur public la rend aussi ; sinon **arrêter**.
+Attendu aujourd'hui : AAAA vide partout, aucun AAAA pour `ipv4only.arpa` (pas de DNS64), et `socket.gaierror` ;
+la famille 6 sera `family_unavailable`. Le nombre d'enregistrements A suffit (leurs valeurs ne sont pas
+nécessaires au diagnostic). **Si** une adresse IPv6 est rendue : la conserver, vérifier qu'elle n'est ni dans
+`64:ff9b::/96`, ni dans `64:ff9b:1::/48`, ni dans `::ffff:0:0/96`, qu'elle n'est pas dans le préfixe révélé par
+`ipv4only.arpa`, et que les résolveurs publics la rendent aussi ; sinon **arrêter**.
+
+### 4.1 bis Règle de classement « traduction » (correction d'audit 2)
+
+1. Une **discordance de famille** (cellule de famille 6 portant un `X-Real-IP` IPv4, ou l'inverse) **ne suffit
+   jamais** à conclure à une traduction. Seule une **preuve côté client**, établie **avant** la session et propre
+   au réseau utilisé, le peut : adresse résolue par la sonde appartenant à `64:ff9b::/96`, `64:ff9b:1::/48`,
+   `::ffff:0:0/96` ou au préfixe NAT64 révélé par `ipv4only.arpa` (RFC 7050), ou AAAA synthétisé par le seul
+   résolveur local alors que les résolveurs publics n'en rendent pas.
+2. **Campagne 2 sous V0.1-R1** : le banc ne connaît pas de statut `family_translated` et **aucun reclassement**
+   n'est possible. La protection est l'**arrêt** : traduction prouvée côté client ⇒ aucune session sur ce
+   réseau. Si, malgré le contrôle, une cellule `not_self` / `different` apparaît, elle **reste un FAIL** affiché
+   (« à confirmer » si la collecte n'est pas prouvée), soumis à l'audit ; elle n'est jamais écartée par le rapport.
+3. Une éventuelle garde future (§ 5) ne pourrait reclasser une cellule qu'avec la preuve client **enregistrée
+   dans la cellule elle-même** ; jamais les classes `client_controlled`, `multiple`, `absent` ni une valeur forgée
+   ou illisible ; le FAIL d'origine resterait listé dans les faits ; des tests de mutation vérifieraient qu'une
+   discordance **sans** preuve reste un FAIL.
 
 ### 4.2 Options comparées pour l'IPv6 côté client
 
@@ -172,18 +202,35 @@ jour ; lignes `family_unavailable` (erreur `gaierror`) de chaque session publiqu
 | Voie | Contenu | Effet |
 |---|---|---|
 | **V1 — protocole figé** | campagne 2 IPv4 telle quelle | résultat **attendu INCONCLUSIVE** (Q1-Q4, Q6, Q7) sauf FAIL ; apporte les faits IPv4 (Q1-Q4, D1 public, Q6-B, Q7 public) ; ne peut pas qualifier l'option A |
-| **V2 — révision du protocole (R2) avant la campagne** | spécification → freeze → implémentation → PR → audit ChatGPT → merge, d'une règle explicite : « famille publique 6 **non applicable** si, le jour de l'essai, l'absence d'AAAA est prouvée (§ 4.3) et que toutes les cellules publiques IPv6 sont `family_unavailable` par échec de résolution » ; conséquences à figer : R10 (IPv6 globale acceptée) **non qualifiée** ⇒ refus ou « à figer », et requalification obligatoire dès qu'un AAAA apparaît | rend la campagne 2 potentiellement **décisive** pour Q1-Q4 / Q6 / Q7 ; c'est un **assouplissement** de couverture (protocole § 10, U-COVER) : relève de l'audit et du fondateur, jamais d'une option de l'analyseur |
+| **V2 — révision du protocole (R2) avant la campagne** | spécification → freeze → implémentation → PR → audit ChatGPT → merge, d'une règle explicite : « famille publique 6 **non applicable** si, le jour de l'essai, l'absence d'AAAA est prouvée (§ 4.3) et que toutes les cellules publiques IPv6 sont `family_unavailable` par échec de résolution » ; « non applicable » ne vaut **jamais** validation de l'IPv6 ; conséquences : R7, R8 et R10 en **refus par défaut** (§ 4.5) et requalification obligatoire dès qu'un AAAA apparaît | rend la campagne 2 potentiellement **décisive** pour Q1-Q4 / Q6 / Q7 ; c'est un **assouplissement** de couverture (protocole § 10, U-COVER) : relève de l'audit et du fondateur, jamais d'une option de l'analyseur |
 
 Recommandation : trancher **avant** la campagne 2. Si une campagne décisive est recherchée, V2 d'abord ; sinon
 V1 reste utile pour détecter tôt un FAIL IPv4. La rédaction de R2 n'est pas engagée sans demande.
+
+### 4.5 R7, R8, R10 — refus par défaut (correction d'audit 3)
+
+Position du présent plan, **sans ambiguïté et quelle que soit la voie V1 ou V2** : **R7** (IPv4 mappée IPv6),
+**R8** (IPv6 globale non canonique) et **R10** (IPv6 globale canonique unique) sont en **refus par défaut**
+(`ClientIpUnavailable` → `503 temporarily_unavailable`, refus fermé, aucun appel moteur, aucune écriture
+anti-abus : F04-A § 7.2) **tant que le comportement correspondant n'est pas qualifié**.
+
+| Ligne | Condition de levée du refus | Ne suffit **pas** |
+|---|---|---|
+| R7 | Q4 PASS montrant que l'edge émet une IPv4 mappée pour des clients IPv4 réels, puis freeze F04-D | une IPv4 mappée vue en privé ou forgée par un client |
+| R8 | Q4 PASS montrant une forme IPv6 non canonique émise par l'edge, puis freeze F04-D | idem |
+| R10 | cellules publiques IPv6 **réellement observées** (AAAA réel, client IPv6 natif prouvé, § 4.1) et Q1-Q4 PASS en IPv6, puis freeze F04-D | une couverture IPv6 publique déclarée « non applicable » (V2) ; une cellule traduite |
+
+Le protocole V0.1-R1 (§ 7) range R10 parmi les lignes acceptées et R7 / R8 parmi les lignes « à figer, refus par
+défaut » : le présent document **ne le modifie pas** ; la position ci-dessus est une **proposition** à arbitrer au
+freeze F04-D (ou dans une révision R2), soumise à l'audit et au fondateur.
 
 ## 5. Adaptation du banc
 
 | Besoin | Nécessaire ? | Nature | Workflow |
 |---|---|---|---|
 | Exécuter S2 IPv4 depuis le Mac (V1) | **non** | banc utilisable tel quel (bibliothèque standard, Python ≥ 3.11) | — |
-| Garde NAT64 / mappée dans la sonde : marquer `family_translated` (non exploitable) toute résolution IPv6 publique dans `64:ff9b::/96`, `64:ff9b:1::/48`, `::ffff:0:0/96` | **recommandé**, non bloquant si le contrôle manuel § 4.1 est appliqué | code de la sonde + tests | PR distincte, audit, merge |
-| Garde dans l'analyseur : cellule de famille 6 portant un `X-Real-IP` IPv4 (ou l'inverse) ⇒ statut « famille traduite », INCONCLUSIVE au lieu de `not_self` | **recommandé** (supprime le FAIL artificiel du § 4.1) | code de l'analyseur + tests de mutation | idem |
+| Garde NAT64 / mappée dans la sonde : enregistrer dans la cellule la **preuve côté client** (adresse résolue dans `64:ff9b::/96`, `64:ff9b:1::/48`, `::ffff:0:0/96` ou dans le préfixe révélé par `ipv4only.arpa`) et, dans ce seul cas, ne pas exécuter la famille (statut `family_translated`) | **optionnel** ; non nécessaire en campagne 2 (arrêt sur preuve préalable, § 4.1 bis) | code de la sonde + tests | PR distincte, audit, merge |
+| Garde dans l'analyseur | **non recommandée en l'état** : une discordance de famille seule ne prouve jamais une traduction (§ 4.1 bis) ; toute garde exigerait la preuve client de la cellule, ne toucherait jamais `client_controlled` / `multiple` / `absent` / valeur forgée, laisserait le FAIL d'origine listé, avec tests de mutation | code de l'analyseur + tests de mutation | idem, après spécification |
 | Règle « IPv6 publique non applicable » (V2) | seulement si V2 | protocole + analyseur (version de protocole à définir : un changement de `PROTOCOL_VERSION` rendrait les observations de la campagne 1 non combinables) | spécification → freeze → PR → audit → merge |
 | Migration `railway.json` → `.railway/railway.ts` | non avant le 2026-12-01 ; **oui** après (§ 7.1) | fichiers du banc, test `test_p1q_bench.py` (assertion sur `railway.json`) | PR distincte |
 
@@ -227,27 +274,53 @@ point d'arrêt, feu vert requis. Chaque étape [C] modifiant Railway est listée
 4. **[F]** curl HTTP/2 (guide § 6), sorties `curl_h2_q1_s1.json`, `curl_h2_q2_s1.json`, `curl_h2_q4_s1.json` ;
    puis IPv4 publique relevée de nouveau (doit être identique).
 5. **[F]** envoi à Claude Code des fichiers `public_strict_s1.jsonl` et `curl_*_s1.json` (+ `sha256sum`).
-6. **[C]** analyse de S2 : `Q6.facts.strict_boots.<boot>.bypass` (adresses locales de A atteintes par l'edge).
-   - adresse déjà atteinte par la matrice privée (cas attendu d'après Q6-P de la campagne 1 : même IPv4 privée) :
-     aucune cible Q6-B ;
-   - adresse non globale **absente** de la matrice privée : **[G]** puis
+6. **[C]** contrôle lecture seule : `P1Q_EXTRA_TARGETS` **absente** de `p1q-prober` (règle Q6-B-6 ci-dessous) ;
+   sinon **[G]** suppression avant toute exécution de B pour ce démarrage.
+7. **[C]** première exécution privée sur S-1 (atténuation F-DNS) : attendre ≥ 60 s après le retrait de l'ancien
+   déploiement de A ; puis `railway redeploy --service p1q-prober -p … -e … -y` ; collecter `private_c2_s1_a.log`
+   (`railway logs --service p1q-prober -n 2000`, sortie standard seule) ; **vérifier** que toutes les
+   observations de B portent le `boot_id` de S-1 et que `P1Q-DIGEST` concorde. Si B a joint un autre démarrage
+   ou si une famille est en échec de connexion : **[G]** un seul nouveau redéploiement de B, consigné.
+8. **[C]** confrontation Q6-B de S-1 (§ 6.1 bis) : analyse de `public_strict_s1.jsonl` + `private_c2_s1_a.log`
+   seuls, lecture de `Q6.facts.strict_boots.<boot S-1>.bypass` :
+   - toutes les adresses `observed` (cas attendu d'après Q6-P de la campagne 1 : l'edge atteint l'IPv4 privée que
+     B atteint directement) : **aucune** cible Q6-B, passer à 10 ;
+   - adresse `not_attempted`, non globale, publiée dans l'inventaire de A **du même démarrage** : **[G]** puis
      `railway variable set "P1Q_EXTRA_TARGETS=http://<adresse>:8080" --service p1q-prober --skip-deploys`
      (IPv6 entre crochets) ;
    - adresse pseudonymisée (`g4:` / `g6:`) : `untestable_pseudonymised`, consigné, soumis à arbitrage, **aucune**
      recherche de l'adresse réelle.
-7. **[C]** atténuation F-DNS : attendre ≥ 60 s après le retrait de l'ancien déploiement de A ; puis
-   `railway redeploy --service p1q-prober -p … -e … -y` ; collecter `private_c2_s1.log`
-   (`railway logs --service p1q-prober -n 2000`, sortie standard seule) ; **vérifier** que le `boot_id` des
-   observations de B est celui de S-1 et que `P1Q-DIGEST` concorde. Si B a joint un autre démarrage ou si une
-   famille est en échec de connexion : **[G]** un seul nouveau redéploiement de B, consigné.
-8. **[C]** analyse croisée S-1 : `public_complete`, `private_complete`, `q6p_missing`, `bypass_missing`,
-   discriminateurs D1-D3.
+9. **[C]** si une cible a été définie : seconde exécution privée **complète** sur le même démarrage
+   (`railway redeploy --service p1q-prober …`, `private_c2_s1_b.log`), mêmes vérifications qu'en 7 ; lecture des
+   statuts Q6-B (`observed` ou `refused:<classe>` attendus) ; puis **[G]** suppression de `P1Q_EXTRA_TARGETS`
+   (`railway variable delete P1Q_EXTRA_TARGETS --service p1q-prober`, vérifier l'absence de déploiement
+   automatique).
+10. **[C]** analyse croisée S-1 : `public_complete`, `private_complete`, `q6p_missing`, `bypass_missing`,
+    discriminateurs D1-D3.
+
+### 6.1 bis Règles de confrontation Q6-B (correction d'audit 4)
+
+Pour chaque démarrage strict *k* de A :
+
+| # | Règle | Fondement vérifié dans le code à `155e377` |
+|---|---|---|
+| Q6-B-1 | **Ensemble edge** E*k* = couples (`scope["server"]`, port) des observations de la cible `primary` des **seules sessions publiques S2** dont toutes les observations portent le `boot_id` *k* | `analyze_q6` : `required` construit à partir de `boot_publics` (sessions publiques intègres du démarrage) |
+| Q6-B-2 | **Ensemble privé** P*k* = (`scope["server"]`, port) des observations `primary` des exécutions privées intègres dont toutes les observations portent le `boot_id` *k* ; une adresse de E*k* présente dans P*k* est `observed` | `bypass_status` |
+| Q6-B-3 | **Cibles** = E*k* \ P*k*, non globales, au port de la cible principale, et figurant dans l'inventaire des **adresses d'interface** (`local_ipv4` / `local_ipv6`) publié par A dans l'identification `Q0-ID` **de l'exécution privée elle-même** | sonde : `inventory_addresses`, refus `refused_by_guard` sinon ; identification « même démarrage » exigée pour la cible |
+| Q6-B-4 | **Sources exclues** (informations périmées ou d'un autre contexte) : sessions d'un autre démarrage ou de la campagne 1 ; résolution du domaine privé de la ligne `P1Q-STARTUP` (périmée dans 2 cas sur 6, F-DNS) ; observations Q6-P (la cible `public` de B n'entre ni dans E*k* ni dans P*k*) ; toute adresse devinée ou balayée | analyseur : seules les cibles `primary` comptent ; protocole § 3.2 (aucun balayage) |
+| Q6-B-5 | **Ordre** : S2 *k* → exécution privée *k*-a → confrontation → (cibles) → exécution privée *k*-b → statuts ; A **ne doit pas** être redéployé ni arrêté (TTL) entre S2 *k* et la dernière exécution privée *k* ; sinon le démarrage *k* est abandonné et la séquence reprend sur un nouveau démarrage | une exécution qui mêle deux démarrages est rejetée ; Q6-B exige le même démarrage |
+| Q6-B-6 | **Remise à zéro** : `P1Q_EXTRA_TARGETS` est **absente** avant la première exécution privée de chaque démarrage et supprimée après usage ; les adresses de A changent à chaque démarrage | campagne 1 : adresses privées différentes à chaque démarrage |
+| Q6-B-7 | **Statuts recevables** : `observed`, `refused:connect_refused`, `refused:unreachable`, `refused:timeout` ; tout autre statut (`not_attempted`, `family_unavailable`, `refused_by_guard`, `tls_error`, `other`, `untestable_pseudonymised`) laisse Q6 INCONCLUSIVE et est consigné | protocole § 5.1, `REFUSED_CLASSES` |
+
+L'analyseur retient, par démarrage, l'exécution privée la plus complète : l'exécution *k*-b (matrice complète +
+cibles Q6-B) remplace alors *k*-a pour ce démarrage ; les deux sont remises à l'audit, chacune **une seule fois**.
 
 ### 6.2 Démarrage strict S-2 (distinct, exigé pour la stabilité)
 
-Rejouer 6.1 à l'identique (`receiver_c2_s2.log`, `public_strict_s2.jsonl`, `curl_*_s2.json`,
-`private_c2_s2.log`) ; les adresses de A **changent** à chaque démarrage : relire Q6-B pour **ce** démarrage et
-mettre à jour ou **supprimer** `P1Q_EXTRA_TARGETS` avant de redéployer B (**[G]**).
+Rejouer 6.1 et 6.1 bis à l'identique (`receiver_c2_s2.log`, `public_strict_s2.jsonl`, `curl_*_s2.json`,
+`private_c2_s2_a.log`, et `private_c2_s2_b.log` si des cibles Q6-B sont nécessaires) ; les adresses de A
+**changent** à chaque démarrage : E et P sont recalculés pour **ce** démarrage seulement (règles Q6-B-1 à Q6-B-6),
+jamais repris de S-1.
 
 ### 6.3 Q7 — configurations (b), (c), (d) (variables du seul récepteur)
 
@@ -346,7 +419,7 @@ Durée indicative de la campagne 2 : 1 h 30 à 2 h (≈ 8 redéploiements de A e
 | G0 | choix V1 / V2 ; si V2, la révision passe d'abord par le workflow complet | fondateur |
 | M0 | préparation et contrôles du Mac (§ 3, § 4.1), aucune requête d'essai | fondateur |
 | R1 | redéploiements de A et de B pour S-1 et S-2 | Claude Code |
-| R2 | modification de `P1Q_EXTRA_TARGETS` (Q6-B), si nécessaire | Claude Code |
+| R2 | définition, puis suppression, de `P1Q_EXTRA_TARGETS` (Q6-B, § 6.1 bis), et seconde exécution privée du même démarrage, si nécessaire | Claude Code |
 | R3 | modifications de variables et redéploiements Q7 (b)-(d), puis retour en strict | Claude Code |
 | N | nettoyage final (§ 8.3) après sauvegarde et présentation des résultats pour audit | fondateur, puis Claude Code |
 
@@ -358,7 +431,7 @@ Durée indicative de la campagne 2 : 1 h 30 à 2 h (≈ 8 redéploiements de A e
 | Homogénéité | chaque exécution porte un seul `boot_id` et une seule configuration ; S2 et B du même démarrage pour S-1 et S-2 |
 | Absence d'intermédiaire | `preflight.txt` conforme ; IPv4 publique identique avant / après chaque session |
 | IPv6 | `dns_proof.txt` ; aucune adresse NAT64 / mappée ; cellules IPv6 `family_unavailable` par `gaierror` (V1) |
-| Q6-B | pour chaque démarrage strict, chaque adresse edge `observed` ou `refused:<classe>` ; sinon consigné |
+| Q6-B | pour chaque démarrage strict, chaque adresse de E*k* `observed` ou `refused:<classe>` au sens des règles Q6-B-1 à Q6-B-7 (même démarrage, aucune source exclue) ; sinon consigné |
 | Q7 | quatre configurations lues dans les observations ; témoin (d) démontré public et privé |
 | Verdicts | propositions de l'analyseur reportées sans amélioration ; un FAIL reste affiché ; **aucun GO** ; P1 ouverte ; audit ChatGPT avant toute décision |
 
@@ -370,4 +443,4 @@ Durée indicative de la campagne 2 : 1 h 30 à 2 h (≈ 8 redéploiements de A e
 | B2 | Coupure Config as Code le 2026-12-01 | campagne avant cette date, ou PR de migration auditée |
 | B3 | Transfert des fichiers Mac → Claude Code | pièce jointe dans la session ; empreintes SHA-256 jointes |
 | B4 | U-ENV (production) | relevé visuel du fondateur, hors Claude Code |
-| B5 | Risque FAIL artificiel NAT64 dans l'analyseur | contrôle manuel § 4.1 (immédiat) ; garde de code (PR, § 5) |
+| B5 | Risque FAIL artificiel NAT64 dans l'analyseur | preuve côté client et **arrêt** avant toute session (§ 4.1 bis) ; aucun reclassement en campagne 2 ; un FAIL observé reste affiché |
