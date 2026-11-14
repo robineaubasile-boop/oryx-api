@@ -1,6 +1,8 @@
 """Support des tests locaux du banc P1-Q (ACT-L1 / F04-D) : chargement des
 modules isolés de diagnostics/p1q et pilotage d'un vrai serveur Uvicorn en
 sous-processus (boucle locale, port éphémère, environnement minimal)."""
+import io
+import ipaddress
 import json
 import os
 import select
@@ -194,3 +196,196 @@ class FakeEdge:
                             conn.sendall(chunk)
             except (OSError, ssl.SSLError):
                 continue
+
+
+# --------------------------------------------------------------------------
+# Campagne SYNTHÉTIQUE complète (tests de l'analyseur, correctif C6)
+#
+# Enregistrements au schéma exact de la sonde, sérialisés par p1q_prober.Run
+# (empreintes réelles). Topologie FICTIVE choisie pour que l'analyseur doive
+# conclure GO-CANDIDATE ; ce n'est en rien une prédiction du comportement de
+# Railway. Chaque test négatif retire ou altère UN élément requis.
+# --------------------------------------------------------------------------
+
+NOMINAL = {4: "g4:aaaaaaaaaaaaaaaa", 6: "g6:bbbbbbbbbbbbbbbb"}
+EGRESS_B = "g4:cccccccccccccccc"
+PUBLIC_PEER, PUBLIC_SERVER = ("100.64.1.2", "shared_cgnat", 4), ("10.250.0.5", "private_rfc1918", 4)
+PRIVATE_PEER = {4: ("10.251.0.9", "private_rfc1918", 4), 6: ("fd12::9", "unique_local", 6)}
+PRIVATE_SERVER = {4: ("10.251.0.5", "private_rfc1918", 4), 6: ("fd12::5", "unique_local", 6)}
+PORT = 8080
+
+
+def _addr(text, category, version, port=None):
+    out = {"parsed": True, "text": text, "category": category, "version": version, "canonical": True,
+           "sensitive": category == "global"}
+    if port is not None:
+        out["port"] = port
+    return out
+
+
+def _xri(texts):
+    values = []
+    for text in texts:
+        if text.startswith("g4:") or text.startswith("g6:"):
+            values.append(_addr(text, "global", int(text[1])))
+        else:
+            address = ipaddress.ip_address(text)
+            values.append(_addr(text, p1q_redact.category(address), address.version))
+    return {"count": len(values), "values": values}
+
+
+def observation(*, boot, mode="strict", env=None, raw, server, xri=(), self_xri=None, case=None,
+                effective=None, headers=None):
+    raw_d, server_d = _addr(*raw, port=40000), _addr(*server, port=PORT)
+    eff = dict(raw_d) if effective is None else _addr(effective, "documentation", 4, port=0)
+    return {"p1q": "receiver-observation", "protocol": p1q_prober.PROTOCOL_VERSION, "boot_id": boot,
+            "mode": mode, "case": case,
+            "uvicorn": {"proxy_headers": mode != "strict", "forwarded_allow_ips_env": env,
+                        "forwarded_allow_ips_env_present": env is not None},
+            "raw_client": raw_d, "effective_client": eff, "effective_equals_raw": effective is None,
+            "server": server_d, "x_real_ip": _xri(xri),
+            "self_match": None if self_xri is None else {"valid": True, "x_real_ip": self_xri},
+            "headers": headers or {}, "simulation": {},
+            "inventory": {"local_ipv4": [_addr("10.250.0.5", "private_rfc1918", 4),
+                                         _addr("10.251.0.5", "private_rfc1918", 4)],
+                          "local_ipv6": [_addr("fd12::5", "unique_local", 6)],
+                          "private_domain_resolution": {"ipv4": [_addr("10.251.0.5", "private_rfc1918", 4)],
+                                                        "ipv6": [_addr("fd12::5", "unique_local", 6)]}}}
+
+
+def record(run_id, role, target, family, case_id, attempt, *, outcome="observed", obs=None, **extra):
+    q = case_id.split("-")[0] if case_id != "*" else "*"
+    rec = {"p1q": "prober-result", "protocol": p1q_prober.PROTOCOL_VERSION, "run_id": run_id, "role": role,
+           "target": target, "target_kind": {"primary": "railway_public" if role == "public" else "railway_private",
+                                             "public": "railway_public"}.get(target, "ip_literal"),
+           "target_port": 443 if target == "public" or role == "public" else PORT,
+           "tls": target == "public" or role == "public", "family": family, "case": case_id, "q": q,
+           "attempt": attempt, "self_committed_versions": [4, 6] if role == "public" else [], "outcome": outcome}
+    if obs is not None:
+        rec["observation"] = obs
+        rec.update({"status": 200, "receiver_header": True})
+    rec.update(extra)
+    return rec
+
+
+class Session:
+    def __init__(self, run_id, role, records):
+        self.run_id, self.role, self.records = run_id, role, records
+
+    def drop(self, predicate):
+        before = len(self.records)
+        self.records = [r for r in self.records if not predicate(r)]
+        assert len(self.records) < before, "aucun enregistrement retiré"
+        return self
+
+    def edit(self, predicate, change):
+        touched = 0
+        for r in self.records:
+            if predicate(r):
+                change(r)
+                touched += 1
+        assert touched, "aucun enregistrement modifié"
+        return self
+
+    def lines(self):
+        out = io.StringIO()
+        run = p1q_prober.Run(role=self.role, out=out, prefix=True)
+        run.run_id = self.run_id
+        for r in self.records:
+            r["run_id"] = self.run_id
+            run.emit(r)
+        run.finish()
+        return out.getvalue().splitlines()
+
+
+def _identify(run_id, role, target, family, boot, raw, server, mode="strict", env=None):
+    return record(run_id, role, target, family, "Q0-ID", 1,
+                  obs=observation(boot=boot, mode=mode, env=env, raw=raw, server=server), identification="identified")
+
+
+def public_session(run_id, boot, *, mode="strict", env=None, questions=("Q1", "Q2", "Q3", "Q4", "Q7")):
+    records = []
+    for family in (4, 6):
+        records.append(_identify(run_id, "public", "primary", family, boot, PUBLIC_PEER, PUBLIC_SERVER, mode, env))
+        for case in p1q_prober.cases_for("public"):
+            if case.q not in questions:
+                continue
+            for attempt in range(1, case.repeat + 1):
+                effective = None
+                if mode == "trust_all_negative_control" and case.id in ("Q7-01", "Q7-02", "Q7-03", "Q7-04"):
+                    effective = p1q_prober.F4A
+                o = observation(boot=boot, mode=mode, env=env, raw=PUBLIC_PEER, server=PUBLIC_SERVER,
+                                xri=[NOMINAL[family]], self_xri=[True], case=case.id, effective=effective,
+                                headers={"x-railway-edge": [{"value": "railway/europe-west4", "length": 20}]})
+                records.append(record(run_id, "public", "primary", family, case.id, attempt, obs=o))
+    return Session(run_id, "public", records)
+
+
+def private_session(run_id, boot, *, mode="strict", env=None, questions=None, bypass=True, q6p=True):
+    records = []
+    forged_by_case = {c.id: dict((k.lower(), v) for k, v in c.headers).get("x-real-ip") for c in p1q_prober.CASES}
+    for family in (4, 6):
+        records.append(_identify(run_id, "private", "primary", family, boot, PRIVATE_PEER[family],
+                                 PRIVATE_SERVER[family], mode, env))
+        for case in p1q_prober.cases_for("private"):
+            if questions is not None and case.q not in questions:
+                continue
+            for attempt in range(1, case.repeat + 1):
+                if case.imitate_edge:
+                    xri = [forged_by_case.get(case.id) or p1q_prober.F4A]
+                else:
+                    forged = forged_by_case.get(case.id)
+                    xri = [forged] if forged and p1q_redact.parse_plain(forged) is not None else []
+                effective = None
+                if mode == "trust_all_negative_control" and case.id in ("Q7-01", "Q7-02", "Q7-03", "Q7-04"):
+                    effective = p1q_prober.F4A
+                o = observation(boot=boot, mode=mode, env=env, raw=PRIVATE_PEER[family],
+                                server=PRIVATE_SERVER[family], xri=xri, case=case.id, effective=effective)
+                records.append(record(run_id, "private", "primary", family, case.id, attempt, obs=o,
+                                      connect_address=PRIVATE_SERVER[family][0]))
+    if bypass:
+        # Q6-B : tentative vers l'adresse locale de A atteinte par l'edge, RÉELLEMENT refusée.
+        literal = {"target_kind": "ip_literal", "target_address": PUBLIC_SERVER[0], "target_port": PORT}
+        records.append(record(run_id, "private", "extra:0", 4, "Q0-ID", 1, outcome="connect_error",
+                              error="ConnectionRefusedError", error_class="connect_refused", errno=111,
+                              connect_address=PUBLIC_SERVER[0], identification="target_not_receiver", **literal))
+        records.append(record(run_id, "private", "extra:0", 4, "*", 0, outcome="aborted",
+                              reason="target_not_receiver", cases_not_run=list(p1q_prober.BYPASS_CASES), **literal))
+    if q6p:
+        records.append(_identify(run_id, "private", "public", 4, boot, PUBLIC_PEER, PUBLIC_SERVER, mode, env))
+        for case_id in p1q_prober.Q6P_CASES:
+            for attempt in range(1, p1q_analyze.CATALOGUE[case_id].repeat + 1):
+                o = observation(boot=boot, mode=mode, env=env, raw=PUBLIC_PEER, server=PUBLIC_SERVER,
+                                xri=[EGRESS_B], case=case_id)
+                records.append(record(run_id, "private", "public", 4, case_id, attempt, obs=o))
+        records.append(record(run_id, "private", "public", 6, "*", 0, outcome="family_unavailable",
+                              error="gaierror", cases_not_run=list(p1q_prober.Q6P_CASES)))
+    return Session(run_id, "private", records)
+
+
+def complete_campaign():
+    """Sessions couvrant TOUTES les exigences : deux démarrages stricts complets
+    (public Q1-Q4/Q7, privé Q5-Q7 + Q6-P + Q6-B) et les configurations Q7 (b)-(d)."""
+    return {
+        "pub1": public_session("pub1", "boot1"),
+        "priv1": private_session("priv1", "boot1"),
+        "pub2": public_session("pub2", "boot2"),
+        "priv2": private_session("priv2", "boot2"),
+        "pub_b": public_session("pub_b", "boot3", env="*", questions=("Q7",)),
+        "priv_b": private_session("priv_b", "boot3", env="*", questions=("Q7",), bypass=False, q6p=False),
+        "pub_c": public_session("pub_c", "boot4", mode="uvicorn_defaults", questions=("Q7",)),
+        "priv_c": private_session("priv_c", "boot4", mode="uvicorn_defaults", questions=("Q7",), bypass=False,
+                                  q6p=False),
+        "pub_d": public_session("pub_d", "boot5", mode="trust_all_negative_control", questions=("Q7",)),
+        "priv_d": private_session("priv_d", "boot5", mode="trust_all_negative_control", questions=("Q7",),
+                                  bypass=False, q6p=False),
+    }
+
+
+def campaign_report(sessions, *, extra_lines=(), mutate_lines=None, tmp_path=None):
+    lines = [line for s in sessions.values() for line in s.lines()] + list(extra_lines)
+    if mutate_lines is not None:
+        lines = mutate_lines(lines)
+    path = tmp_path / "campaign.log"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p1q_analyze.analyze_files([str(path)])

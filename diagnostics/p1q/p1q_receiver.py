@@ -49,7 +49,8 @@ if __package__ in (None, ""):
 from p1q_guard import EXIT_ENVIRONMENT_NOT_ISOLATED, forbidden_variables  # noqa: E402
 from p1q_redact import Redactor, parse_plain  # noqa: E402
 
-PROTOCOL_VERSION = "P1Q-V0.1"
+PROTOCOL_VERSION = "P1Q-V0.1-R1"
+RECEIVER_HEADER = b"x-p1q-receiver"
 OBSERVE_PATH = "/p1q/observe"
 HEALTH_PATH = "/p1q/health"
 MODES = ("strict", "uvicorn_defaults", "trust_all_negative_control")
@@ -132,8 +133,11 @@ class RawPeerRecorder:
 
 def _json_response(status, document, *, head=False):
     body = (json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+    # x-p1q-receiver : marque TOUTE réponse du récepteur (y compris 404 / 405 / 503), pour qu'une
+    # réponse de l'edge (refus) ne soit jamais confondue avec une erreur du récepteur.
     headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store"),
-               (b"content-length", str(len(body)).encode("ascii"))]
+               (b"content-length", str(len(body)).encode("ascii")),
+               (RECEIVER_HEADER, PROTOCOL_VERSION.encode("ascii"))]
     return status, headers, b"" if head else body
 
 

@@ -29,8 +29,24 @@ non rapportées).
 Adresse de l'expérimentateur : --self-ip (répétable) n'est JAMAIS envoyée en
 clair ; la sonde envoie une clé aléatoire par exécution et l'engagement
 HMAC-SHA256 de chaque adresse ; le récepteur rend seulement des booléens.
+
+Ciblage (protocole § 3.2, correctif C5) — la sonde n'envoie de requête
+expérimentale qu'à un récepteur P1-Q IDENTIFIÉ :
+- chemin unique GET /p1q/observe ; URL de cible sans chemin, requête ni fragment ;
+- hôtes admis : domaine public Railway « *.up.railway.app » (rôle public et
+  Q6-P), domaine privé « *.railway.internal » (rôle private) ; boucle locale
+  seulement avec --allow-loopback (tests locaux) ; hôte de production refusé ;
+- avant toute requête d'essai, chaque (cible, famille) reçoit UNE requête
+  d'identification « Q0-ID » sans en-tête forgé ; si la réponse n'est pas une
+  observation du récepteur P1-Q (même protocole ; même démarrage que la cible
+  principale pour Q6-P et Q6-B), la cible est abandonnée sans autre envoi ;
+- Q6-B : uniquement des adresses IP littérales, non globales, au port de la
+  cible principale, ET figurant dans l'inventaire d'adresses locales publié
+  par le récepteur lui-même dans cette exécution ; toute autre adresse est
+  refusée avant tout envoi.
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -46,10 +62,15 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from p1q_guard import (EXIT_ENVIRONMENT_NOT_ISOLATED, EXIT_PRODUCTION_TARGET, check_target_host,  # noqa: E402
-                       forbidden_variables)
+                       forbidden_variables, is_production_host)
 from p1q_redact import Redactor, category, commitment, parse_plain  # noqa: E402
 
-PROTOCOL_VERSION = "P1Q-V0.1"
+PROTOCOL_VERSION = "P1Q-V0.1-R1"
+IDENTIFY_CASE = "Q0-ID"
+RECEIVER_HEADER = "x-p1q-receiver"
+PUBLIC_SUFFIX = ".up.railway.app"
+PRIVATE_SUFFIX = ".railway.internal"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 OBSERVE_PATH = "/p1q/observe"
 MAX_RESPONSE_BYTES = 1 << 20
 USER_AGENT = "p1q-prober/0.1"
@@ -152,6 +173,11 @@ CASES = (
          (("X-Forwarded-For", F4A), ("X-Forwarded-For", F4B))),
     Case("Q7-05", "Q7", BOTH, "X-Forwarded-Proto forgé", (("X-Forwarded-Proto", "http"),)),
 )
+
+
+CATALOGUE_BY_ID = {c.id: c for c in CASES}
+BYPASS_CASES = ("Q5-01", "Q6-01")
+Q6P_CASES = ("Q1-01", "Q2-01", "Q3-05")
 
 
 def cases_for(role, only=None):
@@ -278,15 +304,52 @@ class Target:
     host: str
     port: int
     tls: bool
+    kind: str                     # railway_public | railway_private | ip_literal | loopback
+
+    @property
+    def literal_version(self):
+        address = parse_plain(self.host)
+        return address.version if address is not None else None
 
 
-def parse_target(label, url):
+IDENTIFY = Case(IDENTIFY_CASE, "Q0", BOTH, "identification du récepteur (aucun en-tête forgé)")
+
+
+def parse_target(label, url, *, expected, allow_loopback=False):
+    """Cible admise, ou ValueError. expected : 'railway_public',
+    'railway_private' ou 'ip_literal' (Q6-B)."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("cible : http(s)://hôte[:port] attendu")
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username or parts.password:
+        raise ValueError("cible : ni chemin, ni requête, ni fragment, ni identifiants (chemin imposé /p1q/observe)")
     host = check_target_host(parts.hostname)
     port = parts.port or (443 if parts.scheme == "https" else 80)
-    return Target(label, url, host, port, parts.scheme == "https")
+    tls = parts.scheme == "https"
+    if host in LOOPBACK_HOSTS or (parse_plain(host) is not None and parse_plain(host).is_loopback):
+        if not allow_loopback:
+            raise ValueError("cible de boucle locale refusée (réservée aux tests locaux : --allow-loopback)")
+        kind = "loopback"
+    elif expected == "railway_public":
+        if not (tls and host.endswith(PUBLIC_SUFFIX) and len(host) > len(PUBLIC_SUFFIX)):
+            raise ValueError(f"cible publique : https://<service>{PUBLIC_SUFFIX} attendu")
+        kind = "railway_public"
+    elif expected == "railway_private":
+        if tls or not (host.endswith(PRIVATE_SUFFIX) and len(host) > len(PRIVATE_SUFFIX)):
+            raise ValueError(f"cible privée : http://<service>{PRIVATE_SUFFIX}:<port> attendu")
+        kind = "railway_private"
+    elif expected == "ip_literal":
+        address = parse_plain(host)
+        if tls or address is None:
+            raise ValueError("cible Q6-B : http://<adresse IP littérale>:<port> attendu")
+        if category(address) == "global":
+            raise ValueError("cible Q6-B : adresse globale refusée")
+        kind = "ip_literal"
+    else:
+        raise ValueError("type de cible inconnu")
+    if expected == "ip_literal" and kind == "loopback" and parse_plain(host) is None:
+        raise ValueError("cible Q6-B : adresse IP littérale attendue")
+    return Target(label, url, host, port, tls, kind)
 
 
 def resolve_family(host, port, family):
@@ -297,6 +360,32 @@ def resolve_family(host, port, family):
         return None, type(exc).__name__
     addresses = sorted({info[4][0] for info in infos})
     return (addresses[0] if addresses else None), None
+
+
+def error_class(exc) -> str:
+    """Classe d'échec de connexion : distingue un REFUS réel d'une absence."""
+    if isinstance(exc, ssl.SSLError):
+        return "tls_error"
+    if isinstance(exc, ConnectionRefusedError):
+        return "connect_refused"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, socket.gaierror):
+        return "resolution_failed"
+    if getattr(exc, "errno", None) in (errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EADDRNOTAVAIL):
+        return "unreachable"
+    return "other"
+
+
+def inventory_addresses(observation) -> set:
+    """Adresses locales publiées par le récepteur lui-même (texte non pseudonymisé)."""
+    inventory = (observation or {}).get("inventory") or {}
+    found = set()
+    for key in ("local_ipv4", "local_ipv6"):
+        for item in inventory.get(key) or ():
+            if isinstance(item, dict) and item.get("parsed") and not item.get("sensitive"):
+                found.add(item.get("text"))
+    return found
 
 
 class Run:
@@ -310,6 +399,9 @@ class Run:
         self.count = 0
         self.local = Redactor()
         self.self_headers = ()
+        self.self_versions = sorted({parse_plain(ip).version for ip in self_ips})
+        self.receiver_boot = None       # démarrage du récepteur identifié sur la cible principale
+        self.receiver_inventory = set()
         if self_ips:
             key = secrets.token_bytes(32)
             macs = ",".join(commitment(key, ip) for ip in self_ips)
@@ -323,61 +415,96 @@ class Run:
         self.out.flush()
 
     def finish(self):
-        line = json.dumps({"p1q": "prober-digest", "run_id": self.run_id, "results": self.count,
-                           "sha256": self.digest.hexdigest()}, sort_keys=True, separators=(",", ":"))
+        line = json.dumps({"p1q": "prober-digest", "protocol": PROTOCOL_VERSION, "run_id": self.run_id,
+                           "role": self.role, "results": self.count, "sha256": self.digest.hexdigest()},
+                          sort_keys=True, separators=(",", ":"))
         self.out.write(("P1Q-DIGEST " if self.prefix else "") + line + "\n")
         self.out.flush()
 
-    def execute(self, target, cases, families, *, delay=0.2):
+    def _base(self, target, family, case, attempt):
+        return {"p1q": "prober-result", "protocol": PROTOCOL_VERSION, "run_id": self.run_id, "role": self.role,
+                "target": target.label, "target_kind": target.kind, "target_port": target.port, "tls": target.tls,
+                "family": family, "case": case.id, "q": case.q, "attempt": attempt,
+                "self_committed_versions": self.self_versions,
+                **({"target_address": target.host} if target.literal_version is not None else {})}
+
+    def _request(self, target, address, family, case, attempt):
+        record = self._base(target, family, case, attempt)
+        if not target.tls:
+            # Réseau privé : adresse d'infrastructure, rapportée (pseudonymisée si globale).
+            record["connect_address"] = self.local.redact_text(address)
+        payload = build_request(case, host=host_header(target.host, target.port, target.tls),
+                                public_host=self.public_host, self_headers=self.self_headers)
+        started = time.monotonic()
+        try:
+            raw = send_raw(address, target.port, payload, tls_host=target.host if target.tls else None)
+        except OSError as exc:
+            record.update({"outcome": "connect_error", "error": type(exc).__name__,
+                           "error_class": error_class(exc), "errno": getattr(exc, "errno", None)})
+            return record, None
+        record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        status, headers, body = parse_response(raw)
+        record["status"] = status
+        record["receiver_header"] = headers.get(RECEIVER_HEADER) == [PROTOCOL_VERSION]
+        record["response_headers"] = {k: [self.local.redact_text(v) for v in headers[k]]
+                                      for k in RESPONSE_HEADERS_REPORTED if k in headers}
+        observation = None
+        try:
+            document = json.loads(body.decode("utf-8")) if body else None
+            if (isinstance(document, dict) and document.get("p1q") == "receiver-observation"
+                    and document.get("protocol") == PROTOCOL_VERSION):
+                observation = document
+        except (UnicodeDecodeError, ValueError):
+            pass
+        if observation is not None:
+            record.update({"outcome": "observed", "observation": observation})
+        else:
+            record.update({"outcome": "not_observed" if status is not None else "no_response",
+                           "body_excerpt": self.local.redact_text(body[:300].decode("utf-8", "replace"))})
+        return record, observation
+
+    def _skip(self, target, family, cases, outcome, **extra):
+        record = self._base(target, family, Case("*", "*", BOTH, "-"), 0)
+        record.update({"outcome": outcome, "cases_not_run": [c.id for c in cases], **extra})
+        self.emit(record)
+
+    def execute(self, target, cases, families, *, delay=0.2, require_same_boot=False):
+        """Exécute `cases` vers `target`, famille par famille, APRÈS identification.
+        Rend le nombre de familles identifiées."""
+        identified = 0
+        version = target.literal_version
         for family in families:
+            if version is not None and family != version:
+                self._skip(target, family, cases, "family_not_applicable")
+                continue
             address, error = resolve_family(target.host, target.port, family)
             if address is None:
-                # Famille indisponible (résolution) : consignée une fois, jamais ignorée.
-                self.emit({"p1q": "prober-result", "protocol": PROTOCOL_VERSION, "run_id": self.run_id,
-                           "role": self.role, "target": target.label, "tls": target.tls, "family": family,
-                           "case": "*", "q": "*", "attempt": 0, "outcome": "family_unavailable", "error": error,
-                           "cases_not_run": [c.id for c in cases]})
+                # Famille indisponible (résolution) : consignée, jamais ignorée.
+                self._skip(target, family, cases, "family_unavailable", error=error)
                 continue
+            record, observation = self._request(target, address, family, IDENTIFY, 1)
+            reason = None
+            if observation is None:
+                reason = "target_not_receiver"
+            elif ((require_same_boot or (target.label == "primary" and self.receiver_boot is not None))
+                  and observation.get("boot_id") != self.receiver_boot):
+                reason = "target_not_same_receiver"
+            record["identification"] = reason or "identified"
+            self.emit(record)
+            if reason is not None:
+                self._skip(target, family, cases, "aborted", reason=reason)
+                continue
+            identified += 1
+            if target.label == "primary" and self.receiver_boot is None:
+                self.receiver_boot = observation.get("boot_id")
+                self.receiver_inventory = inventory_addresses(observation)
             for case in cases:
                 for attempt in range(1, case.repeat + 1):
-                    record = {"p1q": "prober-result", "protocol": PROTOCOL_VERSION, "run_id": self.run_id,
-                              "role": self.role, "target": target.label, "tls": target.tls,
-                              "family": family, "case": case.id, "q": case.q, "attempt": attempt}
-                    if not target.tls:
-                        # Réseau privé : adresse d'infrastructure, rapportée (pseudonymisée si globale).
-                        record["connect_address"] = self.local.redact_text(address)
-                    payload = build_request(case, host=host_header(target.host, target.port, target.tls),
-                                            public_host=self.public_host,
-                                            self_headers=self.self_headers)
-                    started = time.monotonic()
-                    try:
-                        raw = send_raw(address, target.port, payload, tls_host=target.host if target.tls else None)
-                    except OSError as exc:
-                        record.update({"outcome": "connect_error", "error": type(exc).__name__,
-                                       "errno": getattr(exc, "errno", None)})
-                        self.emit(record)
-                        continue
-                    record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-                    status, headers, body = parse_response(raw)
-                    record["status"] = status
-                    record["response_headers"] = {k: [self.local.redact_text(v) for v in headers[k]]
-                                                  for k in RESPONSE_HEADERS_REPORTED if k in headers}
-                    observation = None
-                    try:
-                        document = json.loads(body.decode("utf-8")) if body else None
-                        if isinstance(document, dict) and document.get("p1q") == "receiver-observation":
-                            observation = document
-                    except (UnicodeDecodeError, ValueError):
-                        pass
-                    if observation is not None:
-                        record.update({"outcome": "observed", "observation": observation})
-                    else:
-                        record.update({"outcome": "not_observed" if status is not None else "no_response",
-                                       "body_excerpt": self.local.redact_text(
-                                           body[:300].decode("utf-8", "replace"))})
+                    record, _ = self._request(target, address, family, case, attempt)
                     self.emit(record)
                     if delay:
                         time.sleep(delay)
+        return identified
 
 
 def _families(text):
@@ -388,15 +515,19 @@ def main(argv=None, environ=None) -> int:
     environ = dict(os.environ if environ is None else environ)
     parser = argparse.ArgumentParser(description="Sonde P1-Q (Q1-Q7)")
     parser.add_argument("--role", choices=(PUBLIC, PRIVATE), default=environ.get("P1Q_ROLE_PROBE"))
-    parser.add_argument("--target", default=environ.get("P1Q_TARGET"), help="http(s)://hôte[:port]")
+    parser.add_argument("--target", default=environ.get("P1Q_TARGET"),
+                        help=f"public : https://<service>{PUBLIC_SUFFIX} ; private : http://<service>{PRIVATE_SUFFIX}:<port>")
     parser.add_argument("--public-target", default=environ.get("P1Q_PUBLIC_TARGET"),
-                        help="domaine public du récepteur (imitation Q6, et Q6-P depuis B)")
+                        help=f"domaine public du récepteur https://<service>{PUBLIC_SUFFIX} (imitation Q6, Q6-P)")
     parser.add_argument("--extra-target", action="append", default=[],
-                        help="cible de contournement Q6-B (répétable), http://adresse:port")
+                        help="cible Q6-B (répétable) : http://<adresse du récepteur>:<port de la cible principale>")
     parser.add_argument("--family", choices=("4", "6", "both"), default=environ.get("P1Q_FAMILY", "both"))
-    parser.add_argument("--only", action="append", default=[], help="identifiant de cas ou de question")
+    parser.add_argument("--only", action="append", default=[],
+                        help="identifiant de cas ou de question (exécution PARTIELLE : ne prouve pas la couverture)")
     parser.add_argument("--self-ip", action="append", default=[],
                         help="adresse publique de l'expérimentateur (jamais transmise en clair)")
+    parser.add_argument("--allow-loopback", action="store_true",
+                        help="TESTS LOCAUX SEULEMENT : admettre une cible de boucle locale")
     parser.add_argument("--prefix", action="store_true", help="préfixer les lignes (journaux Railway)")
     parser.add_argument("--out", help="fichier JSONL de sortie (défaut : sortie standard)")
     parser.add_argument("--delay", type=float, default=0.2)
@@ -413,6 +544,8 @@ def main(argv=None, environ=None) -> int:
             print("p1q-prober: environnement NON isolé, exécution refusée ; variables : " + ", ".join(banned),
                   file=sys.stderr)
             return EXIT_ENVIRONMENT_NOT_ISOLATED
+    if args.allow_loopback and any(name.startswith("RAILWAY_") for name in environ):
+        parser.error("--allow-loopback est réservé aux tests locaux (refusé sur Railway)")
     if args.role is None or args.target is None:
         parser.error("--role et --target sont obligatoires")
     for text in args.self_ip:
@@ -421,10 +554,16 @@ def main(argv=None, environ=None) -> int:
             parser.error("--self-ip : adresse publique globale nue attendue")
     extra_targets = list(args.extra_target)
     extra_targets += [t for t in environ.get("P1Q_EXTRA_TARGETS", "").split(",") if t.strip()]
+    loop = args.allow_loopback
     try:
-        target = parse_target("primary", args.target)
-        public = parse_target("public", args.public_target) if args.public_target else None
-        extras = [parse_target(f"extra:{i}", t.strip()) for i, t in enumerate(extra_targets)]
+        if is_production_host(urlsplit(args.target).hostname or ""):
+            raise ValueError("cible de production Oryx refusée")
+        target = parse_target("primary", args.target, allow_loopback=loop,
+                              expected="railway_public" if args.role == PUBLIC else "railway_private")
+        public = (parse_target("public", args.public_target, expected="railway_public", allow_loopback=loop)
+                  if args.public_target else None)
+        extras = [parse_target(f"extra:{i}", t.strip(), expected="ip_literal", allow_loopback=loop)
+                  for i, t in enumerate(extra_targets)]
     except ValueError as exc:
         print(f"p1q-prober: cible refusée : {exc}", file=sys.stderr)
         return EXIT_PRODUCTION_TARGET
@@ -432,6 +571,12 @@ def main(argv=None, environ=None) -> int:
         parser.error("rôle public : cible https:// (edge Railway) attendue")
     if args.role == PRIVATE and target.tls:
         parser.error("rôle private : cible http:// sur le réseau privé attendue")
+    if args.role == PUBLIC and extras:
+        parser.error("--extra-target : réservé au rôle private (Q6-B)")
+    for extra in extras:
+        if extra.port != target.port:
+            print("p1q-prober: cible refusée : Q6-B au port de la cible principale seulement", file=sys.stderr)
+            return EXIT_PRODUCTION_TARGET
 
     out = open(args.out, "w", encoding="ascii") if args.out else None
     try:
@@ -440,13 +585,18 @@ def main(argv=None, environ=None) -> int:
         families = _families(args.family)
         run.execute(target, cases_for(args.role, args.only), families, delay=args.delay)
         if args.role == PRIVATE:
-            bypass = [c for c in CASES if c.id in ("Q5-01", "Q6-01")]
+            bypass = [c for c in CASES if c.id in BYPASS_CASES]
             for extra in extras:
-                run.execute(extra, bypass, families, delay=args.delay)
-            if public is not None:
-                # Q6-P : appelant interne passant par l'edge public.
-                public_run_cases = [c for c in CASES if c.id in ("Q1-01", "Q2-01", "Q3-05")]
-                run.execute(public, public_run_cases, families, delay=args.delay)
+                if run.receiver_boot is None or extra.host not in run.receiver_inventory:
+                    # Adresse non publiée par le récepteur identifié : aucun envoi.
+                    run._skip(extra, extra.literal_version, bypass, "refused_by_guard",
+                              reason="address_not_in_receiver_inventory")
+                    continue
+                run.execute(extra, bypass, families, delay=args.delay, require_same_boot=True)
+            if public is not None and run.receiver_boot is not None:
+                # Q6-P : appelant interne passant par l'edge public (même récepteur exigé).
+                run.execute(public, [c for c in CASES if c.id in Q6P_CASES], families, delay=args.delay,
+                            require_same_boot=True)
         run.finish()
     finally:
         if out is not None:

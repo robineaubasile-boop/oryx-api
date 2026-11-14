@@ -20,7 +20,9 @@
 | Version CLI Railway ; écarts de commandes constatés | |
 | Réseau de l'expérimentateur (FAI / NAT / VPN, IPv6 disponible ?) | |
 | Démarrages de A (`boot_id`, mode, `FORWARDED_ALLOW_IPS`) | |
-| Exécutions de la sonde (`run_id`, rôle, collecte complète ?) | |
+| Exécutions de la sonde (`run_id`, rôle, démarrage, configuration, collecte complète ?) | |
+| Collecte prouvée (`collection.proven`) ; anomalies de lecture (`collection.notes`) | |
+| Liste `blocking` du rapport de l'analyseur | |
 
 ## 2. Inventaire de démarrage de A (ligne `P1Q-STARTUP`)
 
@@ -34,7 +36,10 @@
 ## 3. Résultats par question
 
 Pour chaque question : faits observés (avec identifiants de cas et nombres), verdict **proposé** par
-l'analyseur, verdict **retenu par le rapport** et justification de tout écart, limites.
+l'analyseur, verdict **retenu par le rapport** et justification de tout écart, limites, et **couverture** :
+sessions concernées / complètes, cellules manquantes (`missing`, avec leur statut : `not_run`,
+`family_unavailable`, `aborted`, `not_attempted`, `refused:<classe>`…). Un verdict retenu ne peut pas être plus
+favorable que le verdict proposé sans nouvelle collecte.
 
 ### Q1 — Public nominal
 
@@ -97,7 +102,9 @@ Verdict proposé : … · Verdict retenu : … · Limites : …
 | D3 famille d'écoute : public / privé / sépare ? | |
 | D4 valeurs exactes (non retenu comme règle) | |
 | Démarrages couverts (public / privé) | |
-| Q6-B : cibles essayées, résultat, propriétés edge obtenues ? | |
+| Q6-B : par démarrage, statut de chaque adresse edge (`observed`, `refused:<classe>`, `not_attempted`, `family_unavailable`, `refused_by_guard`, `untestable_pseudonymised`) | |
+| Démarrages qualifiants (`Q6.facts.qualifying_boots`) / requis : 2 | |
+| Imitations Q6-01 ×3, Q6-02, Q6-03 observées (IPv4 / IPv6) | |
 | Q6-P : `X-Real-IP` d'un appelant interne via l'edge (forgé conservé ?) | |
 | Q6-C (facultatif) : isolement entre environnements | |
 
@@ -105,7 +112,7 @@ Verdict proposé : … · Verdict retenu : … · Limites (comportement non docu
 
 ### Q7 — Configuration Uvicorn
 
-| Mode | `FORWARDED_ALLOW_IPS` | Observations | Réécritures de `scope["client"]` | Pair brut = `127.0.0.1` ? |
+| Mode | `FORWARDED_ALLOW_IPS` | Observations (public / privé × IPv4 / IPv6) | Réécritures de `scope["client"]` | Pair brut = `127.0.0.1` ? |
 |---|---|---|---|---|
 | (a) strict | absente | | | |
 | (b) strict | `*` | | | |

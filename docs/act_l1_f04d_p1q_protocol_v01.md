@@ -5,7 +5,7 @@
 | Élément | Valeur |
 |---|---|
 | Chantier | Activation F2 Lot 1 (ACT-L1), lot **F04-D**, réserve **P1**, protocole **P1-Q** |
-| Version | **V0.1** (première version versionnée) |
+| Version | **V0.1, révision corrective R1** (audit indépendant ChatGPT de la PR #242 : NO-GO pour merge en l'état, écarts C1-C6) ; format des enregistrements `P1Q-V0.1-R1` |
 | Statut du protocole | **Validé par le fondateur pour PRÉPARER les expériences** (message de lancement du 14/11/2026) ; cette validation n'autorise **aucune** modification d'infrastructure ni aucune exécution sur Railway |
 | Statut de P1 | **OUVERTE** |
 | Option A | **Candidate prioritaire, NON qualifiée**, non choisie |
@@ -74,8 +74,8 @@ Railway (F04-A § 7.1) et sans tenir un en-tête pour authentique du seul fait d
 | Fichier | Rôle |
 |---|---|
 | `diagnostics/p1q/p1q_receiver.py` | Service A : application ASGI 3 minimale servie par **Uvicorn 0.27.0** (même version, mêmes empreintes que la production) ; rend l'observation de la requête à l'appelant |
-| `diagnostics/p1q/p1q_prober.py` | Sonde : client HTTP/1.1 écrit octet par octet (doublons, valeurs mal formées, obs-fold, octets non ASCII), catalogue des cas Q1-Q7, sortie JSONL avec empreinte de collecte |
-| `diagnostics/p1q/p1q_analyze.py` | Analyse : faits par question, verdict **proposé** selon le § 5, intégrité de la collecte |
+| `diagnostics/p1q/p1q_prober.py` | Sonde : client HTTP/1.1 écrit octet par octet (doublons, valeurs mal formées, obs-fold, octets non ASCII), catalogue des cas Q1-Q7, identification du récepteur avant tout essai, liste d'autorisation des cibles (§ 3.2), sortie JSONL avec empreinte de collecte |
+| `diagnostics/p1q/p1q_analyze.py` | Analyse : couverture exacte du catalogue par session, famille et tentative, verdict **proposé** selon le § 5, intégrité de la collecte conditionnant la proposition |
 | `diagnostics/p1q/p1q_redact.py` | Classification IANA des adresses et pseudonymisation (§ 3.3) |
 | `diagnostics/p1q/p1q_guard.py` | Garde d'isolement (variables interdites, cible de production refusée) |
 | `diagnostics/p1q/p1q_main.py` | Lanceur Railway (`P1Q_ROLE=receiver|prober`), durée de vie bornée |
@@ -100,7 +100,23 @@ autre que GET / HEAD : 405 ; budget de requêtes par démarrage (`P1Q_MAX_REQUES
 - Garde exécutoire : A et B **refusent de démarrer** (code 3) si une variable `ORYX_*`, `DATABASE_*`, `PG*`,
   `ANTHROPIC*`, `CLAUDE*`, `EODHD*`, `FMP*`, `SUPABASE*`, `RESEND*`, `POSTGRES*`, ou contenant `SECRET`, `PASSWORD`,
   `API_KEY`, `TOKEN`, `CREDENTIAL`, est présente (noms affichés, jamais les valeurs).
-- La sonde **refuse** toute cible dont l'hôte contient `oryx-api-production` (code 4).
+- **Ciblage (correctif C5)** — la sonde n'envoie de requête d'essai qu'à un récepteur P1-Q **identifié** :
+  - chemin unique `GET /p1q/observe` ; une URL de cible portant un chemin, une requête, un fragment ou des
+    identifiants est refusée ;
+  - hôtes admis : `https://<service>.up.railway.app` (rôle public et Q6-P), `http://<service>.railway.internal:<port>`
+    (rôle private) ; toute autre forme est refusée (code 4), y compris un suffixe usurpé
+    (`….up.railway.app.attacker.example`) ; un hôte contenant `oryx-api-production` est refusé en premier ;
+  - boucle locale admise **seulement** avec `--allow-loopback`, option réservée aux tests locaux et refusée dès
+    qu'une variable `RAILWAY_*` est présente ;
+  - avant toute requête d'essai, chaque couple (cible, famille) reçoit **une** requête d'identification `Q0-ID`
+    sans en-tête forgé ; si la réponse n'est pas une observation du récepteur au protocole `P1Q-V0.1-R1` — et,
+    pour Q6-P et Q6-B, du **même démarrage** que la cible principale —, la cible est abandonnée (`aborted`) sans
+    aucun autre envoi ;
+  - Q6-B : adresses IP **littérales**, non globales, au **port de la cible principale**, et **publiées par le
+    récepteur lui-même** (inventaire de ses adresses locales, lu dans l'observation d'identification de la même
+    exécution) ; toute autre adresse est refusée avant tout envoi (`refused_by_guard`) ; aucun balayage ;
+  - toute réponse du récepteur porte l'en-tête `x-p1q-receiver: P1Q-V0.1-R1` : une réponse sans cet en-tête vient
+    d'un intermédiaire (edge).
 - Le code n'importe que la bibliothèque standard, `uvicorn` et ses propres modules (test AST
   `tests/test_p1q_bench.py::test_bench_imports_only_stdlib_uvicorn_and_itself`).
 - Aucun fichier du runtime (`api.py`, `core/**`, `scripts/**`) ne mentionne le banc ; aucun fichier de
@@ -166,8 +182,33 @@ Familles : chaque cas est exécuté en IPv4 et en IPv6 (`--family both`) ; une f
 (`10.1.2.3`, `127.0.0.1`, `::1`, `100.64.0.9`, `fd00::9`, `fe80::1`) : aucune adresse réelle d'un tiers n'est
 usurpée. Le catalogue exact est affiché par `python3 diagnostics/p1q/p1q_prober.py --list`.
 
-Notation : « nominal » = valeur `X-Real-IP` du même démarrage et de la même famille en Q1-01, ou, mieux, valeur
-reconnue par l'engagement HMAC de `--self-ip`.
+Notation : « nominal » = valeur `X-Real-IP` reconnue par l'engagement HMAC de `--self-ip` pour la famille de
+cette valeur, ou, à défaut, égale à la valeur Q1-01 du même démarrage et de la même famille.
+
+**Règles de couverture (correctifs C1-C4)**, appliquées par l'analyseur (§ 5) à **toutes** les questions :
+
+- **session** = une exécution de la sonde (`run_id`) ; elle n'est une preuve que si elle est **intègre** (§ 5.2),
+  homogène (un seul démarrage et une seule configuration du récepteur) et observée ;
+- **cellule** = (session, cible, cas du catalogue, famille IP, tentative) ; le catalogue de référence est celui de
+  `p1q_prober.CASES` (répétitions comprises : Q1-01 ×5, Q5-01 ×3, Q6-01 ×3) ;
+- une question est **PASS** seulement si **chaque** session concernée (contenant au moins un cas de la question)
+  est complète pour **toutes** ses cellules requises ; une exécution partielle (`--only`) concernée rend la
+  question INCONCLUSIVE : rejouer la session complète ;
+- une cellule absente (`not_run`), non exploitable (`connect_refused`, `timeout`, `no_response`, `tls_error`,
+  réponse 5xx, erreur du récepteur…) ou d'une famille indisponible (`family_unavailable`) donne **INCONCLUSIVE**,
+  jamais PASS ; seul un **refus explicite de l'edge** (statut 400, 413, 414 ou 431, réponse **non** marquée
+  `x-p1q-receiver`) remplace valablement une observation pour Q2-Q4 ;
+- un contre-exemple observé est un **FAIL démontré**, quelle que soit la couverture ailleurs ou l'intégrité de la
+  collecte (le FAIL n'est jamais masqué ; s'il provient d'une collecte non intègre, il est signalé « à confirmer »).
+
+Familles IP **requises** :
+
+| Canal | Familles requises | Remarque |
+|---|---|---|
+| public (expérimentateur → edge → A) | IPv4 **et** IPv6 | sans IPv6 chez l'expérimentateur : Q1-Q4 INCONCLUSIVE |
+| privé (B → A) | IPv4 **et** IPv6 | environnement de diagnostic récent (DNS privé A et AAAA) |
+| Q6-P (B → edge → A) | IPv4 | la sortie IPv6 des services Railway est une option à activer (CLI `railway outbound-network ipv6 enable`, [doc Railway] `docs.railway.com/cli`) ; une observation IPv6 éventuelle est **évaluée** (FAIL possible), jamais exigée |
+| Q6-B | famille de l'adresse littérale | les autres familles sont `family_not_applicable` |
 
 ### Q1 — Public nominal
 
@@ -176,9 +217,9 @@ reconnue par l'engagement HMAC de `--self-ip`.
 | Procédure | Depuis le poste de l'expérimentateur : `p1q_prober.py --role public --target https://<domaine public de A> --self-ip <IPv4 publique> [--self-ip <IPv6 publique>] --only Q1` ; cas `Q1-01` ×5 par famille ; variante HTTP/2 par curl (guide § 6) |
 | Entrées | aucune en-tête de proxy fourni |
 | À observer | pair brut (catégorie, stabilité), `scope["server"]`, `X-Real-IP` (nombre, forme, catégorie, égalité avec l'adresse engagée), `X-Forwarded-For` / `Forwarded` ajoutés ou non, en-têtes `X-Railway-*`, version HTTP edge → A, simulation « confiance 127.0.0.1 » |
-| PASS | ≥ 5 observations ; `X-Real-IP` présent **une seule fois**, IP nue, **globale**, **égale à l'adresse engagée** à chaque requête, stable par famille |
-| FAIL | `X-Real-IP` absent, multiple, illisible, non global, ou différent de l'adresse engagée |
-| INCONCLUSIVE | pas d'engagement `--self-ip`, moins de 5 observations, valeur instable sans explication |
+| PASS | dans **chaque** session concernée, pour IPv4 **et** IPv6, les 5 tentatives observées ; `X-Real-IP` présent **une seule fois**, IP nue, **globale**, **égale à l'adresse engagée pour sa famille** à chaque requête, stable par famille |
+| FAIL | `X-Real-IP` absent, multiple, illisible, non global, ou différent de l'adresse **engagée pour sa famille** |
+| INCONCLUSIVE | famille non engagée par `--self-ip` (jamais un FAIL), tentative manquante ou inexploitable, famille indisponible, valeur instable |
 | Limites | ne dit rien du trafic privé ; ne prouve pas que l'edge **remplace** une valeur fournie (Q2) ; un réseau de l'expérimentateur derrière NAT / CGNAT / VPN change l'adresse attendue |
 
 ### Q2 — Falsification de `X-Real-IP` (public)
@@ -188,9 +229,9 @@ reconnue par l'engagement HMAC de `--self-ip`.
 | Procédure | `--role public --only Q2` |
 | Entrées | `Q2-01` IPv4 forgée ; `Q2-02` IPv6 ; `Q2-03` `127.0.0.1` ; `Q2-04` RFC 1918 ; `Q2-05` casse du nom ; `Q2-06` espaces ; `Q2-07` liste ; `Q2-08` vide |
 | À observer | `X-Real-IP` reçu par A : remplacé (nominal), conservé (valeur forgée), ajouté (liste), dupliqué, supprimé ; réponse de l'edge (statut) si refus |
-| PASS | pour **chaque** cas : `X-Real-IP` unique et nominal, **ou** requête refusée par l'edge (4xx, A non atteint) ; au moins un cas nominal |
+| PASS | dans chaque session concernée, pour **chaque** cas × IPv4 et IPv6 : `X-Real-IP` unique et nominal, **ou** refus explicite de l'edge (400 / 413 / 414 / 431 non marqué `x-p1q-receiver`) ; au moins une cellule nominale |
 | FAIL | une seule valeur forgée, ajoutée, multiple, illisible ou absente reçue par A |
-| INCONCLUSIVE | aucune référence nominale ; cas non observés sans refus explicite |
+| INCONCLUSIVE | une cellule absente, inexploitable ou sans référence nominale ; famille indisponible |
 | Limites | comportement **observé** à une date, une région edge, un protocole ; pas un engagement de Railway |
 
 ### Q3 — Falsification des autres en-têtes (public)
@@ -200,9 +241,9 @@ reconnue par l'engagement HMAC de `--self-ip`.
 | Procédure | `--role public --only Q3` |
 | Entrées | `X-Forwarded-For` simple / chaîne ; `Forwarded` IPv4 / IPv6 avec port, `proto`, `by` ; valeurs **contradictoires** `X-Real-IP` ≠ `X-Forwarded-For` ≠ `Forwarded` ; `X-Forwarded-Proto/Host/Port` ; `True-Client-IP`, `CF-Connecting-IP`, `X-Client-IP`, `X-Original-Forwarded-For`, `X-Envoy-External-Address`, `X-Cluster-Client-IP` ; `X-Railway-Edge`, `X-Railway-Request-Id`, `X-Request-Start` forgés ; `X-Forwarded-For` sans `X-Real-IP` (dérivation éventuelle) |
 | À observer | `X-Real-IP` (critère) ; ce que deviennent XFF, `Forwarded`, `X-Forwarded-*`, `X-Railway-*` (faits) |
-| PASS | `X-Real-IP` reste unique et nominal dans **tous** les cas ; les autres en-têtes sont seulement documentés |
+| PASS | `X-Real-IP` reste unique et nominal (ou refus explicite de l'edge) dans **toutes** les cellules (cas × IPv4 / IPv6) de chaque session concernée ; les autres en-têtes sont seulement documentés |
 | FAIL | `X-Real-IP` dérive d'une valeur fournie par le client (XFF, `Forwarded`, autre) |
-| INCONCLUSIVE | référence nominale absente |
+| INCONCLUSIVE | une cellule absente, inexploitable ou sans référence nominale |
 | Limites | la conservation d'un XFF ou d'un `Forwarded` forgé n'est **pas** un FAIL : le futur résolveur ne les lit jamais (§ 7) ; elle confirme qu'ils ne sont pas fiables |
 
 ### Q4 — Entrées ambiguës (public)
@@ -212,9 +253,9 @@ reconnue par l'engagement HMAC de `--self-ip`.
 | Procédure | `--role public --only Q4` |
 | Entrées | doublons `X-Real-IP` / XFF / `Forwarded` ; octet hors bornes ; non IP ; port ; crochets ; zone `%eth0` ; IPv4 mappée ; IPv6 non canonique ; zéros non significatifs ; entier décimal ; XFF de 100 entrées ; obs-fold ; octet non ASCII ; CGNAT / ULA / lien local |
 | À observer | idem Q2 ; forme exacte de `X-Real-IP` pour un client IPv6 (canonique ? mappée ?) ; refus edge |
-| PASS | `X-Real-IP` unique et nominal, ou refus edge, pour **chaque** cas |
+| PASS | `X-Real-IP` unique et nominal, ou refus explicite de l'edge, pour **chaque** cellule (16 cas × IPv4 / IPv6) de chaque session concernée |
 | FAIL | une valeur ambiguë, multiple ou contrôlée par le client atteint A dans `X-Real-IP` |
-| INCONCLUSIVE | référence nominale absente |
+| INCONCLUSIVE | une cellule absente, inexploitable ou sans référence nominale |
 | Limites | l'edge peut normaliser différemment selon HTTP/1.1, HTTP/2, HTTP/3 : la variante curl HTTP/2 n'est qu'un échantillon |
 
 ### Q5 — Trafic privé nominal
@@ -223,7 +264,7 @@ reconnue par l'engagement HMAC de `--self-ip`.
 |---|---|
 | Procédure | Service B, au démarrage : `--role private --target http://${{p1q-receiver.RAILWAY_PRIVATE_DOMAIN}}:8080` (IPv4 et IPv6) ; cas `Q5-01` ×3 |
 | À observer | joignabilité par famille ; pair brut ; `scope["server"]` (adresse locale atteinte) ; présence ou absence de `X-Real-IP` et des en-têtes `X-Railway-*` |
-| PASS | A est joint en privé ; **aucun** `X-Real-IP` ni en-tête edge n'est ajouté (contournement de l'edge confirmé) |
+| PASS | dans chaque session privée, les 3 tentatives Q5-01 observées en IPv4 **et** IPv6 ; **aucun** `X-Real-IP` ni en-tête edge ajouté (contournement de l'edge confirmé). Q5 seul ne prouve **rien** pour Q6 |
 | FAIL | — (Q5 décrit ; il ne qualifie pas à lui seul) |
 | INCONCLUSIVE | A injoignable en privé, ou en-têtes edge présents sur le trafic privé |
 | Limites | caractérise un environnement **récent** (U-ENV) ; ne dit rien d'un autre environnement |
@@ -232,11 +273,11 @@ reconnue par l'engagement HMAC de `--self-ip`.
 
 | Rubrique | Contenu |
 |---|---|
-| Procédure | Service B : `Q6-01` (×3) imitation **complète** d'une requête edge (`X-Real-IP` et XFF forgés, `X-Forwarded-Proto: https`, `X-Forwarded-Host` = domaine public de A, `X-Railway-Edge`, `X-Railway-Request-Id`, `X-Request-Start` forgés) ; `Q6-02` idem en IPv6 forgée ; `Q6-03` idem avec `Host` = domaine public ; rejeu privé de tous les cas Q2-Q4 et Q7 ; **Q6-B** : mêmes cas vers les adresses locales de A observées côté edge en Q1 (`P1Q_EXTRA_TARGETS`, adresses **de A seulement**, aucun balayage) ; **Q6-P** : B vers A par le domaine public ; **Q6-C** (facultatif) : depuis un second environnement du projet de diagnostic, tentative de joindre le domaine privé de A |
+| Procédure | Service B : `Q6-01` (×3) imitation **complète** d'une requête edge (`X-Real-IP` et XFF forgés, `X-Forwarded-Proto: https`, `X-Forwarded-Host` = domaine public de A, `X-Railway-Edge`, `X-Railway-Request-Id`, `X-Request-Start` forgés) ; `Q6-02` idem en IPv6 forgée ; `Q6-03` idem avec `Host` = domaine public ; rejeu privé de tous les cas Q2-Q4 et Q7 ; **Q6-B** : `Q5-01` et `Q6-01` vers chaque adresse locale de A atteinte côté edge (`scope["server"]` des sessions publiques du même démarrage) qui n'est pas déjà atteinte en privé (`P1Q_EXTRA_TARGETS`, adresses littérales **publiées par A dans son inventaire**, port de la cible principale, après identification du même démarrage ; aucun balayage) ; **Q6-P** : B vers A par le domaine public ; **Q6-C** (facultatif) : depuis un second environnement du projet de diagnostic, tentative de joindre le domaine privé de A |
 | À observer | la valeur forgée atteint-elle A ? existe-t-il une propriété **non contrôlable par l'appelant** qui sépare **toutes** les requêtes edge (Q1-Q4) de **toutes** les requêtes privées (Q5-Q6) : D1 catégorie IANA du pair brut ; D2 adresse locale `scope["server"]`, en particulier appartenance aux adresses **auto-découvertes** du domaine privé de A ; D3 famille de la socket d'écoute ; D4 valeurs exactes (rapportée, **jamais retenue** : non généralisable sans CIDR) ; un contournement Q6-B présente-t-il les propriétés edge ? |
-| PASS | un discriminateur D1, D2 ou D3 sépare les deux trafics **sur ≥ 2 démarrages de A** de chaque côté, **et** au moins une tentative Q6-B a été exécutée **sans** obtenir les propriétés edge, **et** Q6-P ne conserve pas de valeur forgée. PASS signifie « discriminateur **observé** de manière stable », jamais « garanti par Railway » |
-| FAIL | `X-Real-IP` forgé reçu en privé **et** aucun discriminateur ; **ou** contournement Q6-B réussi ; **ou** l'edge conserve une valeur forgée pour un appelant interne (Q6-P) |
-| INCONCLUSIVE | discriminateur observé sur un seul démarrage, ou sans essai de contournement ; observations publiques ou privées absentes |
+| PASS | **≥ 2 démarrages stricts** de A, chacun avec : (i) une session publique **complète** Q1-Q4 (IPv4 et IPv6) ; (ii) une session privée **complète** sur toute la matrice privée (Q2-Q7 rejoués, Q5-01 ×3, **Q6-01 ×3, Q6-02, Q6-03**, IPv4 et IPv6) ; (iii) **Q6-P** complet en IPv4 (Q1-01 ×5, Q2-01, Q3-05) ; (iv) pour **chaque** adresse locale de A atteinte par l'edge (`scope["server"]` des sessions publiques de ce démarrage), une tentative privée **exploitable** : observée (directement ou par Q6-B) ou **réellement refusée** (`connect_refused`, `unreachable`, `timeout`) ; et un discriminateur D1, D2 ou D3 qui sépare les deux trafics dans **chacun** de ces démarrages et sur leur union. PASS signifie « discriminateur **observé** de manière stable », jamais « garanti par Railway » |
+| FAIL | `X-Real-IP` forgé reçu en privé **et** aucun discriminateur (un seul démarrage suffit à le démontrer) ; **ou** contournement Q6-B présentant les propriétés edge ; **ou** valeur forgée, multiple ou illisible conservée pour un appelant interne via l'edge (Q6-P, IPv4 ou IPv6 observée) |
+| INCONCLUSIVE | moins de deux démarrages qualifiants ; imitation Q6-01..03 manquante ; Q6-P manquant ; contournement requis non tenté (`not_attempted`), famille indisponible (`family_unavailable`), refusé par la garde (`refused_by_guard`), erreur TLS ou autre échec qui n'est pas un refus réel ; adresse edge pseudonymisée (globale) donc non ciblable ; observations publiques ou privées absentes |
 | Limites | un discriminateur observé repose sur un comportement **non documenté** de Railway : il peut changer sans préavis (nouvelle architecture réseau, migration de région, Railway Metal) ; il exigerait une requalification périodique et une sonde de non-régression ; l'usurpation d'adresse source (paquets bruts) est **hors périmètre** et n'est pas tentée |
 
 Conséquence contractuelle : par F04-A § 7.3, l'option A exige la « preuve que le trafic privé ne peut pas usurper
@@ -251,9 +292,9 @@ F04-A (modèle de confiance organisationnel), hors du présent protocole, et dev
 | Procédure | Redéploiements successifs de A (variables du **seul** service de diagnostic) : (a) `P1Q_UVICORN_MODE=strict`, `FORWARDED_ALLOW_IPS` absent ; (b) `strict` + `FORWARDED_ALLOW_IPS=*` ; (c) `uvicorn_defaults`, `FORWARDED_ALLOW_IPS` absent (réglages d'`api.py`) ; (d) `trust_all_negative_control` ; chaque fois `--only Q7` public et rejeu privé (redéploiement de B ou `railway ssh`) |
 | Entrées | XFF simple, terminé par `127.0.0.1`, non IP, dupliqué ; `X-Forwarded-Proto` forgé |
 | À observer | `effective_equals_raw` ; pair brut sur Railway (vaut-il jamais `127.0.0.1` ?) ; simulation « confiance 127.0.0.1 » (ce que feraient les réglages d'`api.py`) |
-| PASS | (a) et (b) : aucune réécriture ; (d) : réécriture observée (pouvoir de détection du banc démontré) ; complété par les constats locaux § 3.5 |
-| FAIL | une réécriture en mode `strict` |
-| INCONCLUSIVE | (b) ou (d) non exécutés |
+| PASS | les **quatre** configurations (a) à (d), chacune identifiée par l'observation elle-même (mode et valeur rapportée de `FORWARDED_ALLOW_IPS`), avec Q7-01 à Q7-05 observés en IPv4 **et** IPv6, en public **et** en privé ; aucune réécriture en mode `strict` ; témoin (d) **démontré** : Q7-01 réécrit dans chaque rôle et famille (en privé, client effectif = la valeur forgée `203.0.113.7`) ; complété par les constats locaux § 3.5 |
+| FAIL | une réécriture de `scope["client"]` en mode `strict`, dans n'importe quelle session ou question |
+| INCONCLUSIVE | une configuration, un rôle, une famille ou un cas Q7 manquant ; témoin négatif sans réécriture détectée |
 | Limites | qualifie Uvicorn 0.27.0 / h11 0.16.0 ; toute montée de version exige de rejouer Q7 ; (c) est un **constat** sur la configuration d'`api.py`, sans modification |
 
 ### Q8 — Qualification du futur résolveur (normatif, non expérimental)
@@ -262,16 +303,42 @@ Voir § 7. Aucune implémentation dans ce lot : `core/auth_f2_http/client_ip.py`
 
 ## 5. Critères mécaniques de l'analyseur
 
-`p1q_analyze.py` applique les critères ci-dessus et rend, par question, `PASS`, `FAIL` ou `INCONCLUSIVE` avec les
-faits et les raisons, puis une proposition globale :
+### 5.1 Verdicts par question
 
-- `NO-GO` si une question Q1-Q7 est `FAIL` ;
-- `GO-CANDIDATE (soumis à l'audit indépendant et à la décision du fondateur)` si Q1-Q7 sont toutes `PASS` ;
-- `INCONCLUSIVE` sinon.
+`p1q_analyze.py` applique les règles de couverture du § 4 et rend, par question, `PASS`, `FAIL` ou `INCONCLUSIVE`
+avec les **faits**, les **raisons** et la liste explicite des **preuves manquantes** (`missing`, avec le statut de
+chaque cellule : `not_run`, `family_unavailable`, `not_attempted`, `refused:connect_refused`, `aborted`…).
 
-L'analyseur ne produit **jamais** un « GO » nu. Il vérifie l'intégrité de chaque collecte (nombre de lignes et
-empreinte SHA-256 annoncés par la ligne `P1Q-DIGEST`). Ses verdicts sont des **propositions** : l'audit
-indépendant relit les faits bruts, et seul le fondateur décide.
+| Statut d'une cellule | Signification | Effet |
+|---|---|---|
+| `nominal` | `X-Real-IP` unique, reconnu | exploitable |
+| `edge_rejected` | 400 / 413 / 414 / 431 sans marque `x-p1q-receiver` | exploitable (Q2-Q4) |
+| `multiple`, `client_controlled`, `not_self`, `different`, `absent` (X-Real-IP absent d'une observation) | contre-exemple | **FAIL** |
+| `not_run`, `aborted`, `family_unavailable`, `connect_refused`, `timeout`, `no_response`, `tls_error`, `not_observed`, `unreferenced`, `uncommitted` | preuve manquante | **INCONCLUSIVE** |
+| Q6-B : `refused:connect_refused` / `refused:unreachable` / `refused:timeout` | tentative réellement refusée | exploitable |
+| Q6-B : `not_attempted`, `family_unavailable`, `refused_by_guard`, `tls_error`, `other`, `untestable_pseudonymised` | tentative absente ou non concluante | **INCONCLUSIVE** |
+
+### 5.2 Intégrité de collecte (correctif C2)
+
+Une exécution est **intègre** si elle porte exactement une ligne `P1Q-DIGEST` du protocole `P1Q-V0.1-R1` dont le
+nombre de lignes et l'empreinte SHA-256 correspondent aux lignes `P1Q-RESULT` collectées, sans ligne dupliquée,
+sans enregistrement d'un autre protocole et avec un seul démarrage du récepteur. La collecte est **prouvée** si
+toutes les exécutions sont intègres et si aucune anomalie de lecture n'existe (ligne marquée tronquée ou illisible,
+empreinte orpheline, document inattendu, observation curl illisible). Une exécution non intègre ne compte **jamais**
+dans la couverture.
+
+### 5.3 Proposition globale
+
+| Condition | Proposition |
+|---|---|
+| une question Q1-Q7 FAIL | `NO-GO` (même si la collecte n'est pas prouvée : FAIL maintenu, signalé « à confirmer ») |
+| collecte non prouvée, aucune FAIL | `INCONCLUSIVE` — **jamais** GO-CANDIDATE |
+| Q1-Q7 toutes PASS et collecte prouvée | `GO-CANDIDATE (soumis à l'audit indépendant et à la décision du fondateur)` |
+| autre cas | `INCONCLUSIVE` |
+
+La liste `blocking` du rapport énumère ce qui empêche un GO-CANDIDATE. L'analyseur ne produit **jamais** un « GO »
+nu. Les observations curl (HTTP/2) ne peuvent démontrer qu'un FAIL, jamais une couverture. Ses verdicts sont des
+**propositions** : l'audit indépendant relit les faits bruts, et seul le fondateur décide.
 
 ## 6. Matrice finale GO / NO-GO / INCONCLUSIVE pour l'option A
 
@@ -281,7 +348,8 @@ indépendant relit les faits bruts, et seul le fondateur décide.
 | **NO-GO A** | Q6 FAIL (usurpation privée indistinguable, ou contournement réussi) | option A non conforme au § 7.3 F04-A ; option B, ou révision contractuelle explicite (hors P1-Q) |
 | **NO-GO** de la configuration proposée | Q7 FAIL | réglage Uvicorn à reprendre ; Q1-Q6 à rejouer |
 | **INCONCLUSIVE** | au moins une question INCONCLUSIVE, aucune FAIL | essais complémentaires (autre démarrage, autre région edge, IPv6, HTTP/2) ; aucune décision |
-| **GO-CANDIDATE A** | Q1-Q7 PASS, collectes complètes, audit indépendant sans réserve bloquante | **proposition** au fondateur : acceptation écrite, nominative et limitée du modèle de confiance (ce que l'edge garantit, ce qu'il ne garantit pas, discriminateur retenu, conditions de requalification) ; puis freeze F04-D. **P1 reste ouverte jusqu'à ce freeze.** |
+| **INCONCLUSIVE** | collecte non prouvée (§ 5.2), aucune FAIL | recollecter ; aucune décision |
+| **GO-CANDIDATE A** | Q1-Q7 PASS selon les règles de couverture du § 4, collecte prouvée (§ 5.2), audit indépendant sans réserve bloquante | **proposition** au fondateur : acceptation écrite, nominative et limitée du modèle de confiance (ce que l'edge garantit, ce qu'il ne garantit pas, discriminateur retenu, conditions de requalification) ; puis freeze F04-D. **P1 reste ouverte jusqu'à ce freeze.** |
 
 Même en GO-CANDIDATE, l'option A ne devient jamais une garantie : elle repose sur un comportement observé de
 Railway, à requalifier à chaque changement de plateforme, de région, de version d'Uvicorn ou de topologie.
@@ -321,10 +389,14 @@ IPv4 et IPv6, et la preuve qu'aucune écriture anti-abus n'a lieu sur refus.
 
 | Fichier | Objet |
 |---|---|
-| `tests/test_p1q_bench.py` | pseudonymisation (catégories, adresses globales jamais en clair, IPv4 mappée, texte libre, clé non exportable, engagement HMAC) ; garde d'isolement ; refus de la cible de production ; catalogue (couverture Q1-Q7, valeurs de documentation seulement, octets exacts, imitation edge, adresse de l'expérimentateur jamais en clair) ; exécution privée de bout en bout contre un récepteur local et intégrité de collecte (dont altération détectée) ;
-chaîne publique TLS complète contre un « edge » **simulé** (réécriture de `X-Real-IP` → Q1-Q4 PASS ; conservation
-d'une valeur forgée → Q2 / Q4 FAIL, proposition NO-GO) — ce simulateur n'est pas un modèle de Railway ; critères de l'analyseur (Q1, Q2/Q4, Q6, Q7, proposition) ; isolement du code (imports, absence de variables Oryx, empreintes identiques à la production, image et `railway.json`, aucune référence du runtime au banc) |
-| `tests/test_p1q_receiver_http.py` | vrai serveur Uvicorn 0.27.0 : constats § 3.5, simulation conforme au middleware réel, entrées ambiguës, confidentialité (aucune adresse globale, aucun cookie ni jeton dans la réponse ni dans la sortie du processus), stabilité des pseudonymes, engagement HMAC, routes / méthodes / no-store / budget, rapport honnête de l'écoute IPv6, refus d'un environnement non isolé |
+| `tests/test_p1q_bench.py` | pseudonymisation (catégories, adresses globales jamais en clair, IPv4 mappée, texte libre, clé non exportable, engagement HMAC) ; garde d'isolement ; refus de la cible de production ; catalogue (couverture Q1-Q7, valeurs de documentation seulement, octets exacts, imitation edge, adresse de l'expérimentateur jamais en clair) ; exécution privée de bout en bout contre un récepteur local (identification, intégrité, IPv6 requise non exécutée → INCONCLUSIVE, altération détectée) ; chaîne publique TLS réelle contre un « edge » **simulé** — ce simulateur n'est pas un modèle de Railway — : cellules IPv4 toutes nominales mais IPv6 indisponible → Q1-Q4 **INCONCLUSIVE** (aucune fausse validation) ; valeur forgée conservée → Q2 / Q4 FAIL, NO-GO ; isolement du code (imports, absence de variables Oryx, empreintes identiques à la production, image et `railway.json`, aucune référence du runtime au banc) |
+| `tests/test_p1q_analysis.py` | correctifs C1-C4 / C6 sur une campagne **synthétique complète** (topologie fictive) seule à donner GO-CANDIDATE ; retrait successif de chaque élément requis → INCONCLUSIVE et jamais GO : cellule ou cas Q2 / Q3 / Q4, tentative Q1, famille IPv6 indisponible (public, privé), adresse IPv6 non engagée, session partielle, empreinte absente, ligne tronquée, ligne altérée, collecte dupliquée, exécution à deux démarrages, autre protocole, empreinte orpheline (verrou d'intégrité seul), imitation Q6-01 / 02 / 03, Q5 sans Q6, Q6-P, contournement non tenté ou non concluant, démarrage unique, chaque configuration et rôle Q7, cellule Q7, témoin négatif muet ; refus edge admis seulement 400 / 413 / 431 non marqués ; FAIL démontrés maintenus (valeur forgée avec empreinte absente, contournement réussi, usurpation indistinguable sur un démarrage, Q6-P IPv6 forgé, réécriture stricte) |
+| `tests/test_p1q_targeting.py` | correctif C5 : hôtes admis / refusés (suffixes Railway, suffixe usurpé, chemin, requête, fragment, identifiants, boucle locale, Q6-B global ou non littéral, port différent, rôle) ; cible non P1-Q : seule la requête d'identification est envoyée ; adresse Q6-B hors inventaire jamais contactée ; cible secondaire d'un autre démarrage abandonnée ; chemin unique `/p1q/observe` |
+| `tests/test_p1q_receiver_http.py` | vrai serveur Uvicorn 0.27.0 : constats § 3.5, simulation conforme au middleware réel, entrées ambiguës, confidentialité (aucune adresse globale, aucun cookie ni jeton dans la réponse ni dans la sortie du processus), stabilité des pseudonymes, engagement HMAC, routes / méthodes / no-store / budget / marque `x-p1q-receiver`, rapport honnête de l'écoute IPv6, refus d'un environnement non isolé |
+
+Contrôle de la force des tests : des mutations volontaires de l'analyseur (IPv6 non requise, verrou d'intégrité
+supprimé, couverture partielle acceptée, un seul démarrage, témoin négatif ignoré, FAIL Q6-P ignoré, tout 4xx / 5xx
+admis comme refus, toute issue Q6-B admise comme refus) font chacune échouer au moins un test.
 
 Image : le `Dockerfile` n'a **pas** pu être construit dans l'environnement de préparation (aucun démon Docker).
 Son contenu a été reproduit à la place : venv Python 3.11 neuf, `pip install --require-hashes --no-deps -r
@@ -381,14 +453,16 @@ lui-même ; image de base `python:3.11.9-slim` non épinglée par empreinte (tai
 | U-REGION | Comportement par POP edge / région | résultats locaux à une région | noter `X-Railway-Edge` ; idéalement un second point d'entrée (autre réseau, VPN) |
 | U-NAT | Réseau de l'expérimentateur derrière CGNAT / proxy | `--self-ip` erroné → Q1 FAIL apparent | vérifier l'adresse publique au moment de l'essai ; en cas d'écart, INCONCLUSIVE et non FAIL après analyse |
 | U-REPLICA | Une seule réplique de A ; topologie multi-réplique non testée | discriminateur non qualifié en multi-réplique | le pilote est mono-réplique (F04-A § 10.1) ; requalifier avant tout passage multi-réplique |
-| U-LOGS | Limite de taille des lignes de journal Railway | collecte tronquée | empreinte `P1Q-DIGEST` ; en cas d'écart, relancer via `railway ssh` avec `--out` puis récupérer le fichier |
+| U-LOGS | Limite de taille des lignes de journal Railway | collecte tronquée → INCONCLUSIVE (§ 5.2) | empreinte `P1Q-DIGEST` ; en cas d'écart, relancer via `railway ssh` avec `--out` puis récupérer le fichier |
+| U-V6-OUT | Sortie IPv6 des services Railway non activée par défaut (CLI `railway outbound-network ipv6 enable`) | Q6-P IPv6 non exigé | limite consignée : le comportement de l'edge pour un appelant interne IPv6 n'est qualifié que s'il est observé |
+| U-COVER | Exigences de couverture strictes (IPv6 requise, sessions complètes, deux démarrages, quatre configurations Q7) | INCONCLUSIVE fréquent si une condition manque | choix délibéré de conservatisme ; tout assouplissement serait une révision du protocole, jamais une option de l'analyseur |
 | U-DOC | Documentation Railway lue par l'outil de recherche, non par le site | citations partielles | relire les pages citées au moment de l'essai |
 | R-PRIV | L'edge voit les en-têtes d'engagement HMAC ; les journaux HTTP Railway relèvent l'adresse source | traitement par Railway, comme pour la production | consigné § 3.3 ; aucune autre exposition |
 
 ## 11. Frontière de ce lot et dormance
 
 - **Ajoutés** : `diagnostics/p1q/**`, `tests/p1q_support.py`, `tests/test_p1q_bench.py`,
-  `tests/test_p1q_receiver_http.py`, `docs/act_l1_f04d_p1q_protocol_v01.md`,
+  `tests/test_p1q_receiver_http.py`, `tests/test_p1q_analysis.py`, `tests/test_p1q_targeting.py`, `docs/act_l1_f04d_p1q_protocol_v01.md`,
   `docs/act_l1_f04d_p1q_railway_guide_v01.md`, `docs/act_l1_f04d_p1q_report_template_v01.md`.
 - **Aucun fichier existant modifié** : `api.py` et `api:app`, `core/**` (dont `client_ip.py`, les deux
   `provenance.py`, `f2_runtime/entrypoint.py`, `route_policy/registry.py`), `requirements*.txt`, `alembic/**`,

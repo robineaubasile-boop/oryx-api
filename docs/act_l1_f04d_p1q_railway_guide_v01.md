@@ -18,6 +18,12 @@
 - Les commandes CLI ci-dessous correspondent à la documentation Railway consultée le 14/11/2026 ; vérifier chaque
   option par `railway <commande> --help` au moment de l'essai et consigner toute différence dans le rapport.
 - Avant chaque commande `railway`, vérifier le projet lié : `railway status` doit afficher `oryx-p1q-diagnostic`.
+- La sonde n'accepte que `https://<service>.up.railway.app` (public, Q6-P), `http://<service>.railway.internal:<port>`
+  (privé) et, pour Q6-B, des adresses littérales publiées par le récepteur ; elle **identifie** chaque cible par une
+  requête `Q0-ID` sans en-tête forgé et l'abandonne si ce n'est pas le récepteur P1-Q attendu. Ne jamais contourner
+  ces refus (protocole § 3.2) ; `--allow-loopback` est réservé aux tests locaux et refusé sur Railway.
+- **Sessions de preuve complètes** : ne pas utiliser `--only` pour une session destinée à prouver Q1-Q6 (une
+  session partielle concernée rend la question INCONCLUSIVE, protocole § 4) ; `--only Q7` est prévu au § 8.3.
 
 ## 1. Prérequis (poste de l'expérimentateur)
 
@@ -130,8 +136,11 @@ Depuis la racine de l'extrait :
 python3 diagnostics/p1q/p1q_prober.py --role public --target https://<domaine-public-de-p1q-receiver> --family both --self-ip <IPV4_PUBLIQUE> --self-ip <IPV6_PUBLIQUE_SI_DISPONIBLE> --out $RES/public_strict_boot1.jsonl
 ```
 
-- Sans IPv6 locale : `--family 4` et un seul `--self-ip` ; consigner l'absence d'IPv6 (Q1-Q4 IPv6 resteront
-  INCONCLUSIVE).
+- IPv6 est **requise** (protocole § 4) : sans IPv6 locale, les cellules IPv6 sont `family_unavailable`, Q1-Q4
+  restent INCONCLUSIVE et aucun GO-CANDIDATE n'est possible ; refaire la session depuis un réseau offrant IPv6.
+  Fournir un `--self-ip` **par famille** : une famille non engagée donne INCONCLUSIVE (jamais FAIL).
+- La première ligne de chaque famille est l'identification `Q0-ID` ; `aborted` / `target_not_receiver` signifie
+  que la cible n'est pas le récepteur : arrêter et vérifier le domaine.
 - Contrôle immédiat : `python3 diagnostics/p1q/p1q_analyze.py $RES/public_strict_boot1.jsonl`
   (collecte « complète » attendue).
 
@@ -162,8 +171,11 @@ Si curl le permet : mêmes commandes avec `--http3`. Ces fichiers sont passés �
 railway up . --path-as-root --service p1q-prober --detach
 ```
 
-2. B exécute la matrice privée au démarrage, en IPv4 et en IPv6, puis Q6-P (vers le domaine public), écrit
-   `P1Q-PROBER-EXIT 0` et reste inactif jusqu'à son TTL. **Ne pas** lui générer de domaine public.
+2. B identifie le récepteur (`Q0-ID`), exécute la matrice privée complète au démarrage, en IPv4 et en IPv6, puis
+   les éventuelles cibles Q6-B et Q6-P (vers le domaine public, même démarrage de A exigé), écrit
+   `P1Q-PROBER-EXIT 0` et reste inactif jusqu'à son TTL. **Ne pas** lui générer de domaine public. Q6-P n'exige que
+   l'IPv4 : la sortie IPv6 des services Railway n'est pas active par défaut ; ne pas l'activer pour cet essai sans
+   décision du fondateur (une IPv6 observée serait évaluée).
 3. Collecter :
 
 ```bash
@@ -185,26 +197,35 @@ railway ssh --service p1q-prober
 
 ## 8. Sessions complémentaires
 
-### 8.1 Q6-B — contournement vers les adresses observées côté edge
+### 8.1 Q6-B — contournement vers les adresses observées côté edge (requis pour chaque démarrage)
 
-1. Lancer l'analyse de S2 + S3 et relever `Q6.facts.discriminators.D2_server_address.public` : adresses
-   **locales de A** atteintes par l'edge.
-2. Si l'une d'elles n'est pas déjà une adresse privée atteinte par B, la fournir à B (adresses de A uniquement) :
-   `P1Q_EXTRA_TARGETS=http://<adresse>:8080` (IPv6 entre crochets : `http://[<adresse>]:8080`), puis redéployer B
-   ou relancer par `railway ssh` avec `--extra-target`.
-3. Collecter comme au § 7.
+1. Lancer l'analyse de S2 + S3 et lire `Q6.facts.strict_boots.<boot_id>.bypass` : pour chaque adresse locale de
+   A atteinte par l'edge pendant ce démarrage, le statut doit être `observed` ou `refused:<classe>`.
+2. Pour chaque statut `not_attempted`, fournir l'adresse à B : `P1Q_EXTRA_TARGETS=http://<adresse>:8080` (IPv6
+   entre crochets : `http://[<adresse>]:8080`), puis redéployer B (nouvelle session privée complète) ou relancer par
+   `railway ssh` avec `--extra-target`. La sonde refuse (`refused_by_guard`) toute adresse absente de l'inventaire
+   publié par A, et abandonne une cible qui ne répond pas avec le même démarrage de A.
+3. Une adresse pseudonymisée (`g4:` / `g6:`, adresse globale) n'est pas ciblable : Q6 restera INCONCLUSIVE ;
+   consigner et soumettre à arbitrage, sans rechercher l'adresse réelle.
+4. Collecter comme au § 7. `family_unavailable`, `tls_error` ou `other` ne sont **pas** des refus : seuls
+   `connect_refused`, `unreachable` et `timeout` prouvent qu'une tentative a échoué.
 
 ### 8.2 Second démarrage (stabilité, exigée pour un PASS Q6)
 
 Redéployer A (`railway redeploy --service p1q-receiver`, ou `railway up` à nouveau), attendre la fin du
-recouvrement (un seul déploiement actif), puis rejouer S2 (`public_strict_boot2.jsonl`) et S3
-(`private_strict_boot2.log`, redéploiement de B).
+recouvrement (un seul déploiement actif : une exécution qui mêlerait deux démarrages est rejetée), puis, dans cet
+ordre : rejouer S2 complet (`public_strict_boot2.jsonl`) ; analyser pour relever les adresses edge de **ce**
+démarrage (elles peuvent avoir changé) ; mettre à jour `P1Q_EXTRA_TARGETS` ; redéployer B
+(`private_strict_boot2.log`).
 
 ### 8.3 Q7 — modes Uvicorn (variables du seul récepteur)
 
 Pour chaque ligne : modifier les variables de `p1q-receiver`, redéployer A, rejouer
-`p1q_prober.py --role public ... --only Q7 --out $RES/public_<mode>.jsonl`, puis redéployer B (ou `railway ssh`)
-pour le rejeu privé `--only Q7`.
+`p1q_prober.py --role public ... --family both --only Q7 --out $RES/public_<mode>.jsonl`, puis redéployer B (matrice
+privée complète, qui contient Q7) ou relancer par `railway ssh` avec `--only Q7`. Chaque configuration exige Q7-01
+à Q7-05 en IPv4 **et** IPv6, en public **et** en privé ; la configuration est lue dans l'observation elle-même
+(mode, valeur rapportée de `FORWARDED_ALLOW_IPS`). Le témoin (d) doit montrer la réécriture de Q7-01 dans chaque
+rôle et famille ; sinon Q7 reste INCONCLUSIVE.
 
 | Étape | `P1Q_UVICORN_MODE` | `FORWARDED_ALLOW_IPS` |
 |---|---|---|
@@ -231,6 +252,10 @@ l'analyseur principal (le rapport le traite à part).
 python3 diagnostics/p1q/p1q_analyze.py $RES/*.jsonl $RES/private_*.log --curl-public $RES/curl_h2_q1.json --out $RES/p1q_report.json
 ```
 
+   Fournir **chaque** journal ou fichier **une seule fois** (un fichier passé deux fois crée des lignes dupliquées :
+   collecte non prouvée). Lire `option_a_proposal`, `blocking`, puis `missing` de chaque question ;
+   `collection.runs` doit montrer chaque exécution « complète ». Toute anomalie de collecte interdit un
+   GO-CANDIDATE ; un FAIL reste affiché même si la collecte est incomplète.
 2. Remplir `docs/act_l1_f04d_p1q_report_template_v01.md` (copie datée) avec les faits, les verdicts proposés, les
    écarts et les limites ; joindre les fichiers bruts pseudonymisés à l'audit (hors Git, ou dans une PR de rapport
    distincte si le fondateur le décide).

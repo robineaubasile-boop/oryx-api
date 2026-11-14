@@ -182,6 +182,8 @@ def test_routes_methods_and_cache_policy_are_closed():
     for response in (health, unknown, post, head, ok, exhausted):
         assert response[1]["cache-control"] == ["no-store"]
         assert "access-control-allow-origin" not in response[1] and "server" not in response[1]
+        # Marque du récepteur sur TOUTE réponse : un refus de l'edge n'est jamais confondu avec elle.
+        assert response[1]["x-p1q-receiver"] == [p1q_receiver.PROTOCOL_VERSION]
 
 
 def test_listener_report_is_honest_about_ipv6():

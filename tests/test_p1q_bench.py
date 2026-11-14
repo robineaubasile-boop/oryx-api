@@ -145,9 +145,9 @@ def test_production_target_is_refused(host):
 
 def test_prober_roles_require_the_right_transport(capsys):
     with pytest.raises(SystemExit):
-        p1q_prober.main(["--role", "public", "--target", "http://127.0.0.1:1"], {})
+        p1q_prober.main(["--role", "public", "--target", "http://127.0.0.1:1", "--allow-loopback"], {})
     with pytest.raises(SystemExit):
-        p1q_prober.main(["--role", "private", "--target", "https://p1q.up.railway.app"], {})
+        p1q_prober.main(["--role", "private", "--target", "https://127.0.0.1:1", "--allow-loopback"], {})
 
 
 @pytest.mark.parametrize("value", ["192.168.1.10", "203.0.113.7", "not-an-ip", " 8.8.8.8"])
@@ -228,135 +228,30 @@ def test_end_to_end_private_run_against_a_local_receiver_is_complete_and_analysa
     out = tmp_path / "private.jsonl"
     with receiver_process("strict") as rx:
         code = p1q_prober.main(["--role", "private", "--target", f"http://127.0.0.1:{rx.port}", "--family", "4",
-                                "--delay", "0", "--prefix", "--out", str(out)], {})
+                                "--allow-loopback", "--delay", "0", "--prefix", "--out", str(out)], {})
     assert code == 0
     lines = out.read_text().splitlines()
     assert lines[-1].startswith("P1Q-DIGEST ") and all(l.startswith("P1Q-RESULT ") for l in lines[:-1])
-    results, digests, integrity = p1q_analyze.read_lines([str(out)])
-    assert integrity == [] and len(results) == len(lines) - 1
-    assert [d["complete"] for d in p1q_analyze.verify_digests(results, digests)] == [True]
+    results, digests, notes, _ = p1q_analyze.read_lines([str(out)])
+    assert notes == [] and len(results) == len(lines) - 1
+    collection = p1q_analyze.verify_collection(results, digests, notes)
+    assert collection["proven"] is True
     records = [d for _, d in results]
+    assert records[0]["case"] == "Q0-ID" and records[0]["identification"] == "identified"
     assert all(r["outcome"] == "observed" for r in records)
-    assert {r["case"] for r in records} == {c.id for c in p1q_prober.cases_for("private")}
-    report = p1q_analyze.analyze(records)
-    assert report["Q5"]["verdict"] == "PASS"
-    # Sans observation publique, Q1-Q4 et Q6 ne peuvent pas conclure.
-    for q in ("Q1", "Q2", "Q3", "Q4", "Q6"):
+    assert {r["case"] for r in records} == {c.id for c in p1q_prober.cases_for("private")} | {"Q0-ID"}
+    report = p1q_analyze.analyze(results, digests, notes)
+    # IPv6 requise non exécutée (--family 4) : Q5 ne peut pas être validé.
+    assert report["Q5"]["verdict"] == "INCONCLUSIVE"
+    assert any("/v6/Q5-01" in m and "not_run" in m for m in report["Q5"]["missing"])
+    for q in ("Q1", "Q2", "Q3", "Q4", "Q6", "Q7"):
         assert report[q]["verdict"] == "INCONCLUSIVE", q
     assert report["option_a_proposal"] == "INCONCLUSIVE"
-    # Tampering : une ligne modifiée rend la collecte incomplète.
+    # Altération d'une ligne : collecte non prouvée.
     tampered = tmp_path / "tampered.jsonl"
     tampered.write_text("\n".join([lines[0].replace('"attempt":1', '"attempt":9')] + lines[1:]) + "\n")
-    results2, digests2, _ = p1q_analyze.read_lines([str(tampered)])
-    assert [d["complete"] for d in p1q_analyze.verify_digests(results2, digests2)] == [False]
-
-
-# --------------------------------------------------------------------------
-# Analyseur : critères mécaniques (protocole § 5)
-# --------------------------------------------------------------------------
-
-NOMINAL = "g4:00112233445566aa"
-
-
-def _addr(text, category, version=4):
-    return {"parsed": True, "text": text, "category": category, "version": version, "canonical": True}
-
-
-def _obs(*, boot="b1", xri=(), raw=("10.9.0.1", "private_rfc1918"), server=("10.9.0.5", "private_rfc1918"),
-         self_xri=None, mode="strict", effective_equals_raw=True, env=None, headers=None, inventory=None):
-    return {"p1q": "receiver-observation", "boot_id": boot, "mode": mode,
-            "uvicorn": {"proxy_headers": mode != "strict", "forwarded_allow_ips_env": env,
-                        "forwarded_allow_ips": "127.0.0.1"},
-            "raw_client": _addr(*raw), "effective_client": _addr(*raw), "server": _addr(*server),
-            "effective_equals_raw": effective_equals_raw,
-            "x_real_ip": {"count": len(xri), "values": list(xri)},
-            "self_match": ({"valid": True, "x_real_ip": self_xri} if self_xri is not None else None),
-            "headers": headers or {}, "simulation": {}, "inventory": inventory or {}}
-
-
-def _rec(role, case, o, *, target="primary", family=4, attempt=1):
-    return {"p1q": "prober-result", "role": role, "target": target, "family": family, "case": case,
-            "q": case.split("-")[0], "attempt": attempt, "outcome": "observed", "observation": o, "run_id": "r"}
-
-
-def _public_nominal(boot="b1", n=5):
-    return [_rec("public", "Q1-01", _obs(boot=boot, xri=[_addr(NOMINAL, "global")], self_xri=[True],
-                                         raw=("100.64.1.2", "shared_cgnat"), server=("10.9.0.5", "private_rfc1918")),
-                 attempt=i + 1) for i in range(n)]
-
-
-def test_q1_pass_requires_engaged_global_stable_x_real_ip():
-    assert p1q_analyze.analyze_q1(_public_nominal())["verdict"] == "PASS"
-    assert p1q_analyze.analyze_q1(_public_nominal(n=4))["verdict"] == "INCONCLUSIVE"
-    wrong = _public_nominal()
-    wrong[0]["observation"]["self_match"]["x_real_ip"] = [False]
-    assert p1q_analyze.analyze_q1(wrong)["verdict"] == "FAIL"
-    absent = _public_nominal()
-    absent[1]["observation"]["x_real_ip"] = {"count": 0, "values": []}
-    assert p1q_analyze.analyze_q1(absent)["verdict"] == "FAIL"
-
-
-def test_q2_forged_x_real_ip_preserved_by_the_edge_is_a_fail():
-    base = _public_nominal()
-    overwritten = base + [_rec("public", "Q2-01", _obs(xri=[_addr(NOMINAL, "global")], self_xri=[True]))]
-    ref = p1q_analyze.nominal_reference(overwritten)
-    assert p1q_analyze.analyze_header_q(overwritten, "Q2", ref)["verdict"] == "PASS"
-    kept = base + [_rec("public", "Q2-01", _obs(xri=[_addr("203.0.113.7", "documentation")]))]
-    assert p1q_analyze.analyze_header_q(kept, "Q2", p1q_analyze.nominal_reference(kept))["verdict"] == "FAIL"
-    twice = base + [_rec("public", "Q4-01", _obs(xri=[_addr(NOMINAL, "global"), _addr(NOMINAL, "global")]))]
-    assert p1q_analyze.analyze_header_q(twice, "Q4", p1q_analyze.nominal_reference(twice))["verdict"] == "FAIL"
-    rejected = base + [{**_rec("public", "Q4-14", None), "outcome": "not_observed", "status": 400}]
-    rejected.append(_rec("public", "Q4-01", _obs(xri=[_addr(NOMINAL, "global")], self_xri=[True])))
-    assert p1q_analyze.analyze_header_q(rejected, "Q4",
-                                        p1q_analyze.nominal_reference(rejected))["verdict"] == "PASS"
-
-
-def test_q6_indistinguishable_private_spoof_is_a_fail():
-    public = _public_nominal()
-    private = [_rec("private", "Q6-01", _obs(xri=[_addr("203.0.113.7", "documentation")],
-                                             raw=("100.64.3.4", "shared_cgnat"), server=("10.9.0.5", "private_rfc1918")))]
-    result = p1q_analyze.analyze_q6(public + private)
-    assert result["verdict"] == "FAIL" and result["facts"]["candidate_discriminators"] == []
-
-
-def test_q6_pass_requires_a_stable_discriminator_over_two_boots_and_failed_bypass():
-    inventory = {"private_domain_resolution": {"ipv6": [_addr("fd12::5", "unique_local", 6)]}}
-
-    def private(boot):
-        return _rec("private", "Q6-01", _obs(boot=boot, xri=[_addr("203.0.113.7", "documentation")],
-                                             raw=("fd12::9", "unique_local", 6), server=("fd12::5", "unique_local", 6),
-                                             inventory=inventory))
-
-    records = _public_nominal("b1") + _public_nominal("b2") + [private("b1"), private("b2")]
-    one_boot = p1q_analyze.analyze_q6(_public_nominal("b1") + [private("b1")])
-    assert one_boot["verdict"] == "INCONCLUSIVE"
-    no_bypass_attempt = p1q_analyze.analyze_q6(records)
-    assert no_bypass_attempt["verdict"] == "INCONCLUSIVE"
-    blocked = {**_rec("private", "Q6-01", None, target="extra:0"), "outcome": "connect_error"}
-    result = p1q_analyze.analyze_q6(records + [blocked])
-    assert result["verdict"] == "PASS"
-    assert result["facts"]["discriminators"]["D2_server_address"]["rule_self_discovered"] is True
-    bypass = _rec("private", "Q6-01", _obs(raw=("100.64.1.2", "shared_cgnat")), target="extra:0")
-    assert p1q_analyze.analyze_q6(records + [bypass])["verdict"] == "FAIL"
-
-
-def test_q7_requires_env_independence_and_a_detecting_negative_control():
-    strict = _rec("private", "Q7-01", _obs(mode="strict", env="*"))
-    negative = _rec("private", "Q7-01", _obs(mode="trust_all_negative_control", effective_equals_raw=False))
-    assert p1q_analyze.analyze_q7([strict, negative])["verdict"] == "PASS"
-    assert p1q_analyze.analyze_q7([_rec("private", "Q7-01", _obs(mode="strict")), negative])["verdict"] \
-        == "INCONCLUSIVE"
-    rewritten = _rec("private", "Q7-01", _obs(mode="strict", env="*", effective_equals_raw=False))
-    assert p1q_analyze.analyze_q7([rewritten, negative])["verdict"] == "FAIL"
-
-
-def test_any_fail_makes_the_proposal_no_go_and_nothing_is_ever_a_go():
-    kept = _public_nominal() + [_rec("public", "Q2-01", _obs(xri=[_addr("203.0.113.7", "documentation")]))]
-    report = p1q_analyze.analyze(kept)
-    assert report["Q2"]["verdict"] == "FAIL" and report["option_a_proposal"] == "NO-GO"
-    assert "non décisionnelle" in report["warning"]
-    source = (BENCH_DIR / "p1q_analyze.py").read_text(encoding="utf-8")
-    assert '"GO"' not in source  # jamais un GO nu : au mieux un GO-CANDIDATE soumis à audit
+    results2, digests2, notes2, _ = p1q_analyze.read_lines([str(tampered)])
+    assert p1q_analyze.verify_collection(results2, digests2, notes2)["proven"] is False
 
 
 # --------------------------------------------------------------------------
@@ -364,7 +259,7 @@ def test_any_fail_makes_the_proposal_no_go_and_nothing_is_ever_a_go():
 # --------------------------------------------------------------------------
 
 BENCH_FILES = sorted(BENCH_DIR.glob("*.py"))
-ALLOWED_IMPORTS = {"argparse", "dataclasses", "hashlib", "hmac", "ipaddress", "json",
+ALLOWED_IMPORTS = {"argparse", "dataclasses", "errno", "hashlib", "hmac", "ipaddress", "json",
                    "os", "re", "secrets", "socket", "ssl", "sys", "threading", "time", "urllib",
                    "uvicorn", "p1q_guard", "p1q_redact", "p1q_receiver", "p1q_prober", "p1q_analyze"}
 
@@ -448,27 +343,37 @@ def _public_run(tmp_path, monkeypatch, *, overwrite):
     out = tmp_path / ("public_ok.jsonl" if overwrite else "public_bad.jsonl")
     with receiver_process("strict") as rx, FakeEdge(rx.port, key, cert, client_ip=GLOBAL4,
                                                     overwrite=overwrite) as edge:
-        code = p1q_prober.main(["--role", "public", "--target", f"https://localhost:{edge.port}", "--family", "4",
-                                "--self-ip", GLOBAL4, "--delay", "0", "--only", "Q1", "--only", "Q2",
-                                "--only", "Q3", "--only", "Q4", "--out", str(out)], {})
+        code = p1q_prober.main(["--role", "public", "--target", f"https://localhost:{edge.port}", "--family", "both",
+                                "--allow-loopback", "--self-ip", GLOBAL4, "--delay", "0", "--only", "Q1",
+                                "--only", "Q2", "--only", "Q3", "--only", "Q4", "--out", str(out)], {})
     assert code == 0
     assert GLOBAL4 not in out.read_text()
-    results, digests, _ = p1q_analyze.read_lines([str(out)])
-    assert [d["complete"] for d in p1q_analyze.verify_digests(results, digests)] == [True]
-    return p1q_analyze.analyze([d for _, d in results]), [d for _, d in results]
+    results, digests, notes, _ = p1q_analyze.read_lines([str(out)])
+    assert p1q_analyze.verify_collection(results, digests, notes)["proven"] is True
+    return p1q_analyze.analyze(results, digests, notes), [d for _, d in results]
 
 
-def test_public_chain_passes_against_an_edge_that_overwrites_x_real_ip(tmp_path, monkeypatch):
+def test_public_chain_never_validates_without_the_required_ipv6_family(tmp_path, monkeypatch):
+    """Chaîne réelle sonde -> edge TLS simulé -> récepteur : toutes les cellules
+    IPv4 sont nominales, mais l'IPv6 requise est indisponible (bac à sable) ou
+    refusée (l'edge simulé n'écoute qu'en IPv4) : jamais de PASS."""
     report, records = _public_run(tmp_path, monkeypatch, overwrite=True)
-    assert all(r["outcome"] == "observed" and r["tls"] is True and "connect_address" not in r for r in records)
+    v4 = [r for r in records if r["family"] == 4 and r["case"] != "Q0-ID"]
+    assert v4 and all(r["outcome"] == "observed" and r["tls"] is True and "connect_address" not in r for r in v4)
+    v6 = [r for r in records if r["family"] == 6]
+    assert v6 and all(r["outcome"] in ("family_unavailable", "connect_error", "aborted") for r in v6)
     for q in ("Q1", "Q2", "Q3", "Q4"):
-        assert report[q]["verdict"] == "PASS", (q, report[q]["reasons"])
-    # Sans essais privés ni modes Q7, aucune conclusion globale.
+        assert report[q]["verdict"] == "INCONCLUSIVE", (q, report[q]["reasons"])
+        cells = next(iter(report[q]["facts"]["by_session"].values())).get("cells", {})
+        for case_cells in cells.values():
+            assert not set(case_cells) & p1q_analyze.FAIL_CLASSES
+        assert any("/v6/" in m for m in report[q]["missing"])
     assert report["option_a_proposal"] == "INCONCLUSIVE"
 
 
 def test_public_chain_fails_against_an_edge_that_keeps_a_forged_x_real_ip(tmp_path, monkeypatch):
+    """Le FAIL démontré en IPv4 n'est pas masqué par l'IPv6 manquante."""
     report, _ = _public_run(tmp_path, monkeypatch, overwrite=False)
-    assert report["Q1"]["verdict"] == "PASS"
+    assert report["Q1"]["verdict"] == "INCONCLUSIVE"
     assert report["Q2"]["verdict"] == "FAIL" and report["Q4"]["verdict"] == "FAIL"
     assert report["option_a_proposal"] == "NO-GO"
