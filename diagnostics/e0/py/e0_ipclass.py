@@ -26,7 +26,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 
-from e0_redact import category, is_global
+from e0_redact import canonical_text, category, is_global
 
 CLOUDFLARE_ASN = 13335
 I_A_ADDRESSES = ("2a06:98c0:3600::103",)
@@ -74,7 +74,7 @@ def parse_strict(text):
             address = ipaddress.IPv6Address(text)
         except ValueError:
             return None
-    canonical = address.compressed
+    canonical = canonical_text(address)
     return ParsedIP(address, canonical, canonical == text)
 
 

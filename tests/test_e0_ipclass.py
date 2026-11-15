@@ -99,6 +99,27 @@ def test_strict_parser_canonicalises_and_records_canonicity(text, canonical, was
     assert parsed.canonical == canonical and parsed.was_canonical is was_canonical
 
 
+@pytest.mark.parametrize("text, canonical", [
+    ("2001:db8:0:0:1:0:0:1", "2001:db8::1:0:0:1"),        # RFC 5952 § 4.2.3 : première suite en cas d'égalité
+    ("2001:0db8:0:0:0:0:2:1", "2001:db8::2:1"),           # § 4.1 : zéros non significatifs retirés
+    ("2001:db8:0:1:1:1:1:1", "2001:db8:0:1:1:1:1:1"),     # § 4.2.2 : un seul groupe nul jamais compressé
+    ("2001:db8:0:0:1:0:0:0", "2001:db8:0:0:1::"),          # § 4.2.3 : la plus longue suite
+    ("2001:DB8::A", "2001:db8::a"),                        # § 4.3 : minuscules
+    ("0:0:0:0:0:0:0:1", "::1"), ("0:0:0:0:0:0:0:0", "::"), ("1:0:0:0:0:0:0:0", "1::"),
+    ("0:0:0:0:0:ffff:c000:201", "::ffff:192.0.2.1"),       # § 5 : notation mixte des adresses mappées
+    ("1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8"),
+])
+def test_rfc5952_canonical_form_is_independent_of_the_python_version(text, canonical):
+    assert rd.canonical_text(ipaddress.ip_address(text)) == canonical
+    assert ic.parse_strict(text).canonical == canonical
+
+
+def test_canonical_form_never_relies_on_ipaddress_string_methods():
+    for module in ("e0_redact.py", "e0_ipclass.py"):
+        source = (s.BENCH_PY / module).read_text(encoding="utf-8")
+        assert ".compressed" not in source and ".exploded" not in source
+
+
 @pytest.mark.parametrize("text", ["", " 1.2.3.4", "1.2.3.4 ", "01.2.3.4", "1.2.3", "1.2.3.4.5", "1.2.3.4:80",
                                   "[::1]", "fe80::1%1", "::1/128", "0x1.2.3.4", "1e2.0.0.1", "１.2.3.4", "::g",
                                   "1.2.3.4\n", None, 42])

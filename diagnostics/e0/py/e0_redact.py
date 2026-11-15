@@ -96,6 +96,34 @@ _QUAD = re.compile(r"(?<!\d)\d{1,3}(?:\.\d{1,3}){3}(?!\d)")
 _PORT_ONLY = re.compile(r"(?::\d{1,5})?")
 
 
+def canonical_text(address) -> str:
+    """Forme canonique DÉTERMINISTE, indépendante de la version de Python :
+    IPv4 décimale ; IPv6 selon RFC 5952 (minuscules, zéros non significatifs
+    retirés, plus longue suite d'au moins deux groupes nuls remplacée par
+    « :: », la première en cas d'égalité ; notation mixte `::ffff:a.b.c.d`
+    pour une IPv4 mappée, RFC 5952 § 5). `ipaddress` a changé la forme des
+    adresses mappées entre deux versions correctives de Python 3.11 : elle
+    n'est donc jamais utilisée telle quelle."""
+    if address.version == 4:
+        return ".".join(str(b) for b in address.packed)
+    if address.ipv4_mapped is not None:
+        return "::ffff:" + canonical_text(address.ipv4_mapped)
+    groups = [int.from_bytes(address.packed[i:i + 2], "big") for i in range(0, 16, 2)]
+    best_start, best_len, start = -1, 0, None
+    for index in range(9):
+        if index < 8 and groups[index] == 0:
+            if start is None:
+                start = index
+        elif start is not None:
+            if index - start > best_len:
+                best_start, best_len = start, index - start
+            start = None
+    parts = ["%x" % g for g in groups]
+    if best_len >= 2:
+        return ":".join(parts[:best_start]) + "::" + ":".join(parts[best_start + best_len:])
+    return ":".join(parts)
+
+
 def most_specific(address):
     """(réseau, globally_reachable, catégorie, clear) de l'entrée la plus
     spécifique contenant l'adresse, ou None."""
@@ -175,8 +203,8 @@ class Redactor:
         """Texte publiable : clair seulement si la table v1 l'autorise."""
         if address.version == 6 and address.ipv4_mapped is not None:
             inner = address.ipv4_mapped
-            return "::ffff:" + (str(inner) if clear_allowed(inner) else self.pseudonym(inner))
-        return address.compressed if clear_allowed(address) else self.pseudonym(address)
+            return "::ffff:" + (canonical_text(inner) if clear_allowed(inner) else self.pseudonym(inner))
+        return canonical_text(address) if clear_allowed(address) else self.pseudonym(address)
 
     def describe(self, text):
         """Description publiable d'une valeur censée être une IP nue."""
@@ -187,7 +215,7 @@ class Redactor:
             return {"parsed": False, "text": self.redact_text(text), "length": len(text)}
         out = {"parsed": True, "version": address.version, "category": category(address),
                "global": is_global(address), "text": self.address_text(address),
-               "canonical": text == address.compressed}
+               "canonical": text == canonical_text(address)}
         if address.version == 6 and address.ipv4_mapped is not None:
             out["mapped_inner_category"] = category(address.ipv4_mapped)
         return out
