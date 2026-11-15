@@ -284,7 +284,7 @@ class CollectionFailed(RuntimeError):
 
 # Champs conservés par la réduction « truncated » ; tout autre champ est remplacé
 # par son empreinte dans `omitted`.
-_TRUNCATED_KEEP = ("boot_id", "route", "http_version", "scheme", "target_len", "target_redacted", "target_hmac_boot",
+_TRUNCATED_KEEP = ("boot_id", "route", "processing", "http_version", "scheme", "target_len", "target_redacted", "target_hmac_boot",
                    "run", "run_seq", "test_id", "tid", "origin_received_ms", "origin_logged_ms", "plain_count_total",
                    "plain_count_case", "eng_post", "cmp_key_post_id", "cmp_pre_headers_at_origin", "replica",
                    "status", "body", "redactions", "truncated_fields", "extra")
@@ -328,9 +328,21 @@ class OriginApp:
       5. PUIS SEULEMENT envoi de la réponse. Si la collecte échoue, aucune
          réponse de succès n'est envoyée : 503 `e0_collection_failed` et arrêt.
 
+    Annulation de la tâche (`asyncio.CancelledError`, distincte d'un
+    `http.disconnect`) pendant la lecture du corps ou l'attente /e0/slow :
+    l'enregistrement est journalisé (`processing = "cancelled"`, jamais
+    `complete`), puis l'annulation est propagée, sans aucune réponse. Champ
+    `processing` ∈ {completed, client_disconnected, cancelled, error} ; le
+    statut journalisé est le statut DÉCIDÉ avant l'envoi (un échec ou une
+    annulation pendant l'envoi est compté dans `send_failures`).
+
     Limites non garantissables (consignées) : perte brutale du processus
     (SIGKILL, OOM) entre l'écriture et le vidage, ou perte de la sortie
     standard en aval de l'appel système d'écriture (journal de plateforme) ;
+    une écriture PARTIELLEMENT réussie suivie d'une exception laisse un
+    fragment avant la ligne réémise : aucune unicité n'est revendiquée (au
+    moins une émission complète par ligne engagée, fragment ou doublon
+    possibles, signalés par la vérification de chaîne et `emit_retries`) ;
     une requête refusée par le serveur HTTP avant l'application (en-têtes
     au-delà des limites de h11) n'atteint pas l'origine et n'est pas observée.
     L'absence de trace n'est JAMAIS une preuve de non-invocation.
@@ -358,6 +370,7 @@ class OriginApp:
         self.emit_retries = 0
         self.collection_failures = 0
         self.send_failures = 0
+        self.cancelled_requests = 0
         self.collection_broken = False
         self.on_exhausted = None
         self._log_lock = threading.Lock()
@@ -405,6 +418,7 @@ class OriginApp:
             "plain_count_by_case": dict(sorted(self.plain_by_case.items())),
             "reduced_records": dict(self.reduced_records), "emit_retries": self.emit_retries,
             "collection_failures": self.collection_failures, "send_failures": self.send_failures,
+            "cancelled_requests": self.cancelled_requests,
             "origin_time_ms": self.clock_ms()})
 
     @staticmethod
@@ -436,6 +450,7 @@ class OriginApp:
         attestation = record.get("attestation") or {}
         signed = attestation.get("signed_ip")
         return {"boot_id": record.get("boot_id"), "route": _small_scalar(record.get("route"), 16),
+                "processing": _small_scalar(record.get("processing"), 24),
                 "status": record.get("status") if isinstance(record.get("status"), int) else None,
                 "origin_received_ms": record.get("origin_received_ms"),
                 "origin_logged_ms": record.get("origin_logged_ms"),
@@ -457,8 +472,10 @@ class OriginApp:
     def _log_request(self, record: dict) -> None:
         """Toujours une ligne ≤ 4 Kio : complète, sinon réduite (`truncated`),
         sinon minimale (`unusable`). CollectionFailed si la sortie est perdue."""
-        # Une valeur coupée à sa borne n'est jamais présentée comme complète.
-        record = dict(record, evidence_completeness="truncated" if record.get("truncated_fields") else "complete")
+        # Une valeur coupée à sa borne, ou un traitement annulé ou en erreur, n'est
+        # jamais présenté comme complet.
+        incomplete = record.get("truncated_fields") or record.get("processing") in ("cancelled", "error")
+        record = dict(record, evidence_completeness="truncated" if incomplete else "complete")
         for stage in ("complete", "truncated", "unusable"):
             candidate = record if stage == "complete" else (
                 self._truncated(record) if stage == "truncated" else self._unusable(record))
@@ -679,12 +696,19 @@ class OriginApp:
 
         record = self._observation(scope, headers, route, raw_target, evaluation, signed_ip_record, eng_post,
                                    test_id, test_key, received_ms, redactions)
-        extra, response, error = {}, None, None
+        extra, response, error, cancelled = {}, None, None, None
         try:
-            response = await self._dispatch(route, method, scope, receive, record, evaluation, extra)
+            response = await self._dispatch(route, method, scope, receive, record, evaluation, extra, redactions)
+            processing = "completed" if response is not None else "client_disconnected"
+        except asyncio.CancelledError as exc:
+            # Annulation de la tâche ASGI (arrêt du serveur, délai externe…) : distincte
+            # d'un http.disconnect. L'observation est journalisée, PUIS l'annulation propagée.
+            cancelled, processing = exc, "cancelled"
+            extra.setdefault("body", {"read": False, "state": "interrupted"})
         except Exception as exc:
-            error = exc
+            error, processing = exc, "error"
             extra["error"] = type(exc).__name__
+        record["processing"] = processing
         record["status"] = None if response is None else response.status
         record["body"] = extra.pop("body", {"read": False})
         if extra:
@@ -698,6 +722,14 @@ class OriginApp:
             response.headers = self._headers(b"application/json", body)
             response.body = body
         record["origin_logged_ms"] = self.clock_ms()
+        if cancelled is not None:
+            self.cancelled_requests += 1
+            try:
+                self._log_request(record)  # synchrone : ne peut pas être interrompu par l'annulation
+            except CollectionFailed:
+                if self.on_exhausted is not None:
+                    self.on_exhausted()
+            raise cancelled  # jamais de réponse, jamais un succès
         try:
             self._log_request(record)
         except CollectionFailed:
@@ -706,6 +738,9 @@ class OriginApp:
                 self.on_exhausted()
             try:
                 await self._send(send, 503, *self._failure_parts(), method)
+            except asyncio.CancelledError:
+                self.send_failures += 1
+                raise
             except Exception:
                 self.send_failures += 1
             return
@@ -714,7 +749,9 @@ class OriginApp:
         if response is not None:
             try:
                 await self._send(send, response.status, response.headers, response.body, method)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
+                # L'enregistrement déjà journalisé porte le statut DÉCIDÉ ; l'échec d'envoi
+                # (ou l'annulation pendant l'envoi) est compté au point de contrôle.
                 self.send_failures += 1
                 raise
 
@@ -722,7 +759,7 @@ class OriginApp:
         response = self._json(503, {"error": "e0_collection_failed"})
         return response.headers, response.body
 
-    async def _dispatch(self, route, method, scope, receive, record, evaluation, extra):
+    async def _dispatch(self, route, method, scope, receive, record, evaluation, extra, notes):
         if self.collection_broken:
             return self._json(503, {"error": "e0_collection_failed"})
         if self.request_count > self.config.max_requests:
@@ -735,12 +772,12 @@ class OriginApp:
             if not evaluation.att_policy_accepted:
                 return self._refusal()
             body, size, state = await _read_body(receive, self.config.body_max)
-            extra["body"] = self._body_record(body, size, state, record)
+            extra["body"] = self._body_record(body, size, state, notes)
             if state != "ok":
                 return self._body_problem(state)
             return self._json(200, {"guarded": "accepted", "boot_id": self.boot_id, "tid": record["tid"]})
         if route == "slow":
-            return await self._slow(scope, receive, method, extra, record)
+            return await self._slow(scope, receive, method, extra, notes)
         if route == "cookies":
             body = b'{"cookies":3}\n'
             return Response(200, self._headers(b"application/json", body,
@@ -752,20 +789,23 @@ class OriginApp:
             return Response(200, self._headers(b"text/html; charset=utf-8", PAGE_HTML,
                                                [(b"content-security-policy", b"default-src 'self'")]), PAGE_HTML)
         body, size, state = await _read_body(receive, self.config.body_max)
-        extra["body"] = self._body_record(body, size, state, record)
+        extra["body"] = self._body_record(body, size, state, notes)
         if state != "ok":
             return self._body_problem(state)
         return Response(200, [], b"", observation=True)
 
-    def _body_record(self, body, size, state, record):
+    def _body_record(self, body, size, state, notes):
+        """Le champ `body` rédigé est reporté dans les métadonnées de la requête
+        (`redactions`), comme tout autre champ."""
         out = {"read": True, "state": state, "length": size}
         if body is None:
             out["sha256"] = None
         else:
-            redactions = set()
-            out.update(self._content_digest("body", body, redactions))
-            if redactions:
+            local = set()
+            out.update(self._content_digest("body", body, local))
+            if local:
                 out["redacted"] = True
+                notes.add("body")
         return out
 
     def _body_problem(self, state):
@@ -773,7 +813,7 @@ class OriginApp:
             return self._json(413, {"error": "e0_body_too_large"})
         return None  # client déconnecté : aucune réponse possible
 
-    async def _slow(self, scope, receive, method, extra, record):
+    async def _slow(self, scope, receive, method, extra, notes):
         params = self._slow_params(scope.get("query_string") or b"")
         if params is None:
             return self._json(400, {"error": "e0_slow_parameters"})
@@ -784,7 +824,7 @@ class OriginApp:
         started = time.monotonic()
         try:
             body, length, state = await _read_body(receive, self.config.body_max)
-            extra["body"] = self._body_record(body, length, state, record)
+            extra["body"] = self._body_record(body, length, state, notes)
             if state != "ok":
                 return self._body_problem(state)
             disconnected = await _wait_or_disconnect(receive, delay)

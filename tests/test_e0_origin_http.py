@@ -949,3 +949,126 @@ def test_p1a_sweep_every_observed_field_and_every_output(encoded):
     assert jl.verify_chain(lines)["ok"] and all(len(line) + 1 <= 4096 for line in lines)
     assert_no_raw_ip(texts, [json.loads(line) for line in lines] + observations)
     assert all(r["redactions"] for r in records_of(origin)[:4])  # les quatre requêtes porteuses de l'adresse
+
+
+# ==========================================================================
+# Audit PC-1 R2 — annulation de la tâche ASGI (asyncio.CancelledError)
+# ==========================================================================
+
+def _run_and_cancel(app, *, method, path, first_chunk, more_body):
+    """Lance la requête comme une vraie tâche asyncio, attend qu'elle soit
+    suspendue (lecture du corps ou attente /e0/slow), puis l'ANNULE — ce n'est
+    pas un `http.disconnect` : `receive()` n'en émet jamais."""
+    raw_path, _, query = path.partition("?")
+    scope = {"type": "http", "method": method, "path": raw_path, "raw_path": raw_path.encode(),
+             "query_string": query.encode(), "http_version": "1.1", "scheme": "http",
+             "headers": [(b"host", s.ORIGIN_HOST.encode())], "client": ("127.0.0.1", 50000)}
+    sent, outcome = [], {}
+
+    async def main():
+        suspended = asyncio.Event()
+        chunks = [{"type": "http.request", "body": first_chunk, "more_body": more_body}]
+
+        async def receive():
+            if chunks:
+                return chunks.pop(0)
+            suspended.set()
+            await asyncio.Event().wait()  # bloque indéfiniment : jamais de http.disconnect
+
+        async def send(message):
+            sent.append(message)
+
+        task = asyncio.ensure_future(app(scope, receive, send))
+        await asyncio.wait_for(suspended.wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+            outcome["result"] = "returned"
+        except asyncio.CancelledError:
+            outcome["result"] = "cancelled"
+
+    asyncio.run(main())
+    return sent, outcome["result"]
+
+
+@pytest.mark.parametrize("case", ["body_read_observe", "body_read_guarded_accepted", "slow_wait_get",
+                                  "slow_body_read_post"])
+def test_r2_cancelled_task_still_produces_a_bounded_cancelled_record(case):
+    ticks = iter(range(1_763_200_000_000, 1_763_200_900_000, 1_000))
+    lines = []
+    app = _app_with_emit(lines.append, clock=lambda: next(ticks))
+    if case == "body_read_observe":
+        kwargs = dict(method="POST", path="/e0/observe?ip=8.8.8.8", first_chunk=b'{"ip":"8.8.8.8"', more_body=True)
+    elif case == "body_read_guarded_accepted":
+        kwargs = dict(method="POST", path=GUARDED, first_chunk=b"x", more_body=True)
+    elif case == "slow_wait_get":
+        kwargs = dict(method="GET", path="/e0/slow?d=30&n=10", first_chunk=b"", more_body=False)
+    else:
+        kwargs = dict(method="POST", path="/e0/slow?d=30", first_chunk=b"abc", more_body=True)
+    if case == "body_read_guarded_accepted":
+        signed = s.attestation(t=GUARDED, ts_ms=1_763_200_000_000, method="POST")
+        original_call = app.__call__
+
+        async def with_attestation(scope, receive, send):
+            scope["headers"] = scope["headers"] + [(ver.ATTESTATION_HEADER.encode(), signed.encode())]
+            return await original_call(scope, receive, send)
+
+        target = with_attestation
+    else:
+        target = app
+    sent, result = _run_and_cancel(target, **kwargs)
+    assert result == "cancelled"                        # l'annulation est PROPAGÉE
+    assert sent == []                                   # aucune réponse, jamais un succès HTTP
+    records = [json.loads(line) for line in lines if json.loads(line)["e0"] == "origin-record"]
+    assert len(records) == 1                            # l'observation existe malgré l'annulation
+    record = records[0]
+    assert record["processing"] == "cancelled" and record["status"] is None
+    assert record["evidence_completeness"] != "complete"
+    assert record["origin_received_ms"] == 1_763_200_000_000
+    assert all(len(line) + 1 <= 4096 for line in lines) and jl.verify_chain(lines)["ok"]
+    assert_no_raw_ip(lines, records)
+    if case == "body_read_guarded_accepted":
+        assert record["attestation"]["att_policy_accepted"] is True  # observé, mais aucune réponse émise
+    app.checkpoint("stop")
+    assert json.loads(lines[-1])["cancelled_requests"] == 1
+
+
+def test_r2_body_redaction_is_reflected_in_the_record_privacy_metadata():
+    lines = []
+    app = _app_with_emit(lines.append)
+    call(app, method="POST", path="/e0/observe", body=b'{"ip":"8.8.8.8"}')
+    record = json.loads(lines[-1])
+    assert record["body"]["redacted"] is True and "body" in record["redactions"]
+    call(app, method="POST", path="/e0/guarded", body=b"8.8.8.8")  # refusé : corps non lu, rien à rédiger
+    assert "body" not in json.loads(lines[-1])["redactions"]
+
+
+def test_r2_completed_requests_are_marked_completed():
+    lines = []
+    app = _app_with_emit(lines.append)
+    call(app, path="/e0/observe")
+    assert json.loads(lines[-1])["processing"] == "completed"
+
+
+def test_r2_partial_stdout_write_then_retry_is_detected_never_claimed_unique():
+    """Limite consignée : une écriture partiellement réussie suivie d'une
+    exception, puis la nouvelle tentative, laissent un fragment avant la ligne
+    complète. Le banc ne revendique AUCUNE unicité : la vérification de chaîne
+    signale l'anomalie (collecte non intègre), elle ne l'efface pas."""
+    stream, state = [], {"first": True}
+
+    def partial_then_ok(line):
+        if state["first"] and '"origin-record"' in line:
+            state["first"] = False
+            stream.append(line[:40])  # fragment réellement écrit
+            raise OSError("écriture partielle")
+        stream.append(line)
+
+    app = _app_with_emit(partial_then_ok)
+    sent = call(app, path="/e0/observe")
+    assert sent[0]["status"] == 200 and app.emit_retries == 1
+    report = jl.verify_chain(stream)
+    assert report["ok"] is False and any("illisible" in p for p in report["problems"])
+    complete = [l for l in stream if l.startswith("{") and l.endswith("}")]
+    assert jl.verify_chain(complete)["ok"] is True  # la ligne engagée reste intacte et chaînée
