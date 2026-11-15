@@ -38,9 +38,17 @@ def _no_network(monkeypatch):
     s.block_external_network(monkeypatch)
 
 
+def _independent_digest(pairs):
+    text = json.dumps(sorted(pairs), separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
 def test_lock_matches_an_independently_written_snapshot():
-    assert sorted(LOCK["snapshot"]["F2_AUTH"]) == INDEPENDENT_AUTH and len(INDEPENDENT_AUTH) == 14
-    assert sorted(LOCK["snapshot"]["F2_PERSONAL"]) == INDEPENDENT_PERSONAL and len(INDEPENDENT_PERSONAL) == 13
+    assert len(INDEPENDENT_AUTH) == 14 and len(INDEPENDENT_PERSONAL) == 13
+    assert LOCK["snapshot_sha256"] == {"F2_AUTH": _independent_digest(INDEPENDENT_AUTH),
+                                       "F2_PERSONAL": _independent_digest(INDEPENDENT_PERSONAL)}
+    assert drift.pairs_digest(INDEPENDENT_AUTH) == LOCK["snapshot_sha256"]["F2_AUTH"]
+    assert "snapshot" not in LOCK  # aucun chemin F2 littéral hors tests/ et docs/
     assert LOCK["expected_counts"] == {"F2_AUTH": 14, "F2_PERSONAL": 13}
     assert LOCK["registry_sha256"] == "d8accc92a55170f5fa4092eae18c7e8c29cf921f97b9853402516decefdb4b29"
 

@@ -5,38 +5,13 @@
   "registry_ref": "registre de routage figé du dépôt (spécification § 3.9) ; chemin fourni par l'appelant",
   "registry_sha256": "d8accc92a55170f5fa4092eae18c7e8c29cf921f97b9853402516decefdb4b29",
   "reference_commit": "96f6eab74cd7b032fcef4ea4985fe7b0b9dd07a5",
-  "expected_counts": {"F2_AUTH": 14, "F2_PERSONAL": 13},
-  "snapshot": {
-    "F2_AUTH": [
-      ["GET", "/api/auth/f2/csrf/bootstrap"],
-      ["POST", "/api/auth/f2/sign-in/start"],
-      ["POST", "/api/auth/f2/sign-in/resend"],
-      ["POST", "/api/auth/f2/sign-in/verify"],
-      ["POST", "/api/auth/f2/sign-in/resume"],
-      ["POST", "/api/auth/f2/session/resolve"],
-      ["POST", "/api/auth/f2/logout"],
-      ["POST", "/api/auth/f2/invitation/begin"],
-      ["POST", "/api/auth/f2/invitation/complete"],
-      ["POST", "/api/auth/f2/invitation/resume"],
-      ["POST", "/api/auth/f2/email-link/start"],
-      ["POST", "/api/auth/f2/email-link/resend"],
-      ["POST", "/api/auth/f2/email-link/verify"],
-      ["POST", "/api/auth/f2/email-link/result"]
-    ],
-    "F2_PERSONAL": [
-      ["GET", "/api/v2/me"],
-      ["PUT", "/api/v2/me/level"],
-      ["GET", "/api/v2/me/portfolio"],
-      ["GET", "/api/v2/me/portfolio/{position_id}"],
-      ["POST", "/api/v2/me/portfolio"],
-      ["PUT", "/api/v2/me/portfolio/{position_id}"],
-      ["DELETE", "/api/v2/me/portfolio/{position_id}"],
-      ["GET", "/api/v2/me/analysis-overview"],
-      ["GET", "/api/v2/me/theses"],
-      ["GET", "/api/v2/me/theses/{thesis_id}"],
-      ["POST", "/api/v2/me/decryptage/turns"],
-      ["POST", "/api/v2/me/decryptage/replay"],
-      ["POST", "/api/v2/me/decryptage/ack"]
-    ]
+  "expected_counts": {
+    "F2_AUTH": 14,
+    "F2_PERSONAL": 13
+  },
+  "snapshot_rule": "SHA-256 de json.dumps(sorted(couples), separators=(',', ':'), ensure_ascii=True) ; couples [méthode, gabarit] ; la liste littérale indépendante est tenue par tests/test_e0_f02a_drift.py (les chemins F2 ne figurent pas hors tests/ et docs/)",
+  "snapshot_sha256": {
+    "F2_AUTH": "436ac4e24337c5c8544bfb139d2744a9f35b5ad4bcb77e88644ed18dc8791771",
+    "F2_PERSONAL": "d118513aa79038f43efcf39e3375fc06f707b8dad1d2506b22f5dc7c1a875fc4"
   }
 }

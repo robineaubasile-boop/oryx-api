@@ -140,6 +140,12 @@ def extract(source_text: str) -> dict:
             "expected_counts": {CATEGORIES[c]: expected.get(c) for c in CATEGORIES}}
 
 
+def pairs_digest(pairs) -> str:
+    """Empreinte canonique d'une liste de couples [méthode, gabarit]."""
+    canonical = json.dumps(sorted(list(p) for p in pairs), separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
 def load_lock(path) -> dict:
     with open(path, encoding="utf-8") as handle:
         lock = json.load(handle)
@@ -168,11 +174,11 @@ def check(registry_path, lock: dict) -> dict:
     except (Unresolvable, SyntaxError, UnicodeDecodeError, ValueError) as exc:
         reasons.append(f"structure non résoluble statiquement : {type(exc).__name__}")
     if extraction is not None:
-        snapshot = lock.get("snapshot") or {}
+        snapshot = lock.get("snapshot_sha256") or {}
         counts = lock.get("expected_counts") or {}
         for label in CATEGORIES.values():
             pairs = extraction["pairs"][label]
-            if pairs != sorted(map(list, snapshot.get(label) or [])):
+            if pairs_digest(pairs) != snapshot.get(label):
                 reasons.append(f"{label} : couples différents de l'instantané")
             if len(pairs) != counts.get(label) or extraction["expected_counts"].get(label) != counts.get(label):
                 reasons.append(f"{label} : comptes incohérents")
