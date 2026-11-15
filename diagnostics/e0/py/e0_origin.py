@@ -30,8 +30,23 @@ l'IP signée étant écartée aussitôt ; seuls son pseudonyme par démarrage,
 
 Journal : une ligne `E0-ORIGIN {json}` par requête sur stdout, chaînée
 (e0_jsonl), point de contrôle `origin-checkpoint` toutes les 100 lignes de
-requête, à l'échéance du TTL et à l'arrêt ; ≤ 4 Kio par ligne. Jamais l'en-tête
-d'attestation brut, la valeur de Cookie, une IP globale brute ni une clé.
+requête, à l'échéance du TTL et à l'arrêt ; ≤ 4 Kio par ligne, sinon
+enregistrement réduit explicitement marqué (`evidence_completeness` ∈
+{complete, truncated, unusable}). La réponse n'est envoyée qu'APRÈS
+journalisation réussie. `origin_received_ms` (UTC, ms) est capturé à l'entrée
+du traitement, indépendamment du `ts` de l'attestation (aucune synchronisation
+d'horloges n'est prouvée par cette mesure).
+
+Confidentialité (I6) : jamais l'en-tête d'attestation brut, la valeur de
+Cookie, une IP globale brute ni une clé. Toute valeur déclarative, cible,
+méthode, champ d'attestation (`t`, `m`, `h`, `hi`) ou en-tête persisté passe
+par `Redactor.safe_text` (adresses brutes, à zéros non significatifs ou
+pourcent-encodées pseudonymisées) ; `target_b64` encode la cible SÛRE ; les
+champs rédigés sont listés dans `redactions`. Les empreintes de contenus courts
+porteurs d'une adresse sont des HMAC du démarrage (un SHA-256 nu se renverse).
+Limite consignée : un encodage arbitraire choisi par le client (base64, entier,
+hexadécimal) n'est pas reconnu ; le banc ne crée lui-même aucun encodage
+réversible d'une adresse.
 """
 import asyncio
 import base64
@@ -50,9 +65,9 @@ import e0_guard
 from e0_attest import InMemoryNonceStore, PhaseVerifier, b64url_encode
 from e0_ipclass import signable_address
 from e0_ipcompare import KEY_ID, PostKey, key_from_hex
-from e0_jsonl import ChainWriter, LineTooLong
+from e0_jsonl import ChainWriter, LineTooLong, canonical
 from e0_keysets import KeySetError, KeySets
-from e0_redact import Redactor
+from e0_redact import MAX_VALUE_CHARS, Redactor
 from e0_version import ATTESTATION_HEADER, CASE_HEADER, CMP_PRE_KEY_HEADER, CMP_PRE_MAC_HEADER, \
     EDGE_DIAG_HEADER, GUARDED_SEGMENTS, ORIGIN_HEADER, PHASE_AUDIENCE, PHASES, PROTOCOL, REFUSAL_BODY, \
     REFUSAL_NO_STORE_HEADERS, REFUSAL_STATUS, RUN_HEADER, SEQ_HEADER
@@ -254,8 +269,72 @@ def deterministic_body(size: int) -> bytes:
     return (pattern * (size // len(pattern) + 1))[:size]
 
 
+@dataclass
+class Response:
+    """Réponse DÉCIDÉE (envoyée seulement après journalisation réussie)."""
+    status: int
+    headers: list
+    body: bytes
+    observation: bool = False   # corps = observation, construit après finalisation de l'enregistrement
+
+
+class CollectionFailed(RuntimeError):
+    """La collecte indispensable a échoué : aucune réponse de succès ne doit suivre."""
+
+
+# Champs conservés par la réduction « truncated » ; tout autre champ est remplacé
+# par son empreinte dans `omitted`.
+_TRUNCATED_KEEP = ("boot_id", "route", "http_version", "scheme", "target_len", "target_redacted", "target_hmac_boot",
+                   "run", "run_seq", "test_id", "tid", "origin_received_ms", "origin_logged_ms", "plain_count_total",
+                   "plain_count_case", "eng_post", "cmp_key_post_id", "cmp_pre_headers_at_origin", "replica",
+                   "status", "body", "redactions", "truncated_fields", "extra")
+_ATT_CORE = ("att_present", "att_header_count", "att_crypto_valid", "key_origin", "att_policy_accepted", "refusal",
+             "aud", "kid", "ts", "nonce", "signed_ip")
+_ATT_TEXT = ("m", "h", "hi", "t")
+TRUNCATED_TEXT_CHARS = 128
+TRUNCATED_TARGET_CHARS = 256
+SMALL_BODY_SCAN_BYTES = 4096
+
+
+class _Notes(set):
+    """Champs rédigés (adresse sensible) ; `clipped` : champs coupés à leur borne."""
+
+    def __init__(self):
+        super().__init__()
+        self.clipped = set()
+
+
+def _bounded_text(value, limit):
+    if not isinstance(value, str):
+        return value
+    return value if len(value) <= limit else value[:limit] + f"…<+{len(value) - limit}>"
+
+
+def _small_scalar(value, limit=64):
+    """Valeur conservée telle quelle si courte (jeton valide), sinon None."""
+    return value if isinstance(value, str) and len(value) <= limit else None
+
+
 class OriginApp:
-    """Application ASGI 3 de l'origine E0 (un démarrage = un `boot_id`)."""
+    """Application ASGI 3 de l'origine E0 (un démarrage = un `boot_id`).
+
+    Ordre de traitement d'une requête HTTP :
+      1. `origin_received_ms` (UTC, ms) capturé à l'ENTRÉE, avant toute
+         vérification, consommation de nonce, lecture de corps ou attente ;
+      2. vérification de l'attestation (observations élémentaires) ;
+      3. réponse DÉCIDÉE (corps lu, attente /e0/slow effectuée) ;
+      4. enregistrement `origin-record` journalisé (réduit si nécessaire,
+         jamais au-delà de 4 Kio) ;
+      5. PUIS SEULEMENT envoi de la réponse. Si la collecte échoue, aucune
+         réponse de succès n'est envoyée : 503 `e0_collection_failed` et arrêt.
+
+    Limites non garantissables (consignées) : perte brutale du processus
+    (SIGKILL, OOM) entre l'écriture et le vidage, ou perte de la sortie
+    standard en aval de l'appel système d'écriture (journal de plateforme) ;
+    une requête refusée par le serveur HTTP avant l'application (en-têtes
+    au-delà des limites de h11) n'atteint pas l'origine et n'est pas observée.
+    L'absence de trace n'est JAMAIS une preuve de non-invocation.
+    """
 
     def __init__(self, config: OriginConfig, *, bench: str, emit=None, clock_ms=None):
         self.config = config
@@ -275,16 +354,33 @@ class OriginApp:
         self.plain_total = 0
         self.plain_by_case = {}
         self.slow_active = 0
+        self.reduced_records = {"truncated": 0, "unusable": 0}
+        self.emit_retries = 0
+        self.collection_failures = 0
+        self.send_failures = 0
+        self.collection_broken = False
         self.on_exhausted = None
         self._log_lock = threading.Lock()
 
     # ----- journal -----
 
     def _write(self, record_type: str, body: dict) -> str:
-        # Le point de contrôle du TTL est émis depuis un autre fil : chaînage sérialisé.
+        """Construit, émet (une nouvelle tentative au plus), PUIS engage la
+        ligne : une ligne non émise n'avance jamais la tête de chaîne. Le
+        point de contrôle du TTL vient d'un autre fil : chaînage sérialisé."""
         with self._log_lock:
-            line = self.writer.append(record_type, body)
-            self.emit(line)
+            line = self.writer.build(record_type, body)   # LineTooLong possible
+            for attempt in (1, 2):
+                try:
+                    self.emit(line)
+                    break
+                except Exception as exc:  # sortie indisponible
+                    if attempt == 2:
+                        self.collection_failures += 1
+                        self.collection_broken = True
+                        raise CollectionFailed(type(exc).__name__) from exc
+                    self.emit_retries += 1
+            self.writer.commit(line)
             return line
 
     def startup(self, extra: dict) -> str:
@@ -296,7 +392,8 @@ class OriginApp:
                            "w_ms": self.config.w_ms, "s_ms": self.config.s_ms,
                            "slow_max_s": self.config.slow_max_s, "slow_concurrency": self.config.slow_concurrency,
                            "body_max": self.config.body_max},
-                "tls": self.config.tls, "replica": self.config.replica_id}
+                "tls": self.config.tls, "replica": self.config.replica_id,
+                "origin_time_ms": self.clock_ms()}
         body.update(extra)
         return self._write("origin-startup", body)
 
@@ -305,45 +402,133 @@ class OriginApp:
             "boot_id": self.boot_id, "reason": reason, "head": self.writer.head,
             "request_records": self.request_records, "requests": self.request_count, "accepted": self.accepted,
             "refused": self.refused, "plain_count_total": self.plain_total,
-            "plain_count_by_case": dict(sorted(self.plain_by_case.items()))})
+            "plain_count_by_case": dict(sorted(self.plain_by_case.items())),
+            "reduced_records": dict(self.reduced_records), "emit_retries": self.emit_retries,
+            "collection_failures": self.collection_failures, "send_failures": self.send_failures,
+            "origin_time_ms": self.clock_ms()})
 
-    def _log_request(self, body: dict) -> None:
-        try:
-            self._write("origin-record", body)
-        except LineTooLong:
-            reduced = dict(body)
-            for name in ("ip_headers", "markers", "host", "origin", "referer", "sec_fetch", "edge_diag", "xfp"):
-                if name in reduced:
-                    digest = hashlib.sha256(json.dumps(reduced[name], sort_keys=True).encode("ascii")).hexdigest()
-                    reduced[name] = {"omitted": True, "sha256": digest}
-            reduced["oversize"] = True
-            self._write("origin-record", reduced)
+    @staticmethod
+    def _digest(value) -> str:
+        return hashlib.sha256(canonical(value).encode("ascii")).hexdigest()
+
+    def _truncated(self, record: dict) -> dict:
+        reduced = {k: record[k] for k in _TRUNCATED_KEEP if k in record}
+        for name in ("run", "run_seq", "test_id"):
+            if isinstance(reduced.get(name), dict):
+                reduced[name] = {"invalid": True, "hmac_boot": reduced[name].get("hmac_boot")}
+        if isinstance(reduced.get("extra"), dict):
+            reduced["extra"] = {"omitted": True, "sha256": self._digest(reduced["extra"])}
+        reduced["method"] = _bounded_text(record.get("method"), 32)
+        target = record.get("target_b64") or ""
+        reduced["target_b64"] = target[:TRUNCATED_TARGET_CHARS]
+        reduced["target_b64_truncated"] = len(target) > TRUNCATED_TARGET_CHARS
+        attestation = record.get("attestation") or {}
+        reduced["attestation"] = {k: attestation.get(k) for k in _ATT_CORE}
+        for name in _ATT_TEXT:
+            reduced["attestation"][name] = _bounded_text(attestation.get(name), TRUNCATED_TEXT_CHARS)
+        reduced["omitted"] = {k: self._digest(v) for k, v in sorted(record.items())
+                              if k not in reduced and k != "attestation"}
+        reduced["evidence_completeness"] = "truncated"
+        return reduced
+
+    def _unusable(self, record: dict) -> dict:
+        """Forme minimale BORNÉE PAR CONSTRUCTION (champs de taille fixe)."""
+        attestation = record.get("attestation") or {}
+        signed = attestation.get("signed_ip")
+        return {"boot_id": record.get("boot_id"), "route": _small_scalar(record.get("route"), 16),
+                "status": record.get("status") if isinstance(record.get("status"), int) else None,
+                "origin_received_ms": record.get("origin_received_ms"),
+                "origin_logged_ms": record.get("origin_logged_ms"),
+                "run": _small_scalar(record.get("run")), "run_seq": _small_scalar(record.get("run_seq")),
+                "test_id": _small_scalar(record.get("test_id")), "tid": _small_scalar(record.get("tid")),
+                "attestation": {"att_present": bool(attestation.get("att_present")),
+                                "att_crypto_valid": bool(attestation.get("att_crypto_valid")),
+                                "att_policy_accepted": bool(attestation.get("att_policy_accepted")),
+                                "key_origin": _small_scalar(attestation.get("key_origin"), 8),
+                                "refusal": _small_scalar(attestation.get("refusal"), 32),
+                                "kid": _small_scalar(attestation.get("kid"), 24),
+                                "nonce": _small_scalar(attestation.get("nonce"), 22),
+                                "signed_ip": signed if isinstance(signed, dict) and len(canonical(signed)) < 128
+                                else None},
+                "eng_post": _small_scalar(record.get("eng_post")),
+                "cmp_key_post_id": _small_scalar(record.get("cmp_key_post_id"), 20),
+                "record_sha256": self._digest(record), "evidence_completeness": "unusable"}
+
+    def _log_request(self, record: dict) -> None:
+        """Toujours une ligne ≤ 4 Kio : complète, sinon réduite (`truncated`),
+        sinon minimale (`unusable`). CollectionFailed si la sortie est perdue."""
+        # Une valeur coupée à sa borne n'est jamais présentée comme complète.
+        record = dict(record, evidence_completeness="truncated" if record.get("truncated_fields") else "complete")
+        for stage in ("complete", "truncated", "unusable"):
+            candidate = record if stage == "complete" else (
+                self._truncated(record) if stage == "truncated" else self._unusable(record))
+            try:
+                self._write("origin-record", candidate)
+            except LineTooLong:
+                if stage == "unusable":  # impossible par construction ; jamais silencieux
+                    self.collection_failures += 1
+                    self.collection_broken = True
+                    raise CollectionFailed("LineTooLong")
+                continue
+            if candidate["evidence_completeness"] != "complete":
+                self.reduced_records[candidate["evidence_completeness"]] += 1
+            break
         self.request_records += 1
         if self.request_records % CHECKPOINT_EVERY == 0:
             self.checkpoint("periodic")
 
-    # ----- observation -----
+    # ----- valeurs sûres -----
 
     def _values(self, headers, name):
         return [value for key, value in headers if key == name]
 
-    def _token(self, headers, name):
+    def _safe(self, field, value, redactions):
+        """Texte publiable ; le champ est consigné dans `redactions` s'il
+        contenait une adresse sensible (brute ou encodée)."""
+        text, sensitive = self.redactor.safe_text(value)
+        if sensitive:
+            redactions.add(field)
+        if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
+            redactions.clipped.add(field)
+        return text
+
+    def _token(self, headers, name, redactions):
+        """Identifiant de corrélation : exploitable seulement s'il est unique,
+        conforme à la grammaire ET sans adresse sensible ; sinon représentation
+        bornée et sûre, avec empreinte HMAC du démarrage."""
         values = self._values(headers, name)
         if not values:
             return None
-        if len(values) == 1 and _TOKEN.fullmatch(values[0]):
+        if len(values) == 1 and _TOKEN.fullmatch(values[0]) and not self.redactor.contains_sensitive(values[0]):
             return values[0]
-        return {"invalid": True, "count": len(values)}
+        return {"invalid": True, "count": len(values),
+                "redacted": [self._safe(name, v, redactions)[:64] for v in values[:4]],
+                "hmac_boot": self.redactor.keyed_digest("\n".join(values))}
 
-    def _describe_headers(self, headers, names, *, as_ip):
+    def _describe_headers(self, headers, names, redactions, *, as_ip):
         out = {}
         for name in names:
             values = self._values(headers, name)
             if values:
-                out[name] = [self.redactor.describe(v) if as_ip else self.redactor.redact_text(v) for v in values]
+                if as_ip:
+                    described = [self.redactor.describe(v) for v in values]
+                    if any(d.get("redacted") or (d.get("parsed") and d["text"] != v)
+                           for d, v in zip(described, values)):
+                        redactions.add(name)
+                    out[name] = described
+                else:
+                    out[name] = [self._safe(name, v, redactions) for v in values]
         return out
 
-    def _edge_diag(self, headers):
+    def _content_digest(self, field, data: bytes, redactions):
+        """SHA-256 de contenu (RT-04, RT-10) ; HMAC du démarrage si un contenu
+        COURT contient une adresse sensible (un SHA-256 nu se renverserait)."""
+        if len(data) <= SMALL_BODY_SCAN_BYTES and self.redactor.contains_sensitive(data.decode("latin-1")):
+            redactions.add(field)
+            return {"hmac_boot": self.redactor.keyed_digest(data.decode("latin-1"))}
+        return {"sha256": hashlib.sha256(data).hexdigest()}
+
+    def _edge_diag(self, headers, redactions):
         values = self._values(headers, EDGE_DIAG_HEADER)
         if not values:
             return None
@@ -354,55 +539,76 @@ class OriginApp:
             padded = raw + "=" * (-len(raw) % 4)
             document = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
         except (ValueError, binascii.Error, UnicodeError):
-            return {"authenticated": False, "parsed": False,
-                    "sha256": hashlib.sha256(raw.encode("latin-1")).hexdigest()}
+            return {"authenticated": False, "parsed": False, "hmac_boot": self.redactor.keyed_digest(raw)}
         if not isinstance(document, dict):
-            return {"authenticated": False, "parsed": False}
+            return {"authenticated": False, "parsed": False, "hmac_boot": self.redactor.keyed_digest(raw)}
         fields = {}
         for key, kind in _DIAG_KEYS.items():
             value = document.get(key)
             if value is None or type(value) is not kind:
                 continue
             if kind is str:
-                fields[key] = self.redactor.redact_text(value)[:64]
+                fields[key] = self._safe("edge_diag", value, redactions)[:64]
+                if len(value) > 64:
+                    redactions.clipped.add("edge_diag")
             elif kind is list:
-                fields[key] = [self.redactor.redact_text(str(v))[:64] for v in value[:16]]
+                fields[key] = [self._safe("edge_diag", str(v), redactions)[:64] for v in value[:16]]
+                if len(value) > 16 or any(len(str(v)) > 64 for v in value):
+                    redactions.clipped.add("edge_diag")
             else:
                 fields[key] = value
         return {"authenticated": False, "parsed": True, "fields": fields}
 
+    def _attestation_record(self, evaluation, signed_ip_record, redactions):
+        record = evaluation.record()
+        for name in _ATT_TEXT:
+            if isinstance(record.get(name), str):
+                record[name] = self._safe("attestation." + name, record[name], redactions)
+        record["signed_ip"] = signed_ip_record
+        return record
+
     def _observation(self, scope, headers, route, raw_target, evaluation, signed_ip_record, eng_post, test_id,
-                     test_key):
+                     test_key, received_ms, redactions):
         peer = scope.get("client")
         cookies = self._values(headers, "cookie")
-        xfp = self._values(headers, "x-forwarded-proto")
-        return {
-            "boot_id": self.boot_id, "route": route, "method": scope.get("method"),
+        safe_target, target_sensitive = self.redactor.safe_text(raw_target)
+        if target_sensitive:
+            redactions.add("target")
+        if len(raw_target) > MAX_VALUE_CHARS:
+            redactions.clipped.add("target")
+        record = {
+            "boot_id": self.boot_id, "route": route, "origin_received_ms": received_ms,
+            "method": self._safe("method", scope.get("method", ""), redactions),
             "http_version": scope.get("http_version"), "scheme": scope.get("scheme"),
-            "target_b64": b64url_encode(raw_target.encode("latin-1")), "target_len": len(raw_target),
-            "run": self._token(headers, RUN_HEADER), "run_seq": self._token(headers, SEQ_HEADER),
+            # base64url d'une cible SÛRE (jamais un encodage réversible d'une adresse brute)
+            "target_b64": b64url_encode(safe_target.encode("ascii", "backslashreplace")),
+            "target_len": len(raw_target), "target_redacted": target_sensitive,
+            "target_hmac_boot": self.redactor.keyed_digest(raw_target) if target_sensitive else None,
+            "run": self._token(headers, RUN_HEADER, redactions), "run_seq": self._token(headers, SEQ_HEADER,
+                                                                                         redactions),
             "test_id": test_id, "tid": guarded_tid(scope.get("raw_path") or b"") if route == "guarded" else None,
-            "host": [self.redactor.redact_text(v) for v in self._values(headers, "host")],
-            "origin": [self.redactor.redact_text(v) for v in self._values(headers, "origin")],
-            "referer": [self.redactor.redact_text(v) for v in self._values(headers, "referer")],
-            "sec_fetch": self._describe_headers(headers, SEC_FETCH, as_ip=False),
-            "cookie": {"count": len(cookies),
-                       "sha256": hashlib.sha256("\n".join(cookies).encode("latin-1")).hexdigest() if cookies
-                       else None},
-            "xfp": [self.redactor.redact_text(v) for v in xfp],
+            "host": [self._safe("host", v, redactions) for v in self._values(headers, "host")],
+            "origin": [self._safe("origin", v, redactions) for v in self._values(headers, "origin")],
+            "referer": [self._safe("referer", v, redactions) for v in self._values(headers, "referer")],
+            "sec_fetch": self._describe_headers(headers, SEC_FETCH, redactions, as_ip=False),
+            "cookie": dict({"count": len(cookies)},
+                           **(self._content_digest("cookie", "\n".join(cookies).encode("latin-1"), redactions)
+                              if cookies else {"sha256": None})),
+            "xfp": [self._safe("xfp", v, redactions) for v in self._values(headers, "x-forwarded-proto")],
             "plain_count_total": self.plain_total, "plain_count_case": self.plain_by_case.get(test_key, 0),
-            "ip_headers": self._describe_headers(headers, IP_HEADERS, as_ip=True),
-            "markers": self._describe_headers(headers, MARKER_HEADERS, as_ip=False),
-            "attestation": dict(evaluation.record(), signed_ip=signed_ip_record),
+            "ip_headers": self._describe_headers(headers, IP_HEADERS, redactions, as_ip=True),
+            "markers": self._describe_headers(headers, MARKER_HEADERS, redactions, as_ip=False),
+            "attestation": self._attestation_record(evaluation, signed_ip_record, redactions),
             "eng_post": eng_post,
             "cmp_key_post_id": None if eng_post is None else self.config.post_key.key_id,
             "cmp_pre_headers_at_origin": len(self._values(headers, CMP_PRE_KEY_HEADER))
             + len(self._values(headers, CMP_PRE_MAC_HEADER)),
-            "edge_diag": self._edge_diag(headers),
+            "edge_diag": self._edge_diag(headers, redactions),
             "peer": None if not peer else {"addr": self.redactor.describe(str(peer[0])),
                                             "port": peer[1] if len(peer) > 1 else None},
             "replica": self.config.replica_id,
         }
+        return record
 
     # ----- réponses -----
 
@@ -415,16 +621,17 @@ class OriginApp:
                    (b"cache-control", b"no-store"), (ORIGIN_HEADER.encode("ascii"), PROTOCOL.encode("ascii"))]
         return headers + list(extra)
 
-    async def _json(self, send, status, document, method, extra=()):
+    def _json(self, status, document, extra=()) -> Response:
         body = (json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
-        await self._send(send, status, self._headers(b"application/json", body, extra), body, method)
+        return Response(status, self._headers(b"application/json", body, extra), body)
 
-    async def _refusal(self, send, method):
+    @staticmethod
+    def _refusal() -> Response:
         """503 de maintenance F04-C § 4, octets constants (aucun en-tête ajouté)."""
         headers = [(b"content-type", b"application/json"),
                    (b"content-length", str(len(REFUSAL_BODY)).encode("ascii"))]
         headers += [(k.encode("ascii"), v.encode("ascii")) for k, v in REFUSAL_NO_STORE_HEADERS]
-        await self._send(send, REFUSAL_STATUS, headers, REFUSAL_BODY, method)
+        return Response(REFUSAL_STATUS, headers, REFUSAL_BODY)
 
     # ----- ASGI -----
 
@@ -434,19 +641,23 @@ class OriginApp:
             return
         if scope["type"] != "http":
             return
+        received_ms = self.clock_ms()  # AVANT toute vérification, lecture, attente ou réponse
         self.request_count += 1
+        redactions = _Notes()
         method = scope.get("method", "")
         headers = [(k.decode("latin-1").lower(), v.decode("latin-1")) for k, v in scope.get("headers") or ()]
         raw_path = scope.get("raw_path") or scope.get("path", "").encode("latin-1")
         query = scope.get("query_string") or b""
         raw_target = raw_path.decode("latin-1") + ("?" + query.decode("latin-1") if query else "")
         route = route_of(method, raw_path, scope.get("path", ""))
-        test_id = self._token(headers, CASE_HEADER)
+        test_id = self._token(headers, CASE_HEADER, redactions)
         test_key = test_id if isinstance(test_id, str) else "_none"
         if any(v.strip().lower() == "http" for v in self._values(headers, "x-forwarded-proto")):
             self.plain_total += 1
             self.plain_by_case[test_key] = self.plain_by_case.get(test_key, 0) + 1
 
+        # La vérification opère sur les valeurs BRUTES en mémoire ; seule leur
+        # forme sûre est persistée.
         evaluation = self.verifier.evaluate(self._values(headers, ATTESTATION_HEADER), method=method,
                                             host_values=self._values(headers, "host"), raw_target=raw_target)
         signed_ip_record, eng_post = None, None
@@ -467,103 +678,124 @@ class OriginApp:
             self.refused += 1
 
         record = self._observation(scope, headers, route, raw_target, evaluation, signed_ip_record, eng_post,
-                                   test_id, test_key)
-        extra, status = {}, None
+                                   test_id, test_key, received_ms, redactions)
+        extra, response, error = {}, None, None
         try:
-            status = await self._dispatch(route, method, scope, receive, send, record, evaluation, extra)
+            response = await self._dispatch(route, method, scope, receive, record, evaluation, extra)
         except Exception as exc:
+            error = exc
             extra["error"] = type(exc).__name__
-            raise
-        finally:
-            record["status"] = status
-            record["body"] = extra.pop("body", {"read": False})
-            if extra:
-                record["extra"] = extra
+        record["status"] = None if response is None else response.status
+        record["body"] = extra.pop("body", {"read": False})
+        if extra:
+            record["extra"] = extra
+        record["redactions"] = sorted(redactions)
+        record["truncated_fields"] = sorted(redactions.clipped)
+        if response is not None and response.observation:
+            visible = {k: v for k, v in record.items() if k not in ("eng_post", "cmp_key_post_id")}
+            body = (json.dumps({"observation": visible}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                    + "\n").encode("ascii")
+            response.headers = self._headers(b"application/json", body)
+            response.body = body
+        record["origin_logged_ms"] = self.clock_ms()
+        try:
             self._log_request(record)
-
-    async def _dispatch(self, route, method, scope, receive, send, record, evaluation, extra):
-        if self.request_count > self.config.max_requests:
-            await self._json(send, 503, {"error": "e0_budget_exhausted"}, method)
+        except CollectionFailed:
+            # Jamais de réponse de succès après un échec de collecte : refus et arrêt.
             if self.on_exhausted is not None:
                 self.on_exhausted()
-            return 503
+            try:
+                await self._send(send, 503, *self._failure_parts(), method)
+            except Exception:
+                self.send_failures += 1
+            return
+        if error is not None:
+            raise error
+        if response is not None:
+            try:
+                await self._send(send, response.status, response.headers, response.body, method)
+            except Exception:
+                self.send_failures += 1
+                raise
+
+    def _failure_parts(self):
+        response = self._json(503, {"error": "e0_collection_failed"})
+        return response.headers, response.body
+
+    async def _dispatch(self, route, method, scope, receive, record, evaluation, extra):
+        if self.collection_broken:
+            return self._json(503, {"error": "e0_collection_failed"})
+        if self.request_count > self.config.max_requests:
+            if self.on_exhausted is not None:
+                self.on_exhausted()
+            return self._json(503, {"error": "e0_budget_exhausted"})
         if route == "health":
-            await self._json(send, 200, {"status": "ok", "protocol": PROTOCOL, "boot_id": self.boot_id}, method)
-            return 200
+            return self._json(200, {"status": "ok", "protocol": PROTOCOL, "boot_id": self.boot_id})
         if route == "guarded":
             if not evaluation.att_policy_accepted:
-                await self._refusal(send, method)
-                return REFUSAL_STATUS
+                return self._refusal()
             body, size, state = await _read_body(receive, self.config.body_max)
-            extra["body"] = self._body_record(body, size, state)
+            extra["body"] = self._body_record(body, size, state, record)
             if state != "ok":
-                return await self._body_problem(send, state, method)
-            await self._json(send, 200, {"guarded": "accepted", "boot_id": self.boot_id, "tid": record["tid"]},
-                             method)
-            return 200
+                return self._body_problem(state)
+            return self._json(200, {"guarded": "accepted", "boot_id": self.boot_id, "tid": record["tid"]})
         if route == "slow":
-            return await self._slow(scope, receive, send, method, extra)
+            return await self._slow(scope, receive, method, extra, record)
         if route == "cookies":
             body = b'{"cookies":3}\n'
-            await self._send(send, 200, self._headers(b"application/json", body,
-                                                      [(b"set-cookie", c) for c in SYNTHETIC_COOKIES]), body, method)
-            return 200
+            return Response(200, self._headers(b"application/json", body,
+                                               [(b"set-cookie", c) for c in SYNTHETIC_COOKIES]), body)
         if route == "redirect":
             location = ("https://" + self.config.public_host + "/e0/observe?redirected=1").encode("ascii")
-            await self._send(send, 302, self._headers(b"text/plain", b"", [(b"location", location)]), b"", method)
-            return 302
+            return Response(302, self._headers(b"text/plain", b"", [(b"location", location)]), b"")
         if route == "page":
-            await self._send(send, 200, self._headers(b"text/html; charset=utf-8", PAGE_HTML,
-                                                      [(b"content-security-policy", b"default-src 'self'")]),
-                             PAGE_HTML, method)
-            return 200
+            return Response(200, self._headers(b"text/html; charset=utf-8", PAGE_HTML,
+                                               [(b"content-security-policy", b"default-src 'self'")]), PAGE_HTML)
         body, size, state = await _read_body(receive, self.config.body_max)
-        extra["body"] = self._body_record(body, size, state)
+        extra["body"] = self._body_record(body, size, state, record)
         if state != "ok":
-            return await self._body_problem(send, state, method)
-        visible = {k: v for k, v in record.items() if k not in ("eng_post", "cmp_key_post_id")}
-        visible["body"] = extra["body"]
-        await self._json(send, 200, {"observation": visible}, method)
-        return 200
+            return self._body_problem(state)
+        return Response(200, [], b"", observation=True)
 
-    def _body_record(self, body, size, state):
-        return {"read": True, "state": state, "length": size,
-                "sha256": hashlib.sha256(body).hexdigest() if body is not None else None}
+    def _body_record(self, body, size, state, record):
+        out = {"read": True, "state": state, "length": size}
+        if body is None:
+            out["sha256"] = None
+        else:
+            redactions = set()
+            out.update(self._content_digest("body", body, redactions))
+            if redactions:
+                out["redacted"] = True
+        return out
 
-    async def _body_problem(self, send, state, method):
+    def _body_problem(self, state):
         if state == "too_large":
-            await self._json(send, 413, {"error": "e0_body_too_large"}, method)
-            return 413
+            return self._json(413, {"error": "e0_body_too_large"})
         return None  # client déconnecté : aucune réponse possible
 
-    async def _slow(self, scope, receive, send, method, extra):
+    async def _slow(self, scope, receive, method, extra, record):
         params = self._slow_params(scope.get("query_string") or b"")
         if params is None:
-            await self._json(send, 400, {"error": "e0_slow_parameters"}, method)
-            return 400
+            return self._json(400, {"error": "e0_slow_parameters"})
         delay, size = params
         if self.slow_active >= self.config.slow_concurrency:
-            await self._json(send, 503, {"error": "e0_slow_busy"}, method)
-            return 503
+            return self._json(503, {"error": "e0_slow_busy"})
         self.slow_active += 1
         started = time.monotonic()
         try:
             body, length, state = await _read_body(receive, self.config.body_max)
-            extra["body"] = self._body_record(body, length, state)
+            extra["body"] = self._body_record(body, length, state, record)
             if state != "ok":
-                return await self._body_problem(send, state, method)
+                return self._body_problem(state)
             disconnected = await _wait_or_disconnect(receive, delay)
             extra["slow"] = {"d": delay, "n": size, "client_disconnected": disconnected,
                              "waited_ms": int((time.monotonic() - started) * 1000)}
             if disconnected:
                 return None
             if method == "POST":
-                await self._json(send, 200, {"length": length, "sha256": hashlib.sha256(body).hexdigest(),
-                                             "d": delay}, method)
-                return 200
+                return self._json(200, {"length": length, "sha256": hashlib.sha256(body).hexdigest(), "d": delay})
             payload = deterministic_body(size)
-            await self._send(send, 200, self._headers(b"application/octet-stream", payload), payload, method)
-            return 200
+            return Response(200, self._headers(b"application/octet-stream", payload), payload)
         finally:
             self.slow_active -= 1
 

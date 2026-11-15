@@ -172,6 +172,37 @@ def parse_plain(text):
         return None
 
 
+_IPV4_LENIENT = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+_PERCENT = re.compile(r"%[0-9A-Fa-f]{2}")
+PERCENT_DECODE_ROUNDS = 3
+KEYED_DIGEST_DOMAIN = b"oryx-e0-keyed-digest/v1\x00"
+
+
+def lenient_ipv4(text):
+    """IPv4 écrite avec des zéros non significatifs (« 008.008.008.008 ») :
+    refusée par `ipaddress`, mais désignant bien une adresse. Rédaction
+    seulement (la classification reste stricte)."""
+    if not isinstance(text, str) or not _IPV4_LENIENT.fullmatch(text):
+        return None
+    octets = [int(part) for part in text.split(".")]
+    if any(octet > 255 for octet in octets):
+        return None
+    return ipaddress.IPv4Address(bytes(octets))
+
+
+def percent_forms(text: str) -> list:
+    """Le texte et ses décodages pourcent successifs (au plus 3 tours) :
+    une adresse encodée (`8%2E8%2E8%2E8`, `%25`-doublé) est détectée."""
+    forms, current = [text], text
+    for _ in range(PERCENT_DECODE_ROUNDS):
+        decoded = _PERCENT.sub(lambda m: chr(int(m.group(0)[1:], 16)), current)
+        if decoded == current:
+            break
+        forms.append(decoded)
+        current = decoded
+    return forms
+
+
 class Redactor:
     """Pseudonymisation par démarrage. La clé n'est jamais exposée ni
     sérialisable ; les pseudonymes ne sont comparables qu'au sein d'un même
@@ -212,7 +243,11 @@ class Redactor:
             return None
         address = parse_plain(text)
         if address is None:
-            return {"parsed": False, "text": self.redact_text(text), "length": len(text)}
+            safe, sensitive = self.safe_text(text)
+            out = {"parsed": False, "text": safe, "length": len(text)}
+            if sensitive:
+                out["redacted"] = True
+            return out
         out = {"parsed": True, "version": address.version, "category": category(address),
                "global": is_global(address), "text": self.address_text(address),
                "canonical": text == canonical_text(address)}
@@ -223,12 +258,12 @@ class Redactor:
     def _redact_candidate(self, candidate: str) -> str:
         if not any(c.isdigit() for c in candidate):
             return candidate
-        address = parse_plain(candidate)
+        address = parse_plain(candidate) or lenient_ipv4(candidate)
         if address is not None:
             return candidate if clear_allowed(address) else self.address_text(address)
 
         def quad(match):
-            inner = parse_plain(match.group(0))
+            inner = parse_plain(match.group(0)) or lenient_ipv4(match.group(0))
             if inner is not None and not clear_allowed(inner):
                 return "<" + self.pseudonym(inner) + ">"
             return match.group(0)
@@ -254,3 +289,34 @@ class Redactor:
         if len(text) > MAX_VALUE_CHARS:
             out += f"…<+{len(text) - MAX_VALUE_CHARS}>"
         return out
+
+    def contains_sensitive(self, text) -> bool:
+        """Vrai si le texte, ou l'un de ses décodages pourcent, contient une
+        adresse que la table v1 n'autorise pas en clair (ou un groupe IPv6
+        illisible, traité comme sensible par prudence)."""
+        if not isinstance(text, str):
+            text = repr(text)
+        for form in percent_forms(text):
+            for match in _CANDIDATE.finditer(form):
+                candidate = match.group(0)
+                if self._redact_candidate(candidate) != candidate:
+                    return True
+        return False
+
+    def safe_text(self, text) -> tuple:
+        """(texte publiable borné, sensible ?). Sans adresse sensible : la
+        valeur rédigée telle quelle. Avec adresse sensible, même encodée :
+        la forme DÉCODÉE rédigée (les adresses y deviennent des pseudonymes),
+        de sorte qu'aucun encodage ne transporte l'adresse brute."""
+        if not isinstance(text, str):
+            text = repr(text)
+        if not self.contains_sensitive(text):
+            return self.redact_text(text), False
+        return self.redact_text(percent_forms(text)[-1]), True
+
+    def keyed_digest(self, text) -> str:
+        """Empreinte HMAC sous la clé du démarrage : intégrité et égalité au
+        sein d'un démarrage, sans permettre la force brute d'une adresse (un
+        SHA-256 nu d'une IP se renverse par énumération)."""
+        data = text.encode("utf-8", "surrogateescape") if isinstance(text, str) else bytes(text)
+        return hmac.new(self.__key, KEYED_DIGEST_DOMAIN + data, hashlib.sha256).hexdigest()[:32]
