@@ -967,7 +967,8 @@ def test_pg_key_reuse_with_incompatible_data_is_a_collision(engine, Sessions, cl
     _record(Sessions, **kwargs)
     changed = {
         "visit_id": {"visit_id": uuid.uuid4()},
-        "event_type": {"event_type": "portfolio_used", "surface": "portfolio", "source_operation_kind": "portfolio_write"},
+        "event_type": {"event_type": "portfolio_used", "surface": "portfolio",
+                       "source_operation_kind": "portfolio_write"},
         "surface": {"event_type": "portfolio_used", "surface": "portfolio", "source_operation_kind": "portfolio_write"},
         "executed_route": {"executed_route": "f2"},
         "source": {"source": "client_signal", "source_operation_kind": None, "source_operation_id": None,
@@ -1033,7 +1034,8 @@ def test_pg_stored_event_with_invalid_retention_or_schema_fails_closed(engine, S
             conn.execute(sa.text(
                 "UPDATE product_activity_events SET retention_scopes = CAST(:retention_scopes AS jsonb), "
                 "next_scope_expires_at = :next_scope_expires_at, purge_after_at = :purge_after_at, "
-                "schema_version = :schema_version"), {**original, "retention_scopes": json.dumps(original["retention_scopes"])})
+                "schema_version = :schema_version"),
+                {**original, "retention_scopes": json.dumps(original["retention_scopes"])})
     assert _record(Sessions, **kwargs)[1] is False
 
 

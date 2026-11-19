@@ -161,7 +161,8 @@ def _canonical_or_collision(db, event: ProductActivityEvent, request: dict) -> P
                                                   purge_after_at=event.purge_after_at)
     retention.verify_scopes_against_campaigns(db, scopes, user_id=event.user_id, occurred_at=event.occurred_at)
     if any(getattr(event, field) != request[field] for field in REQUEST_FIELDS):
-        raise EventIdempotencyCollision(f"événement {event.id} : clé d'idempotence réutilisée avec d'autres données")
+        raise EventIdempotencyCollision(
+            f"événement {event.id} : clé d'idempotence réutilisée avec d'autres données")
     return event
 
 
@@ -207,7 +208,8 @@ def _business_uniqueness(db, *, user_id: str, request: dict) -> None:
             ProductActivityEvent.user_id == user_id, ProductActivityEvent.visit_id == request["visit_id"],
             ProductActivityEvent.event_type == SESSION_STARTED)).scalar_one_or_none()
         if taken is not None:
-            raise EventUniquenessConflict("session_started déjà enregistré pour cette visite", reason="session_start")
+            raise EventUniquenessConflict("session_started déjà enregistré pour cette visite",
+                                          reason="session_start")
     if request["source_operation_kind"] is not None:
         taken = db.execute(select(ProductActivityEvent.id).where(
             ProductActivityEvent.user_id == user_id,
