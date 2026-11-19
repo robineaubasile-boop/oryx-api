@@ -23,11 +23,22 @@ n'existe aucune fonction de mise à jour, de suppression ni de listing.
 
 2. Utilisateur existant (aucune création implicite).
 
+   Verrous consultatifs d'identité (audit R1), en ordre croissant : clé
+   d'idempotence, et selon le cas session_started de la visite, opération
+   canonique. Deux écritures concurrentes d'une même identité sont
+   sérialisées ici, avant toute décision.
+
 3. Idempotence par (user_id, idempotency_key) : si la clé existe, l'événement
-   stocké (version de schéma et conservation revalidées) est renvoyé tel quel
-   lorsque la requête est identique (created=False, aucune écriture) ;
-   EventIdempotencyCollision sinon. Une répétition ne modifie jamais
-   l'événement stocké, en particulier sa conservation.
+   stocké est revalidé (version de schéma, structure et échéances de la
+   conservation) ; si au moins une finalité est expirée à l'instant présent
+   (totalement ou partiellement : next_scope_expires_at <= maintenant),
+   EventRetentionExpired, sans écriture, sans suppression et sans comparer
+   ni renvoyer les données stockées ; sinon rattachement des finalités
+   vérifié, puis l'événement est renvoyé tel quel lorsque la requête est
+   identique (created=False, aucune écriture), EventIdempotencyCollision
+   sinon. Une répétition ne modifie jamais l'événement stocké. La clé reste
+   consommée tant que la ligne existe : sa suppression relève de la purge
+   du lot 2C.
 
 4. Autorisation (refus fermé, EventNotAuthorized) : au moins une
    participation enrolled de l'utilisateur, verrouillée en partage avec sa
@@ -37,6 +48,20 @@ n'existe aucune fonction de mise à jour, de suppression ni de listing.
    close_by_at) couvrent occurred_at, et dont l'échéance de conservation
    occurred_at + retention_days n'est pas déjà dépassée. Chaque campagne
    retenue devient une finalité de conservation.
+
+   Politique de retard (audit R1) : AUCUNE fenêtre de grâce
+   (LATE_EVENT_GRACE = 0). L'événement doit en outre être ENREGISTRÉ pendant
+   que la campagne collecte (maintenant < close_by_at, quel que soit le
+   statut : une campagne restée techniquement active après son échéance
+   n'accepte plus rien) et pendant que la fenêtre de participation est
+   ouverte (maintenant < window_end_at). Un événement antidaté dans la
+   période autorisée mais transmis après l'une de ces échéances est refusé.
+   Tant que la fenêtre et la campagne sont ouvertes, aucun retard maximal
+   propre n'est imposé (point ouvert d'arbitrage).
+
+   Horloge (audit R1) : maintenant est lu APRÈS l'acquisition de tous les
+   verrous (identité, participations, campagnes). Une échéance franchie
+   pendant une attente de verrou est donc vue et refusée.
 
 5. Unicités métier : un seul session_started par (user_id, visit_id) ; un
    seul événement par opération canonique (user_id, source_operation_kind,
@@ -50,7 +75,7 @@ n'existe aucune fonction de mise à jour, de suppression ni de listing.
    service ne fait jamais commit() ni rollback() de celle-ci.
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -74,6 +99,7 @@ from core.product_analytics.common import (
     SURFACES,
     EventIdempotencyCollision,
     EventNotAuthorized,
+    EventRetentionExpired,
     EventUniquenessConflict,
     InvalidProductAnalyticsInput,
     UnsupportedProductEventSchema,
@@ -83,6 +109,9 @@ IDEMPOTENCY_UNIQUE = "uq_product_activity_events_user_idempotency_key"
 SESSION_START_UNIQUE = "uq_product_activity_events_visit_session_start"
 SOURCE_OPERATION_UNIQUE = "uq_product_activity_events_source_operation"
 SESSION_STARTED = "session_started"
+# Politique de retard : aucune fenêtre de grâce après close_by_at ni après
+# window_end_at. Toute valeur non nulle est une décision du fondateur.
+LATE_EVENT_GRACE = timedelta(0)
 
 # Champs fournis par l'appelant : ce sont eux, et eux seuls, qu'une
 # répétition idempotente doit reproduire à l'identique.
@@ -151,14 +180,21 @@ def _event_by_key(db, user_id, idempotency_key) -> ProductActivityEvent | None:
     ).scalar_one_or_none()
 
 
-def _canonical_or_collision(db, event: ProductActivityEvent, request: dict) -> ProductActivityEvent:
-    """Répétition : l'événement stocké est revalidé (version, conservation)
-    puis renvoyé tel quel si la requête est identique."""
+def _canonical_or_collision(db, event: ProductActivityEvent, request: dict, *, now: datetime) -> ProductActivityEvent:
+    """Répétition : l'événement stocké est revalidé (version, conservation,
+    échéances à l'instant `now`, lu après les verrous) puis renvoyé tel quel
+    si la requête est identique. Lecture seule."""
     if event.schema_version != PRODUCT_EVENT_SCHEMA_VERSION:
         raise UnsupportedProductEventSchema(f"événement {event.id} : version de schéma non prise en charge")
     scopes = retention.validate_retention_columns(event.retention_scopes,
                                                   next_scope_expires_at=event.next_scope_expires_at,
                                                   purge_after_at=event.purge_after_at)
+    # next_scope_expires_at = première échéance : une seule finalité expirée
+    # suffit à refuser (expiration partielle comprise). Contrôle AVANT toute
+    # comparaison : les données d'un événement hors conservation ne sont ni
+    # comparées ni renvoyées.
+    if event.next_scope_expires_at <= now:
+        raise EventRetentionExpired(f"événement {event.id} : finalité de conservation expirée")
     retention.verify_scopes_against_campaigns(db, scopes, user_id=event.user_id, occurred_at=event.occurred_at)
     if any(getattr(event, field) != request[field] for field in REQUEST_FIELDS):
         raise EventIdempotencyCollision(
@@ -166,10 +202,10 @@ def _canonical_or_collision(db, event: ProductActivityEvent, request: dict) -> P
     return event
 
 
-def _authorized_scopes(db, *, user_id: str, occurred_at: datetime, now: datetime) -> list:
-    """Finalités de conservation des participations qui autorisent
-    l'événement, sous verrous partagés (participations puis campagnes, ordre
-    déterministe)."""
+def _lock_authorizations(db, *, user_id: str, occurred_at: datetime) -> list:
+    """Participations enrolled couvrant occurred_at et leurs campagnes, sous
+    verrous partagés (participations puis campagnes, ordre déterministe).
+    Retourne [(participation, campagne)]. Aucune décision temporelle ici."""
     participations = db.execute(
         select(ProductCampaignParticipant)
         .where(ProductCampaignParticipant.user_id == user_id,
@@ -182,24 +218,46 @@ def _authorized_scopes(db, *, user_id: str, occurred_at: datetime, now: datetime
     ).scalars().all()
     if not participations:
         return []
-    campaigns = db.execute(
+    campaigns = {campaign.id: campaign for campaign in db.execute(
         select(ProductCampaign)
         .where(ProductCampaign.id.in_([p.campaign_id for p in participations]))
         .order_by(ProductCampaign.id)
         .with_for_update(read=True)
         .execution_options(populate_existing=True)
-    ).scalars().all()
+    ).scalars().all()}
+    return [(participation, campaigns[participation.campaign_id]) for participation in participations]
+
+
+def _authorized_scopes(authorizations, *, occurred_at: datetime, now: datetime) -> list:
+    """Finalités des autorisations encore ouvertes à l'instant `now` (lu
+    APRÈS les verrous) : campagne active, occurred_at dans [activated_at,
+    close_by_at) (occurred_at dans la fenêtre : filtre SQL de
+    _lock_authorizations, fenêtres immuables), enregistrement avant
+    close_by_at et avant window_end_at (LATE_EVENT_GRACE = 0), conservation
+    non échue."""
     scopes = []
-    for campaign in campaigns:
+    for participation, campaign in authorizations:
         if campaign.status != ACTIVE or campaign.activated_at is None:
             continue
         if not campaign.activated_at <= occurred_at < campaign.close_by_at:
+            continue
+        if now >= campaign.close_by_at + LATE_EVENT_GRACE or now >= participation.window_end_at + LATE_EVENT_GRACE:
             continue
         scope = retention.campaign_scope(campaign, occurred_at)
         if scope.expires_at <= now:
             continue
         scopes.append(scope)
     return scopes
+
+
+def _identity_locks(user_id: str, request: dict, idempotency_key: uuid.UUID) -> list:
+    keys = [common.identity_lock_key("event_key", user_id, idempotency_key)]
+    if request["event_type"] == SESSION_STARTED:
+        keys.append(common.identity_lock_key("event_session_start", user_id, request["visit_id"]))
+    if request["source_operation_kind"] is not None:
+        keys.append(common.identity_lock_key("event_source_operation", user_id, request["source_operation_kind"],
+                                             request["source_operation_id"]))
+    return keys
 
 
 def _business_uniqueness(db, *, user_id: str, request: dict) -> None:
@@ -245,15 +303,17 @@ def record_event(
                         resolved_at=resolved_at, delivered_at=delivered_at)
 
     common.require_existing_user(db, user_id)
+    common.lock_identities(db, *_identity_locks(user_id, request, idempotency_key))
     existing = _event_by_key(db, user_id, idempotency_key)
     if existing is not None:
-        return _canonical_or_collision(db, existing, request), False
+        return _canonical_or_collision(db, existing, request, now=common.utcnow()), False
 
-    now = common.utcnow()
+    authorizations = _lock_authorizations(db, user_id=user_id, occurred_at=request["occurred_at"])
+    now = common.utcnow()  # après TOUS les verrous : identité, participations, campagnes
     for field in ("occurred_at", "resolved_at", "delivered_at"):
         if request[field] is not None and request[field] > now:
             raise InvalidProductAnalyticsInput(f"{field} : postérieure à l'enregistrement")
-    scopes = _authorized_scopes(db, user_id=user_id, occurred_at=request["occurred_at"], now=now)
+    scopes = _authorized_scopes(authorizations, occurred_at=request["occurred_at"], now=now)
     if not scopes:
         raise EventNotAuthorized("aucune participation active ne couvre cet événement")
     document = retention.build_retention_document(scopes)
@@ -270,10 +330,12 @@ def record_event(
             db.flush()
     except IntegrityError as exc:
         if common.is_unique_violation(exc, IDEMPOTENCY_UNIQUE):
+            # Défense finale (écrivain hors service) : relecture et décision
+            # avec une horloge relue après l'attente sur l'index.
             winner = _event_by_key(db, user_id, idempotency_key)
             if winner is None:
                 raise
-            return _canonical_or_collision(db, winner, request), False
+            return _canonical_or_collision(db, winner, request, now=common.utcnow()), False
         if common.is_unique_violation(exc, SESSION_START_UNIQUE):
             raise EventUniquenessConflict("session_started déjà enregistré pour cette visite",
                                           reason="session_start") from None

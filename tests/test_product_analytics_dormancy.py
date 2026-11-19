@@ -29,7 +29,8 @@ MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
 MIGRATION_0022_SHA256 = "860305fd4b13a312347444fc31add80587ad58fa03c7f07818f7ec10013be053"
-ALLOWED_IMPORTS = {"re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
+ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc",
+                   "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",
                    "core.product_analytics.retention"}
 

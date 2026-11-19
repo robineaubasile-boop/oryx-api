@@ -19,7 +19,10 @@ l'activation elles sont immuables.
 
 Concurrence : chaque transition verrouille la campagne (SELECT ... FOR
 UPDATE) avant de lire son statut ; deux transitions concurrentes sont donc
-sérialisées et la seconde voit l'état produit par la première. Le service
+sérialisées et la seconde voit l'état produit par la première. Deux
+créations concurrentes du même code sont sérialisées par un verrou
+consultatif d'identité. Horloge (audit R1) : maintenant est lu APRÈS ces
+verrous, jamais avant une attente. Le service
 ne fait jamais commit() ni rollback() de la transaction de l'appelant ;
 l'INSERT de create_campaign est isolé dans un SAVEPOINT pour traduire une
 course perdue sur uq_product_campaigns_code.
@@ -90,12 +93,13 @@ def create_campaign(
     close_by_at = common.require_aware(close_by_at, "close_by_at")
     common.validate_policy(retention_days=retention_days, retention_policy_version=retention_policy_version,
                            measurement_policy_version=measurement_policy_version)
-    now = common.utcnow()
-    if close_by_at <= now:
-        raise InvalidProductAnalyticsInput("close_by_at : doit être postérieure à la création")
 
+    common.lock_identities(db, common.identity_lock_key("campaign_code", code))
     if db.execute(select(ProductCampaign.id).where(ProductCampaign.code == code)).scalar_one_or_none() is not None:
         raise CampaignCodeConflict(f"code de campagne {code} déjà utilisé")
+    now = common.utcnow()  # après le verrou d'identité
+    if close_by_at <= now:
+        raise InvalidProductAnalyticsInput("close_by_at : doit être postérieure à la création")
     campaign = ProductCampaign(
         id=uuid.uuid4(), code=code, name=name, purpose=purpose, status=PLANNED, created_at=now,
         activated_at=None, closed_at=None, close_by_at=close_by_at, retention_days=retention_days,
@@ -146,7 +150,7 @@ def activate_campaign(db, *, campaign_id: uuid.UUID) -> ProductCampaign:
     close_by_at. Flush sans commit."""
     campaign = lock_campaign(db, campaign_id)
     _transition(campaign, ACTIVE)
-    now = common.utcnow()
+    now = common.utcnow()  # après le verrou de la campagne
     if now >= campaign.close_by_at:
         raise CampaignTransitionRefused(f"campagne {campaign.id} : échéance close_by_at dépassée")
     campaign.status = ACTIVE

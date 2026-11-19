@@ -17,6 +17,12 @@ Inscription (enroll_participant) :
   preuve juridique de consentement : le service n'en déduit rien d'autre
   que leur présence et leur cohérence temporelle.
 
+Concurrence et horloge (audit R1) : deux inscriptions concurrentes du même
+couple (campagne, utilisateur) sont sérialisées par un verrou consultatif
+d'identité ; la campagne est ensuite verrouillée en partage ; maintenant est
+lu APRÈS ces deux verrous, de sorte qu'une échéance (close_by_at) ou un début
+de fenêtre franchi pendant une attente de verrou est vu et refusé.
+
 Retrait (withdraw_participant) : enrolled -> withdrawn, sous verrou. La
 ligne est conservée (dénominateur des rapports futurs) ; aucun événement
 n'est accepté après le retrait.
@@ -93,6 +99,7 @@ def enroll_participant(
                "authorization_recorded_at": authorization_recorded_at, "notice_version": notice_version}
 
     common.require_existing_user(db, user_id)
+    common.lock_identities(db, common.identity_lock_key("participation", campaign_id, user_id))
     existing = _participation(db, campaign_id, user_id)
     if existing is not None:
         return _same_or_conflict(existing, request), False
@@ -100,7 +107,7 @@ def enroll_participant(
     campaign = lock_campaign(db, campaign_id, shared=True)
     if campaign.status not in ENROLLABLE_CAMPAIGN_STATUSES:
         raise ParticipationRefused(f"campagne {campaign_id} : inscription impossible à l'état {campaign.status}")
-    now = common.utcnow()
+    now = common.utcnow()  # après le verrou d'identité et le verrou de la campagne
     if now >= campaign.close_by_at:
         raise ParticipationRefused(f"campagne {campaign_id} : échéance close_by_at dépassée")
     if authorization_recorded_at > now:

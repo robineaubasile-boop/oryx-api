@@ -1,19 +1,26 @@
 """Socle commun des services analytics produit (V0-T08 Lot 2A) — DORMANT.
 
 Erreurs, vocabulaires FERMÉS, registre des politiques de campagne, horloge
-serveur et validation structurelle. Aucun accès à la base hors
-require_existing_user / is_unique_violation.
+serveur, validation structurelle et verrous consultatifs d'identité. Accès à
+la base limités à require_existing_user et lock_identities.
+
+Horloge (audit R1) : toute décision temporelle d'un service est prise avec
+un utcnow() lu APRÈS l'acquisition de tous les verrous PostgreSQL dont elle
+dépend (verrous de ligne et verrous consultatifs d'identité) ; jamais avec
+une valeur lue avant une attente de verrou.
 
 Messages d'erreur : uniquement des noms de champs, des identifiants
 techniques (UUID, code de campagne) et des valeurs de vocabulaire fermé ;
 jamais une valeur libre fournie par l'appelant.
 """
+import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from core.models import User
@@ -92,6 +99,13 @@ class InvalidRetentionScopes(ProductAnalyticsError):
 class RetentionRevisionRefused(ProductAnalyticsError):
     """Révision de conservation interdite (prolongation, finalité ajoutée,
     finalité modifiée)."""
+
+
+class EventRetentionExpired(ProductAnalyticsError):
+    """Répétition d'un événement dont au moins une finalité de conservation
+    est expirée (totalement ou partiellement) : refus sans aucune écriture ni
+    suppression. La clé d'idempotence reste consommée ; la ligne attend la
+    purge du lot 2C."""
 
 
 # --------------------------------------------------------------------------
@@ -183,12 +197,14 @@ WAVE_0_POLICY = CampaignPolicy(retention_days=90, retention_policy_version="v0-r
 def validate_policy(*, retention_days, retention_policy_version, measurement_policy_version) -> None:
     if type(retention_days) is not int:
         raise InvalidProductAnalyticsInput("retention_days : entier explicite requis")
-    if retention_policy_version not in RETENTION_POLICIES:
+    # Type vérifié AVANT toute recherche dans le registre : une valeur non
+    # hachable (liste, dict, ensemble) lèverait sinon TypeError.
+    if type(retention_policy_version) is not str or retention_policy_version not in RETENTION_POLICIES:
         raise InvalidProductAnalyticsInput("retention_policy_version : politique inconnue")
     if RETENTION_POLICIES[retention_policy_version] != retention_days:
         raise InvalidProductAnalyticsInput(
             f"retention_days : incohérent avec la politique {retention_policy_version}")
-    if measurement_policy_version not in MEASUREMENT_POLICIES:
+    if type(measurement_policy_version) is not str or measurement_policy_version not in MEASUREMENT_POLICIES:
         raise InvalidProductAnalyticsInput("measurement_policy_version : politique inconnue")
 
 
@@ -252,6 +268,35 @@ def require_text(value, field: str, *, max_length: int) -> str:
 def require_existing_user(db, user_id: str) -> None:
     if db.execute(select(User.id).where(User.id == user_id)).scalar_one_or_none() is None:
         raise ProductAnalyticsUserNotFound("utilisateur inconnu")
+
+
+# --------------------------------------------------------------------------
+# Verrous consultatifs d'identité
+# --------------------------------------------------------------------------
+
+IDENTITY_LOCK_NAMESPACE = "oryx-v0t08-lot2a"
+
+
+def identity_lock_key(kind: str, *parts) -> int:
+    """Clé bigint déterministe entre processus (jamais hash() Python)."""
+    encoded = json.dumps([IDENTITY_LOCK_NAMESPACE, kind, *(str(part) for part in parts)], separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big", signed=True)
+
+
+def lock_identities(db, *keys: int) -> None:
+    """pg_advisory_xact_lock de chaque identité métier, en ordre croissant
+    (anti-interblocage), libérés à la fin de la transaction de l'appelant.
+
+    Deux écritures concurrentes d'une même identité (code de campagne,
+    participation, clé d'idempotence, session_started d'une visite,
+    opération canonique) sont ainsi sérialisées AVANT toute décision : le
+    perdant attend ici, puis relit l'état validé et décide avec une horloge
+    fraîche, au lieu d'attendre sur l'index UNIQUE pendant l'INSERT avec une
+    décision prise avant l'attente. Les contraintes UNIQUE restent la défense
+    finale (SAVEPOINT)."""
+    for key in sorted(set(keys)):
+        db.execute(select(func.pg_advisory_xact_lock(key)))
 
 
 def is_unique_violation(exc: IntegrityError, constraint: str) -> bool:

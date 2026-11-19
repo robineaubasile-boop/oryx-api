@@ -420,7 +420,11 @@ def test_services_never_own_the_transaction_and_never_delete():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     and node.module and node.module.startswith("sqlalchemy") for alias in node.names}
-        assert imported <= {"select", "IntegrityError"}, path.name  # ni delete, ni update, ni SQL brut (text)
+        assert imported <= {"select", "IntegrityError", "func"}, path.name  # ni delete, ni update, ni SQL brut (text)
+        # func ne sert qu'aux verrous consultatifs de transaction (audit R1).
+        functions = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                     and isinstance(node.value, ast.Name) and node.value.id == "func"}
+        assert functions <= {"pg_advisory_xact_lock"}, path.name
     # Un SAVEPOINT par INSERT, rien d'autre.
     for name, expected in (("campaigns.py", 1), ("participation.py", 1), ("events.py", 1)):
         assert _calls(PACKAGE / name, {"begin_nested"}) == ["begin_nested"] * expected
@@ -883,8 +887,8 @@ def test_pg_event_outside_the_observation_window_is_refused(engine, Sessions, cl
                 "window_end_exclusive": T0 + timedelta(days=14)}[case]
     clock.now = max(clock.now, occurred + timedelta(seconds=1))
     _expect_not_authorized(engine, Sessions, occurred_at=occurred, resolved_at=occurred)
-    # La borne de début est incluse.
-    _record(Sessions, **_event_kwargs(occurred_at=T0, resolved_at=T0))
+    # Borne de début incluse : tests/test_product_analytics_audit_r1.py
+    # (test_pg_window_start_is_inclusive), enregistrée fenêtre encore ouverte.
 
 
 @pytest.mark.parametrize("case", ["planned", "closed", "cancelled", "before_activation"])
