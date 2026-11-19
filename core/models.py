@@ -2723,3 +2723,167 @@ class DecryptageTurnReservation(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
     finalized_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# --------------------------------------------------------------------------
+# V0-T08 Lot 1 (migration 0022_product_analytics_v1) : socle PostgreSQL
+# DORMANT de l'analytics produit. Aucun service, aucune route, aucun worker
+# ne lit ni n'écrit ces tables dans ce lot ; elles restent vides. Les
+# expressions des CHECK sont celles de la migration (concordance testée).
+# --------------------------------------------------------------------------
+
+
+class ProductCampaign(Base):
+    """Campagne de mesure produit (V0-T08 Lot 1, migration
+    0022_product_analytics_v1) — DORMANTE.
+
+    Statut fermé planned / active / closed / cancelled ; retention_days
+    explicite (> 0, aucune valeur implicite : la politique Vague 0 de 90 jours
+    sera appliquée à la création future de la campagne, jamais par défaut).
+    Chronologie imposée en base : created_at <= activated_at <= closed_at <=
+    close_by_at (chaque borne seulement si renseignée) ; une campagne closed
+    porte activated_at et closed_at. Les transitions d'état, l'interdiction
+    de réouverture et l'immutabilité des politiques après activation relèvent
+    de services métier futurs (aucun trigger)."""
+    __tablename__ = "product_campaigns"
+    __table_args__ = (
+        CheckConstraint("status IN ('planned', 'active', 'closed', 'cancelled')", name="ck_product_campaigns_status"),
+        CheckConstraint("retention_days > 0", name="ck_product_campaigns_retention_days"),
+        CheckConstraint("close_by_at >= created_at", name="ck_product_campaigns_close_by_at"),
+        CheckConstraint("activated_at IS NULL OR activated_at >= created_at", name="ck_product_campaigns_activated_at"),
+        CheckConstraint(
+            "closed_at IS NULL OR ((activated_at IS NULL OR closed_at >= activated_at) AND closed_at <= close_by_at)",
+            name="ck_product_campaigns_closed_at"),
+        CheckConstraint("status <> 'closed' OR (activated_at IS NOT NULL AND closed_at IS NOT NULL)",
+                        name="ck_product_campaigns_closed"),
+        UniqueConstraint("code", name="uq_product_campaigns_code"),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    code = Column(String(64), nullable=False)
+    name = Column(String(160), nullable=False)
+    purpose = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    close_by_at = Column(DateTime(timezone=True), nullable=False)
+    retention_days = Column(SmallInteger, nullable=False)
+    retention_policy_version = Column(String(64), nullable=False)
+    measurement_policy_version = Column(String(64), nullable=False)
+
+
+class ProductCampaignParticipant(Base):
+    """Inscription d'un utilisateur à une campagne (V0-T08 Lot 1, migration
+    0022_product_analytics_v1) — DORMANTE.
+
+    PK (campaign_id, user_id) : une seule inscription par campagne, plusieurs
+    campagnes possibles. Fenêtre d'observation semi-ouverte [window_start_at,
+    window_end_at), non vide. Aucun participant n'est exclu faute
+    d'événement : tous les inscrits forment le dénominateur des rapports
+    futurs. authorization_recorded_at et notice_version sont des champs
+    techniques documentaires, jamais une preuve juridique de consentement."""
+    __tablename__ = "product_campaign_participants"
+    __table_args__ = (
+        CheckConstraint("participation_status IN ('enrolled', 'completed', 'withdrawn')",
+                        name="ck_product_campaign_participants_participation_status"),
+        CheckConstraint("window_end_at > window_start_at", name="ck_product_campaign_participants_window"),
+        ForeignKeyConstraint(["campaign_id"], ["product_campaigns.id"],
+                             name="product_campaign_participants_campaign_id_fkey"),
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="product_campaign_participants_user_id_fkey"),
+        Index("ix_product_campaign_participants_user_window", "user_id", "window_start_at", "window_end_at"),
+    )
+
+    campaign_id = Column(Uuid, primary_key=True)
+    user_id = Column(String, primary_key=True)
+    window_start_at = Column(DateTime(timezone=True), nullable=False)
+    window_end_at = Column(DateTime(timezone=True), nullable=False)
+    participation_status = Column(String(16), nullable=False)
+    enrolled_at = Column(DateTime(timezone=True), nullable=False)
+    authorization_recorded_at = Column(DateTime(timezone=True), nullable=True)
+    notice_version = Column(String(64), nullable=True)
+
+
+class ProductActivityEvent(Base):
+    """Événement d'activité produit (V0-T08 Lot 1, migration
+    0022_product_analytics_v1) — DORMANT : aucun code n'en écrit.
+
+    Sept types, trois sources, quatre outcomes et quatre statuts de livraison
+    fermés (« unconfirmed », jamais « unknown »). Aucune donnée financière,
+    aucun texte de question, prompt, réponse IA, donnée pédagogique ni
+    secret. Unicités : (user_id, idempotency_key) ; un seul session_started
+    par (user_id, visit_id) ; une seule ligne par opération métier canonique
+    d'un propriétaire (user_id, source_operation_kind, source_operation_id),
+    paire entièrement présente ou entièrement absente.
+
+    retention_scopes : document versionné retention-scopes-v1
+    {"version": ..., "scopes": [{"kind", "campaign_id", "policy_version",
+    "expires_at"}, ...]}. La base ne vérifie que sa structure EXTÉRIEURE et
+    next_scope_expires_at <= purge_after_at. Restent à garantir par les
+    futurs services d'écriture : next_scope_expires_at = première échéance
+    restante, purge_after_at = dernière, échéances qui ne s'allongent jamais,
+    aucune finalité ajoutée rétroactivement, existence des campagnes
+    référencées, exclusion des finalités expirées, suppression de
+    l'événement avec sa dernière finalité."""
+    __tablename__ = "product_activity_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('session_started', 'education_used', 'coach_used', 'decrypter_used', 'portfolio_used', "
+            "'profile_viewed', 'view_opened')",
+            name="ck_product_activity_events_event_type"),
+        CheckConstraint("source IN ('client_signal', 'server_business', 'server_visit')",
+                        name="ck_product_activity_events_source"),
+        CheckConstraint("outcome IN ('in_progress', 'succeeded', 'failed', 'indeterminate')",
+                        name="ck_product_activity_events_outcome"),
+        CheckConstraint("delivery_status IN ('not_applicable', 'pending', 'confirmed', 'unconfirmed')",
+                        name="ck_product_activity_events_delivery_status"),
+        CheckConstraint("(source_operation_kind IS NULL) = (source_operation_id IS NULL)",
+                        name="ck_product_activity_events_source_operation"),
+        CheckConstraint(
+            "recorded_at >= occurred_at AND updated_at >= recorded_at "
+            "AND (resolved_at IS NULL OR resolved_at >= occurred_at) "
+            "AND (delivered_at IS NULL OR delivered_at >= occurred_at)",
+            name="ck_product_activity_events_timestamps"),
+        CheckConstraint("next_scope_expires_at <= purge_after_at", name="ck_product_activity_events_retention_window"),
+        CheckConstraint(
+            "CASE WHEN jsonb_typeof(retention_scopes) = 'object' "
+            "THEN (retention_scopes - 'version' - 'scopes') = '{}'::jsonb "
+            "AND COALESCE((retention_scopes -> 'version') = '\"retention-scopes-v1\"'::jsonb, false) "
+            "AND CASE WHEN jsonb_typeof(retention_scopes -> 'scopes') = 'array' "
+            "THEN jsonb_array_length(retention_scopes -> 'scopes') > 0 ELSE false END "
+            "ELSE false END",
+            name="ck_product_activity_events_retention_scopes"),
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="product_activity_events_user_id_fkey"),
+        UniqueConstraint("user_id", "idempotency_key", name="uq_product_activity_events_user_idempotency_key"),
+        Index("ix_product_activity_events_user_occurred", "user_id", text("occurred_at DESC"), text("id DESC")),
+        Index("ix_product_activity_events_user_visit", "user_id", "visit_id"),
+        Index("ix_product_activity_events_next_scope_expires_at", "next_scope_expires_at"),
+        Index("ix_product_activity_events_purge_after_at", "purge_after_at"),
+        Index("uq_product_activity_events_visit_session_start", "user_id", "visit_id", unique=True,
+              postgresql_where=text("event_type = 'session_started'")),
+        Index("uq_product_activity_events_source_operation", "user_id", "source_operation_kind",
+              "source_operation_id", unique=True,
+              postgresql_where=text("source_operation_kind IS NOT NULL AND source_operation_id IS NOT NULL")),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    user_id = Column(String, nullable=False)
+    visit_id = Column(Uuid, nullable=False)
+    idempotency_key = Column(Uuid, nullable=False)
+    event_type = Column(String(32), nullable=False)
+    surface = Column(String(32), nullable=False)
+    executed_route = Column(String(32), nullable=True)
+    source = Column(String(24), nullable=False)
+    source_operation_kind = Column(String(64), nullable=True)
+    source_operation_id = Column(Uuid, nullable=True)
+    outcome = Column(String(24), nullable=False)
+    delivery_status = Column(String(24), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    retention_scopes = Column(JSONB(none_as_null=True), nullable=False)
+    next_scope_expires_at = Column(DateTime(timezone=True), nullable=False)
+    purge_after_at = Column(DateTime(timezone=True), nullable=False)
+    schema_version = Column(String(64), nullable=False)

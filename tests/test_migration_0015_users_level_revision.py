@@ -41,6 +41,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    V0T08_0022,
     PR4_0019,
     PR4_FILES,
     PR7_0020,
@@ -89,7 +90,7 @@ def _load_0015():
 
 def test_revision_chain_puts_0015_after_0014_and_head_is_0017():
     script = _script_directory()
-    assert script.get_heads() == [PR9B1_0021]
+    assert script.get_heads() == [V0T08_0022]
     assert script.get_revision(PR1_0015).down_revision == R1D1
     assert script.get_revision(PR1_0016).down_revision == PR1_0015
     assert script.get_revision(PR1_0017).down_revision == PR1_0016
@@ -307,7 +308,7 @@ def test_pg_upgrade_0014_to_0015_keeps_data_and_legacy_backend_then_downgrade(pg
 def test_pg_upgrade_from_empty_database_to_head_matches_models(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == PR9B1_0021
+    assert _version(pg_engine) == V0T08_0022
     assert _compare_metadata(pg_engine) == []
     with pg_engine.begin() as conn:
         conn.execute(sa.text("INSERT INTO users (id, level) VALUES ('fresh', 'debutant')"))
@@ -393,7 +394,7 @@ def test_pg_lock_timeout_aborts_the_whole_upgrade_and_leaves_0014_intact(pg_url,
     assert _data(pg_engine, tables - {"alembic_version"}) == data_0014
 
     _run_alembic(pg_url, "upgrade", "head")
-    assert _version(pg_engine) == PR9B1_0021
+    assert _version(pg_engine) == V0T08_0022
     assert _compare_metadata(pg_engine) == []
 
 

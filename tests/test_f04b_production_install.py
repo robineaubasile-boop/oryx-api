@@ -150,7 +150,7 @@ def test_a_clean_environment_installs_and_runs_from_requirements_txt_alone(tmp_p
         assert components["isolated_session_trust_env"] is False and components["isolated_session_type"] is True
         assert (components["auth_pairs"], components["personal_pairs"]) == (14, 13)
         assert components["gate_built"] is True
-        assert components["alembic_head"] == "0021_decryptage_reservations"
+        assert components["alembic_head"] == "0022_product_analytics_v1"  # V0-T08 Lot 1
         assert report["close"]["closed"] == ["claude", "fmp", "eodhd", "resend", "supabase", "engine"]
         # Freeze § 3.2 : appels simulés des cinq adaptateurs dans l'environnement de production.
         assert report["simulated_calls"] == {"requests": 6, "market_results": [True, True],

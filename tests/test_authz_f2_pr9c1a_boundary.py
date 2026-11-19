@@ -195,7 +195,8 @@ def test_the_bridge_never_reads_nor_writes_the_b1_reservation():
 
 def test_no_migration_is_added():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 21 and versions[-1] == "0021_decryptage_turn_reservations.py"
+    assert len(versions) == 22 and versions[-2:] == ["0021_decryptage_turn_reservations.py",
+                                                     "0022_product_analytics_v1.py"]  # V0-T08 Lot 1
 
 
 def test_http_routers_and_runner_know_nothing_of_c1a():

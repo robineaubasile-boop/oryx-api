@@ -37,6 +37,8 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    V0T08_FILES,
+    V0T08_0022,
     PR4_0019,
     PR4_FILES,
     PR7_0020,
@@ -78,10 +80,10 @@ RUNNING_SQL = "lease_token IS NULL OR execution_status = 'running'"
 
 def test_revision_chain_ends_with_0014_as_the_single_head():
     script = _script_directory()
-    assert script.get_heads() == [PR9B1_0021]
+    assert script.get_heads() == [V0T08_0022]
     assert script.get_revision(R1D1).down_revision == R1C4
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert files[-9:-7] == [R1C4_FILE, R1D1_FILE] and files[-7:] == PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES and len(files) == 21
+    assert files[-10:-8] == [R1C4_FILE, R1D1_FILE] and files[-8:] == PR1_FILES + PR2_FILES + PR4_FILES + PR7_FILES + PR9B1_FILES + V0T08_FILES and len(files) == 22
 
 
 def test_revision_id_fits_alembic_version_and_names_the_file():

@@ -245,6 +245,8 @@ def test_model_does_not_touch_historical_tables():
         "conversation_identities", "assistant_deliveries", "decryptage_cognitive_links",
         # R1 PR 9-B1 (0021, testée à part) : réservations Décrypter F2.
         "decryptage_turn_reservations",
+        # V0-T08 Lot 1 (0022, testée à part) : analytics produit dormant.
+        "product_campaigns", "product_campaign_participants", "product_activity_events",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables

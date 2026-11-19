@@ -43,6 +43,7 @@ from tests.test_migration_0002_analysis_sessions import (
     pg_url,  # noqa: F401 — fixture
 )
 from tests.test_migration_0004_drop_company_analyses import (
+    V0T08_0022,
     PR4_0019,
     PR4_FILES,
     PR7_0020,
@@ -91,12 +92,12 @@ def test_revision_links_0017_to_0016_and_is_the_parent_of_0018():
     (tests/test_migration_0018_f2_abuse_journal.py,
     tests/test_migration_0019_f2_http_admission.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR9B1_0021]
+    assert script.get_heads() == [V0T08_0022]
     assert script.get_revision(PR1_0017).down_revision == PR1_0016
     assert script.get_revision(PR2_0018).down_revision == PR1_0017
     assert PR1_0017_FILE == f"{PR1_0017}.py" and len(PR1_0017) <= 32
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 21 and files[-5] == PR1_0017_FILE
+    assert len(files) == 22 and files[-6] == PR1_0017_FILE
     assert tuple(CREATION_ORDER) == PR1_0017_TABLES
 
 
