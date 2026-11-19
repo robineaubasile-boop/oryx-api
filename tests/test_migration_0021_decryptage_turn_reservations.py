@@ -1,7 +1,8 @@
 """Tests de R1 PR 9-B1 : migration 0021_decryptage_reservations (fichier
 0021_decryptage_turn_reservations.py) et modèle correspondant.
 
-1. Sans base : maillon 0020 -> 0021 (tête), identifiant <= 32 caractères,
+1. Sans base : maillon 0020 -> 0021 (parent de 0022, V0-T08 Lot 1, testée
+   à part), identifiant <= 32 caractères,
    fichiers 0001 à 0020 inchangés, SQL offline (upgrade additif sans
    trigger, fonction, backfill ni UPDATE ; downgrade : délais, verrou, garde
    DO évaluée à l'exécution, retrait), modèle aligné sur la migration.
@@ -39,6 +40,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     PR7_0020_FILE,
     PR9B1_0021,
     PR9B1_0021_FILE,
+    V0T08_0022,
     _compare_metadata,
     _data,
     _statements,
@@ -75,15 +77,18 @@ def _m0021():
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0021_to_0020_and_is_the_head():
+def test_revision_links_0021_to_0020_and_is_the_parent_of_0022():
+    """0021 était la tête de R1 PR 9-B1 ; V0-T08 Lot 1 ajoute 0022 au-dessus,
+    sans modifier ce fichier (tests/test_migration_0022_product_analytics_v1.py)."""
     script = _script_directory()
-    assert script.get_heads() == [PR9B1_0021]
+    assert script.get_heads() == [V0T08_0022]
     assert script.get_revision(PR9B1_0021).down_revision == PR7_0020
+    assert script.get_revision(V0T08_0022).down_revision == PR9B1_0021
     # Identifiant raccourci (alembic_version.version_num VARCHAR(32)), fichier au nom autorisé.
     assert PR9B1_0021 == "0021_decryptage_reservations" and len(PR9B1_0021) <= 32
     assert len("0021_decryptage_turn_reservations") == 33
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 21 and files[-1] == PR9B1_0021_FILE == "0021_decryptage_turn_reservations.py"
+    assert len(files) == 22 and files[-2] == PR9B1_0021_FILE == "0021_decryptage_turn_reservations.py"
 
 
 def test_migrations_0001_to_0020_are_unchanged():
@@ -253,7 +258,7 @@ def test_pg_upgrade_0020_to_0021_keeps_every_row_then_exact_downgrade(pg_url, pg
     assert _snapshot(pg_engine, tables) == schema_0020 and _catalog(pg_engine, tables) == catalog_0020
     assert _global_catalog(pg_engine) == global_0020
     assert _data(pg_engine, tables - {"alembic_version"}) == data_0020
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR9B1_0021)  # V0-T08 Lot 1 : 0022 au-dessus, testée à part
     assert _compare_metadata(pg_engine) == []
 
 
@@ -293,7 +298,7 @@ CHECK_VIOLATIONS = [
 @pytest.mark.parametrize("constraint,overrides", CHECK_VIOLATIONS)
 def test_pg_every_check_is_exercised(pg_url, pg_engine, constraint, overrides):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR9B1_0021)  # V0-T08 Lot 1 : 0022 au-dessus, testée à part
     _seed_historical(pg_engine)
     with pg_engine.begin() as conn:
         assert_disposable_connection(conn)
@@ -303,7 +308,7 @@ def test_pg_every_check_is_exercised(pg_url, pg_engine, constraint, overrides): 
 
 def test_pg_valid_shapes_identity_and_foreign_keys(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR9B1_0021)  # V0-T08 Lot 1 : 0022 au-dessus, testée à part
     _seed_historical(pg_engine)
     with pg_engine.begin() as conn:
         assert_disposable_connection(conn)
@@ -346,7 +351,7 @@ def test_pg_valid_shapes_identity_and_foreign_keys(pg_url, pg_engine):  # noqa: 
 @pytest.mark.parametrize("offline", [False, True])
 def test_pg_downgrade_is_refused_when_a_reservation_exists(pg_url, pg_engine, offline):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR9B1_0021)  # V0-T08 Lot 1 : 0022 au-dessus, testée à part
     _seed_historical(pg_engine)
     with pg_engine.begin() as conn:
         _seed_conversation(conn)
@@ -371,7 +376,7 @@ def test_pg_downgrade_is_refused_when_a_reservation_exists(pg_url, pg_engine, of
 
 def test_pg_offline_guard_passes_without_reservation(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", PR9B1_0021)  # V0-T08 Lot 1 : 0022 au-dessus, testée à part
     _seed_historical(pg_engine)
     guard = next(s for s in _statements(_run_alembic(OFFLINE, "downgrade", f"{PR9B1_0021}:{PR7_0020}",
                                                      "--sql").stdout) if s.startswith("DO $$"))

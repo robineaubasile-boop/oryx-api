@@ -289,4 +289,4 @@ def test_importing_b2_opens_nothing_and_loads_no_network_client(database_url):
 def test_no_new_migration():
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_heads() == ["0021_decryptage_reservations"]
-    assert len(list((REPO_ROOT / "alembic" / "versions").glob("*.py"))) == 21
+    assert len(list((REPO_ROOT / "alembic" / "versions").glob("*.py"))) == 22

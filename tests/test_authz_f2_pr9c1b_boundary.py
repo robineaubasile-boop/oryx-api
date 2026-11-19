@@ -378,7 +378,8 @@ def test_no_route_no_activation_no_migration():
             continue
         assert "Finalize" not in text and "decryptage" not in text.lower(), path.name
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 21 and versions[-1] == "0021_decryptage_turn_reservations.py"
+    assert len(versions) == 22 and versions[-2:] == ["0021_decryptage_turn_reservations.py",
+                                                     "0022_product_analytics_v1.py"]  # V0-T08 Lot 1
     assert dr.LEASE_DURATION.total_seconds() == 360 and dr.MAX_ATTEMPTS == 3
     assert dr.BLOCKED_REASONS == ("legacy_collision", "attempts_exhausted") and dr.STATES == (
         "reserved", "blocked", "finalized")

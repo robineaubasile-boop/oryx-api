@@ -219,5 +219,5 @@ def test_the_package_reads_no_configuration_and_starts_nothing():
 def test_no_migration_and_no_production_dependency():
     assert production_requirements() == MAIN_REQUIREMENTS
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 21
-    assert versions[-1] == "0021_decryptage_turn_reservations.py"
+    assert len(versions) == 22
+    assert versions[-1] == "0022_product_analytics_v1.py"  # V0-T08 Lot 1
