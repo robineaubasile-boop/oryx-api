@@ -2813,8 +2813,8 @@ class ProductActivityEvent(Base):
     aucun texte de question, prompt, réponse IA, donnée pédagogique ni
     secret. Unicités : (user_id, idempotency_key) ; un seul session_started
     par (user_id, visit_id) ; une seule ligne par opération métier canonique
-    (source_operation_kind, source_operation_id), paire entièrement présente
-    ou entièrement absente.
+    d'un propriétaire (user_id, source_operation_kind, source_operation_id),
+    paire entièrement présente ou entièrement absente.
 
     retention_scopes : document versionné retention-scopes-v1
     {"version": ..., "scopes": [{"kind", "campaign_id", "policy_version",
@@ -2848,7 +2848,7 @@ class ProductActivityEvent(Base):
         CheckConstraint(
             "CASE WHEN jsonb_typeof(retention_scopes) = 'object' "
             "THEN (retention_scopes - 'version' - 'scopes') = '{}'::jsonb "
-            "AND retention_scopes @> '{\"version\": \"retention-scopes-v1\"}'::jsonb "
+            "AND COALESCE((retention_scopes -> 'version') = '\"retention-scopes-v1\"'::jsonb, false) "
             "AND CASE WHEN jsonb_typeof(retention_scopes -> 'scopes') = 'array' "
             "THEN jsonb_array_length(retention_scopes -> 'scopes') > 0 ELSE false END "
             "ELSE false END",
@@ -2861,8 +2861,8 @@ class ProductActivityEvent(Base):
         Index("ix_product_activity_events_purge_after_at", "purge_after_at"),
         Index("uq_product_activity_events_visit_session_start", "user_id", "visit_id", unique=True,
               postgresql_where=text("event_type = 'session_started'")),
-        Index("uq_product_activity_events_source_operation", "source_operation_kind", "source_operation_id",
-              unique=True,
+        Index("uq_product_activity_events_source_operation", "user_id", "source_operation_kind",
+              "source_operation_id", unique=True,
               postgresql_where=text("source_operation_kind IS NOT NULL AND source_operation_id IS NOT NULL")),
     )
 

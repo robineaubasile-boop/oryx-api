@@ -146,7 +146,7 @@ INDEXDEFS = {
         "USING btree (user_id, visit_id) WHERE ((event_type)::text = 'session_started'::text)",
     "uq_product_activity_events_source_operation":
         "CREATE UNIQUE INDEX uq_product_activity_events_source_operation ON public.product_activity_events "
-        "USING btree (source_operation_kind, source_operation_id) "
+        "USING btree (user_id, source_operation_kind, source_operation_id) "
         "WHERE ((source_operation_kind IS NOT NULL) AND (source_operation_id IS NOT NULL))",
 }
 # Index portés par les contraintes PK / UNIQUE.
@@ -305,7 +305,7 @@ def test_models_match_the_migration():
         m.EVENT_NEXT_EXPIRY_INDEX: (["next_scope_expires_at"], False, None),
         m.EVENT_PURGE_INDEX: (["purge_after_at"], False, None),
         m.EVENT_SESSION_START_UNIQUE: (["user_id", "visit_id"], True, m.EVENT_SESSION_START_WHERE),
-        m.EVENT_SOURCE_OPERATION_UNIQUE: (["source_operation_kind", "source_operation_id"], True,
+        m.EVENT_SOURCE_OPERATION_UNIQUE: (["user_id", "source_operation_kind", "source_operation_id"], True,
                                           m.EVENT_SOURCE_OPERATION_WHERE),
     }
     assert set(indexes) == V0T08_0022_INDEXES
@@ -654,6 +654,20 @@ CHECK_VIOLATIONS = [
      {"retention_scopes": {"version": "retention-scopes-v2", "scopes": [{}]}}),
     ("event", "ck_product_activity_events_retention_scopes",
      {"retention_scopes": {"version": 1, "scopes": [{}]}}),
+    # Égalité JSONB exacte : la version doit être LA chaîne JSON attendue,
+    # jamais un tableau, un objet ou un autre type qui la contiendrait.
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": ["retention-scopes-v1"], "scopes": [{}]}}),
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": ["retention-scopes-v1", "retention-scopes-v2"], "scopes": [{}]}}),
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": {"retention-scopes-v1": True}, "scopes": [{}]}}),
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": None, "scopes": [{}]}}),
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": True, "scopes": [{}]}}),
+    ("event", "ck_product_activity_events_retention_scopes",
+     {"retention_scopes": {"version": " retention-scopes-v1", "scopes": [{}]}}),
     ("event", "ck_product_activity_events_retention_scopes", {"retention_scopes": {"version": "retention-scopes-v1"}}),
     ("event", "ck_product_activity_events_retention_scopes",
      {"retention_scopes": {"version": "retention-scopes-v1", "scopes": []}}),
@@ -799,20 +813,37 @@ def test_pg_events_identity_uniqueness_and_legitimate_shapes(pg_url, pg_engine):
                  lambda: _event(conn, idempotency_key=start["idempotency_key"]))
         _event(conn, user_id="user_7f3a", idempotency_key=start["idempotency_key"])
         _rejects(conn, "product_activity_events_pkey", lambda: _event(conn, id=start["id"]))
-        # Identité canonique d'une opération métier : une seule ligne.
+        # Identité canonique d'une opération métier, scindée par propriétaire
+        # (contrat Portfolio (user_id, operation_type, operation_id)) : une
+        # seule ligne par (user_id, source_operation_kind, source_operation_id).
         operation = uuid.uuid4()
         _event(conn, event_type="decrypter_used", surface="decrypter", source="server_business",
                source_operation_kind="decryptage_turn", source_operation_id=operation, outcome="in_progress",
                delivery_status="pending")
-        for overrides in ({}, {"event_type": "portfolio_used", "surface": "portfolio"}, {"user_id": "user_7f3a"},
-                          {"visit_id": uuid.uuid4()}):
+        # Même utilisateur + même opération canonique : refus, quels que soient
+        # le type d'événement, la visite ou le résultat.
+        for overrides in ({}, {"event_type": "portfolio_used", "surface": "portfolio"}, {"visit_id": uuid.uuid4()},
+                          {"outcome": "succeeded", "delivery_status": "confirmed"}):
             values = {"event_type": "decrypter_used", "surface": "decrypter", "source": "server_business",
                       "source_operation_kind": "decryptage_turn", "source_operation_id": operation, **overrides}
             _rejects(conn, "uq_product_activity_events_source_operation", lambda v=values: _event(conn, **v))
+        # Utilisateurs différents + même type et même identifiant d'opération : admis.
+        _event(conn, user_id="user_7f3a", event_type="decrypter_used", surface="decrypter", source="server_business",
+               source_operation_kind="decryptage_turn", source_operation_id=operation)
+        _event(conn, user_id="legacy-anon-2", event_type="decrypter_used", surface="decrypter",
+               source="server_business", source_operation_kind="decryptage_turn", source_operation_id=operation)
+        # ... et chacun reste unique pour son propriétaire.
+        _rejects(conn, "uq_product_activity_events_source_operation",
+                 lambda: _event(conn, user_id="user_7f3a", event_type="decrypter_used", surface="decrypter",
+                                source="server_business", source_operation_kind="decryptage_turn",
+                                source_operation_id=operation))
+        # Même utilisateur + type d'opération différent (même identifiant) : admis.
         _event(conn, event_type="portfolio_used", surface="portfolio", source="server_business",
-               source_operation_kind="portfolio_write", source_operation_id=operation)  # autre nature : admis
+               source_operation_kind="portfolio_write", source_operation_id=operation)
         _event(conn, event_type="portfolio_used", surface="portfolio", source="server_business",
                source_operation_kind="portfolio_write", source_operation_id=uuid.uuid4())
+        assert conn.execute(sa.text(
+            f"SELECT count(*) FROM {EVENTS} WHERE source_operation_id = :o"), {"o": operation}).scalar_one() == 4
         # Sans opération : aucune unicité canonique.
         _event(conn, event_type="profile_viewed", surface="profile")
         _event(conn, event_type="profile_viewed", surface="profile")

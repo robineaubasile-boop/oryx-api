@@ -29,18 +29,21 @@ sont pas modifiés.
    prompt, réponse IA, donnée pédagogique ni secret. Unicités : clé
    d'idempotence par utilisateur, un seul session_started par (user_id,
    visit_id) (index unique partiel), une seule ligne par opération métier
-   canonique (source_operation_kind, source_operation_id) lorsqu'elles sont
-   renseignées (index unique partiel ; la paire est entièrement présente ou
+   canonique d'un propriétaire (user_id, source_operation_kind,
+   source_operation_id) lorsqu'elles sont renseignées (index unique partiel,
+   scindé par propriétaire comme le contrat Portfolio (user_id,
+   operation_type, operation_id) ; la paire est entièrement présente ou
    entièrement absente). Conservation : retention_scopes (document JSONB
    versionné retention-scopes-v1), next_scope_expires_at <= purge_after_at.
 
 Garanties SQL réelles : uniquement les CHECK, FK, PK, UNIQUE et index
 ci-dessous. Le CHECK de retention_scopes ne porte que sur la structure
-EXTÉRIEURE (objet aux seules clés version et scopes, version attendue,
-scopes tableau non vide) : il ne valide ni le contenu de chaque finalité,
-ni l'existence transactionnelle des campaign_id référencés, ni la cohérence
-des échéances avec les deux colonnes, ni l'immutabilité historique
-(raccourcissement seul, aucune finalité rétroactive) : ces invariants
+EXTÉRIEURE (objet aux seules clés version et scopes, version égale à la
+chaîne JSON "retention-scopes-v1", scopes tableau non vide) : il ne valide
+ni le contenu de chaque finalité, ni l'existence transactionnelle des
+campaign_id référencés, ni la cohérence des échéances avec les deux
+colonnes, ni l'immutabilité historique (raccourcissement seul, aucune
+finalité rétroactive) : ces invariants
 relèvent des futurs services d'écriture. Les transitions d'état des
 campagnes, l'interdiction de réouverture et l'immutabilité des politiques
 après activation relèvent aussi de services futurs.
@@ -130,13 +133,14 @@ EVENT_CHECKS = (
     ("ck_product_activity_events_retention_window", "next_scope_expires_at <= purge_after_at"),
     # Structure EXTÉRIEURE seulement. Les CASE garantissent que l'opérateur -
     # n'est appliqué qu'à un objet et jsonb_array_length qu'à un tableau
-    # (l'ordre d'évaluation d'un AND n'est pas garanti par PostgreSQL) ; la
-    # version est testée par contenance (@>), jamais NULL : une clé absente
-    # rend le CHECK faux, pas inconnu.
+    # (l'ordre d'évaluation d'un AND n'est pas garanti par PostgreSQL). La
+    # version est comparée par égalité JSONB EXACTE à la chaîne JSON
+    # "retention-scopes-v1" (ni tableau, ni objet, ni autre type) ; COALESCE
+    # rend le CHECK faux, jamais inconnu, quand la clé est absente.
     ("ck_product_activity_events_retention_scopes",
      "CASE WHEN jsonb_typeof(retention_scopes) = 'object' "
      "THEN (retention_scopes - 'version' - 'scopes') = '{}'::jsonb "
-     "AND retention_scopes @> '{\"version\": \"retention-scopes-v1\"}'::jsonb "
+     "AND COALESCE((retention_scopes -> 'version') = '\"retention-scopes-v1\"'::jsonb, false) "
      "AND CASE WHEN jsonb_typeof(retention_scopes -> 'scopes') = 'array' "
      "THEN jsonb_array_length(retention_scopes -> 'scopes') > 0 ELSE false END "
      "ELSE false END"),
@@ -242,7 +246,7 @@ def upgrade() -> None:
     op.create_index(EVENT_PURGE_INDEX, EVENTS, ["purge_after_at"])
     op.create_index(EVENT_SESSION_START_UNIQUE, EVENTS, ["user_id", "visit_id"], unique=True,
                     postgresql_where=sa.text(EVENT_SESSION_START_WHERE))
-    op.create_index(EVENT_SOURCE_OPERATION_UNIQUE, EVENTS, ["source_operation_kind", "source_operation_id"],
+    op.create_index(EVENT_SOURCE_OPERATION_UNIQUE, EVENTS, ["user_id", "source_operation_kind", "source_operation_id"],
                     unique=True, postgresql_where=sa.text(EVENT_SOURCE_OPERATION_WHERE))
 
 
