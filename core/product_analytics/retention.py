@@ -140,7 +140,10 @@ def validate_retention_columns(document, *, next_scope_expires_at, purge_after_a
 
 
 def authorized_expiry(occurred_at: datetime, retention_days: int) -> datetime:
-    """Dernière échéance autorisée par une campagne pour un événement."""
+    """Dernière échéance autorisée par une campagne pour un événement :
+    occurred_at + retention_days. Ancrage sur occurred_at = décision produit
+    figée (« analytics conservée 90 jours depuis occurred_at »), jamais
+    recorded_at ni la clôture de la campagne."""
     return occurred_at + timedelta(days=retention_days)
 
 

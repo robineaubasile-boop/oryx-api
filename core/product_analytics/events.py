@@ -59,6 +59,17 @@ n'existe aucune fonction de mise à jour, de suppression ni de listing.
    Tant que la fenêtre et la campagne sont ouvertes, aucun retard maximal
    propre n'est imposé (point ouvert d'arbitrage).
 
+   LATE_EVENT_GRACE = 0 est une RESTRICTION PROVISOIRE du service dormant,
+   pas le contrat produit final. Le contrat produit Vague 0 admet les
+   événements réellement survenus pendant la fenêtre, y compris ceux remis à
+   la clôture d'une session commencée avant l'échéance (fin de session après
+   30 minutes d'inactivité), sous réserve d'une validation fiable ; il exclut
+   tout événement survenu après l'échéance. Ce mécanisme de remise (preuve de
+   session, borne de remise, endpoint) relève du lot 2B et n'existe pas ici :
+   le lot 2A ne le simule par aucune grâce générique. Invariant à conserver
+   en 2B : aucune donnée survenue après window_end_at n'entre dans les
+   métriques (déjà garanti ici par le filtre occurred_at < window_end_at).
+
    Horloge (audit R1) : maintenant est lu APRÈS l'acquisition de tous les
    verrous (identité, participations, campagnes). Une échéance franchie
    pendant une attente de verrou est donc vue et refusée.
@@ -110,7 +121,10 @@ SESSION_START_UNIQUE = "uq_product_activity_events_visit_session_start"
 SOURCE_OPERATION_UNIQUE = "uq_product_activity_events_source_operation"
 SESSION_STARTED = "session_started"
 # Politique de retard : aucune fenêtre de grâce après close_by_at ni après
-# window_end_at. Toute valeur non nulle est une décision du fondateur.
+# window_end_at. RESTRICTION PROVISOIRE du service dormant (pas le contrat
+# produit final) : la remise en fin de session est à concevoir en 2B, sous
+# validation fiable, et ne sera pas une grâce générique appliquée ici. Toute
+# valeur non nulle est une décision du fondateur.
 LATE_EVENT_GRACE = timedelta(0)
 
 # Champs fournis par l'appelant : ce sont eux, et eux seuls, qu'une

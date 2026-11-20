@@ -9,8 +9,9 @@ product_campaign_participants, product_activity_events) :
 - campaigns.py   : création explicite et transitions contrôlées des campagnes
                    (planned -> active -> closed, planned/active -> cancelled),
                    politiques immuables après activation ;
-- participation.py : inscription et retrait des participants, fenêtre
-                   d'observation explicite ;
+- participation.py : inscription Vague 0 à la première connexion éligible
+                   (J0 serveur, fenêtre [J0, J0 + 12 j) exacte), inscription
+                   à fenêtre explicite (scénarios contrôlés) et retrait ;
 - retention.py   : validation métier du document retention-scopes-v1 et de
                    ses deux colonnes d'échéance ; règle de révision (aucune
                    prolongation, aucune finalité rétroactive) ;

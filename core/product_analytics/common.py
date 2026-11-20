@@ -18,7 +18,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -179,6 +179,14 @@ EVENT_TYPE_RULES = {
 RETENTION_POLICIES = {"v0-retention-v1": 90}
 MEASUREMENT_POLICIES = ("v0-measurement-v1",)
 
+# Fenêtre d'observation individuelle de chaque politique de mesure (décision
+# produit Vague 0 : 12 jours complets à partir du J0 individuel, J0 = première
+# connexion authentifiée et éligible). Portée par la politique de mesure, donc
+# immuable dès l'activation de la campagne. Utilisée par
+# participation.enroll_at_first_eligible_login : window_end_at = J0 + durée,
+# exactement.
+OBSERVATION_WINDOWS = {"v0-measurement-v1": timedelta(days=12)}
+
 
 @dataclass(frozen=True)
 class CampaignPolicy:
@@ -187,7 +195,8 @@ class CampaignPolicy:
     measurement_policy_version: str
 
 
-# Politique Vague 0 : 90 jours de conservation. Constante de référence que
+# Politique Vague 0 : 90 jours de conservation depuis occurred_at (décision
+# produit figée ; voir retention.authorized_expiry). Constante de référence que
 # l'appelant transmet explicitement à create_campaign ; jamais appliquée
 # implicitement.
 WAVE_0_POLICY = CampaignPolicy(retention_days=90, retention_policy_version="v0-retention-v1",
