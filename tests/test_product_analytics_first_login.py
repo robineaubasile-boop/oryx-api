@@ -25,6 +25,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
+import sqlalchemy as sa
 
 from core.product_analytics import campaigns as pc
 from core.product_analytics import common
@@ -473,3 +474,32 @@ def test_pg_primary_key_remains_the_final_defense_for_enrollments(engine, Sessio
                                            while_blocked=lambda: clock.advance(seconds=3), release="commit")
     assert (result, error) == ((start, start + TWELVE_DAYS, False), None)
     assert _count(engine, "product_campaign_participants") == 1
+
+
+def test_pg_first_login_and_events_write_only_the_analytics_tables(engine, Sessions, clock):
+    """Décision produit : aucune altération des compétences, thèses ni
+    portefeuilles. La première connexion, une connexion répétée et un
+    événement n'émettent d'écritures (INSERT) que sur les tables analytics ;
+    aucune autre table n'est modifiée."""
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    with engine.connect() as conn:
+        tables = conn.execute(sa.text(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND left(tablename, 8) <> 'product_' "
+            "ORDER BY 1")).scalars().all()
+    assert {"users", "portfolio_positions", "investment_theses", "user_competency_states"} <= set(tables)
+
+    def contents():
+        with engine.connect() as conn:
+            return {t: conn.execute(sa.text(f'SELECT md5(coalesce(string_agg(x::text, \',\' ORDER BY x::text), \'\')) '
+                                            f'FROM "{t}" x')).scalar_one() for t in tables}
+    before = contents()
+    with Sessions() as session, _Statements(engine) as statements:
+        _login(session, campaign_id)
+        _login(session, campaign_id)
+        pe.record_event(session, **_event_at(clock.now))
+        session.commit()
+    writes = [w for w in _writes(statements) if not w.startswith(("SAVEPOINT", "RELEASE SAVEPOINT"))]
+    assert [w.split()[2] for w in writes] == ["product_campaign_participants", "product_activity_events"]
+    assert all(w.startswith("INSERT INTO") for w in writes)
+    assert contents() == before
