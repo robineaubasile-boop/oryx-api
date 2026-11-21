@@ -1,0 +1,9 @@
+{
+  "e0": "i-a-addresses",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "rule": "égalité exacte de la forme canonique (RFC 5952) ; liste versionnée, jamais inventée (protocole § 6.4, classe I-a)",
+  "addresses": [
+    {"address": "2a06:98c0:3600::103", "source": "protocole E0 V0.1c § 3, D18 : CF-Connecting-IP des sous-requêtes Worker entre zones (developers.cloudflare.com, HTTP headers)"}
+  ]
+}

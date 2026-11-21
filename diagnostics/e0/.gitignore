@@ -1,0 +1,9 @@
+# Banc E0 : aucune preuve, aucun secret, aucun artefact local versionné.
+evidence/
+*.jsonl
+node_modules/
+.wrangler/
+.dev.vars
+*.pem
+*.key
+rendered/

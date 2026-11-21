@@ -1,0 +1,49 @@
+{
+  "e0": "phase-params",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "status": "valeurs PROVISOIRES d'exécution (U-WS, U-TOL) ; elles ne modifient aucun critère du protocole",
+  "attestation": {
+    "w_ms": {
+      "default": 30000,
+      "min": 1000,
+      "max": 300000
+    },
+    "s_ms": {
+      "default": 5000,
+      "min": 0,
+      "max": 60000
+    },
+    "source": "spécification § 11, U-WS : W = 30 s, S = 5 s avant AT-R01"
+  },
+  "origin": {
+    "ttl_seconds": {
+      "default": 14400,
+      "min": 60,
+      "max": 86400
+    },
+    "max_requests": {
+      "default": 20000,
+      "min": 1,
+      "max": 1000000
+    },
+    "slow_max_s": {
+      "default": 300,
+      "min": 1,
+      "max": 300
+    },
+    "slow_concurrency": {
+      "default": 8,
+      "min": 1,
+      "max": 8
+    },
+    "body_max": {
+      "default": 524288,
+      "min": 1,
+      "max": 524288
+    },
+    "nonce_store_max": 100000,
+    "checkpoint_every": 100,
+    "line_max_bytes": 4096
+  }
+}

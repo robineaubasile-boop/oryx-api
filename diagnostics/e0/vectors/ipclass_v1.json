@@ -1,0 +1,1355 @@
+{
+  "e0": "vectors-ipclass",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "generated_by": "issues attendues écrites à la main d'après le protocole § 6.4 et config/ip_special_registry.v1.json ; aucun classificateur",
+  "notes": [
+    "cf-connecting-ip : valeur rendue comme Headers.get (doublons concaténés par « , »)",
+    "adresses « globales » synthétiques : blocs IANA spéciaux globally_reachable = true (192.0.0.9, 192.31.196.1, 2001:1::1)"
+  ],
+  "cases": [
+    {
+      "name": "v4_global_special_anycast",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.0.0.9",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "v4_global_as112",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.31.196.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.31.196.1",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "v6_global_pcp_anycast",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:1::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "2001:1::1",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "v6_global_non_canonical_input",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:0001:0000:0000:0000:0000:0000:0001"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "2001:1::1",
+        "canonical_input": false
+      }
+    },
+    {
+      "name": "v6_global_uppercase_input",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:4:112::A"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "2001:4:112::a",
+        "canonical_input": false
+      }
+    },
+    {
+      "name": "v6_ietf_block_non_global",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:1::a"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "not_https",
+      "view": {
+        "scheme": "http",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "not_https"
+      }
+    },
+    {
+      "name": "entry_host_workers_dev",
+      "view": {
+        "scheme": "https",
+        "entry_host": "e0-edge.acct.workers.dev",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_host_mismatch"
+      }
+    },
+    {
+      "name": "entry_host_case_differs",
+      "view": {
+        "scheme": "https",
+        "entry_host": "APP.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_host_mismatch"
+      }
+    },
+    {
+      "name": "entry_host_trailing_dot",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example.",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_host_mismatch"
+      }
+    },
+    {
+      "name": "entry_host_version_url",
+      "view": {
+        "scheme": "https",
+        "entry_host": "abc123-e0-edge.acct.workers.dev",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_host_mismatch"
+      }
+    },
+    {
+      "name": "entry_port_explicit",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": true,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_port_explicit"
+      }
+    },
+    {
+      "name": "worker_marker_cf_worker",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "cf-worker",
+            "e0-zone.example"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-b",
+        "reason": "worker_marker"
+      }
+    },
+    {
+      "name": "worker_marker_cf_ew_via",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "cf-ew-via",
+            "15"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-b",
+        "reason": "worker_marker"
+      }
+    },
+    {
+      "name": "worker_marker_empty_value",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "CF-Worker",
+            ""
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-b",
+        "reason": "worker_marker"
+      }
+    },
+    {
+      "name": "entry_mismatch_precedes_worker_marker",
+      "view": {
+        "scheme": "https",
+        "entry_host": "atk.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "cf-worker",
+            "x"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-d",
+        "reason": "entry_host_mismatch"
+      }
+    },
+    {
+      "name": "cloudflare_asn",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 13335
+      },
+      "expected": {
+        "class": "I-c",
+        "reason": "cloudflare_asn"
+      }
+    },
+    {
+      "name": "worker_marker_precedes_asn",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "cf-worker",
+            "x"
+          ]
+        ],
+        "asn": 13335
+      },
+      "expected": {
+        "class": "I-b",
+        "reason": "worker_marker"
+      }
+    },
+    {
+      "name": "asn_absent_is_not_ic",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": null
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.0.0.9",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_absent",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_absent"
+      }
+    },
+    {
+      "name": "ip_empty",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            ""
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_empty"
+      }
+    },
+    {
+      "name": "ip_duplicate_headers",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "cf-connecting-ip",
+            "192.0.0.10"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_multiple"
+      }
+    },
+    {
+      "name": "ip_list_value",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9,192.0.0.10"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_multiple"
+      }
+    },
+    {
+      "name": "ip_leading_space",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            " 192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_trailing_tab",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9\t"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_brackets",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "[2001:1::1]"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_zone",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "fe80::1%eth0"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_v4_leading_zero",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.09"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_v4_leading_zero_octet",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.000.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_v4_out_of_range",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.256"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_v4_long_octet",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "1.2.3.4567"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_with_port",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9:443"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_with_prefix",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9/32"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_non_ascii_digits",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "١٩٢.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_hostname",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "example.com"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_unparsable"
+      }
+    },
+    {
+      "name": "ip_mapped",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "::ffff:192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_mapped",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_mapped_hex",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "::ffff:c000:9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_mapped",
+        "canonical_input": false
+      }
+    },
+    {
+      "name": "ip_class_e",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "240.0.0.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_class_e",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_broadcast_is_class_e",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "255.255.255.255"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_class_e",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_doc_v4_testnet3",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "203.0.113.7"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_documentation",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_doc_v4_testnet1",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.2.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_documentation",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_doc_v6_2001_db8",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:db8::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_documentation",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_doc_v6_3fff",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "3fff::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_documentation",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_private",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "10.1.2.3"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_cgnat",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "100.64.0.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_ula",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "fd00::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_loopback_v4",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "127.0.0.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_loopback_v6",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_link_local_v4",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "169.254.1.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_link_local_v6",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "fe80::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_zero_v4",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "0.0.0.0"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_zero_v6",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "::"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_multicast_v4",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "224.0.0.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_multicast_v6",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "ff02::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_teredo",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2001:0:1234::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_6to4",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2002:c000:209::1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_nat64_outside_2000_3",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "64:ff9b::c000:209"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "ip_benchmarking",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "198.18.0.1"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "F",
+        "reason": "ip_non_global",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "i_a_cloudflare_substitute",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2a06:98c0:3600::103"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-a",
+        "reason": "cloudflare_substitute",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "i_a_non_canonical_input",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "2a06:98c0:3600:0:0:0:0:103"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "I-a",
+        "reason": "cloudflare_substitute",
+        "canonical_input": false
+      }
+    },
+    {
+      "name": "engagement_headers_ignored",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "x-e0-cmp-pre-key",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          [
+            "x-e0-cmp-pre-mac",
+            "1111111111111111111111111111111111111111111111111111111111111111"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.0.0.9",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "forged_proxy_headers_ignored",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "cf-connecting-ip",
+            "192.0.0.9"
+          ],
+          [
+            "x-real-ip",
+            "203.0.113.9"
+          ],
+          [
+            "true-client-ip",
+            "198.51.100.9"
+          ],
+          [
+            "x-forwarded-for",
+            "192.0.2.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.0.0.9",
+        "canonical_input": true
+      }
+    },
+    {
+      "name": "header_name_case_insensitive",
+      "view": {
+        "scheme": "https",
+        "entry_host": "app.e0-zone.example",
+        "entry_port_explicit": false,
+        "expected_entry_host": "app.e0-zone.example",
+        "headers": [
+          [
+            "CF-Connecting-IP",
+            "192.0.0.9"
+          ]
+        ],
+        "asn": 64496
+      },
+      "expected": {
+        "class": "V",
+        "reason": "candidate",
+        "canonical": "192.0.0.9",
+        "canonical_input": true
+      }
+    }
+  ]
+}
