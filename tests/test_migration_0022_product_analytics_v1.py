@@ -361,10 +361,14 @@ def _code_strings_and_names(path) -> set:
 
 
 def test_no_production_module_references_the_analytics_tables():
-    """Seuls core/models.py (déclaration) et la migration 0022 mentionnent
-    les tables : aucun service, route, worker ni rapport ne les lit ou ne
-    les écrit."""
-    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION}
+    """Seuls core/models.py (déclaration), la migration 0022 et, depuis
+    V0-T08 Lot 2A, les services dormants core/product_analytics/ mentionnent
+    les tables : aucune route, aucun worker ni rapport ne les lit ou ne les
+    écrit. Que rien n'importe ces services est vérifié par
+    tests/test_product_analytics_dormancy.py."""
+    services = REPO_ROOT / "core" / "product_analytics"
+    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, *services.glob("*.py")}
+    assert len(allowed) == 2 + 6
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*.py")):
         relative = path.relative_to(REPO_ROOT).parts
