@@ -51,6 +51,7 @@ from tests.test_product_analytics_services import (  # noqa: F401 — fixtures e
     _committed,
     _count,
     _event_kwargs,
+    _planned,
     _rows,
     _snapshot,
     clock,
@@ -284,13 +285,16 @@ def test_pg_repeated_login_with_another_authorization_trace_or_after_withdrawal_
     assert _snapshot(engine) == withdrawn
 
 
-def test_pg_login_on_an_explicitly_enrolled_participation_keeps_its_window(engine, Sessions, clock):
+def test_pg_login_on_an_explicit_five_day_participation_is_refused_without_mutation(engine, Sessions, clock):
+    """Audit R3 → R4 : une participation explicite de 5 jours ne doit jamais
+    être réutilisée par la première connexion (le testeur aurait moins que
+    les 12 jours prévus) : refus explicite, aucune écriture."""
     campaign_id = _active(Sessions, clock)
     _committed(Sessions, lambda s: pp.enroll_participant(
         s, campaign_id=campaign_id, user_id=USER, window_start_at=T0, window_end_at=T0 + timedelta(days=5),
         authorization_recorded_at=T0, notice_version=NOTICE))
     clock.advance(days=2)
-    assert _committed_login(Sessions, campaign_id) == (T0, T0 + timedelta(days=5), False)
+    _expect_conflict_without_mutation(engine, Sessions, campaign_id)
 
 
 @pytest.mark.parametrize("status", ["planned", "closed", "cancelled"])
@@ -503,3 +507,180 @@ def test_pg_first_login_and_events_write_only_the_analytics_tables(engine, Sessi
     assert [w.split()[2] for w in writes] == ["product_campaign_participants", "product_activity_events"]
     assert all(w.startswith("INSERT INTO") for w in writes)
     assert contents() == before
+
+
+
+# --------------------------------------------------------------------------
+# R4 : conformité d'une participation EXISTANTE au contrat de première
+# connexion (statut, trace, J0 = enrolled_at = window_start_at, durée exacte
+# de la politique de mesure, début après l'activation, fin dans close_by_at)
+# --------------------------------------------------------------------------
+
+def _expect_conflict_without_mutation(engine, Sessions, campaign_id, **login_kwargs):
+    before = _snapshot(engine)
+    with Sessions() as session, _Statements(engine) as statements:
+        with pytest.raises(ParticipationConflict):
+            _login(session, campaign_id, **login_kwargs)
+        session.commit()
+    assert [w for w in _writes(statements) if not w.startswith(("SAVEPOINT", "RELEASE"))] == []
+    assert _snapshot(engine) == before
+
+
+def _explicit(Sessions, campaign_id, *, start, end):
+    _committed(Sessions, lambda s: pp.enroll_participant(
+        s, campaign_id=campaign_id, user_id=USER, window_start_at=start, window_end_at=end,
+        authorization_recorded_at=T0, notice_version=NOTICE))
+
+
+@pytest.mark.parametrize("case", ["five_days", "twelve_days_minus_1us", "twelve_days_plus_1us", "thirteen_days",
+                                  "start_after_enrollment"])
+def test_pg_existing_explicit_window_outside_the_contract_is_refused_without_mutation(engine, Sessions, clock,
+                                                                                       case):
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    now = clock.now
+    start = now + timedelta(hours=1) if case == "start_after_enrollment" else now
+    end = start + {"five_days": timedelta(days=5), "twelve_days_minus_1us": TWELVE_DAYS - timedelta(microseconds=1),
+                   "twelve_days_plus_1us": TWELVE_DAYS + timedelta(microseconds=1),
+                   "thirteen_days": timedelta(days=13), "start_after_enrollment": TWELVE_DAYS}[case]
+    _explicit(Sessions, campaign_id, start=start, end=end)
+    for later in (timedelta(0), timedelta(days=2), timedelta(days=20)):
+        clock.now = now + later
+        _expect_conflict_without_mutation(engine, Sessions, campaign_id)
+    [row] = _rows(engine, "product_campaign_participants")
+    assert (row["window_start_at"], row["window_end_at"], row["enrolled_at"]) == (start, end, now)
+
+
+def test_pg_existing_window_started_before_activation_is_refused(engine, Sessions, clock):
+    """Inscription explicite sur campagne planned (J0 = T0), activation à
+    T0 + 1 h : la fenêtre aurait perdu une heure de collecte."""
+    campaign_id = _planned(Sessions)
+    _explicit(Sessions, campaign_id, start=T0, end=T0 + TWELVE_DAYS)
+    clock.advance(hours=1)
+    _committed(Sessions, lambda s: pc.activate_campaign(s, campaign_id=campaign_id))
+    clock.advance(minutes=5)
+    _expect_conflict_without_mutation(engine, Sessions, campaign_id)
+    # Campagne encore planned : pas davantage conforme.
+    other = _planned(Sessions)
+    _committed(Sessions, lambda s: pp.enroll_participant(
+        s, campaign_id=other, user_id=USER, window_start_at=clock.now, window_end_at=clock.now + TWELVE_DAYS,
+        authorization_recorded_at=T0, notice_version=NOTICE))
+    _expect_conflict_without_mutation(engine, Sessions, other)
+
+
+@pytest.mark.parametrize("case", ["start_differs_from_enrolled_at", "authorization_after_start",
+                                  "end_beyond_close_by_at", "completed"])
+def test_pg_existing_row_with_inconsistent_bounds_is_refused_without_mutation(engine, Sessions, clock, case):
+    """Lignes que le service n'écrit jamais (écrivain hors service) : la base
+    les admet, le contrat de première connexion les refuse."""
+    close_by = T0 + timedelta(days=10) if case == "end_beyond_close_by_at" else T0 + timedelta(days=60)
+    campaign_id = _active(Sessions, clock, close_by_at=close_by)
+    clock.advance(hours=1)
+    start = clock.now
+    values = {"c": campaign_id, "u": USER, "s": start, "e": start + TWELVE_DAYS, "st": "enrolled", "en": start,
+              "a": T0}
+    if case == "start_differs_from_enrolled_at":
+        values["en"] = start - timedelta(minutes=1)
+    elif case == "authorization_after_start":
+        values["a"] = start + timedelta(seconds=1)
+    elif case == "completed":
+        values["st"] = "completed"
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO product_campaign_participants (campaign_id, user_id, window_start_at, window_end_at, "
+            "participation_status, enrolled_at, authorization_recorded_at, notice_version) "
+            "VALUES (:c, :u, :s, :e, :st, :en, :a, 'v0-notice-1')"), values)
+    clock.advance(minutes=5)
+    _expect_conflict_without_mutation(engine, Sessions, campaign_id, authorized_at=values["a"])
+
+
+def test_pg_existing_participation_of_a_policy_without_window_is_refused(engine, Sessions, clock, monkeypatch):
+    monkeypatch.setattr(common, "MEASUREMENT_POLICIES", (*common.MEASUREMENT_POLICIES, "v0-measurement-x"))
+    campaign_id = _active(Sessions, clock, measurement_policy_version="v0-measurement-x")
+    clock.advance(hours=1)
+    _explicit(Sessions, campaign_id, start=clock.now, end=clock.now + TWELVE_DAYS)
+    _expect_conflict_without_mutation(engine, Sessions, campaign_id)
+
+
+def test_pg_existing_explicit_participation_matching_the_contract_is_returned_unchanged(engine, Sessions, clock):
+    """Limite documentée : sans champ d'origine, une inscription explicite qui
+    respecte exactement le contrat (J0 = inscription, 12 j, après activation)
+    est indiscernable d'une première connexion et est donc admise."""
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    j0 = clock.now
+    _explicit(Sessions, campaign_id, start=j0, end=j0 + TWELVE_DAYS)
+    before = _snapshot(engine)
+    clock.advance(days=3)
+    with Sessions() as session, _Statements(engine) as statements:
+        participation, created = _login(session, campaign_id)
+        assert (participation.window_start_at, participation.window_end_at, created) == (j0, j0 + TWELVE_DAYS, False)
+        session.commit()
+    assert _writes(statements) == []
+    assert _snapshot(engine) == before
+
+
+@pytest.mark.parametrize("ending", ["close", "cancel"])
+def test_pg_repeated_login_after_the_window_and_the_campaign_end_keeps_the_historical_j0(engine, Sessions, clock,
+                                                                                         ending):
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    j0 = clock.now
+    _committed_login(Sessions, campaign_id)
+    clock.advance(days=13)
+    _committed(Sessions, lambda s: getattr(pc, f"{ending}_campaign")(s, campaign_id=campaign_id))
+    before = _snapshot(engine)
+    clock.advance(days=1)
+    with Sessions() as session, _Statements(engine) as statements:
+        participation, created = _login(session, campaign_id)
+        assert (participation.window_start_at, participation.window_end_at, created) == (j0, j0 + TWELVE_DAYS, False)
+        session.commit()
+    assert _writes(statements) == []
+    assert _snapshot(engine) == before
+
+
+@pytest.mark.parametrize("release", ["commit", "rollback"])
+def test_pg_repeated_login_waits_for_a_concurrent_closing_then_keeps_the_window(engine, Sessions, clock, release):
+    """Interaction avec les verrous existants : la répétition prend le même
+    verrou partagé de campagne que la création (ordre identité → campagne) ;
+    elle attend une clôture concurrente, puis renvoie la même fenêtre, que la
+    clôture soit validée ou annulée (résultat déterministe)."""
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    j0 = clock.now
+    _committed_login(Sessions, campaign_id)
+    clock.advance(days=1)
+    with Sessions() as holder, Sessions() as waiter:
+        pc.close_campaign(holder, campaign_id=campaign_id)
+
+        def repeat(session):
+            participation, created = _login(session, campaign_id)
+            return participation.window_start_at, participation.window_end_at, created
+        result, error = _run_while_blocked(engine, holder, waiter, repeat,
+                                           while_blocked=lambda: clock.advance(seconds=3), release=release)
+    assert (result, error) == ((j0, j0 + TWELVE_DAYS, False), None)
+    assert _count(engine, "product_campaign_participants") == 1
+
+
+def test_pg_concurrent_first_login_against_an_unserialized_incompatible_writer_is_refused(engine, Sessions, clock,
+                                                                                           monkeypatch):
+    """Écrivain concurrent hors verrou d'identité (simulé) qui insère une
+    participation explicite de 5 jours : la première connexion attend sur la
+    clé primaire, relit la ligne gagnante et la refuse (contrat non
+    respecté) ; aucune seconde ligne, aucune modification."""
+    real_lock = common.lock_identities
+    main = threading.main_thread()
+    monkeypatch.setattr(common, "lock_identities",
+                        lambda db, *keys: real_lock(db, *keys) if threading.current_thread() is main else None)
+    campaign_id = _active(Sessions, clock)
+    clock.advance(hours=1)
+    start = clock.now
+    with Sessions() as holder, Sessions() as waiter:
+        pp.enroll_participant(holder, campaign_id=campaign_id, user_id=USER, window_start_at=start,
+                              window_end_at=start + timedelta(days=5), authorization_recorded_at=T0,
+                              notice_version=NOTICE)
+        _, error = _run_while_blocked(engine, holder, waiter, lambda s: _login(s, campaign_id),
+                                      while_blocked=lambda: None, release="commit")
+    assert isinstance(error, ParticipationConflict)
+    [row] = _rows(engine, "product_campaign_participants")
+    assert (row["window_start_at"], row["window_end_at"]) == (start, start + timedelta(days=5))

@@ -54,8 +54,20 @@ Première connexion éligible (enroll_at_first_eligible_login) :
 - connexion répétée, ou première connexion concurrente perdante (sérialisée
   par le verrou d'identité) : la participation existante est renvoyée TELLE
   QUELLE (created=False, même J0, même fenêtre, aucune écriture), y compris
-  après la fin de la fenêtre ; aucune réinitialisation. Participation retirée
-  ou terminée, ou trace d'autorisation différente : ParticipationConflict.
+  après la fin de la fenêtre ou la clôture de la campagne ; aucune
+  réinitialisation. Audit R4 : seulement si elle respecte intégralement le
+  contrat de première connexion (enrolled, même trace et trace <= J0,
+  J0 = window_start_at = enrolled_at, durée exacte de la politique de mesure,
+  J0 >= activation, fin <= close_by_at) ; sinon ParticipationConflict, sans
+  mutation (_same_login_or_conflict).
+
+  Limite connue (aucun champ d'origine, par décision de ne pas élargir le
+  schéma) : une participation écrite par enroll_participant qui respecte
+  exactement ce contrat est indiscernable d'une participation de première
+  connexion et est admise ; le service ne peut pas prouver que son J0
+  correspond à une connexion réelle. Une participation explicite non
+  conforme (fenêtre plus courte ou plus longue, début décalé, début avant
+  l'activation) est refusée.
 
 Préconditions pour le raccordement 2B (non vérifiables ici, à garantir par
 l'orchestrateur) :
@@ -202,14 +214,54 @@ def _insert(db, participation: ProductCampaignParticipant, on_existing) -> tuple
     return participation, True
 
 
-def _same_login_or_conflict(existing: ProductCampaignParticipant, authorization: dict) -> ProductCampaignParticipant:
-    """Connexion répétée : participation renvoyée telle quelle (fenêtre
-    jamais recalculée) si elle est enrolled et porte la même trace
-    d'autorisation ; ParticipationConflict sinon."""
-    if (existing.participation_status != ENROLLED
-            or any(getattr(existing, field) != value for field, value in authorization.items())):
+def _first_login_contract_violations(existing: ProductCampaignParticipant, campaign, authorization: dict) -> list:
+    """Critères du contrat de première connexion non respectés par une
+    participation existante (liste vide : conforme). Lecture seule."""
+    observation = OBSERVATION_WINDOWS.get(campaign.measurement_policy_version)
+    checks = (
+        ("statut", existing.participation_status == ENROLLED),
+        ("trace d'autorisation", all(getattr(existing, field) == value for field, value in authorization.items())),
+        ("trace postérieure au J0", existing.authorization_recorded_at is not None
+         and existing.authorization_recorded_at <= existing.window_start_at),
+        ("J0 différent de l'inscription", existing.window_start_at == existing.enrolled_at),
+        ("politique sans fenêtre", observation is not None),
+        ("durée de fenêtre", observation is not None
+         and existing.window_end_at - existing.window_start_at == observation),
+        ("J0 antérieur à l'activation", campaign.activated_at is not None
+         and existing.window_start_at >= campaign.activated_at),
+        ("fenêtre au-delà de close_by_at", existing.window_end_at <= campaign.close_by_at),
+    )
+    return [name for name, ok in checks if not ok]
+
+
+def _same_login_or_conflict(db, existing: ProductCampaignParticipant,
+                            authorization: dict) -> ProductCampaignParticipant:
+    """Connexion répétée (ou première connexion concurrente perdante) :
+    participation renvoyée TELLE QUELLE — jamais recalculée, déplacée,
+    réinscrite ni modifiée — si elle respecte intégralement le contrat de
+    première connexion (audit R4) :
+
+    - participation_status = enrolled ;
+    - même trace d'autorisation, et trace <= J0 ;
+    - J0 = window_start_at = enrolled_at (aucun déplacement) ;
+    - window_end_at − window_start_at = durée EXACTE de la politique de
+      mesure de la campagne (12 jours pour v0-measurement-v1) ;
+    - J0 >= activated_at de la campagne (aucun jour d'observation perdu) ;
+    - window_end_at <= close_by_at.
+
+    Sinon ParticipationConflict, sans aucune écriture (refus explicite : un
+    testeur ne doit jamais disposer de moins, ni de plus, que la fenêtre
+    prévue). La campagne est relue sous le même verrou partagé que le chemin
+    de création (ordre identité → campagne, inchangé) : décision déterministe
+    face à une activation ou une clôture concurrente. Le statut courant de
+    la campagne n'est PAS exigé : une connexion répétée après la fin des 12
+    jours ou après la clôture renvoie toujours le J0 historique."""
+    campaign = lock_campaign(db, existing.campaign_id, shared=True)
+    violations = _first_login_contract_violations(existing, campaign, authorization)
+    if violations:
         raise ParticipationConflict(
-            f"participation existante incompatible pour la campagne {existing.campaign_id}")
+            f"participation existante incompatible avec le contrat de première connexion pour la campagne "
+            f"{existing.campaign_id} : {', '.join(violations)}")
     return existing
 
 
@@ -232,7 +284,7 @@ def enroll_at_first_eligible_login(
 
     existing = _lock_identity_and_read(db, campaign_id, user_id)
     if existing is not None:
-        return _same_login_or_conflict(existing, authorization), False
+        return _same_login_or_conflict(db, existing, authorization), False
 
     campaign = lock_campaign(db, campaign_id, shared=True)
     if campaign.status != ACTIVE:
@@ -251,7 +303,7 @@ def enroll_at_first_eligible_login(
     participation = ProductCampaignParticipant(
         campaign_id=campaign_id, user_id=user_id, participation_status=ENROLLED, enrolled_at=j0,
         window_start_at=j0, window_end_at=window_end_at, **authorization)
-    return _insert(db, participation, lambda winner: _same_login_or_conflict(winner, authorization))
+    return _insert(db, participation, lambda winner: _same_login_or_conflict(db, winner, authorization))
 
 
 def withdraw_participant(db, *, campaign_id: uuid.UUID, user_id: str) -> ProductCampaignParticipant:
