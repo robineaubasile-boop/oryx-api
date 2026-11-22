@@ -95,7 +95,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from core.models import (
@@ -172,9 +172,9 @@ def _seat_where(db, *criteria, lock: str | None = None) -> ProductCohortSeat | N
     return db.execute(statement.execution_options(populate_existing=True)).scalar_one_or_none()
 
 
-def _participation_count(db, campaign_id) -> int:
-    return db.execute(select(func.count()).select_from(ProductCampaignParticipant).where(
-        ProductCampaignParticipant.campaign_id == campaign_id)).scalar_one()
+def _has_participations(db, campaign_id) -> bool:
+    return db.execute(select(ProductCampaignParticipant.user_id).where(
+        ProductCampaignParticipant.campaign_id == campaign_id).limit(1)).first() is not None
 
 
 def _invitation(db, invitation_id) -> Invitation | None:
@@ -252,7 +252,7 @@ def define_cohort(
     if campaign.status != PLANNED:
         raise CohortRefused(f"campagne {campaign_id} : cohorte définissable seulement à l'état planned",
                             reason="campaign_not_planned")
-    if _participation_count(db, campaign_id):
+    if _has_participations(db, campaign_id):
         raise CohortRefused(f"campagne {campaign_id} : participations déjà présentes", reason="participation_exists")
     now = common.utcnow()  # après le verrou exclusif de la campagne
     _check_calendar(campaign, admission_closes_at, now)
@@ -316,7 +316,7 @@ def cohort_violations(db, campaign: ProductCampaign, cohort: ProductCampaignCoho
         ("invitation révoquée ou expirée",
          all(seat.user_id is not None or _invitation_usable(_invitation(db, seat.invitation_id), now)
              for seat in seats)),
-        ("participation préexistante", _participation_count(db, campaign.id) == 0),
+        ("participation préexistante", not _has_participations(db, campaign.id)),
     )
     return [name for name, ok in checks if not ok]
 
