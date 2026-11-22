@@ -91,6 +91,21 @@ l'orchestrateur) :
    la clôture d'une session commencée avant l'échéance relèvent de 2B : rien
    ici ne les implémente (voir events.LATE_EVENT_GRACE).
 
+Lot 2B-1 (cohorte Vague 0) : une campagne portant une cohorte refuse les
+deux points d'inscription ci-dessus (ParticipationRefused, sans écriture) ;
+son unique chemin est cohort.admit_at_first_eligible_login, qui ajoute les
+préconditions de cohorte (place rattachée par preuve F2, autorisation
+explicite, date limite d'admission) puis réutilise TEL QUEL le corps de
+enroll_at_first_eligible_login (first_eligible_login, via_cohort=True) :
+mêmes verrous, même J0 serveur, même fenêtre, même idempotence. État des
+préconditions ci-dessus après 2B-1 : (1) imposée par cohort.define_cohort et
+activate_cohort_campaign (close_by_at >= date limite d'admission + 12 jours
++ 30 minutes, J0 refusé à partir de la date limite) ; (2) inchangée ; (3)
+toujours à la charge du raccordement 2B-2 ; (4) éligibilité = place rattachée
+par preuve F2, trace d'autorisation lue sur la place (jamais fournie par
+l'appelant) ; (5) règle de session : sessions.py ; remise d'événements en fin
+de session : 2B-2 (LATE_EVENT_GRACE reste 0).
+
 Retrait (withdraw_participant) : enrolled -> withdrawn, sous verrou. La
 ligne est conservée (dénominateur des rapports futurs) ; aucun événement
 n'est accepté après le retrait.
@@ -107,7 +122,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.models import ProductCampaignParticipant
 from core.product_analytics import common
-from core.product_analytics.campaigns import lock_campaign
+from core.product_analytics.campaigns import has_cohort, lock_campaign
 from core.product_analytics.common import (
     ACTIVE,
     ENROLLED,
@@ -169,9 +184,11 @@ def enroll_participant(
 
     existing = _lock_identity_and_read(db, campaign_id, user_id)
     if existing is not None:
+        _require_enrollment_path(db, campaign_id, via_cohort=False)
         return _same_or_conflict(existing, request), False
 
     campaign = lock_campaign(db, campaign_id, shared=True)
+    _require_enrollment_path(db, campaign_id, via_cohort=False)  # après le verrou : cohorte stable
     if campaign.status not in ENROLLABLE_CAMPAIGN_STATUSES:
         raise ParticipationRefused(f"campagne {campaign_id} : inscription impossible à l'état {campaign.status}")
     now = common.utcnow()  # après le verrou d'identité et le verrou de la campagne
@@ -187,6 +204,17 @@ def enroll_participant(
     participation = ProductCampaignParticipant(
         campaign_id=campaign_id, user_id=user_id, participation_status=ENROLLED, enrolled_at=now, **request)
     return _insert(db, participation, lambda winner: _same_or_conflict(winner, request))
+
+
+def _require_enrollment_path(db, campaign_id, *, via_cohort: bool) -> None:
+    """Lot 2B-1 : une campagne à cohorte n'admet de participation que par
+    cohort.admit_at_first_eligible_login (place rattachée, autorisation,
+    date limite d'admission) ; les points d'inscription bruts la refusent,
+    sans écriture. Réciproquement, le chemin de cohorte exige une cohorte."""
+    if has_cohort(db, campaign_id) != via_cohort:
+        raise ParticipationRefused(
+            f"campagne {campaign_id} : admission par la cohorte exigée" if not via_cohort
+            else f"campagne {campaign_id} : aucune cohorte définie")
 
 
 def _lock_identity_and_read(db, campaign_id, user_id) -> ProductCampaignParticipant | None:
@@ -234,8 +262,8 @@ def _first_login_contract_violations(existing: ProductCampaignParticipant, campa
     return [name for name, ok in checks if not ok]
 
 
-def _same_login_or_conflict(db, existing: ProductCampaignParticipant,
-                            authorization: dict) -> ProductCampaignParticipant:
+def _same_login_or_conflict(db, existing: ProductCampaignParticipant, authorization: dict, *,
+                            via_cohort: bool) -> ProductCampaignParticipant:
     """Connexion répétée (ou première connexion concurrente perdante) :
     participation renvoyée TELLE QUELLE — jamais recalculée, déplacée,
     réinscrite ni modifiée — si elle respecte intégralement le contrat de
@@ -257,6 +285,7 @@ def _same_login_or_conflict(db, existing: ProductCampaignParticipant,
     la campagne n'est PAS exigé : une connexion répétée après la fin des 12
     jours ou après la clôture renvoie toujours le J0 historique."""
     campaign = lock_campaign(db, existing.campaign_id, shared=True)
+    _require_enrollment_path(db, existing.campaign_id, via_cohort=via_cohort)
     violations = _first_login_contract_violations(existing, campaign, authorization)
     if violations:
         raise ParticipationConflict(
@@ -275,7 +304,28 @@ def enroll_at_first_eligible_login(
 ) -> tuple[ProductCampaignParticipant, bool]:
     """Inscription Vague 0 à la première connexion authentifiée et éligible.
     J0 serveur fiable lu après les verrous, fenêtre [J0, J0 + 12 j) exacte.
-    Retourne (participation, created) ; voir la docstring du module."""
+    Retourne (participation, created) ; voir la docstring du module.
+    Campagne à cohorte (lot 2B-1) : ParticipationRefused, sans écriture ;
+    passer par cohort.admit_at_first_eligible_login."""
+    return first_eligible_login(db, campaign_id=campaign_id, user_id=user_id,
+                                authorization_recorded_at=authorization_recorded_at, notice_version=notice_version,
+                                via_cohort=False)
+
+
+def first_eligible_login(
+    db,
+    *,
+    campaign_id: uuid.UUID,
+    user_id: str,
+    authorization_recorded_at: datetime,
+    notice_version: str,
+    via_cohort: bool,
+) -> tuple[ProductCampaignParticipant, bool]:
+    """Corps INCHANGÉ de enroll_at_first_eligible_login (verrous, J0,
+    fenêtre, idempotence, contrat R4), paramétré par le chemin d'admission :
+    via_cohort=False pour le point d'inscription brut (campagnes sans
+    cohorte), via_cohort=True pour cohort.admit_at_first_eligible_login
+    uniquement (campagnes à cohorte). Usage interne du paquet."""
     common.require_uuid(campaign_id, "campaign_id")
     common.require_user_id(user_id)
     authorization_recorded_at = common.require_aware(authorization_recorded_at, "authorization_recorded_at")
@@ -284,9 +334,10 @@ def enroll_at_first_eligible_login(
 
     existing = _lock_identity_and_read(db, campaign_id, user_id)
     if existing is not None:
-        return _same_login_or_conflict(db, existing, authorization), False
+        return _same_login_or_conflict(db, existing, authorization, via_cohort=via_cohort), False
 
     campaign = lock_campaign(db, campaign_id, shared=True)
+    _require_enrollment_path(db, campaign_id, via_cohort=via_cohort)
     if campaign.status != ACTIVE:
         raise ParticipationRefused(f"campagne {campaign_id} : première connexion non éligible à l'état "
                                    f"{campaign.status}")
@@ -303,7 +354,8 @@ def enroll_at_first_eligible_login(
     participation = ProductCampaignParticipant(
         campaign_id=campaign_id, user_id=user_id, participation_status=ENROLLED, enrolled_at=j0,
         window_start_at=j0, window_end_at=window_end_at, **authorization)
-    return _insert(db, participation, lambda winner: _same_login_or_conflict(db, winner, authorization))
+    return _insert(db, participation,
+                   lambda winner: _same_login_or_conflict(db, winner, authorization, via_cohort=via_cohort))
 
 
 def withdraw_participant(db, *, campaign_id: uuid.UUID, user_id: str) -> ProductCampaignParticipant:

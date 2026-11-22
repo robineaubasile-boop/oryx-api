@@ -1,5 +1,5 @@
-"""Dormance de V0-T08 Lot 2A : les services core/product_analytics/ existent
-mais ne sont raccordés à rien.
+"""Dormance de V0-T08 Lots 2A et 2B-1 : les services core/product_analytics/
+existent mais ne sont raccordés à rien.
 
 - aucun module applicatif (api.py, core/, scripts/, alembic/, ci/,
   diagnostics/, test.py) n'importe le paquet ; le vrai api:app, importé
@@ -10,7 +10,11 @@ mais ne sont raccordés à rien.
   (auth_f2*, authz_f2*, f2_runtime), ni route_policy (F-02A), ni moteurs
   pédagogiques, ni réseau, ni threads, ni planificateur, ni lecture
   d'environnement ;
-- aucune migration ajoutée (tête 0022, 22 fichiers) et 0022 inchangée ;
+- lot 2B-1 : seule la migration 0023_analytics_cohort_sessions est ajoutée
+  (tête, 23 fichiers), 0022 inchangée ; cohort.py est le SEUL module qui
+  lit des tables F2, uniquement via les modèles Invitation et
+  AuthOperation de core.models (aucun module F2 importé, aucune écriture :
+  tests/test_product_analytics_cohort.py) ;
 - frontend : aucune référence au paquet ni aux services.
 """
 import ast
@@ -24,15 +28,26 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_direc
 
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 PACKAGE_MODULE = "core.product_analytics"
-MODULES = ("__init__.py", "campaigns.py", "common.py", "events.py", "participation.py", "retention.py")
+MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "participation.py", "retention.py",
+           "sessions.py")
 MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1.py"
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
 MIGRATION_0022_SHA256 = "860305fd4b13a312347444fc31add80587ad58fa03c7f07818f7ec10013be053"
+MIGRATION_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_sessions.py"
+# sha256 de 0023 telle que proposée par le lot 2B-1 : toute retouche
+# ultérieure doit être explicite (mise à jour de cette empreinte).
+MIGRATION_0023_SHA256 = "7d5c778a9551c252d43c7619595c3ba79d90bccdd9efdc6d9bd10e2405af1c9e"
 ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc",
                    "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",
-                   "core.product_analytics.retention"}
+                   "core.product_analytics.retention", "core.product_analytics.participation"}
+# Modèles F2 lisibles par le paquet (lot 2B-1, cohort.py seulement) : preuve
+# canonique invitation -> utilisateur. Aucun autre modèle F2.
+F2_MODELS = {"Invitation", "AuthOperation", "AuthIdentity", "AuthPreauthCandidate", "AuthOtpRequest",
+             "AuthOtpVerificationAttempt", "AuthAbuseSubject", "AuthAbuseEvent", "AuthAbuseKeyState", "OryxSession",
+             "OryxSessionGeneration", "AuthOperationResult"}
+F2_MODELS_READ = {"cohort.py": {"Invitation", "AuthOperation"}}
 
 
 def _imports(path) -> set:
@@ -85,11 +100,21 @@ def test_no_application_module_imports_the_package():
                 assert "product_analytics" not in text and "record_event" not in text, path
 
 
-def test_no_migration_added_and_0022_unchanged():
+def test_only_migration_0023_added_and_0022_unchanged():
     script = _script_directory()
-    assert script.get_heads() == ["0022_product_analytics_v1"]
-    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 22
+    assert script.get_heads() == ["0023_analytics_cohort_sessions"]
+    assert script.get_revision("0023_analytics_cohort_sessions").down_revision == "0022_product_analytics_v1"
+    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 23
     assert hashlib.sha256(MIGRATION_0022.read_bytes()).hexdigest() == MIGRATION_0022_SHA256
+    assert hashlib.sha256(MIGRATION_0023.read_bytes()).hexdigest() == MIGRATION_0023_SHA256
+
+
+def test_only_cohort_reads_f2_tables_and_only_the_canonical_invitation_proof():
+    for name in MODULES:
+        tree = ast.parse((PACKAGE / name).read_text(encoding="utf-8"))
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    and node.module == "core.models" for alias in node.names}
+        assert imported & F2_MODELS == F2_MODELS_READ.get(name, set()), name
 
 
 PROBE = r'''

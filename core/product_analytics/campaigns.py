@@ -26,6 +26,10 @@ verrous, jamais avant une attente. Le service
 ne fait jamais commit() ni rollback() de la transaction de l'appelant ;
 l'INSERT de create_campaign est isolé dans un SAVEPOINT pour traduire une
 course perdue sur uq_product_campaigns_code.
+
+Lot 2B-1 : une campagne portant une cohorte (product_campaign_cohorts) ne
+peut être activée que par cohort.activate_cohort_campaign ; activate_campaign
+la refuse (aucun contournement du contrôle de cohorte complète).
 """
 import uuid
 from datetime import datetime
@@ -33,7 +37,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from core.models import ProductCampaign
+from core.models import ProductCampaign, ProductCampaignCohort
 from core.product_analytics import common
 from core.product_analytics.common import (
     ACTIVE,
@@ -145,12 +149,33 @@ def _transition(campaign: ProductCampaign, target: str) -> None:
         raise CampaignTransitionRefused(f"campagne {campaign.id} : {campaign.status} -> {target} refusée")
 
 
+def has_cohort(db, campaign_id: uuid.UUID) -> bool:
+    """La campagne porte-t-elle une cohorte (lot 2B-1) ? Lecture seule. Une
+    cohorte n'est créée qu'à l'état planned sous verrou exclusif de la
+    campagne et n'est jamais supprimée : la réponse est stable dès que la
+    campagne est verrouillée (partage ou exclusif) hors de l'état planned."""
+    return db.execute(select(ProductCampaignCohort.campaign_id).where(
+        ProductCampaignCohort.campaign_id == campaign_id)).scalar_one_or_none() is not None
+
+
 def activate_campaign(db, *, campaign_id: uuid.UUID) -> ProductCampaign:
     """planned -> active (activated_at = maintenant), seulement avant
-    close_by_at. Flush sans commit."""
+    close_by_at. Campagne à cohorte (lot 2B-1) : refus, l'activation passe
+    exclusivement par cohort.activate_cohort_campaign (contrôle de la
+    cohorte complète et du calendrier). Flush sans commit."""
     campaign = lock_campaign(db, campaign_id)
     _transition(campaign, ACTIVE)
-    now = common.utcnow()  # après le verrou de la campagne
+    if has_cohort(db, campaign.id):
+        raise CampaignTransitionRefused(
+            f"campagne {campaign.id} : campagne à cohorte, activation par activate_cohort_campaign exigée")
+    return apply_activation(db, campaign, now=common.utcnow())  # après le verrou de la campagne
+
+
+def apply_activation(db, campaign: ProductCampaign, *, now: datetime) -> ProductCampaign:
+    """planned -> active d'une campagne DÉJÀ verrouillée (FOR UPDATE) par
+    l'appelant, avec `now` lu après tous ses verrous. Usage interne du
+    paquet (activate_campaign, cohort.activate_cohort_campaign)."""
+    _transition(campaign, ACTIVE)
     if now >= campaign.close_by_at:
         raise CampaignTransitionRefused(f"campagne {campaign.id} : échéance close_by_at dépassée")
     campaign.status = ACTIVE

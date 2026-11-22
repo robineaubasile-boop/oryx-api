@@ -101,6 +101,55 @@ class RetentionRevisionRefused(ProductAnalyticsError):
     finalité modifiée)."""
 
 
+class CohortNotFound(ProductAnalyticsError):
+    """Aucune cohorte définie pour la campagne (lot 2B-1)."""
+
+
+class CohortSeatNotFound(ProductAnalyticsError):
+    """Place de cohorte inconnue (lot 2B-1)."""
+
+
+class CohortRefused(ProductAnalyticsError):
+    """Définition, place, rattachement, autorisation ou activation de cohorte
+    refusés (état de campagne, calendrier, cohorte incomplète ou
+    incohérente, preuve F2 absente). reason : vocabulaire fermé
+    COHORT_REFUSAL_REASONS."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+class CohortConflict(ProductAnalyticsError):
+    """Donnée de cohorte déjà fixée autrement : place, invitation ou
+    identité déjà occupée, réattribution, date limite ou autorisation
+    différente d'une valeur immuable."""
+
+
+class AdmissionRefused(ProductAnalyticsError):
+    """Connexion non éligible à l'admission Vague 0 (aucun J0 créé, rien
+    écrit). reason : vocabulaire fermé ADMISSION_REFUSAL_REASONS."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+class ActivitySessionRefused(ProductAnalyticsError):
+    """Interaction hors observation : aucune session ouverte ni prolongée,
+    rien écrit. reason : vocabulaire fermé SESSION_REFUSAL_REASONS."""
+
+    def __init__(self, message: str, *, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+class ActivitySessionConflict(ProductAnalyticsError):
+    """Clé d'interaction d'ouverture déjà utilisée dans un autre
+    environnement, ou unicité de session occupée par un écrivain non
+    sérialisé."""
+
+
 class EventRetentionExpired(ProductAnalyticsError):
     """Répétition d'un événement dont au moins une finalité de conservation
     est expirée (totalement ou partiellement) : refus sans aucune écriture ni
@@ -186,6 +235,57 @@ MEASUREMENT_POLICIES = ("v0-measurement-v1",)
 # participation.enroll_at_first_eligible_login : window_end_at = J0 + durée,
 # exactement.
 OBSERVATION_WINDOWS = {"v0-measurement-v1": timedelta(days=12)}
+
+
+# --------------------------------------------------------------------------
+# Lot 2B-1 : cohorte, calendrier d'admission et sessions d'activité
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CohortPolicy:
+    """Politique de cohorte : nombre EXACT de places exigé à l'activation."""
+    seat_count: int
+
+
+# Décision Vague 0 figée : cohorte fixe de cinq places, sans remplacement
+# (seat_count = 5 et seat_number 1..5 aussi imposés par la migration 0023).
+COHORT_POLICIES = {"v0-cohort-v1": CohortPolicy(seat_count=5)}
+WAVE_0_COHORT_POLICY_VERSION = "v0-cohort-v1"
+
+# Sessions d'activité produit : close après trente minutes d'inactivité
+# (horloge serveur ; idle_expires_at = last_activity_at + 30 minutes imposé
+# en base). Sans lien avec la durée des justificatifs F2 (15 jours absolus).
+ACTIVITY_SESSION_INACTIVITY = timedelta(minutes=30)
+# Finalisation : une session dont la dernière activité précède de peu
+# window_end_at ne se clôt qu'à son expiration d'inactivité ; la campagne
+# doit donc couvrir dernier J0 + observation + ces trente minutes.
+SESSION_FINALIZATION_GRACE = ACTIVITY_SESSION_INACTIVITY
+
+COHORT_REFUSAL_REASONS = (
+    "campaign_not_planned", "campaign_not_open", "cohort_missing", "cohort_incomplete", "cohort_full",
+    "cohort_incoherent", "calendar_incompatible", "admission_closed", "invitation_unavailable",
+    "invitation_not_activated", "participation_exists", "seat_not_bound", "clock_regression",
+)
+ADMISSION_REFUSAL_REASONS = (
+    "not_a_cohort_campaign", "not_in_cohort", "authorization_missing", "campaign_not_active",
+    "admission_closed",
+)
+SESSION_REFUSAL_REASONS = (
+    "not_participant", "participation_inactive", "campaign_not_active", "campaign_closed",
+    "before_observation", "observation_ended",
+)
+
+
+def required_close_by_at(admission_closes_at: datetime, measurement_policy_version: str) -> datetime | None:
+    """Échéance minimale de campagne compatible avec une date limite
+    d'admission : dernier J0 possible (< admission_closes_at) + fenêtre
+    d'observation de la politique de mesure + finalisation de session.
+    None si la politique de mesure ne déclare aucune fenêtre."""
+    observation = OBSERVATION_WINDOWS.get(measurement_policy_version)
+    if observation is None:
+        return None
+    return admission_closes_at + observation + SESSION_FINALIZATION_GRACE
 
 
 @dataclass(frozen=True)
