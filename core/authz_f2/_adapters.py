@@ -215,6 +215,23 @@ verrou -> attestation scellée _AckAdmissionPort (fermée dans un finally) ->
 pont -> résultat comparé à la livraison admise (DeliveryAcknowledged,
 response_action V2 non nulle). Aucune écriture B1, aucun retry, aucune
 progression d'entrée.
+
+V0-T08 2B-2 PR 0 (attestations métier internes, DORMANTES ; aucune
+instruction, aucun verrou, aucune écriture, aucun contrôle modifié) :
+_acknowledge_delivery retire l'enveloppe du pont (core.authz_f2.attestations)
+AVANT son contrôle historique, appliqué à l'identique à la vue nue
+DeliveryAcknowledged, puis transmet l'attestation (premier ACK / rejeu,
+observée par le pont sous le verrou de la livraison). _write_portfolio
+qualifie la branche RÉELLEMENT exécutée : ReceiptFound restitué ->
+portfolio_replay (même pour un reçu de création ou de suppression) ;
+CreateReady -> portfolio_created ; PositionFound + DELETE ->
+portfolio_deleted ; PositionFound + _same_values -> portfolio_noop (aucun
+UPDATE) ; UPDATE conditionnel -> portfolio_updated. Le résultat et le reçu
+(octets canoniques) sont construits et insérés EXACTEMENT comme avant ;
+l'attestation (propriétaire serveur, nature, operation_id du reçu,
+qualification ; aucune valeur financière) n'enveloppe que la valeur rendue au
+runner, qui la retire avant ses contrôles. IDEMPOTENCY_CONFLICT, ABSENT,
+CONFLICT et toute exception : aucune attestation.
 """
 import json
 import math
@@ -228,6 +245,7 @@ import sqlalchemy as sa
 
 from core.authz_f2 import _bridge_contracts as contracts
 from core.authz_f2 import _decryptage_orm_bridge as bridge
+from core.authz_f2 import attestations as att
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
@@ -715,6 +733,18 @@ OPERATION_TYPES = MappingProxyType({
 })
 
 
+# PR 0 : commandes attestables -> (nature de l'opération, attribut de la
+# commande portant son identifiant canonique), lu par le runner après COMMIT
+# pour lier l'attestation à la commande exécutée. Fermé : toute autre commande
+# n'a jamais d'attestation.
+ATTESTED_COMMANDS = MappingProxyType({
+    c.AcknowledgeDecryptageDelivery: (att.DECRYPTAGE_DELIVERY_ACK, "assistant_turn_id"),
+    c.CreatePortfolioPosition: (att.PORTFOLIO_CREATE, "operation_id"),
+    c.ReplacePortfolioPosition: (att.PORTFOLIO_UPDATE, "operation_id"),
+    c.DeletePortfolioPosition: (att.PORTFOLIO_DELETE, "operation_id"),
+})
+
+
 def _lock_portfolio(conn, owner_id, command):
     """Reçu du triplet, puis (sans reçu) position propre ; aucune décision."""
     receipt = _first(conn, _LOCK_RECEIPT, u=owner_id, t=OPERATION_TYPES[type(command)], o=command.operation_id)
@@ -800,13 +830,22 @@ def _written(row, command, revision: int, position_id=None) -> c.PositionView:
     return view
 
 
+def _attest_portfolio(result, user_id: str, operation_type: str, command, qualification: str):
+    """PR 0 : résultat INCHANGÉ, enveloppé de la qualification de la branche
+    exécutée (fabrique totale : hors contrat, résultat nu)."""
+    return att.attach(result, att.portfolio(user_id, operation_type, command.operation_id, qualification))
+
+
 def _write_portfolio(conn, ctx, command, state, keys, hook):
     user_id = ctx.principal.user_id
     operation_type = OPERATION_TYPES[type(command)]
     fields = _fingerprint_fields(user_id, operation_type, command)
     kind = type(state)
     if kind is ReceiptFound:
-        return _replay(state.row, command, operation_type, fields, keys)
+        replayed = _replay(state.row, command, operation_type, fields, keys)
+        if type(replayed) is not results.PortfolioWriteResult:
+            return replayed  # IDEMPOTENCY_CONFLICT : aucune attestation
+        return _attest_portfolio(replayed, user_id, operation_type, command, att.PORTFOLIO_REPLAY)
     if kind is PositionMissing and operation_type != fp.CREATE:
         return ABSENT  # aucun reçu : absente ou étrangère, indiscernables
     at = ctx.authorized_at.astimezone(timezone.utc).replace(tzinfo=None)  # colonnes historiques sans fuseau
@@ -814,6 +853,7 @@ def _write_portfolio(conn, ctx, command, state, keys, hook):
     if kind is CreateReady and operation_type == fp.CREATE:
         view = _written(_first(conn, _CREATE_POSITION, u=user_id, **_write_values(command, at)), command, 0)
         position_id = view.position_id
+        qualification = att.PORTFOLIO_CREATED
         hook("position_written")
     elif kind is PositionFound and operation_type != fp.CREATE:
         current = _position(state.row)
@@ -828,15 +868,18 @@ def _write_portfolio(conn, ctx, command, state, keys, hook):
                                                                                     command.expected_revision):
                 raise AdapterInvariantBroken("suppression conditionnelle sans ligne sous verrou")
             deleted_revision = command.expected_revision
+            qualification = att.PORTFOLIO_DELETED
             hook("position_written")
         elif _same_values(current, command):
             view = current  # aucun UPDATE, aucun incrément, updated_at inchangé
+            qualification = att.PORTFOLIO_NOOP
         else:
             if current.position_revision == c.MAX_POSITION_REVISION:
                 raise RevisionExhausted("révision maximale atteinte", "position_revision_exhausted")
             row = _first(conn, _REPLACE_POSITION, id=position_id, u=user_id, r=command.expected_revision,
                          **_write_values(command, at))
             view = _written(row, command, c.next_revision(current.position_revision), position_id)
+            qualification = att.PORTFOLIO_UPDATED
             hook("position_written")
     else:
         raise AdapterInvariantBroken("état verrouillé inattendu")
@@ -855,7 +898,7 @@ def _write_portfolio(conn, ctx, command, state, keys, hook):
         "kv": keys.current_version, "f": computed, "rv": results.RESULT_VERSION, "s": result.status,
         "payload": result.body.decode("utf-8"), "pid": position_id, "at": ctx.authorized_at})
     hook("receipt_written")
-    return result
+    return _attest_portfolio(result, user_id, operation_type, command, qualification)
 
 
 # --------------------------------------------------------------------------
@@ -2041,10 +2084,15 @@ def _acknowledge_delivery(conn, ctx, command, locked):
                                                                             command.conversation_key), port)
     finally:
         port._close()
+    # PR 0 : enveloppe retirée AVANT le contrôle historique, appliqué à
+    # l'identique à la vue nue ; l'attestation n'est que transmise au runner.
+    outcome, attestation = att.unwrap(outcome)
     if type(outcome) is not bridge.DeliveryAcknowledged or outcome.assistant_turn_id != command.assistant_turn_id \
             or outcome.delivery_status != bridge.DELIVERED or outcome.response_action is None \
             or outcome.response_action not in bridge.RESPONSE_ACTIONS:
         raise DecryptageUnavailable("ACK hors contrat", "decryptage_ack_incoherent")
+    if attestation is not None:
+        return att.Attested(outcome, attestation)  # vue nue contrôlée ci-dessus, inchangée
     return outcome
 
 

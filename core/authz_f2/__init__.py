@@ -95,6 +95,13 @@ pont (SAVEPOINT C1, claim, Prepare, relecture B2, comparaison, Apply,
 RELEASE) -> UPDATE reserved -> finalized -> COMMIT unique. Aucune route,
 aucun appel externe, aucune migration.
 
+V0-T08 2B-2 PR 0 : attestations métier internes DORMANTES (module pur
+attestations.py : premier ACK / rejeu Décrypter, création / modification /
+suppression / no-op / rejeu portefeuille), produites par le pont ACK et
+l'adaptateur portefeuille, retenues par le runner après COMMIT confirmé et
+exposées seulement par la sortie privée _run_attested, sans appelant. Aucun
+résultat public, reçu, verrou, instruction, table ni route modifié.
+
 La validation du justificatif réutilise core.auth_f2.sessions (même code
 que le moteur F2 : aucun second validateur HMAC) et n'écrit jamais : une
 session dont la livraison n'est pas confirmée par /session/resolve est

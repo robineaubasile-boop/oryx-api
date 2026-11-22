@@ -439,7 +439,8 @@ print(json.dumps({"loaded": loaded, "attempts": attempts, "engine": core.db.engi
 # (instrument, données de marché, bibliothèque pédagogique). Aucun réseau.
 TRANSITIVE_CORE_IMPORTS = [
     "core", "core.assistant_delivery", "core.authz_f2", "core.authz_f2._bridge_contracts",
-    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.commands", "core.authz_f2.decryptage_candidate",
+    # V0-T08 2B-2 PR 0 : contrat d'attestation interne (pur, aucun import du projet).
+    "core.authz_f2._decryptage_orm_bridge", "core.authz_f2.attestations", "core.authz_f2.commands", "core.authz_f2.decryptage_candidate",
     "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_finalization",
     "core.authz_f2.decryptage_fingerprint", "core.authz_f2.decryptage_instrument",
     "core.authz_f2.decryptage_market_data", "core.authz_f2.decryptage_method_selection",

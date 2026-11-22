@@ -82,7 +82,11 @@ IMPORT_MATRIX = {
                                    # R1 PR 9-C2 : constantes du payload public C1-B
                                    # (avertissement, borne du texte, devise admise),
                                    # modules PURS déjà chargés par commands.
-                                   "core.authz_f2.decryptage_candidate", "core.authz_f2.decryptage_market_data"},
+                                   "core.authz_f2.decryptage_candidate", "core.authz_f2.decryptage_market_data",
+                                   # V0-T08 2B-2 PR 0 : contrat d'attestation interne (pur, sans import).
+                                   "core.authz_f2.attestations"},
+    # V0-T08 2B-2 PR 0 : contrat d'attestation interne PUR, aucun import du projet.
+    "core/authz_f2/attestations.py": set(),
     # R1 PR 9-C1-B : contrats communs PURS (aucun import), vues de finalisation
     # et sélecteur de méthode PURS.
     "core/authz_f2/_bridge_contracts.py": set(),
@@ -92,7 +96,9 @@ IMPORT_MATRIX = {
     "core/authz_f2/decryptage_method_selection.py": {"core.authz_f2.decryptage_candidate", "core.pedagogie_library"},
     "core/authz_f2/runner.py": {"core.auth_f2.sessions", "core.auth_f2.keys", "core.auth_f2.txn",
                                 "core.authz_f2._adapters", "core.authz_f2.commands", "core.authz_f2.principal",
-                                "core.authz_f2.portfolio_fingerprint", "core.authz_f2.decryptage_fingerprint"},
+                                "core.authz_f2.portfolio_fingerprint", "core.authz_f2.decryptage_fingerprint",
+                                # V0-T08 2B-2 PR 0 : retrait et liaison de l'attestation (pur).
+                                "core.authz_f2.attestations"},
     # R1 PR 9-B1 : modules purs de la réservation Décrypter.
     "core/authz_f2/decryptage_fingerprint.py": set(),
     "core/authz_f2/decryptage_reservation.py": set(),
@@ -163,7 +169,9 @@ IMPORT_MATRIX = {
                                                 "core.authz_f2.commands", "core.authz_f2.principal",
                                                 "core.authz_f2.decryptage_context", "core.authz_f2.decryptage_candidate",
                                                 "core.authz_f2.decryptage_finalization",
-                                                "core.authz_f2.decryptage_method_selection", "core.models"},
+                                                "core.authz_f2.decryptage_method_selection", "core.models",
+                                                # V0-T08 2B-2 PR 0 : fabrique d'attestation ACK (pur, sans import).
+                                                "core.authz_f2.attestations"},
     # R1 PR 8 : codec pur (commandes et vues seulement) et routeur de lecture.
     "core/authz_f2_http/consultation_codec.py": {"core.authz_f2.commands"},
     "core/authz_f2_http/consultation.py": {"core.auth_f2.crypto", "core.auth_f2.service",

@@ -131,6 +131,21 @@ propriétaire de la transaction externe et du COMMIT : une finalisation dont
 l'UPDATE B1 échoue après RELEASE SAVEPOINT rend CONFLICT, donc ROLLBACK
 intégral (REVISION_CONFLICT), jamais un objet métier committé ; un COMMIT en
 échec ou incertain rend UNAVAILABLE, sans réexécution.
+
+V0-T08 2B-2 PR 0 (attestations métier internes, DORMANTES) : run() garde son
+contrat exact (AuthorizationOutcome à trois champs, mêmes statuts, mêmes
+journaux, même valeur). Exposition interne SÉPARÉE, privée et sans appelant
+de production : _run_attested(credential, command) -> AttestedOutcome
+(outcome identique à celui de run(), attestation ou None). Même chemin de
+code : l'enveloppe interne d'un adaptateur (core.authz_f2.attestations) est
+retirée juste après spec.execute, AVANT les contrôles des sentinelles, donc
+la valeur examinée et rendue est exactement l'historique. L'attestation n'est
+retenue qu'APRÈS la sortie du bloc transactionnel (COMMIT confirmé), pour un
+résultat AUTHORIZED seulement, et seulement si elle est liée au principal et
+à la commande exécutés (_adapters.ATTESTED_COMMANDS, attestations.bound) ; sinon elle est
+abandonnée (journal sans détail), jamais l'opération. ROLLBACK, refus,
+exception ou COMMIT en échec ou incertain : aucune attestation. Ni verrou, ni
+instruction, ni écriture, ni appel réseau ajouté ; aucun analytics raccordé.
 """
 import logging
 from dataclasses import dataclass
@@ -141,6 +156,7 @@ from core.auth_f2 import sessions
 from core.auth_f2.keys import PURPOSES, Keyring
 from core.auth_f2.txn import pg_clock, transaction
 from core.authz_f2 import _adapters
+from core.authz_f2 import attestations as att
 from core.authz_f2.commands import GENERATION_LOCK
 from core.authz_f2.decryptage_fingerprint import DecryptageKeyring
 from core.authz_f2.portfolio_fingerprint import PortfolioKeyring
@@ -177,6 +193,17 @@ class AuthorizationOutcome:
     status: str
     value: object = None
     principal: object = None
+
+
+@dataclass(frozen=True, slots=True)
+class AttestedOutcome:
+    """PR 0 (interne, dormant) : résultat de _run_attested. outcome est
+    EXACTEMENT celui que run() aurait rendu ; attestation est une
+    attestations.BusinessAttestation (AUTHORIZED et COMMIT confirmé
+    seulement) ou None."""
+    outcome: AuthorizationOutcome
+    attestation: object = None
+
 
 
 class _Refused(Exception):
@@ -236,30 +263,61 @@ class AuthorizedTransactionRunner:
         raise TypeError("AuthorizedTransactionRunner n'est pas sérialisable")
 
     def run(self, credential, command) -> AuthorizationOutcome:
+        return self._authorize(credential, command)[0]
+
+    def _run_attested(self, credential, command) -> AttestedOutcome:
+        """PR 0 : exposition INTERNE (aucun appelant de production) ; même
+        chemin que run(), même outcome, plus l'attestation retenue après COMMIT
+        confirmé (ou None)."""
+        outcome, attestation = self._authorize(credential, command)
+        if outcome.status != AUTHORIZED:
+            attestation = None  # défense : jamais d'attestation d'un refus
+        return AttestedOutcome(outcome, attestation)
+
+    def _authorize(self, credential, command) -> tuple:
         spec = _adapters.REGISTRY.get(type(command))
         if spec is None:
             raise UnknownCommand("commande hors du registre fermé")
         name = type(command).__name__
         if spec.keyed and spec.decryptage_keyed:  # jamais deux familles de clés (défense : Spec le refuse déjà)
             logger.error("authz_f2 %s status=%s alert=key_families_conflict", name, UNAVAILABLE)
-            return AuthorizationOutcome(UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE), None
         if spec.keyed and self._portfolio is None:
             logger.warning("authz_f2 %s status=%s error=portfolio_keyring_missing", name, UNAVAILABLE)
-            return AuthorizationOutcome(UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE), None
         if spec.decryptage_keyed and self._decryptage is None:
             logger.warning("authz_f2 %s status=%s error=decryptage_keyring_missing", name, UNAVAILABLE)
-            return AuthorizationOutcome(UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE), None
         try:
-            outcome = self._run(credential, command, spec)
+            outcome, attested = self._run(credential, command, spec)
         except Exception as exc:  # refus fermé : aucun détail, aucun secret
             alert = getattr(exc, "alert", None) if isinstance(exc, _adapters.AdapterInvariantBroken) else None
             if alert is not None:
                 logger.error("authz_f2 %s status=%s alert=%s", name, UNAVAILABLE, alert)
             else:
                 logger.warning("authz_f2 %s status=%s error=%s", name, UNAVAILABLE, type(exc).__name__)
-            return AuthorizationOutcome(UNAVAILABLE)
+            return AuthorizationOutcome(UNAVAILABLE), None
         logger.info("authz_f2 %s status=%s", name, outcome.status)
-        return outcome
+        return outcome, self._retain(name, command, outcome, attested)
+
+    @staticmethod
+    def _retain(name: str, command, outcome: AuthorizationOutcome, attested):
+        """PR 0 : APRÈS le COMMIT confirmé. Attestation retenue seulement pour
+        AUTHORIZED, liée au principal et à la commande exécutés ; sinon
+        abandonnée. Ne lève jamais : l'opération committée n'en dépend pas."""
+        if attested is None:
+            return None
+        try:
+            expected = _adapters.ATTESTED_COMMANDS.get(type(command))
+            if outcome.status == AUTHORIZED and expected is not None and type(outcome.principal) is \
+                    AuthorizedPrincipal and att.bound(attested, owner_user_id=outcome.principal.user_id,
+                                                      operation=expected[0],
+                                                      operation_id=getattr(command, expected[1])):
+                return attested
+        except Exception:  # jamais une cause d'échec
+            pass
+        logger.error("authz_f2 %s attestation=dropped", name)
+        return None
 
     # ------------------------------------------------------------------
 
@@ -288,10 +346,11 @@ class AuthorizedTransactionRunner:
             return _IDENTITY_REQUIRED  # aucune identité admissible : 403, rien n'est exécuté
         return AuthorizedPrincipal(session["user_id"], session["id"], generation["id"], session["auth_method"])
 
-    def _run(self, credential, command, spec) -> AuthorizationOutcome:
+    def _run(self, credential, command, spec) -> tuple:
+        """(AuthorizationOutcome, attestation brute ou None)."""
         candidate_user_id = self._prevalidate(credential)
         if candidate_user_id is None:
-            return AuthorizationOutcome(SESSION_INVALID)
+            return AuthorizationOutcome(SESSION_INVALID), None
         self._hook("prevalidated")
         try:
             with transaction(self._engine) as conn:
@@ -321,6 +380,9 @@ class AuthorizedTransactionRunner:
                     value = spec.execute(conn, context, command, business, self._decryptage)
                 else:
                     value = spec.execute(conn, context, command, business)
+                # PR 0 : enveloppe interne retirée AVANT tout contrôle ; la valeur
+                # examinée et rendue est exactement l'historique.
+                value, attested = att.unwrap(value)
                 if value is _adapters.ABSENT:
                     raise _Refused(NOT_FOUND)  # après la décision ; rien n'a été écrit
                 if value is _adapters.CONFLICT:
@@ -329,6 +391,6 @@ class AuthorizedTransactionRunner:
                     raise _Refused(IDEMPOTENCY_CONFLICT)  # après la décision ; rien n'a été écrit
                 self._hook("executed")
         except _Refused as refused:
-            return AuthorizationOutcome(refused.status)
-        # Rendu seulement après un COMMIT confirmé.
-        return AuthorizationOutcome(AUTHORIZED, value, principal)
+            return AuthorizationOutcome(refused.status), None  # ROLLBACK : aucune attestation
+        # Rendu seulement après un COMMIT confirmé (attestation comprise).
+        return AuthorizationOutcome(AUTHORIZED, value, principal), attested
