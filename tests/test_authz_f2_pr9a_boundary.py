@@ -535,9 +535,10 @@ def test_no_migration_and_no_new_table():
     # PR 9-A n'avait ajouté aucune migration ; R1 PR 9-B1 ajoute 0021 (tête),
     # que le pont et le service de livraison ne référencent toujours pas.
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 22 and versions[-3:] == ["0020_position_revision.py",
+    assert len(versions) == 23 and versions[-4:] == ["0020_position_revision.py",
                                                      "0021_decryptage_turn_reservations.py",
-                                                     "0022_product_analytics_v1.py"]  # V0-T08 Lot 1
+                                                     "0022_product_analytics_v1.py",  # V0-T08 Lot 1
+                                                     "0023_analytics_cohort_sessions.py"]  # V0-T08 Lot 2B-1
     source = BRIDGE.read_text(encoding="utf-8") + (REPO_ROOT / "core" / "assistant_delivery.py").read_text("utf-8")
     assert "decryptage_turn_reservations" not in source and "__tablename__" not in source
 

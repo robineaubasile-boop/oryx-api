@@ -33,8 +33,12 @@ d'autorisation (core/authz_f2) ni la route personnelle (core/authz_f2_http) :
   0021_decryptage_turn_reservations.py) ; aucune variable n'active
   la réservation Décrypter ; api.py ne la mentionne pas ;
 - V0-T08 Lot 1 : une seule migration nouvelle, additive
-  (0022_product_analytics_v1, tête), hors de la frontière F2 ; aucune
-  route ni collecte (tests/test_migration_0022_product_analytics_v1.py).
+  (0022_product_analytics_v1), hors de la frontière F2 ; aucune
+  route ni collecte (tests/test_migration_0022_product_analytics_v1.py) ;
+- V0-T08 Lot 2B-1 : une seule migration nouvelle, additive
+  (0023_analytics_cohort_sessions, tête), hors de la frontière F2 (tables
+  F2 seulement référencées par FK, jamais modifiées) ; aucune route ni
+  collecte (tests/test_migration_0023_analytics_cohort_sessions.py).
 
 Les garanties historiques (routes publiques exactes, middlewares, imports
 interdits, chargement dynamique, réseau au démarrage, variables F2 valides
@@ -57,8 +61,8 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 AUTHZ = REPO_ROOT / "core" / "authz_f2"
 AUTHZ_HTTP = REPO_ROOT / "core" / "authz_f2_http"
-HEAD = "0022_product_analytics_v1"  # V0-T08 Lot 1 (analytics produit dormant)
-HEAD_FILE = "0022_product_analytics_v1.py"
+HEAD = "0023_analytics_cohort_sessions"  # V0-T08 Lot 2B-1 (analytics produit dormant)
+HEAD_FILE = "0023_analytics_cohort_sessions.py"
 
 # Matrice fermée : module -> imports core.* exacts.
 IMPORT_MATRIX = {
@@ -445,15 +449,18 @@ def test_importing_the_boundary_opens_nothing():
     assert out.stdout.strip() == "False False False False"
 
 
-def test_only_the_additive_0021_and_0022_migrations_and_no_new_production_dependency():
+def test_only_the_additive_0021_0022_and_0023_migrations_and_no_new_production_dependency():
     """R1 PR 7 a ajouté 0020_position_revision ; R1 PR 9-B1 a ajouté
     0021_decryptage_reservations ; V0-T08 Lot 1 n'ajoute que
-    0022_product_analytics_v1 (tête) ; aucune dépendance de production."""
+    0022_product_analytics_v1 ; V0-T08 Lot 2B-1 n'ajoute que
+    0023_analytics_cohort_sessions (tête) ; aucune dépendance de production."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_revision("0020_position_revision").down_revision == "0019_f2_http_admission"
     assert script.get_revision("0021_decryptage_reservations").down_revision == "0020_position_revision"
-    assert script.get_revision(HEAD).down_revision == "0021_decryptage_reservations"
+    assert script.get_revision("0022_product_analytics_v1").down_revision == "0021_decryptage_reservations"
+    assert script.get_revision(HEAD).down_revision == "0022_product_analytics_v1"
     assert script.get_heads() == [HEAD]
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 22 and versions[-2:] == ["0021_decryptage_turn_reservations.py", HEAD_FILE]
+    assert len(versions) == 23 and versions[-3:] == ["0021_decryptage_turn_reservations.py",
+                                                     "0022_product_analytics_v1.py", HEAD_FILE]
     assert production_requirements() == MAIN_REQUIREMENTS

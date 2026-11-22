@@ -1,8 +1,8 @@
 """Tests de V0-T08 Lot 1 : migration 0022_product_analytics_v1 (socle
 PostgreSQL DORMANT de l'analytics produit) et modèles correspondants.
 
-1. Sans base : maillon 0021 -> 0022 (tête unique), identifiant <= 32
-   caractères, fichiers 0001 à 0021 inchangés, SQL offline (upgrade : trois
+1. Sans base : maillon 0021 -> 0022 (parent de 0023, V0-T08 Lot 2B-1,
+   testée à part), identifiant <= 32 caractères, fichiers 0001 à 0021 inchangés, SQL offline (upgrade : trois
    CREATE TABLE et leurs index, rien d'autre ; downgrade : délais, verrou
    déterministe des trois tables, garde DO évaluée à l'exécution, retrait
    sans CASCADE), modèles alignés sur la migration (colonnes, types,
@@ -61,6 +61,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     T5A_TABLES,
     T6A_TABLES,
     V0T08_0022,
+    V0T08_0023,
+    V0T08_0023_TABLES,
     V0T08_0022_FILE,
     V0T08_0022_INDEXES,
     V0T08_0022_TABLES,
@@ -177,16 +179,19 @@ def _m0022():
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0022_to_0021_and_is_the_single_head():
+def test_revision_links_0022_to_0021_and_is_the_parent_of_0023():
+    """0022 était la tête de V0-T08 Lot 1 ; le lot 2B-1 ajoute 0023 au-dessus,
+    sans modifier ce fichier (tests/test_migration_0023_analytics_cohort_sessions.py)."""
     script = _script_directory()
-    assert script.get_heads() == [V0T08_0022]
+    assert script.get_heads() == [V0T08_0023]
+    assert script.get_revision(V0T08_0023).down_revision == V0T08_0022
     revision = script.get_revision(V0T08_0022)
     assert revision.down_revision == PR9B1_0021
     assert not revision.branch_labels and not revision.dependencies
     assert V0T08_0022 == "0022_product_analytics_v1" and len(V0T08_0022) <= 32
     assert V0T08_0022_FILE == f"{V0T08_0022}.py"
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 22 and files[-1] == V0T08_0022_FILE and files[-2] == PR9B1_0021_FILE
+    assert len(files) == 23 and files[-2] == V0T08_0022_FILE and files[-3] == PR9B1_0021_FILE
     m = _m0022()
     assert (m.revision, m.down_revision, m.branch_labels, m.depends_on) == (V0T08_0022, PR9B1_0021, None, None)
 
@@ -331,7 +336,9 @@ def test_no_forbidden_or_sensitive_field_in_the_analytics_tables():
             parts = name.split("_")
             for marker in FORBIDDEN_FIELD_MARKERS:
                 assert marker not in parts and not name.startswith(marker), (table_name, name)
-    assert {t for t in Base.metadata.tables if t.startswith("product_")} == ANALYTICS
+    # V0-T08 Lot 2B-1 : les trois tables de 0023 sont vérifiées à part
+    # (tests/test_migration_0023_analytics_cohort_sessions.py).
+    assert {t for t in Base.metadata.tables if t.startswith("product_")} == ANALYTICS | set(V0T08_0023_TABLES)
 
 
 # --------------------------------------------------------------------------
@@ -361,14 +368,17 @@ def _code_strings_and_names(path) -> set:
 
 
 def test_no_production_module_references_the_analytics_tables():
-    """Seuls core/models.py (déclaration), la migration 0022 et, depuis
-    V0-T08 Lot 2A, les services dormants core/product_analytics/ mentionnent
+    """Seuls core/models.py (déclaration), les migrations 0022 et 0023 et,
+    depuis V0-T08 Lot 2A, les services dormants core/product_analytics/ mentionnent
     les tables : aucune route, aucun worker ni rapport ne les lit ou ne les
     écrit. Que rien n'importe ces services est vérifié par
     tests/test_product_analytics_dormancy.py."""
     services = REPO_ROOT / "core" / "product_analytics"
-    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, *services.glob("*.py")}
-    assert len(allowed) == 2 + 6
+    # V0-T08 Lot 2B-1 : la migration 0023 référence product_campaigns et
+    # product_campaign_participants par FK (testée à part).
+    migration_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_sessions.py"
+    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, migration_0023, *services.glob("*.py")}
+    assert len(allowed) == 3 + 8
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*.py")):
         relative = path.relative_to(REPO_ROOT).parts
@@ -518,7 +528,7 @@ def _extensions(engine) -> list:
 
 def _upgrade_head(pg_url, pg_engine):
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0022)  # V0-T08 Lot 2B-1 : 0023 au-dessus, testée à part
     _seed_historical(pg_engine)
 
 
@@ -558,13 +568,13 @@ def test_pg_upgrade_0021_to_0022_keeps_every_row_then_exact_downgrade(pg_url, pg
     assert _snapshot(pg_engine, tables) == schema_0021 and _catalog(pg_engine, tables) == catalog_0021
     assert _global_catalog(pg_engine) == global_0021 and _extensions(pg_engine) == extensions_0021
     assert _data(pg_engine, tables - {"alembic_version"}) == data_0021
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0022)  # V0-T08 Lot 2B-1 : 0023 au-dessus, testée à part
     assert _version(pg_engine) == V0T08_0022 and _compare_metadata(pg_engine) == []
 
 
 def test_pg_catalog_is_exact(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0022)  # V0-T08 Lot 2B-1 : 0023 au-dessus, testée à part
     m = _m0022()
     with pg_engine.connect() as conn:
         for table, columns in COLUMNS.items():
