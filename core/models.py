@@ -2887,3 +2887,152 @@ class ProductActivityEvent(Base):
     next_scope_expires_at = Column(DateTime(timezone=True), nullable=False)
     purge_after_at = Column(DateTime(timezone=True), nullable=False)
     schema_version = Column(String(64), nullable=False)
+
+
+# --------------------------------------------------------------------------
+# V0-T08 Lot 2B-1 (migration 0023_analytics_cohort_sessions) : cohorte
+# pré-J0, calendrier d'admission et sessions d'activité produit — DORMANTS.
+# Seuls les services core/product_analytics/ les lisent ou les écrivent ;
+# aucune route, aucun worker. Les expressions des CHECK sont celles de la
+# migration (concordance testée).
+# --------------------------------------------------------------------------
+
+
+class ProductCampaignCohort(Base):
+    """Définition de la cohorte d'une campagne (V0-T08 Lot 2B-1, migration
+    0023_analytics_cohort_sessions) — DORMANTE.
+
+    Une cohorte au plus par campagne (PK campaign_id). seat_count = 5 imposé
+    en base (cohorte Vague 0 fixe, sans remplacement). admission_closes_at :
+    aucun J0 à partir de cet instant ; fixée à la définition (campagne
+    planned), immuable (aucun service ne la modifie). Compatibilité avec
+    close_by_at (dernier J0 + 12 jours + 30 minutes) : imposée par les
+    services à la définition et à l'activation."""
+    __tablename__ = "product_campaign_cohorts"
+    __table_args__ = (
+        CheckConstraint("seat_count = 5", name="ck_product_campaign_cohorts_seat_count"),
+        CheckConstraint("admission_closes_at > created_at", name="ck_product_campaign_cohorts_admission"),
+        ForeignKeyConstraint(["campaign_id"], ["product_campaigns.id"],
+                             name="product_campaign_cohorts_campaign_id_fkey"),
+    )
+
+    campaign_id = Column(Uuid, primary_key=True)
+    cohort_policy_version = Column(String(64), nullable=False)
+    seat_count = Column(SmallInteger, nullable=False)
+    admission_closes_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ProductCohortSeat(Base):
+    """Place sélectionnée d'une cohorte (V0-T08 Lot 2B-1, migration
+    0023_analytics_cohort_sessions) — DORMANTE.
+
+    Identifiant technique, numéro 1 à 5 UNIQUE par campagne, référence
+    canonique à l'invitation F2 (FK, aucune copie d'e-mail, de nom ni de
+    token). Rattachement à user_id prouvé en base par FK composites vers
+    l'activation committed de CETTE invitation pour CET utilisateur ; une
+    identité n'occupe qu'une place par campagne. Autorisation de
+    participation : trace distincte (authorization_recorded_at,
+    notice_version), postérieure au rattachement, jamais une preuve
+    juridique de consentement. La place reste présente même sans J0."""
+    __tablename__ = "product_cohort_seats"
+    __table_args__ = (
+        CheckConstraint("seat_number BETWEEN 1 AND 5", name="ck_product_cohort_seats_seat_number"),
+        CheckConstraint("binding_operation_kind IS NULL OR binding_operation_kind = 'invitation_activation'",
+                        name="ck_product_cohort_seats_binding_kind"),
+        CheckConstraint("binding_operation_status IS NULL OR binding_operation_status = 'committed'",
+                        name="ck_product_cohort_seats_binding_status"),
+        CheckConstraint(
+            "(user_id IS NULL) = (binding_operation_id IS NULL) "
+            "AND (user_id IS NULL) = (binding_operation_kind IS NULL) "
+            "AND (user_id IS NULL) = (binding_operation_status IS NULL) "
+            "AND (user_id IS NULL) = (binding_committed_at IS NULL) "
+            "AND (user_id IS NULL) = (bound_at IS NULL)",
+            name="ck_product_cohort_seats_binding"),
+        CheckConstraint("bound_at IS NULL OR (bound_at >= binding_committed_at AND bound_at >= created_at)",
+                        name="ck_product_cohort_seats_bound_at"),
+        CheckConstraint(
+            "(authorization_recorded_at IS NULL) = (notice_version IS NULL) "
+            "AND (authorization_recorded_at IS NULL OR (bound_at IS NOT NULL "
+            "AND authorization_recorded_at >= bound_at))",
+            name="ck_product_cohort_seats_authorization"),
+        CheckConstraint(
+            "admission_failure_first_at IS NULL OR (authorization_recorded_at IS NOT NULL "
+            "AND admission_failure_first_at >= authorization_recorded_at)",
+            name="ck_product_cohort_seats_admission_failure"),
+        ForeignKeyConstraint(["campaign_id"], ["product_campaign_cohorts.campaign_id"],
+                             name="product_cohort_seats_campaign_id_fkey"),
+        ForeignKeyConstraint(["invitation_id"], ["invitations.id"], name="product_cohort_seats_invitation_id_fkey"),
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="product_cohort_seats_user_id_fkey"),
+        ForeignKeyConstraint(["binding_operation_id", "invitation_id"],
+                             ["auth_operations.id", "auth_operations.invitation_id"],
+                             name="product_cohort_seats_binding_invitation_fkey"),
+        ForeignKeyConstraint(["binding_operation_id", "user_id", "binding_operation_kind"],
+                             ["auth_operations.id", "auth_operations.user_id", "auth_operations.kind"],
+                             name="product_cohort_seats_binding_user_fkey"),
+        ForeignKeyConstraint(
+            ["binding_operation_id", "binding_operation_kind", "binding_operation_status", "binding_committed_at"],
+            ["auth_operations.id", "auth_operations.kind", "auth_operations.status", "auth_operations.committed_at"],
+            name="product_cohort_seats_binding_commit_fkey"),
+        UniqueConstraint("campaign_id", "seat_number", name="uq_product_cohort_seats_campaign_seat_number"),
+        UniqueConstraint("campaign_id", "invitation_id", name="uq_product_cohort_seats_campaign_invitation"),
+        UniqueConstraint("campaign_id", "user_id", name="uq_product_cohort_seats_campaign_user"),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    campaign_id = Column(Uuid, nullable=False)
+    seat_number = Column(SmallInteger, nullable=False)
+    invitation_id = Column(Uuid, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    user_id = Column(String, nullable=True)
+    binding_operation_id = Column(Uuid, nullable=True)
+    binding_operation_kind = Column(String(32), nullable=True)
+    binding_operation_status = Column(String(16), nullable=True)
+    binding_committed_at = Column(DateTime(timezone=True), nullable=True)
+    bound_at = Column(DateTime(timezone=True), nullable=True)
+    authorization_recorded_at = Column(DateTime(timezone=True), nullable=True)
+    notice_version = Column(String(64), nullable=True)
+    admission_failure_first_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ProductActivitySession(Base):
+    """Session d'activité produit (visite) d'un participant (V0-T08 Lot
+    2B-1, migration 0023_analytics_cohort_sessions) — DORMANTE.
+
+    Distincte des sessions d'authentification F2 (aucune FK vers
+    oryx_sessions, aucune durée commune). Environnement de navigation
+    identifié par une empreinte SHA-256, jamais par l'identifiant brut.
+    idle_expires_at = last_activity_at + 30 minutes (en base) ; une seule
+    session ouverte par (campagne, utilisateur, environnement) ; une clé
+    d'ouverture n'ouvre qu'une session. Aucune activité au-delà de
+    window_end_at de la participation (imposé par le service)."""
+    __tablename__ = "product_activity_sessions"
+    __table_args__ = (
+        CheckConstraint("environment_digest ~ '^[0-9a-f]{64}$'",
+                        name="ck_product_activity_sessions_environment_digest"),
+        CheckConstraint("last_activity_at >= opened_at", name="ck_product_activity_sessions_activity"),
+        CheckConstraint("idle_expires_at = last_activity_at + interval '30 minutes'",
+                        name="ck_product_activity_sessions_idle_expiry"),
+        CheckConstraint("finalized_at IS NULL OR finalized_at >= idle_expires_at",
+                        name="ck_product_activity_sessions_finalized"),
+        ForeignKeyConstraint(["campaign_id", "user_id"],
+                             ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
+                             name="product_activity_sessions_participant_fkey"),
+        UniqueConstraint("campaign_id", "user_id", "opening_interaction_key",
+                         name="uq_product_activity_sessions_opening_key"),
+        Index("uq_product_activity_sessions_open_environment", "campaign_id", "user_id", "environment_digest",
+              unique=True, postgresql_where=text("finalized_at IS NULL")),
+        Index("ix_product_activity_sessions_open_idle_expiry", "campaign_id", "idle_expires_at",
+              postgresql_where=text("finalized_at IS NULL")),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    campaign_id = Column(Uuid, nullable=False)
+    user_id = Column(String, nullable=False)
+    environment_digest = Column(String(64), nullable=False)
+    opening_interaction_key = Column(Uuid, nullable=False)
+    last_interaction_key = Column(Uuid, nullable=False)
+    opened_at = Column(DateTime(timezone=True), nullable=False)
+    last_activity_at = Column(DateTime(timezone=True), nullable=False)
+    idle_expires_at = Column(DateTime(timezone=True), nullable=False)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)

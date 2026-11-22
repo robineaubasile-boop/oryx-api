@@ -592,5 +592,6 @@ def test_no_new_command_plan_operation_or_migration():
     assert len(_adapters.REGISTRY) == 20
     assert c.PLANS == (c.READ, c.PROFILE_MUTATION, c.PORTFOLIO_MUTATION, c.DECRYPTAGE_MUTATION)
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 22 and versions[-2:] == ["0021_decryptage_turn_reservations.py",
-                                                     "0022_product_analytics_v1.py"]  # V0-T08 Lot 1
+    assert len(versions) == 23 and versions[-3:] == ["0021_decryptage_turn_reservations.py",
+                                                     "0022_product_analytics_v1.py",  # V0-T08 Lot 1
+                                                     "0023_analytics_cohort_sessions.py"]  # V0-T08 Lot 2B-1

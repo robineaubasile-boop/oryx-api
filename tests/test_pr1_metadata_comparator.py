@@ -36,6 +36,9 @@ from tests.test_migration_0004_drop_company_analyses import (
     V0T08_0022,
     V0T08_0022_INDEXES,
     V0T08_0022_TABLES,
+    V0T08_0023,
+    V0T08_0023_INDEXES,
+    V0T08_0023_TABLES,
     _raw_compare_metadata,
     _without_pr1_changes,
 )
@@ -73,6 +76,9 @@ def _expected(applied):
     if applied < 8:  # V0-T08 Lot 1 (0022) : trois tables et leurs index.
         diff += [("add_table", TABLES[t]) for t in V0T08_0022_TABLES] + [("add_index", INDEXES[i])
                                                                         for i in sorted(V0T08_0022_INDEXES)]
+    if applied < 9:  # V0-T08 Lot 2B-1 (0023) : trois tables et leurs index.
+        diff += [("add_table", TABLES[t]) for t in V0T08_0023_TABLES] + [("add_index", INDEXES[i])
+                                                                        for i in sorted(V0T08_0023_INDEXES)]
     return diff
 
 
@@ -89,12 +95,12 @@ UNEXPECTED = [
 ]
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_only_exact_pending_pr1_changes_are_removed(applied):
     assert _without_pr1_changes(_expected(applied) + UNEXPECTED, applied) == UNEXPECTED
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8])
 def test_a_missing_expected_pr1_change_fails(applied):
     expected = _expected(applied)
     for index in range(len(expected)):
@@ -102,7 +108,7 @@ def test_a_missing_expected_pr1_change_fails(applied):
             _without_pr1_changes(expected[:index] + expected[index + 1:], applied)
 
 
-@pytest.mark.parametrize("applied", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("applied", [1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_a_pr1_change_after_its_revision_fails(applied):
     for leftover in _expected(applied - 1)[: len(_expected(applied - 1)) - len(_expected(applied))]:
         with pytest.raises(AssertionError):
@@ -110,27 +116,34 @@ def test_a_pr1_change_after_its_revision_fails(applied):
 
 
 def test_at_head_nothing_is_removed():
-    assert _without_pr1_changes(UNEXPECTED, 8) == UNEXPECTED
+    assert _without_pr1_changes(UNEXPECTED, 9) == UNEXPECTED
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 8)
+        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 9)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["auth_abuse_key_state"])], 8)
+        _without_pr1_changes([("add_table", TABLES["auth_abuse_key_state"])], 9)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.http_action)], 8)
+        _without_pr1_changes([("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.http_action)], 9)
     with pytest.raises(AssertionError):
         _without_pr1_changes([("add_column", None, "portfolio_positions",
-                               TABLES["portfolio_positions"].c.position_revision)], 8)
+                               TABLES["portfolio_positions"].c.position_revision)], 9)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["decryptage_turn_reservations"])], 8)
+        _without_pr1_changes([("add_table", TABLES["decryptage_turn_reservations"])], 9)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_constraint", OWNER_UNIQUE)], 8)
-    # V0-T08 Lot 1 : à la tête (0022), ni ses tables ni ses index ne sont masqués.
+        _without_pr1_changes([("add_constraint", OWNER_UNIQUE)], 9)
+    # V0-T08 Lot 1 : une fois 0022 appliquée, ni ses tables ni ses index ne sont masqués.
     for table in V0T08_0022_TABLES:
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_table", TABLES[table])], 8)
+            _without_pr1_changes([("add_table", TABLES[table])], 9)
     for index in sorted(V0T08_0022_INDEXES):
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_index", INDEXES[index])], 8)
+            _without_pr1_changes([("add_index", INDEXES[index])], 9)
+    # V0-T08 Lot 2B-1 : à la tête (0023), ni ses tables ni ses index ne sont masqués.
+    for table in V0T08_0023_TABLES:
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([("add_table", TABLES[table])], 9)
+    for index in sorted(V0T08_0023_INDEXES):
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([("add_index", INDEXES[index])], 9)
 
 
 def test_blocked_until_is_removed_only_as_a_pending_0018_column():
@@ -205,7 +218,7 @@ def test_pg_premature_pr1_object_is_never_hidden(pg_url, pg_engine):  # noqa: F8
 
 
 @pytest.mark.parametrize("revision", [PR1_0015, PR1_0016, PR1_0017, PR2_0018, PR4_0019, PR7_0020, PR9B1_0021,
-                                      V0T08_0022])
+                                      V0T08_0022, V0T08_0023])
 def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine, revision):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", revision)
@@ -219,6 +232,7 @@ def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine,
         PR7_0020: "ALTER TABLE portfolio_positions DROP COLUMN position_revision",
         PR9B1_0021: "DROP TABLE decryptage_turn_reservations",
         V0T08_0022: "DROP INDEX ix_product_activity_events_purge_after_at",
+        V0T08_0023: "DROP INDEX ix_product_activity_sessions_open_idle_expiry",
     }[revision]
     with pg_engine.begin() as conn:
         conn.execute(sa.text(statement))
