@@ -201,7 +201,8 @@ def test_the_runner_retains_the_attestation_only_after_the_transaction_block():
 
 def test_only_the_ack_bridge_and_the_portfolio_adapter_produce_attestations():
     assert _att_calls(BRIDGE) == {("_acknowledge", "attach"), ("_acknowledge", "delivery_ack")}
-    assert _att_calls(ADAPTERS) == {("_acknowledge_delivery", "unwrap"), ("_acknowledge_delivery", "Attested"),
+    # Correctif d'audit : plus aucune construction directe d'enveloppe hors du module (attach TOTAL).
+    assert _att_calls(ADAPTERS) == {("_acknowledge_delivery", "unwrap"), ("_acknowledge_delivery", "attach"),
                                     ("_attest_portfolio", "attach"), ("_attest_portfolio", "portfolio")}
     assert _att_calls(RUNNER) == {("_run", "unwrap"), ("_retain", "bound")}
     for path in sorted(AUTHZ_HTTP.glob("*.py")):
@@ -294,3 +295,111 @@ def test_the_boundary_never_imports_product_analytics_and_analytics_never_sees_a
         for path in analytics.rglob("*.py"):
             text = path.read_text(encoding="utf-8")
             assert "attestation" not in text.lower() and "authz_f2" not in text, path.name
+
+
+# --------------------------------------------------------------------------
+# 5. Correctif d'audit PR 0 : construction et transport des enveloppes TOTAUX
+# --------------------------------------------------------------------------
+
+def _raise(*args, **kwargs):
+    raise RuntimeError("panne d'attestation injectée")
+
+
+class _NotATuple:
+    """Type d'enveloppe impossible : tuple.__new__ le refuse (TypeError)."""
+
+
+# Pannes qui doivent abandonner l'attestation SEULE (valeur métier intacte,
+# aucune attestation exposée). Partagées avec les tests PostgreSQL.
+DROPPING_FAULTS = ("attestation_init", "factory_build", "envelope_type", "envelope_verification", "binding",
+                   "foreign_object")
+
+
+def inject_fault(monkeypatch, fault):
+    if fault == "attestation_init":      # construction du contrat
+        monkeypatch.setattr(att.BusinessAttestation, "__post_init__", _raise)
+    elif fault == "factory_build":       # fabrique interne
+        monkeypatch.setattr(att, "_build", _raise)
+    elif fault == "envelope_type":       # construction de l'enveloppe
+        monkeypatch.setattr(att, "_ENVELOPE", _NotATuple)
+    elif fault == "envelope_verification":  # enveloppe construite mais jugée non conforme
+        monkeypatch.setattr(att, "ENVELOPE_SIZE", 3)
+    elif fault == "binding":             # liaison après COMMIT (runner)
+        monkeypatch.setattr(att, "bound", _raise)
+    elif fault == "foreign_object":      # objet transporté qui n'est pas une attestation
+        monkeypatch.setattr(att, "delivery_ack", lambda *a, **k: object())
+        monkeypatch.setattr(att, "portfolio", lambda *a, **k: object())
+    elif fault == "envelope_accessors":  # méthodes redéfinissables de l'enveloppe : jamais utilisées
+        monkeypatch.setattr(att.Attested, "value", property(_raise))
+        monkeypatch.setattr(att.Attested, "attestation", property(_raise))
+    else:
+        raise AssertionError(fault)
+
+
+@pytest.mark.parametrize("fault", ["attestation_init", "factory_build"])
+def test_factories_stay_total_under_injected_faults(monkeypatch, fault):
+    inject_fault(monkeypatch, fault)
+    assert att.delivery_ack(OWNER, OP, first=True) is None
+    assert att.portfolio(OWNER, att.PORTFOLIO_CREATE, OP, att.PORTFOLIO_CREATED) is None
+
+
+@pytest.mark.parametrize("fault", ["envelope_type", "envelope_verification"])
+def test_attach_returns_the_exact_original_value_when_the_envelope_fails(monkeypatch, fault):
+    a = att.portfolio(OWNER, att.PORTFOLIO_CREATE, OP, att.PORTFOLIO_CREATED)
+    inject_fault(monkeypatch, fault)
+    for value in (object(), results, None, (1, 2), _adapters.ABSENT):
+        assert att.attach(value, a) is value  # même objet : jamais une copie ni une substitution
+        assert att.unwrap(att.attach(value, a)) == (value, None)  # aucune attestation transportée
+
+
+def test_the_envelope_is_verified_before_it_leaves_attach():
+    a = att.portfolio(OWNER, att.PORTFOLIO_CREATE, OP, att.PORTFOLIO_CREATED)
+    value = object()
+    envelope = att.attach(value, a)
+    assert type(envelope) is att.Attested and tuple.__len__(envelope) == att.ENVELOPE_SIZE
+    assert tuple.__getitem__(envelope, 0) is value and tuple.__getitem__(envelope, 1) is a
+    assert att.unwrap(envelope) == (value, a) and att.unwrap(envelope)[0] is value
+
+
+def test_transport_never_uses_overridable_envelope_methods(monkeypatch):
+    a = att.portfolio(OWNER, att.PORTFOLIO_CREATE, OP, att.PORTFOLIO_CREATED)
+    value = object()
+    inject_fault(monkeypatch, "envelope_accessors")
+    envelope = att.attach(value, a)
+    assert type(envelope) is att.Attested and att.unwrap(envelope) == (value, a)
+
+
+@pytest.mark.parametrize("value", [None, 0, "", (), ("a", "b"), [1, 2], {"value": 1}, object(), results,
+                                   _adapters.ABSENT, _adapters.CONFLICT, _adapters.IDEMPOTENCY_CONFLICT])
+def test_unwrap_is_total_for_every_business_value(value):
+    unwrapped, attestation = att.unwrap(value)
+    assert unwrapped is value and attestation is None  # un tuple ordinaire n'est jamais une enveloppe
+
+
+@pytest.mark.parametrize("items", [(), (1,), (1, 2, 3)])
+def test_a_malformed_envelope_is_a_closed_refusal_never_a_substituted_value(items):
+    """Impossible à produire par attach (taille vérifiée) ; si elle existait, sa
+    valeur métier ne serait pas restituable : refus fermé (ROLLBACK, 503), jamais
+    une enveloppe ni une valeur rendue comme résultat."""
+    with pytest.raises(att.AttestationInvalid):
+        att.unwrap(tuple.__new__(att.Attested, items))
+
+
+def test_bound_is_total():
+    class Exploding:
+        def __getattribute__(self, name):
+            raise RuntimeError("attribut illisible")
+
+    exploding = Exploding()
+    assert att.bound(exploding, owner_user_id=OWNER, operation=att.PORTFOLIO_CREATE, operation_id=OP) is False
+
+
+def test_transport_functions_contain_their_own_guards():
+    functions = _functions(MODULE)
+    for name in ("attach", "delivery_ack", "portfolio", "bound", "_build"):
+        assert any(isinstance(n, ast.Try) for n in ast.walk(functions[name])), name
+    attach = ast.unparse(functions["attach"])
+    assert "tuple.__new__(_ENVELOPE, (value, attestation))" in attach and "return value" in attach
+    unwrap = ast.unparse(functions["unwrap"])
+    assert "type(value) is not _ENVELOPE" in unwrap and "tuple.__getitem__(value, 0)" in unwrap
+    assert ".value" not in unwrap and ".attestation" not in unwrap  # aucune méthode redéfinissable

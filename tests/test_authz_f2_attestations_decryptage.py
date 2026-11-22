@@ -97,7 +97,8 @@ def refused(env, issued, command, status, **kwargs):
 def single_capture(env, done):
     link = env.link(done.assistant_turn_id)
     assert link["capture_state"] == "captured" and link["response_action"] == "opened_event"
-    assert len([e for e in env.events() if e["status"] == "open"]) == 1
+    assert len([e for e in env.events() if e["status"] == "open"
+                and e["conversation_key"] == done.conversation_key]) == 1  # un seul event ouvert par la réponse
     assert env.delivery(done.assistant_turn_id)["status"] == "delivered"
 
 
@@ -405,3 +406,89 @@ def test_the_adapter_still_checks_the_bare_bridge_view(env, alice, monkeypatch):
 
     monkeypatch.setattr(bridge, "_execute", substituted)
     refused(env, alice, done.ack(), UNAVAILABLE)
+
+
+# --------------------------------------------------------------------------
+# 6. Correctif d'audit PR 0 : pannes de construction et de transport injectées
+# --------------------------------------------------------------------------
+
+from tests.test_authz_f2_attestations import DROPPING_FAULTS, inject_fault  # noqa: E402
+
+
+def _statements(env, action):
+    """(résultat, texte SQL exécuté dans l'ordre) : même texte = mêmes
+    instructions, mêmes verrous."""
+    log = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        log.append(" ".join(statement.split()))
+
+    sa.event.listen(env.engine, "before_cursor_execute", record)
+    try:
+        return action(), log
+    finally:
+        sa.event.remove(env.engine, "before_cursor_execute", record)
+
+
+@pytest.mark.parametrize("fault", DROPPING_FAULTS)
+def test_an_attestation_fault_never_fails_the_ack_nor_changes_anything_else(env, alice, bob, monkeypatch, fault):
+    # Référence SANS panne : même parcours chez un utilisateur indépendant
+    # (l'état cognitif est propre à chaque utilisateur).
+    reference = env.finalized(bob, conversation_key="conv-bob")
+    done = env.finalized(alice)
+    ref_out, ref_sql = _statements(env, lambda: attested(env, bob, reference.ack()))
+    assert ref_out.attestation == expected(reference, att.DELIVERY_FIRST_ACK, USER_B)
+    inject_fault(monkeypatch, fault)
+    out, sql = _statements(env, lambda: attested(env, alice, done.ack()))
+    # 1. ACK réussi ; 2. résultat public identique ; 3. aucune attestation exposée.
+    assert out.outcome.status == AUTHORIZED and out.attestation is None, out
+    assert type(out.outcome.value) is bridge.DeliveryAcknowledged
+    assert out.outcome.value == bridge.DeliveryAcknowledged(done.assistant_turn_id, "delivered",
+                                                            ref_out.outcome.value.response_action)
+    assert out.outcome.principal.user_id == USER_A
+    single_capture(env, done)
+    # 5. Mêmes instructions SQL (donc mêmes verrous) que sans panne.
+    assert sql == ref_sql
+    # Rejeu sous la même panne : réussi, sans écriture, sans attestation.
+    before = env.full_snapshot()
+    replay = attested(env, alice, done.ack())
+    assert replay.outcome.status == AUTHORIZED and replay.attestation is None
+    assert replay.outcome.value == out.outcome.value and env.full_snapshot() == before
+    historical = env.c2(alice, done.ack())  # run() : contrat historique exact
+    assert type(historical) is AuthorizationOutcome and historical.value == out.outcome.value
+
+
+def test_overridable_envelope_methods_are_never_used_by_the_transport(env, alice, monkeypatch):
+    done = env.finalized(alice)
+    inject_fault(monkeypatch, "envelope_accessors")
+    acked(env, alice, done, att.DELIVERY_FIRST_ACK)  # transport natif : attestation intacte
+
+
+@pytest.mark.parametrize("fault", DROPPING_FAULTS)
+def test_refusals_and_rollbacks_are_unchanged_under_an_attestation_fault(env, alice, bob, monkeypatch, fault):
+    done = env.finalized(alice)
+    with monkeypatch.context() as patch:
+        inject_fault(patch, fault)
+        refused(env, bob, done.ack(), NOT_FOUND)
+        refused(env, alice, done.ack(conversation_key="conv-autre"), REVISION_CONFLICT)
+
+        def crash(point):
+            if point == "executed":
+                raise RuntimeError("panne métier avant COMMIT (simulée)")
+
+        refused(env, alice, done.ack(), UNAVAILABLE, hook=crash)  # ROLLBACK métier légitime conservé
+        assert env.delivery(done.assistant_turn_id)["status"] == "pending"
+    acked(env, alice, done, att.DELIVERY_FIRST_ACK)  # panne retirée : rien n'avait survécu
+
+
+@pytest.mark.parametrize("fault", ["attestation_init", "envelope_type", "binding"])
+def test_the_http_ack_is_byte_identical_under_an_attestation_fault(env, alice, monkeypatch, fault):
+    done = env.finalized(alice)
+    inject_fault(monkeypatch, fault)
+    app = env.c3_app()
+    payload = body_of(identity_fields(done.reservation_id, done.assistant_turn_id))
+    first, second = post(app, ACK, payload, c3_headers(alice)), post(app, ACK, payload, c3_headers(alice))
+    expected_body = ('{"assistant_turn_id":"' + str(done.assistant_turn_id) + '","delivery_status":"delivered"}')
+    assert first.status_code == second.status_code == 200 and first.content == second.content
+    assert first.content.replace(b" ", b"") == expected_body.encode()
+    single_capture(env, done)

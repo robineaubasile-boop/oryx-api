@@ -2092,7 +2092,7 @@ def _acknowledge_delivery(conn, ctx, command, locked):
             or outcome.response_action not in bridge.RESPONSE_ACTIONS:
         raise DecryptageUnavailable("ACK hors contrat", "decryptage_ack_incoherent")
     if attestation is not None:
-        return att.Attested(outcome, attestation)  # vue nue contrôlée ci-dessus, inchangée
+        return att.attach(outcome, attestation)  # transport TOTAL : panne = vue nue contrôlée ci-dessus
     return outcome
 
 

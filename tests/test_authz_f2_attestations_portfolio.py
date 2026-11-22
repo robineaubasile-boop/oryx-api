@@ -374,3 +374,103 @@ def test_an_attestation_bound_to_another_owner_is_dropped_never_the_operation(en
     out = attested(env, alice, create_command())
     assert out.outcome.status == AUTHORIZED and out.attestation is None
     assert "attestation=dropped" in caplog.text and USER_B not in caplog.text and USER_A not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# 7. Correctif d'audit PR 0 : pannes de construction et de transport injectées
+# --------------------------------------------------------------------------
+
+from tests.test_authz_f2_attestations import DROPPING_FAULTS, inject_fault  # noqa: E402
+
+
+def _statements(env, action):
+    """(résultat, texte SQL exécuté dans l'ordre) : même texte = mêmes
+    instructions, mêmes verrous."""
+    log = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        log.append(" ".join(statement.split()))
+
+    sa.event.listen(env.engine, "before_cursor_execute", record)
+    try:
+        return action(), log
+    finally:
+        sa.event.remove(env.engine, "before_cursor_execute", record)
+
+
+def _scenario(env, issued, kind, fault=None, monkeypatch=None):
+    """Prépare l'état SANS panne, puis exécute l'opération `kind` (sous la
+    panne si demandée) : (AttestedOutcome, SQL, commande, position)."""
+    if kind == "replay":
+        command = create_command()
+        attested(env, issued, command)
+        position = None
+    elif kind == "create":
+        command, position = create_command(), None
+    else:
+        position = env.insert_position(user_id=USER_A, quantity=4.5,
+                                       purchase_price=100.0, target_percent=10.0)
+        command = {"update": replace_command(position, 0, quantity="5"), "noop": replace_command(position, 0),
+                   "delete": delete_command(position, 0)}[kind]
+    if fault is not None:
+        inject_fault(monkeypatch, fault)
+    out, sql = _statements(env, lambda: attested(env, issued, command))
+    return out, sql, command, position
+
+
+def _same_public_result(outcome, command, receipts):
+    operation = _adapters_operation(command)
+    assert outcome.status == AUTHORIZED and type(outcome.value) is results.PortfolioWriteResult, outcome
+    assert results.same_result(outcome.value, operation, command.operation_id)
+    receipt = receipts[command.operation_id]
+    assert results.canonical_json(results.parse_json(receipt["payload_text"])) == outcome.value.body
+
+
+@pytest.mark.parametrize("kind", ["create", "update", "noop", "delete", "replay"])
+@pytest.mark.parametrize("fault", DROPPING_FAULTS)
+def test_an_attestation_fault_never_fails_the_portfolio_write_nor_changes_anything_else(env, alice, monkeypatch,
+                                                                                        fault, kind):
+    _, ref_sql, _, _ = _scenario(env, alice, kind)  # même opération sans panne : référence SQL
+    out, sql, command, position = _scenario(env, alice, kind, fault, monkeypatch)
+    # 1. écriture réussie ; 3. aucune attestation exposée.
+    assert out.attestation is None, out
+    # 2. résultat public et reçu canoniques exacts, état durable conforme à la branche.
+    _same_public_result(out.outcome, command, {r["operation_id"]: r for r in env.receipts()})
+    if kind == "update":
+        assert env.position(position)["position_revision"] == 1 and out.outcome.value.view.position_revision == 1
+    elif kind == "noop":
+        assert env.position(position)["position_revision"] == 0
+    elif kind == "delete":
+        assert env.position(position) is None and out.outcome.value.deleted_revision == 0
+    # 5. Mêmes instructions SQL (donc mêmes verrous) que sans panne.
+    assert sql == ref_sql
+    # run() : contrat historique exact sous la même panne (rejeu du même reçu, octets identiques).
+    historical = env.runner().run(alice.credential(), command)
+    assert type(historical) is AuthorizationOutcome and historical.value == out.outcome.value
+    assert historical.value.body == out.outcome.value.body
+
+
+def test_overridable_envelope_methods_are_never_used_by_the_portfolio_transport(env, alice, monkeypatch):
+    inject_fault(monkeypatch, "envelope_accessors")
+    ok(env, alice, create_command(), att.PORTFOLIO_CREATED)
+
+
+@pytest.mark.parametrize("fault", DROPPING_FAULTS)
+def test_portfolio_refusals_and_rollbacks_are_unchanged_under_an_attestation_fault(env, alice, monkeypatch, fault):
+    position = env.insert_position(revision=3)
+    command = create_command(quantity="4")
+    ok(env, alice, command, att.PORTFOLIO_CREATED)
+    theirs = env.insert_position(user_id=USER_B)
+    retried = create_command()
+    with monkeypatch.context() as patch:
+        inject_fault(patch, fault)
+        refused(env, alice, replace_command(position, 2, quantity="9"), REVISION_CONFLICT)
+        refused(env, alice, create_command(command.operation_id, quantity="7"), IDEMPOTENCY_CONFLICT)
+        refused(env, alice, replace_command(theirs, 0, quantity="9"), NOT_FOUND)
+
+        def crash(point):
+            if point == "receipt_written":
+                raise RuntimeError("panne métier avant COMMIT (simulée)")
+
+        refused(env, alice, retried, UNAVAILABLE, hook=crash)  # ROLLBACK métier légitime conservé
+    ok(env, alice, retried, att.PORTFOLIO_CREATED)  # panne retirée : rien n'avait survécu
