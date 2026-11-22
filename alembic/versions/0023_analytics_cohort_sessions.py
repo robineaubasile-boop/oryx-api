@@ -1,11 +1,13 @@
 """V0-T08 Lot 2B-1 : cohorte pré-J0, calendrier d'admission et sessions
-d'activité produit — socle PostgreSQL DORMANT (EXPAND).
+d'activité produit — socle PostgreSQL DORMANT (EXPAND). Révision R1 (audit
+de la PR #249, non fusionnée) : registre des clés d'interaction et clôture
+volontaire.
 
 Revision ID: 0023_analytics_cohort_sessions
 Revises: 0022_product_analytics_v1
 Create Date: 2026-11-22
 
-Migration purement additive : trois tables nouvelles, aucune table, colonne,
+Migration purement additive : quatre tables nouvelles, aucune table, colonne,
 contrainte ni index existant n'est modifié ; les fichiers 0001 à 0022 ne
 sont pas modifiés.
 
@@ -48,12 +50,29 @@ sont pas modifiés.
    product_campaign_participants). Environnement de navigation identifié
    par une empreinte SHA-256 (environment_digest, 64 hexadécimaux), jamais
    par l'identifiant brut. Inactivité de trente minutes imposée en base
-   (idle_expires_at = last_activity_at + 30 minutes) ; finalisation
-   (finalized_at) au plus tôt à l'expiration. Une seule session OUVERTE par
-   (campagne, utilisateur, environnement) (index unique partiel) ; une clé
-   d'interaction d'ouverture n'ouvre qu'une session (UNIQUE). La borne
-   last_activity_at < window_end_at (aucune session ne prolonge les douze
-   jours) est inter-tables : imposée par le service.
+   (idle_expires_at = last_activity_at + 30 minutes). Fin de visite
+   (finalized_at, end_reason, présents ensemble) :
+   - 'inactivity' : au plus tôt à l'expiration (finalized_at >=
+     idle_expires_at) ;
+   - 'logout' (déconnexion volontaire) : AVANT l'expiration et jamais avant
+     la dernière activité (last_activity_at <= finalized_at <
+     idle_expires_at) ; aucune activité n'est déplacée ni inventée.
+   Une seule session OUVERTE par (campagne, utilisateur, environnement)
+   (index unique partiel). La borne last_activity_at < window_end_at
+   (aucune session ne prolonge les douze jours) est inter-tables : imposée
+   par le service.
+
+4. product_activity_session_interactions : registre des clés d'interaction
+   ACCEPTÉES (idempotence des rejeux, même anciens ou concurrents). PK
+   (campaign_id, user_id, interaction_key) : une clé n'est acceptée qu'une
+   fois par participation ; son rejeu renvoie la visite d'origine, sans
+   ouverture ni prolongation. Contenu minimal : la clé aléatoire, son type
+   (interaction_kind 'activity' ou 'close'), l'empreinte d'environnement,
+   la session concernée et l'instant serveur d'enregistrement ; aucune
+   donnée de contenu. FK composite vers la session (même campagne, même
+   utilisateur, même environnement) ; session absente seulement pour une
+   clôture sans visite ouverte (rejeu sûr). Ce n'est PAS le registre
+   provisoire des preuves métier du lot 2B-2.
 
 Aucun backfill, aucune ligne insérée, aucun trigger, aucune fonction
 persistée, aucun ENUM, aucune extension, aucun server_default. Aucune route,
@@ -65,11 +84,12 @@ auth_operations, users, product_campaigns et product_campaign_participants
 prennent des verrous brefs sur ces tables à la création (tables existantes
 non réécrites).
 
-Downgrade PROTÉGÉ, dans une seule transaction : LOCK des trois tables IN
+Downgrade PROTÉGÉ, dans une seule transaction : LOCK des quatre tables IN
 ACCESS EXCLUSIVE MODE dans un ordre déterministe (cohortes, places,
-sessions), refus (exception, rien n'est supprimé) si l'une d'elles contient
-une ligne — contrôlées dans l'ordre sessions, places, cohortes (message
-propre à chaque table) — sinon suppression des tables enfants puis parente
+sessions, interactions), refus (exception, rien n'est supprimé) si l'une
+d'elles contient une ligne — contrôlées dans l'ordre interactions, sessions,
+places, cohortes (message propre à chaque table) — sinon suppression des
+tables enfants puis parentes
 (retour exact à 0022, sans CASCADE). En mode offline, le contrôle est un
 bloc DO évalué à l'exécution du script.
 """
@@ -93,12 +113,15 @@ LOCK_GUARDS = (
 COHORTS = "product_campaign_cohorts"
 SEATS = "product_cohort_seats"
 SESSIONS = "product_activity_sessions"
-TABLES = (COHORTS, SEATS, SESSIONS)
+INTERACTIONS = "product_activity_session_interactions"
+TABLES = (COHORTS, SEATS, SESSIONS, INTERACTIONS)
 
 WAVE_0_SEAT_COUNT = 5
 BINDING_OPERATION_KIND = "invitation_activation"
 BINDING_OPERATION_STATUS = "committed"
 SESSION_INACTIVITY = "30 minutes"
+SESSION_END_REASONS = ("inactivity", "logout")
+INTERACTION_KINDS = ("activity", "close")
 
 # Expressions exactes, recopiées par core/models.py (concordance testée).
 COHORT_CHECKS = (
@@ -130,7 +153,18 @@ SESSION_CHECKS = (
     ("ck_product_activity_sessions_environment_digest", "environment_digest ~ '^[0-9a-f]{64}$'"),
     ("ck_product_activity_sessions_activity", "last_activity_at >= opened_at"),
     ("ck_product_activity_sessions_idle_expiry", "idle_expires_at = last_activity_at + interval '30 minutes'"),
-    ("ck_product_activity_sessions_finalized", "finalized_at IS NULL OR finalized_at >= idle_expires_at"),
+    ("ck_product_activity_sessions_end", "(finalized_at IS NULL) = (end_reason IS NULL)"),
+    ("ck_product_activity_sessions_end_reason", "end_reason IS NULL OR end_reason IN ('inactivity', 'logout')"),
+    ("ck_product_activity_sessions_finalized",
+     "finalized_at IS NULL "
+     "OR (end_reason = 'inactivity' AND finalized_at >= idle_expires_at) "
+     "OR (end_reason = 'logout' AND finalized_at >= last_activity_at AND finalized_at < idle_expires_at)"),
+)
+INTERACTION_CHECKS = (
+    ("ck_product_activity_session_interactions_kind", "interaction_kind IN ('activity', 'close')"),
+    ("ck_product_activity_session_interactions_environment_digest", "environment_digest ~ '^[0-9a-f]{64}$'"),
+    ("ck_product_activity_session_interactions_session",
+     "session_id IS NOT NULL OR interaction_kind = 'close'"),
 )
 
 COHORT_CAMPAIGN_FK = "product_campaign_cohorts_campaign_id_fkey"
@@ -144,15 +178,18 @@ SEAT_NUMBER_UNIQUE = "uq_product_cohort_seats_campaign_seat_number"
 SEAT_INVITATION_UNIQUE = "uq_product_cohort_seats_campaign_invitation"
 SEAT_USER_UNIQUE = "uq_product_cohort_seats_campaign_user"
 SESSION_PARTICIPANT_FK = "product_activity_sessions_participant_fkey"
-SESSION_OPENING_UNIQUE = "uq_product_activity_sessions_opening_key"
+SESSION_IDENTITY_UNIQUE = "uq_product_activity_sessions_identity"
+INTERACTION_PRIMARY_KEY = "product_activity_session_interactions_pkey"
+INTERACTION_PARTICIPANT_FK = "product_activity_session_interactions_participant_fkey"
+INTERACTION_SESSION_FK = "product_activity_session_interactions_session_fkey"
 SESSION_OPEN_UNIQUE = "uq_product_activity_sessions_open_environment"
 SESSION_OPEN_WHERE = "finalized_at IS NULL"
 SESSION_IDLE_INDEX = "ix_product_activity_sessions_open_idle_expiry"
 
 # Ordre déterministe des verrous : la table parente, puis ses dépendantes.
-DOWNGRADE_LOCK = f"LOCK TABLE {COHORTS}, {SEATS}, {SESSIONS} IN ACCESS EXCLUSIVE MODE"
+DOWNGRADE_LOCK = f"LOCK TABLE {COHORTS}, {SEATS}, {SESSIONS}, {INTERACTIONS} IN ACCESS EXCLUSIVE MODE"
 # Ordre des contrôles : chaque table examinée à part (message propre).
-BLOCKING_ORDER = (SESSIONS, SEATS, COHORTS)
+BLOCKING_ORDER = (INTERACTIONS, SESSIONS, SEATS, COHORTS)
 
 
 def downgrade_message(table: str) -> str:
@@ -161,7 +198,7 @@ def downgrade_message(table: str) -> str:
 
 
 def upgrade() -> None:
-    """Trois tables analytiques vides et leurs index ; rien d'autre."""
+    """Quatre tables analytiques vides et leurs index ; rien d'autre."""
     for guard in LOCK_GUARDS:
         op.execute(guard)
     op.create_table(
@@ -216,27 +253,45 @@ def upgrade() -> None:
         sa.Column("campaign_id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("environment_digest", sa.String(length=64), nullable=False),
-        sa.Column("opening_interaction_key", sa.Uuid(), nullable=False),
-        sa.Column("last_interaction_key", sa.Uuid(), nullable=False),
         sa.Column("opened_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("idle_expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("finalized_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("end_reason", sa.String(length=16), nullable=True),
         *(sa.CheckConstraint(expression, name=name) for name, expression in SESSION_CHECKS),
         sa.ForeignKeyConstraint(["campaign_id", "user_id"],
                                 ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
                                 name=SESSION_PARTICIPANT_FK),
         sa.PrimaryKeyConstraint("id", name="product_activity_sessions_pkey"),
-        sa.UniqueConstraint("campaign_id", "user_id", "opening_interaction_key", name=SESSION_OPENING_UNIQUE),
+        sa.UniqueConstraint("id", "campaign_id", "user_id", "environment_digest", name=SESSION_IDENTITY_UNIQUE),
     )
     op.create_index(SESSION_OPEN_UNIQUE, SESSIONS, ["campaign_id", "user_id", "environment_digest"], unique=True,
                     postgresql_where=sa.text(SESSION_OPEN_WHERE))
     op.create_index(SESSION_IDLE_INDEX, SESSIONS, ["campaign_id", "idle_expires_at"],
                     postgresql_where=sa.text(SESSION_OPEN_WHERE))
+    op.create_table(
+        INTERACTIONS,
+        sa.Column("campaign_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.String(), nullable=False),
+        sa.Column("interaction_key", sa.Uuid(), nullable=False),
+        sa.Column("interaction_kind", sa.String(length=16), nullable=False),
+        sa.Column("environment_digest", sa.String(length=64), nullable=False),
+        sa.Column("session_id", sa.Uuid(), nullable=True),
+        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False),
+        *(sa.CheckConstraint(expression, name=name) for name, expression in INTERACTION_CHECKS),
+        sa.ForeignKeyConstraint(["campaign_id", "user_id"],
+                                ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
+                                name=INTERACTION_PARTICIPANT_FK),
+        sa.ForeignKeyConstraint(["session_id", "campaign_id", "user_id", "environment_digest"],
+                                [f"{SESSIONS}.id", f"{SESSIONS}.campaign_id", f"{SESSIONS}.user_id",
+                                 f"{SESSIONS}.environment_digest"],
+                                name=INTERACTION_SESSION_FK),
+        sa.PrimaryKeyConstraint("campaign_id", "user_id", "interaction_key", name=INTERACTION_PRIMARY_KEY),
+    )
 
 
 def downgrade() -> None:
-    """Retour exact à 0022, seulement si les trois tables sont vides."""
+    """Retour exact à 0022, seulement si les quatre tables sont vides."""
     for guard in LOCK_GUARDS:
         op.execute(guard)
     op.execute(DOWNGRADE_LOCK)
@@ -252,6 +307,7 @@ def downgrade() -> None:
         for table in BLOCKING_ORDER:
             if bind.execute(sa.text(f"SELECT EXISTS (SELECT 1 FROM {table})")).scalar_one():
                 raise RuntimeError(downgrade_message(table))
+    op.drop_table(INTERACTIONS)
     op.drop_table(SESSIONS)
     op.drop_table(SEATS)
     op.drop_table(COHORTS)

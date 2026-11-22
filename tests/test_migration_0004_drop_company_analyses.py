@@ -199,7 +199,8 @@ V0T08_0022_INDEXES = {
     "ix_product_activity_events_purge_after_at", "uq_product_activity_events_visit_session_start",
     "uq_product_activity_events_source_operation",
 }
-V0T08_0023_TABLES = ("product_campaign_cohorts", "product_cohort_seats", "product_activity_sessions")
+V0T08_0023_TABLES = ("product_campaign_cohorts", "product_cohort_seats", "product_activity_sessions",
+                     "product_activity_session_interactions")
 V0T08_0023_INDEXES = {"uq_product_activity_sessions_open_environment", "ix_product_activity_sessions_open_idle_expiry"}
 V0T08_TABLES = set(V0T08_0022_TABLES) | set(V0T08_0023_TABLES)
 HEAD = V0T08_0023

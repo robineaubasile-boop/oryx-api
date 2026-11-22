@@ -83,7 +83,10 @@ Concurrence et horloge (convention 2A) : verrous consultatifs d'identité
 puis campagne (FOR SHARE ou FOR UPDATE) puis place, toujours dans cet ordre ;
 maintenant est lu APRÈS tous les verrous dont dépend la décision. INSERT et
 UPDATE isolés dans des SAVEPOINT pour traduire une course perdue sur une
-contrainte UNIQUE (défense finale) en CohortConflict.
+contrainte UNIQUE (défense finale) en CohortConflict ; toute mutation ORM a
+lieu À L'INTÉRIEUR du SAVEPOINT (begin_nested() vide d'abord les changements
+en attente : _flush_or_conflict), de sorte qu'une collision n'écrit rien et
+laisse la transaction de l'appelant utilisable.
 
 Dépendance F2 : ces services LISENT invitations et auth_operations (aucune
 écriture, aucun verrou de ligne, aucun module F2 importé). F2 étant dormant,
@@ -172,6 +175,12 @@ def _seat_where(db, *criteria, lock: str | None = None) -> ProductCohortSeat | N
     return db.execute(statement.execution_options(populate_existing=True)).scalar_one_or_none()
 
 
+def _seat_of_user(db, campaign_id, user_id) -> ProductCohortSeat | None:
+    """Place déjà occupée par cette identité dans la campagne (contrôle
+    préalable ; l'UNIQUE (campaign_id, user_id) reste la défense finale)."""
+    return _seat_where(db, ProductCohortSeat.campaign_id == campaign_id, ProductCohortSeat.user_id == user_id)
+
+
 def _has_participations(db, campaign_id) -> bool:
     return db.execute(select(ProductCampaignParticipant.user_id).where(
         ProductCampaignParticipant.campaign_id == campaign_id).limit(1)).first() is not None
@@ -210,13 +219,23 @@ def _check_calendar(campaign: ProductCampaign, admission_closes_at: datetime, no
             "finalisation", reason="calendar_incompatible")
 
 
-def _flush_or_conflict(db, objects=()) -> None:
-    """flush dans un SAVEPOINT ; violation d'une unicité de cohorte ->
-    CohortConflict (le SAVEPOINT annulé laisse la transaction utilisable)."""
+def _flush_or_conflict(db, objects=(), *, apply=None) -> None:
+    """Ajouts, mutations (apply) ET flush à l'intérieur d'un même SAVEPOINT ;
+    violation d'une unicité de cohorte -> CohortConflict, toute autre
+    IntegrityError propagée ; dans les deux cas seul le SAVEPOINT est annulé
+    (les objets modifiés sont expirés puis relus) et la transaction de
+    l'appelant reste utilisable.
+
+    Audit R1 : Session.begin_nested() vide d'abord les changements en
+    attente, quel que soit autoflush ; une mutation faite AVANT lui serait
+    donc écrite hors SAVEPOINT, et une collision y casserait la transaction
+    de l'appelant. Aucune mutation de ce module ne précède ce SAVEPOINT."""
     try:
         with db.begin_nested():
             for item in objects:
                 db.add(item)
+            if apply is not None:
+                apply()
             db.flush()
     except IntegrityError as exc:
         for constraint in SEAT_UNIQUES + (COHORT_PRIMARY_KEY,):
@@ -387,22 +406,20 @@ def bind_seat_to_activated_invitation(db, *, campaign_id: uuid.UUID,
         raise CohortConflict(f"place {seat_id} : déjà rattachée (aucune réattribution)")
     if now >= cohort.admission_closes_at:
         raise CohortRefused(f"campagne {campaign_id} : date limite d'admission atteinte", reason="admission_closed")
-    other = _seat_where(db, ProductCohortSeat.campaign_id == campaign_id, ProductCohortSeat.user_id == proof.user_id)
+    other = _seat_of_user(db, campaign_id, proof.user_id)
     if other is not None:
         raise CohortConflict(f"campagne {campaign_id} : identité déjà rattachée à la place {other.id}")
     if now < proof.committed_at:
         raise CohortRefused(f"place {seat_id} : horloge antérieure à l'activation", reason="clock_regression")
-    seat.user_id = proof.user_id
-    seat.binding_operation_id = proof.id
-    seat.binding_operation_kind = INVITATION_ACTIVATION
-    seat.binding_operation_status = COMMITTED
-    seat.binding_committed_at = proof.committed_at
-    seat.bound_at = now
-    try:
-        _flush_or_conflict(db)
-    except CohortConflict:
-        db.expire(seat)
-        raise
+
+    def bind():
+        seat.user_id = proof.user_id
+        seat.binding_operation_id = proof.id
+        seat.binding_operation_kind = INVITATION_ACTIVATION
+        seat.binding_operation_status = COMMITTED
+        seat.binding_committed_at = proof.committed_at
+        seat.bound_at = now
+    _flush_or_conflict(db, apply=bind)
     return seat, True
 
 
@@ -433,9 +450,11 @@ def record_seat_authorization(db, *, campaign_id: uuid.UUID, user_id: str,
         raise CohortRefused(f"campagne {campaign_id} : date limite d'admission atteinte", reason="admission_closed")
     if now < seat.bound_at:
         raise CohortRefused(f"place {seat.id} : horloge antérieure au rattachement", reason="clock_regression")
-    seat.authorization_recorded_at = now
-    seat.notice_version = notice_version
-    db.flush()
+
+    def authorize():
+        seat.authorization_recorded_at = now
+        seat.notice_version = notice_version
+    _flush_or_conflict(db, apply=authorize)
     return seat, True
 
 

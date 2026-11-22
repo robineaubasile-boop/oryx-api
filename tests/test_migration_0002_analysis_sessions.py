@@ -249,6 +249,7 @@ def test_model_does_not_touch_historical_tables():
         "product_campaigns", "product_campaign_participants", "product_activity_events",
         # V0-T08 Lot 2B-1 (0023, testée à part) : cohorte et sessions d'activité dormantes.
         "product_campaign_cohorts", "product_cohort_seats", "product_activity_sessions",
+        "product_activity_session_interactions",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables

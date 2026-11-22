@@ -3,7 +3,7 @@
 correspondants.
 
 1. Sans base : maillon 0022 -> 0023 (tête unique), identifiant <= 32
-   caractères, fichiers 0001 à 0022 inchangés, SQL offline (upgrade : trois
+   caractères, fichiers 0001 à 0022 inchangés, SQL offline (upgrade : quatre
    CREATE TABLE et deux index, rien d'autre ; downgrade : délais, verrou
    déterministe, garde DO évaluée à l'exécution, retrait sans CASCADE),
    modèles alignés sur la migration (colonnes, types, nullabilité, CHECK,
@@ -12,7 +12,7 @@ correspondants.
    historiques et analytiques 0022 conservées à l'identique, aucune ligne
    créée, aucune table existante modifiée (F2 comprise), catalogue exact,
    aucun trigger / fonction / ENUM / extension ; chaque CHECK, FK et UNIQUE
-   réellement exercé ; downgrade exact vers 0022 si les trois tables sont
+   réellement exercé ; downgrade exact vers 0022 si les quatre tables sont
    vides ; downgrade REFUSÉ, en ligne et par la garde offline exécutée, si
    l'une d'elles contient une ligne.
 """
@@ -55,7 +55,7 @@ from tests.test_migration_0022_product_analytics_v1 import _seed_0021_history
 from tests.test_product_analytics_dormancy import MIGRATION_0022_SHA256
 
 MIGRATION = REPO_ROOT / "alembic" / "versions" / V0T08_0023_FILE
-COHORTS, SEATS, SESSIONS = V0T08_0023_TABLES
+COHORTS, SEATS, SESSIONS, INTERACTIONS = V0T08_0023_TABLES
 NEW = set(V0T08_0023_TABLES)
 TS = "timestamp with time zone"
 COLUMNS = {
@@ -68,9 +68,13 @@ COLUMNS = {
             ("bound_at", TS, True), ("authorization_recorded_at", TS, True),
             ("notice_version", "character varying(64)", True), ("admission_failure_first_at", TS, True)],
     SESSIONS: [("id", "uuid", False), ("campaign_id", "uuid", False), ("user_id", "character varying", False),
-               ("environment_digest", "character varying(64)", False), ("opening_interaction_key", "uuid", False),
-               ("last_interaction_key", "uuid", False), ("opened_at", TS, False), ("last_activity_at", TS, False),
-               ("idle_expires_at", TS, False), ("finalized_at", TS, True)],
+               ("environment_digest", "character varying(64)", False), ("opened_at", TS, False),
+               ("last_activity_at", TS, False), ("idle_expires_at", TS, False), ("finalized_at", TS, True),
+               ("end_reason", "character varying(16)", True)],
+    INTERACTIONS: [("campaign_id", "uuid", False), ("user_id", "character varying", False),
+                   ("interaction_key", "uuid", False), ("interaction_kind", "character varying(16)", False),
+                   ("environment_digest", "character varying(64)", False), ("session_id", "uuid", True),
+                   ("recorded_at", TS, False)],
 }
 
 
@@ -106,19 +110,20 @@ def test_migration_0022_is_unchanged():
     assert hashlib.sha256(path.read_bytes()).hexdigest() == MIGRATION_0022_SHA256
 
 
-def test_offline_upgrade_creates_only_the_three_tables_and_their_indexes():
+def test_offline_upgrade_creates_only_the_four_tables_and_their_indexes():
     statements = _statements(_run_alembic(OFFLINE, "upgrade", f"{V0T08_0022}:{V0T08_0023}", "--sql").stdout)
     assert statements[:3] == GUARDS
     creates = [s for s in statements if s.startswith("CREATE TABLE")]
-    assert [s.split(" ")[2] for s in creates] == [COHORTS, SEATS, SESSIONS]
+    assert [s.split(" ")[2] for s in creates] == [COHORTS, SEATS, SESSIONS, INTERACTIONS]
     indexes = [s for s in statements if s.startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))]
     assert sorted(s.split(" INDEX ")[1].split(" ")[0] for s in indexes) == sorted(V0T08_0023_INDEXES)
     assert statements[-1] == (f"UPDATE alembic_version SET version_num='{V0T08_0023}' "
                               f"WHERE alembic_version.version_num = '{V0T08_0022}'")
     assert len(statements) == 3 + len(creates) + len(indexes) + 1
     m = _m0023()
-    by_table = dict(zip((COHORTS, SEATS, SESSIONS), creates))
-    for table, checks in ((COHORTS, m.COHORT_CHECKS), (SEATS, m.SEAT_CHECKS), (SESSIONS, m.SESSION_CHECKS)):
+    by_table = dict(zip((COHORTS, SEATS, SESSIONS, INTERACTIONS), creates))
+    for table, checks in ((COHORTS, m.COHORT_CHECKS), (SEATS, m.SEAT_CHECKS), (SESSIONS, m.SESSION_CHECKS),
+                          (INTERACTIONS, m.INTERACTION_CHECKS)):
         for name, expression in checks:
             assert f"CONSTRAINT {name} CHECK ({expression})" in by_table[table], name
     for table, fragment in (
@@ -130,7 +135,12 @@ def test_offline_upgrade_creates_only_the_three_tables_and_their_indexes():
                     "binding_operation_kind, binding_operation_status, binding_committed_at) REFERENCES "
                     "auth_operations (id, kind, status, committed_at)"),
             (SESSIONS, "CONSTRAINT product_activity_sessions_participant_fkey FOREIGN KEY(campaign_id, user_id) "
-                       "REFERENCES product_campaign_participants (campaign_id, user_id)")):
+                       "REFERENCES product_campaign_participants (campaign_id, user_id)"),
+            (INTERACTIONS, "CONSTRAINT product_activity_session_interactions_pkey PRIMARY KEY (campaign_id, "
+                           "user_id, interaction_key)"),
+            (INTERACTIONS, "CONSTRAINT product_activity_session_interactions_session_fkey FOREIGN KEY(session_id, "
+                           "campaign_id, user_id, environment_digest) REFERENCES product_activity_sessions (id, "
+                           "campaign_id, user_id, environment_digest)")):
         assert fragment in by_table[table], fragment
     upper = " ".join(statements).upper()
     for forbidden in ("TRIGGER", "FUNCTION", "CREATE TYPE", "ENUM", "EXTENSION", "ALTER TABLE", "DROP", "CASCADE",
@@ -145,11 +155,14 @@ def test_offline_downgrade_locks_then_guards_each_table_at_execution_then_drops_
     message = ("V0-T08 Lot 2B-1 : downgrade de 0023_analytics_cohort_sessions refusé, la table {} contient des "
                "données. Aucune donnée supprimée.")
     assert statements == GUARDS + [
-        f"LOCK TABLE {COHORTS}, {SEATS}, {SESSIONS} IN ACCESS EXCLUSIVE MODE",
-        f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM {SESSIONS}) THEN RAISE EXCEPTION '{message.format(SESSIONS)}'; "
+        f"LOCK TABLE {COHORTS}, {SEATS}, {SESSIONS}, {INTERACTIONS} IN ACCESS EXCLUSIVE MODE",
+        f"DO $$ BEGIN IF EXISTS (SELECT 1 FROM {INTERACTIONS}) THEN RAISE EXCEPTION "
+        f"'{message.format(INTERACTIONS)}'; "
+        f"ELSIF EXISTS (SELECT 1 FROM {SESSIONS}) THEN RAISE EXCEPTION '{message.format(SESSIONS)}'; "
         f"ELSIF EXISTS (SELECT 1 FROM {SEATS}) THEN RAISE EXCEPTION '{message.format(SEATS)}'; "
         f"ELSIF EXISTS (SELECT 1 FROM {COHORTS}) THEN RAISE EXCEPTION '{message.format(COHORTS)}'; "
         "END IF; END $$",
+        f"DROP TABLE {INTERACTIONS}",
         f"DROP TABLE {SESSIONS}",
         f"DROP TABLE {SEATS}",
         f"DROP TABLE {COHORTS}",
@@ -169,18 +182,20 @@ def test_models_match_the_migration():
             assert column.server_default is None and column.default is None, column.name
             assert column.onupdate is None and column.server_onupdate is None, column.name
         assert described == columns, table_name
-    for table_name, expected in ((COHORTS, m.COHORT_CHECKS), (SEATS, m.SEAT_CHECKS), (SESSIONS, m.SESSION_CHECKS)):
+    for table_name, expected in ((COHORTS, m.COHORT_CHECKS), (SEATS, m.SEAT_CHECKS), (SESSIONS, m.SESSION_CHECKS),
+                                 (INTERACTIONS, m.INTERACTION_CHECKS)):
         checks = {c.name: str(c.sqltext) for c in tables[table_name].constraints if isinstance(c, sa.CheckConstraint)}
         assert checks == dict(expected), table_name
     assert [c.name for c in tables[COHORTS].primary_key.columns] == ["campaign_id"]
     assert [c.name for c in tables[SEATS].primary_key.columns] == ["id"]
     assert [c.name for c in tables[SESSIONS].primary_key.columns] == ["id"]
+    assert [c.name for c in tables[INTERACTIONS].primary_key.columns] == ["campaign_id", "user_id", "interaction_key"]
     uniques = {c.name: [col.name for col in c.columns] for t in tables.values() for c in t.constraints
                if isinstance(c, sa.UniqueConstraint)}
     assert uniques == {m.SEAT_NUMBER_UNIQUE: ["campaign_id", "seat_number"],
                        m.SEAT_INVITATION_UNIQUE: ["campaign_id", "invitation_id"],
                        m.SEAT_USER_UNIQUE: ["campaign_id", "user_id"],
-                       m.SESSION_OPENING_UNIQUE: ["campaign_id", "user_id", "opening_interaction_key"]}
+                       m.SESSION_IDENTITY_UNIQUE: ["id", "campaign_id", "user_id", "environment_digest"]}
     fks = {fk.name: ([e.parent.name for e in fk.elements], [e.target_fullname for e in fk.elements],
                      fk.ondelete, fk.onupdate, fk.deferrable)
            for t in tables.values() for fk in t.foreign_key_constraints}
@@ -201,6 +216,14 @@ def test_models_match_the_migration():
         m.SESSION_PARTICIPANT_FK: (["campaign_id", "user_id"], ["product_campaign_participants.campaign_id",
                                                                 "product_campaign_participants.user_id"],
                                    None, None, None),
+        m.INTERACTION_PARTICIPANT_FK: (["campaign_id", "user_id"], ["product_campaign_participants.campaign_id",
+                                                                    "product_campaign_participants.user_id"],
+                                       None, None, None),
+        m.INTERACTION_SESSION_FK: (["session_id", "campaign_id", "user_id", "environment_digest"],
+                                   ["product_activity_sessions.id", "product_activity_sessions.campaign_id",
+                                    "product_activity_sessions.user_id",
+                                    "product_activity_sessions.environment_digest"],
+                                   None, None, None),
     }
     indexes = {index.name: ([e.name for e in index.expressions], index.unique,
                             str(index.dialect_options["postgresql"]["where"]))
@@ -210,8 +233,11 @@ def test_models_match_the_migration():
                        m.SESSION_IDLE_INDEX: (["campaign_id", "idle_expires_at"], False, m.SESSION_OPEN_WHERE)}
     assert set(indexes) == V0T08_0023_INDEXES
     # Aucune FK vers les sessions F2 : sessions d'activité distinctes.
-    assert not [fk for fk in tables[SESSIONS].foreign_key_constraints
-                if any(e.target_fullname.startswith("oryx_session") for e in fk.elements)]
+    for name in (SESSIONS, INTERACTIONS):
+        assert not [fk for fk in tables[name].foreign_key_constraints
+                    if any(e.target_fullname.startswith("oryx_session") for e in fk.elements)]
+    assert list(m.SESSION_END_REASONS) == ["inactivity", "logout"] and list(m.INTERACTION_KINDS) == ["activity",
+                                                                                                     "close"]
 
 
 def test_no_personal_or_content_field_in_the_new_tables():
@@ -256,7 +282,7 @@ def test_pg_upgrade_0022_to_0023_keeps_every_row_then_exact_downgrade(pg_url, pg
     global_0022 = _global_catalog(pg_engine)
     data_0022 = _data(pg_engine, tables - {"alembic_version"})
     assert data_0022["product_campaigns"] and data_0022["product_campaign_participants"] and data_0022["users"]
-    assert _compare_metadata(pg_engine) == []  # écarts attendus (trois tables et deux index) retirés exactement
+    assert _compare_metadata(pg_engine) == []  # écarts attendus (quatre tables et deux index) retirés exactement
 
     _run_alembic(pg_url, "upgrade", V0T08_0023)
     assert _version(pg_engine) == V0T08_0023 and _compare_metadata(pg_engine) == []
@@ -397,16 +423,19 @@ def test_pg_cohort_checks_and_foreign_keys(pg_url, pg_engine):  # noqa: F811
         conn.rollback()
 
 
+SESSION_ID = uuid.UUID("5e55105e-0000-4000-8000-000000000023")
+
+
 def test_pg_downgrade_is_refused_when_any_new_table_has_data(pg_url, pg_engine):  # noqa: F811
-    for table in (SESSIONS, SEATS, COHORTS):
+    for table in (INTERACTIONS, SESSIONS, SEATS, COHORTS):
         for offline in (False, True):
             _reset_schema(pg_engine)
             _run_alembic(pg_url, "upgrade", "head")
             with pg_engine.begin() as conn:
                 campaign = _seed_campaign_and_cohort(conn)
-                if table in (SEATS, SESSIONS):
+                if table in (SEATS, SESSIONS, INTERACTIONS):
                     conn.execute(sa.text(SEAT_INSERT), _seat_params(campaign, _f2_activation(conn)))
-                if table == SESSIONS:
+                if table in (SESSIONS, INTERACTIONS):
                     conn.execute(sa.text("DELETE FROM product_cohort_seats"))
                     conn.execute(sa.text("DELETE FROM product_campaign_cohorts"))
                     conn.execute(sa.text(
@@ -414,9 +443,15 @@ def test_pg_downgrade_is_refused_when_any_new_table_has_data(pg_url, pg_engine):
                         ":s, :s, 'v0-notice-1')"),
                         {"c": campaign, "s": BASE_TIME, "e": BASE_TIME + timedelta(days=12)})
                     conn.execute(sa.text(
-                        "INSERT INTO product_activity_sessions VALUES (gen_random_uuid(), :c, 'v0-cat-user', :d, "
-                        "gen_random_uuid(), gen_random_uuid(), :t, :t, :x, NULL)"),
-                        {"c": campaign, "d": "0" * 64, "t": BASE_TIME, "x": BASE_TIME + timedelta(minutes=30)})
+                        "INSERT INTO product_activity_sessions VALUES (:s, :c, 'v0-cat-user', :d, :t, :t, :x, NULL, "
+                        "NULL)"),
+                        {"s": SESSION_ID, "c": campaign, "d": "0" * 64, "t": BASE_TIME,
+                         "x": BASE_TIME + timedelta(minutes=30)})
+                if table == INTERACTIONS:
+                    conn.execute(sa.text(
+                        "INSERT INTO product_activity_session_interactions VALUES (:c, 'v0-cat-user', "
+                        "gen_random_uuid(), 'activity', :d, :s, :t)"),
+                        {"c": campaign, "d": "0" * 64, "s": SESSION_ID, "t": BASE_TIME})
             tables = _tables(pg_engine)
             before = _data(pg_engine, tables - {"alembic_version"})
             expected = f"downgrade de 0023_analytics_cohort_sessions refusé, la table {table} contient des données"
@@ -456,3 +491,82 @@ def test_pg_offline_upgrade_then_offline_downgrade_round_trip(pg_url, pg_engine)
     assert _version(pg_engine) == V0T08_0022 and _catalog(pg_engine, tables) == catalog_0022
     _run_alembic(pg_url, "upgrade", V0T08_0023)
     assert _catalog(pg_engine, tables | NEW) == offline_catalog
+
+
+SESSION_INSERT = ("INSERT INTO product_activity_sessions VALUES (:id, :campaign, 'v0-cat-user', :digest, :opened, "
+                  ":last, :idle, :finalized, :reason)")
+INTERACTION_INSERT = ("INSERT INTO product_activity_session_interactions VALUES (:campaign, :user, :key, :kind, "
+                      ":digest, :session, :at)")
+
+
+@pytest.mark.parametrize("constraint,overrides", [
+    ("ck_product_activity_sessions_end", {"finalized": BASE_TIME + timedelta(minutes=40)}),
+    ("ck_product_activity_sessions_end", {"reason": "inactivity"}),
+    ("ck_product_activity_sessions_end_reason", {"finalized": BASE_TIME + timedelta(minutes=40), "reason": "crash"}),
+    # inactivité : jamais avant l'expiration
+    ("ck_product_activity_sessions_finalized",
+     {"finalized": BASE_TIME + timedelta(minutes=29), "reason": "inactivity"}),
+    # déconnexion : jamais avant la dernière activité, toujours avant l'expiration
+    ("ck_product_activity_sessions_finalized", {"finalized": BASE_TIME - timedelta(seconds=1), "reason": "logout"}),
+    ("ck_product_activity_sessions_finalized", {"finalized": BASE_TIME + timedelta(minutes=30), "reason": "logout"}),
+    ("ck_product_activity_sessions_idle_expiry", {"idle": BASE_TIME + timedelta(days=15)}),
+    ("ck_product_activity_sessions_activity", {"opened": BASE_TIME + timedelta(seconds=1)}),
+    ("ck_product_activity_sessions_environment_digest", {"digest": "not-a-digest"}),
+])
+def test_pg_every_session_check_is_exercised(pg_url, pg_engine, constraint, overrides):  # noqa: F811
+    _reset_schema(pg_engine)
+    _run_alembic(pg_url, "upgrade", "head")
+    base = {"id": uuid.uuid4(), "digest": "0" * 64, "opened": BASE_TIME, "last": BASE_TIME,
+            "idle": BASE_TIME + timedelta(minutes=30), "finalized": None, "reason": None}
+    with pg_engine.connect() as conn:
+        campaign = _seed_campaign_and_cohort(conn)
+        _f2_activation(conn)
+        conn.execute(sa.text(
+            "INSERT INTO product_campaign_participants VALUES (:c, 'v0-cat-user', :s, :e, 'enrolled', :s, :s, 'n')"),
+            {"c": campaign, "s": BASE_TIME, "e": BASE_TIME + timedelta(days=12)})
+        for legit in ({}, {"finalized": BASE_TIME, "reason": "logout"},
+                      {"finalized": BASE_TIME + timedelta(minutes=29), "reason": "logout"},
+                      {"finalized": BASE_TIME + timedelta(minutes=30), "reason": "inactivity"}):
+            conn.execute(sa.text(SESSION_INSERT), {**base, "campaign": campaign, **legit, "id": uuid.uuid4(),
+                                                   "digest": uuid.uuid4().hex * 2})
+        _rejects(conn, constraint, SESSION_INSERT, **{**base, "campaign": campaign, **overrides})
+        conn.rollback()
+
+
+def test_pg_interaction_registry_constraints(pg_url, pg_engine):  # noqa: F811
+    _reset_schema(pg_engine)
+    _run_alembic(pg_url, "upgrade", "head")
+    with pg_engine.connect() as conn:
+        campaign = _seed_campaign_and_cohort(conn)
+        _f2_activation(conn)
+        _f2_activation(conn, user="v0-cat-user-2")
+        for user in ("v0-cat-user", "v0-cat-user-2"):
+            conn.execute(sa.text(
+                "INSERT INTO product_campaign_participants VALUES (:c, :u, :s, :e, 'enrolled', :s, :s, 'n')"),
+                {"c": campaign, "u": user, "s": BASE_TIME, "e": BASE_TIME + timedelta(days=12)})
+        session, digest, key = uuid.uuid4(), "a" * 64, uuid.uuid4()
+        conn.execute(sa.text(SESSION_INSERT), {"id": session, "campaign": campaign, "digest": digest,
+                                               "opened": BASE_TIME, "last": BASE_TIME,
+                                               "idle": BASE_TIME + timedelta(minutes=30), "finalized": None,
+                                               "reason": None})
+        row = {"campaign": campaign, "user": "v0-cat-user", "key": key, "kind": "activity", "digest": digest,
+               "session": session, "at": BASE_TIME}
+        conn.execute(sa.text(INTERACTION_INSERT), row)
+        # Une clé n'est acceptée qu'une fois par participation (rejeu ancien compris).
+        _rejects(conn, "product_activity_session_interactions_pkey", INTERACTION_INSERT, **row)
+        # Même clé pour un autre utilisateur : indépendante (sans session : clôture seulement).
+        conn.execute(sa.text(INTERACTION_INSERT), {**row, "user": "v0-cat-user-2", "kind": "close", "session": None})
+        _rejects(conn, "ck_product_activity_session_interactions_session", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "session": None})
+        _rejects(conn, "ck_product_activity_session_interactions_kind", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "kind": "refresh"})
+        _rejects(conn, "ck_product_activity_session_interactions_environment_digest", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "digest": "raw-key"})
+        # La session doit appartenir à la même participation ET au même environnement.
+        _rejects(conn, "product_activity_session_interactions_session_fkey", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "digest": "b" * 64})
+        _rejects(conn, "product_activity_session_interactions_session_fkey", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "user": "v0-cat-user-2"})
+        _rejects(conn, "product_activity_session_interactions_participant_fkey", INTERACTION_INSERT,
+                 **{**row, "key": uuid.uuid4(), "user": "v0-unknown", "kind": "close", "session": None})
+        conn.rollback()

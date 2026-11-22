@@ -37,7 +37,7 @@ MIGRATION_0022_SHA256 = "860305fd4b13a312347444fc31add80587ad58fa03c7f07818f7ec1
 MIGRATION_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_sessions.py"
 # sha256 de 0023 telle que proposée par le lot 2B-1 : toute retouche
 # ultérieure doit être explicite (mise à jour de cette empreinte).
-MIGRATION_0023_SHA256 = "7d5c778a9551c252d43c7619595c3ba79d90bccdd9efdc6d9bd10e2405af1c9e"
+MIGRATION_0023_SHA256 = "896c33583892f8037eeb1bb3fd4af00548a8557e9548fca4070e76ca8a8fcb52"
 ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc",
                    "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",

@@ -15,7 +15,10 @@ individuel (core/product_analytics/cohort.py), DORMANTS.
    connexions concurrentes, répétées, après la date limite (y compris
    franchie pendant l'attente d'un verrou), autorisation absente ou
    incohérente, campagne inactive, points d'inscription bruts refusés ;
-   panne analytique sans J0 artificiel ni antidaté.
+   panne analytique sans J0 artificiel ni antidaté ; audit R1 : collision
+   d'UNIQUE pendant un rattachement (autoflush désactivé et activé) sans
+   écriture partielle, classée CohortConflict, transaction de l'appelant
+   toujours utilisable.
 
 Preuves F2 : sauf mention contraire, les lignes invitations / auth_operations
 sont des FIXTURES SQL reproduisant la forme que le service F2 écrit (aucune
@@ -63,8 +66,9 @@ THIRTY_MINUTES = timedelta(minutes=30)
 NOTICE = "v0-notice-1"
 ADMISSION_CLOSES = T0 + timedelta(days=10)
 CLOSE_BY = ADMISSION_CLOSES + TWELVE_DAYS + THIRTY_MINUTES  # échéance minimale exacte
-ANALYTICS_TABLES = ("product_activity_sessions", "product_activity_events", "product_cohort_seats",
-                    "product_campaign_participants", "product_campaign_cohorts", "product_campaigns")
+ANALYTICS_TABLES = ("product_activity_session_interactions", "product_activity_sessions", "product_activity_events",
+                    "product_cohort_seats", "product_campaign_participants", "product_campaign_cohorts",
+                    "product_campaigns")
 F2_FIXTURE_TABLES = ("auth_operations", "invitations")
 BASE_USER = "v0-cohort-outsider"
 
@@ -870,3 +874,55 @@ def test_pg_binding_follows_the_real_f2_invitation_activation(engine, Sessions, 
         conn.execute(sa.text("TRUNCATE auth_operation_results, oryx_session_generations, oryx_sessions, "
                              "auth_abuse_events, auth_abuse_subjects, auth_abuse_key_state, auth_preauth_candidates, "
                              "auth_operations, invitations CASCADE"))
+
+
+# --- Contrôle transactionnel (audit R1) : SAVEPOINT et autoflush ------------
+
+@pytest.mark.parametrize("autoflush", [False, True])  # False = core.db.SessionLocal
+def test_pg_binding_collision_writes_nothing_and_keeps_the_caller_transaction(engine, Sessions, clock, monkeypatch,
+                                                                             autoflush):
+    """Collision réelle d'UNIQUE (campaign_id, user_id) pendant un
+    rattachement : un écrivain hors service, non sérialisé, a occupé
+    l'identité après le contrôle préalable (simulé en masquant ce contrôle).
+    Les mutations ayant lieu DANS le SAVEPOINT, seule la place visée est
+    restaurée : aucune écriture partielle, CohortConflict, et la transaction
+    de l'appelant reste utilisable (écriture métier commitée ensuite)."""
+    campaign_id, invitations, seats = _full_cohort(engine, Sessions, clock)
+    _activate_campaign(Sessions, campaign_id)
+    user = _activate(engine, invitations[0])
+    _activate(engine, invitations[1], user_id=user)  # deux invitations activées par le même profil
+    _bind(Sessions, campaign_id, seats[1])  # l'identité occupe déjà la place 2
+    monkeypatch.setattr(ch, "_seat_of_user", lambda db, campaign, user_id: None)  # contrôle préalable contourné
+    before = _snapshot(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=autoflush)
+    with factory() as session, _Statements(engine) as statements:
+        session.execute(sa.text("INSERT INTO users (id, level) VALUES ('v0-before-bind', 'debutant')"))
+        with pytest.raises(CohortConflict, match="uq_product_cohort_seats_campaign_user"):
+            ch.bind_seat_to_activated_invitation(session, campaign_id=campaign_id, seat_id=seats[0])
+        seat = session.get(ch.ProductCohortSeat, seats[0])
+        assert (seat.user_id, seat.bound_at, seat.binding_operation_id) == (None, None, None)  # ORM restauré
+        session.execute(sa.text("INSERT INTO users (id, level) VALUES ('v0-after-bind', 'debutant')"))
+        session.commit()
+    order = [s.split()[0] for s in statements if s.split()[0] in ("SAVEPOINT", "UPDATE", "ROLLBACK", "RELEASE")]
+    assert order[order.index("UPDATE") - 1] == "SAVEPOINT"  # l'UPDATE a lieu DANS le SAVEPOINT
+    assert "ROLLBACK" in order[order.index("UPDATE"):]
+    after = _snapshot(engine)
+    assert {r["id"] for r in after["users"]} - {r["id"] for r in before["users"]} == {"v0-before-bind",
+                                                                                     "v0-after-bind"}
+    assert {k: v for k, v in after.items() if k != "users"} == {k: v for k, v in before.items() if k != "users"}
+
+
+def test_pg_a_refused_binding_or_authorization_leaves_the_caller_transaction_usable(engine, Sessions, clock):
+    campaign_id, invitations, seats = _full_cohort(engine, Sessions, clock)
+    _activate_campaign(Sessions, campaign_id)
+    user = _activate(engine, invitations[0])
+    _bind(Sessions, campaign_id, seats[0])
+    with Sessions() as session:
+        with pytest.raises(CohortRefused):  # invitation non activée
+            ch.bind_seat_to_activated_invitation(session, campaign_id=campaign_id, seat_id=seats[1])
+        with pytest.raises(CohortRefused):  # aucune place pour cet utilisateur
+            ch.record_seat_authorization(session, campaign_id=campaign_id, user_id=BASE_USER, notice_version=NOTICE)
+        assert ch.record_seat_authorization(session, campaign_id=campaign_id, user_id=user,
+                                            notice_version=NOTICE)[1] is True
+        session.commit()
+    assert _rows(engine, "product_cohort_seats", "seat_number")[0]["notice_version"] == NOTICE

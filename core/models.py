@@ -3003,9 +3003,10 @@ class ProductActivitySession(Base):
     oryx_sessions, aucune durée commune). Environnement de navigation
     identifié par une empreinte SHA-256, jamais par l'identifiant brut.
     idle_expires_at = last_activity_at + 30 minutes (en base) ; une seule
-    session ouverte par (campagne, utilisateur, environnement) ; une clé
-    d'ouverture n'ouvre qu'une session. Aucune activité au-delà de
-    window_end_at de la participation (imposé par le service)."""
+    session ouverte par (campagne, utilisateur, environnement). Fin :
+    'inactivity' (finalized_at >= idle_expires_at) ou 'logout'
+    (last_activity_at <= finalized_at < idle_expires_at). Aucune activité
+    au-delà de window_end_at de la participation (imposé par le service)."""
     __tablename__ = "product_activity_sessions"
     __table_args__ = (
         CheckConstraint("environment_digest ~ '^[0-9a-f]{64}$'",
@@ -3013,13 +3014,19 @@ class ProductActivitySession(Base):
         CheckConstraint("last_activity_at >= opened_at", name="ck_product_activity_sessions_activity"),
         CheckConstraint("idle_expires_at = last_activity_at + interval '30 minutes'",
                         name="ck_product_activity_sessions_idle_expiry"),
-        CheckConstraint("finalized_at IS NULL OR finalized_at >= idle_expires_at",
-                        name="ck_product_activity_sessions_finalized"),
+        CheckConstraint("(finalized_at IS NULL) = (end_reason IS NULL)", name="ck_product_activity_sessions_end"),
+        CheckConstraint("end_reason IS NULL OR end_reason IN ('inactivity', 'logout')",
+                        name="ck_product_activity_sessions_end_reason"),
+        CheckConstraint(
+            "finalized_at IS NULL "
+            "OR (end_reason = 'inactivity' AND finalized_at >= idle_expires_at) "
+            "OR (end_reason = 'logout' AND finalized_at >= last_activity_at AND finalized_at < idle_expires_at)",
+            name="ck_product_activity_sessions_finalized"),
         ForeignKeyConstraint(["campaign_id", "user_id"],
                              ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
                              name="product_activity_sessions_participant_fkey"),
-        UniqueConstraint("campaign_id", "user_id", "opening_interaction_key",
-                         name="uq_product_activity_sessions_opening_key"),
+        UniqueConstraint("id", "campaign_id", "user_id", "environment_digest",
+                         name="uq_product_activity_sessions_identity"),
         Index("uq_product_activity_sessions_open_environment", "campaign_id", "user_id", "environment_digest",
               unique=True, postgresql_where=text("finalized_at IS NULL")),
         Index("ix_product_activity_sessions_open_idle_expiry", "campaign_id", "idle_expires_at",
@@ -3030,9 +3037,44 @@ class ProductActivitySession(Base):
     campaign_id = Column(Uuid, nullable=False)
     user_id = Column(String, nullable=False)
     environment_digest = Column(String(64), nullable=False)
-    opening_interaction_key = Column(Uuid, nullable=False)
-    last_interaction_key = Column(Uuid, nullable=False)
     opened_at = Column(DateTime(timezone=True), nullable=False)
     last_activity_at = Column(DateTime(timezone=True), nullable=False)
     idle_expires_at = Column(DateTime(timezone=True), nullable=False)
     finalized_at = Column(DateTime(timezone=True), nullable=True)
+    end_reason = Column(String(16), nullable=True)
+
+
+class ProductActivitySessionInteraction(Base):
+    """Clé d'interaction ACCEPTÉE par le service de sessions (V0-T08 Lot 2B-1,
+    migration 0023_analytics_cohort_sessions, révision R1) — DORMANTE.
+
+    PK (campaign_id, user_id, interaction_key) : une clé n'est acceptée
+    qu'une fois par participation ; tout rejeu, même ancien, renvoie la
+    visite d'origine sans ouverture ni prolongation. interaction_kind
+    'activity' ou 'close' ; session_id absent seulement pour une clôture
+    sans visite ouverte. FK composite vers la session (même participation,
+    même environnement). Aucun contenu ; pas le registre 2B-2."""
+    __tablename__ = "product_activity_session_interactions"
+    __table_args__ = (
+        CheckConstraint("interaction_kind IN ('activity', 'close')",
+                        name="ck_product_activity_session_interactions_kind"),
+        CheckConstraint("environment_digest ~ '^[0-9a-f]{64}$'",
+                        name="ck_product_activity_session_interactions_environment_digest"),
+        CheckConstraint("session_id IS NOT NULL OR interaction_kind = 'close'",
+                        name="ck_product_activity_session_interactions_session"),
+        ForeignKeyConstraint(["campaign_id", "user_id"],
+                             ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
+                             name="product_activity_session_interactions_participant_fkey"),
+        ForeignKeyConstraint(["session_id", "campaign_id", "user_id", "environment_digest"],
+                             ["product_activity_sessions.id", "product_activity_sessions.campaign_id",
+                              "product_activity_sessions.user_id", "product_activity_sessions.environment_digest"],
+                             name="product_activity_session_interactions_session_fkey"),
+    )
+
+    campaign_id = Column(Uuid, primary_key=True)
+    user_id = Column(String, primary_key=True)
+    interaction_key = Column(Uuid, primary_key=True)
+    interaction_kind = Column(String(16), nullable=False)
+    environment_digest = Column(String(64), nullable=False)
+    session_id = Column(Uuid, nullable=True)
+    recorded_at = Column(DateTime(timezone=True), nullable=False)

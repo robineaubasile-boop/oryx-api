@@ -4,14 +4,20 @@
 1. Sans base : inactivité de 30 minutes identique à la migration 0023 et
    distincte des 15 jours F2, empreinte d'environnement (jamais la clé
    brute), signatures sans aucune date, validation avant tout accès à la
-   base, contrat non bloquant qui ne lève jamais.
+   base, contrat non bloquant qui ne lève jamais, aucune mutation ORM avant
+   un SAVEPOINT (audit R1).
 2. PostgreSQL réel (base jetable ; sinon SKIPPÉS) : onglets multiples et
    rafraîchissement dans une même visite, appareils différents pour un même
    utilisateur, expiration à exactement 30 minutes, activité juste avant
-   l'expiration, rejeu (ouverture et dernière interaction), concurrence
-   réelle (pg_blocking_pids), interaction après J+12 et hors observation,
-   finalisation d'une fermeture brutale sans événement inventé, contraintes
-   SQL. Aucune lecture des sessions F2.
+   l'expiration, concurrence réelle (pg_blocking_pids), interaction après
+   J+12 et hors observation, finalisation d'une fermeture brutale sans
+   événement inventé, contraintes SQL. Aucune lecture des sessions F2.
+   Audit R1 : rejeu de N'IMPORTE QUELLE clé déjà acceptée (scénario
+   09:00 A / 09:05 B / 09:10 C / 09:41 rejeu de B), avant et après
+   l'expiration, après finalisation, après J+12 et en concurrence, sans
+   aucune écriture ; clôture volontaire avant 30 minutes (aucune activité
+   inventée, J0 et autres appareils intacts, rejeu idempotent qui ne clôt
+   jamais une visite ultérieure, concurrence déconnexion / interaction).
 
 Participations créées par le point d'inscription 2A (campagnes sans
 cohorte) : les sessions ne dépendent que de la participation ; le parcours
@@ -45,7 +51,7 @@ from tests.test_product_analytics_cohort import (
     _ready,
     _rows,
 )
-from tests.test_product_analytics_services import POLICY, T0, clock  # noqa: F401 — fixture clock
+from tests.test_product_analytics_services import POLICY, clock  # noqa: F401 — fixture clock
 
 USER, OTHER_USER = "pa-session-user-1", "pa-session-user-2"
 TWELVE_DAYS = timedelta(days=12)
@@ -62,7 +68,9 @@ def test_inactivity_is_thirty_minutes_and_unrelated_to_f2_credentials():
     assert common.ACTIVITY_SESSION_INACTIVITY == THIRTY_MINUTES and m.SESSION_INACTIVITY == "30 minutes"
     assert ("ck_product_activity_sessions_idle_expiry",
             "idle_expires_at = last_activity_at + interval '30 minutes'") in m.SESSION_CHECKS
-    assert (ps.OPENING_KEY_UNIQUE, ps.OPEN_ENVIRONMENT_UNIQUE) == (m.SESSION_OPENING_UNIQUE, m.SESSION_OPEN_UNIQUE)
+    assert (ps.OPEN_ENVIRONMENT_UNIQUE, ps.INTERACTION_PRIMARY_KEY) == (m.SESSION_OPEN_UNIQUE,
+                                                                     m.INTERACTION_PRIMARY_KEY)
+    assert ps.END_REASONS == m.SESSION_END_REASONS and ps.INTERACTION_KINDS == m.INTERACTION_KINDS
     code = open(ps.__file__, encoding="utf-8").read().replace(ps.__doc__, "")  # hors docstring
     for marker in ("oryx_sessions", "OryxSession", "absolute_expires_at", "auth_f2", "f2_runtime", "AuthOperation"):
         assert marker not in code, marker
@@ -78,7 +86,8 @@ def test_environment_digest_is_stable_and_never_the_raw_key():
 
 
 def test_signatures_take_no_date_and_validate_before_any_database_access():
-    for function in (ps.touch_activity_session, ps.attempt_session_touch):
+    for function in (ps.touch_activity_session, ps.attempt_session_touch, ps.close_activity_session,
+                     ps.attempt_session_close):
         assert list(inspect.signature(function).parameters) == ["db", "campaign_id", "user_id", "environment_key",
                                                                  "interaction_key"]
         for name, parameter in inspect.signature(function).parameters.items():
@@ -89,14 +98,54 @@ def test_signatures_take_no_date_and_validate_before_any_database_access():
     for bad in ({"campaign_id": "c"}, {"user_id": ""}, {"environment_key": "laptop"}, {"interaction_key": 1}):
         with pytest.raises(InvalidProductAnalyticsInput):
             ps.touch_activity_session(_NoDB(), **{**good, **bad})
+        with pytest.raises(InvalidProductAnalyticsInput):
+            ps.close_activity_session(_NoDB(), **{**good, **bad})
     with pytest.raises(InvalidProductAnalyticsInput):
         ps.finalize_idle_sessions(_NoDB(), campaign_id="c")
 
 
 def test_non_blocking_touch_never_raises_even_with_an_unusable_database():
-    attempt = ps.attempt_session_touch(_NoDB(), campaign_id=uuid.uuid4(), user_id=USER, environment_key=LAPTOP,
-                                       interaction_key=uuid.uuid4())
-    assert (attempt.status, attempt.reason, attempt.session_id) == ("failed", "AssertionError", None)
+    for attempt_function in (ps.attempt_session_touch, ps.attempt_session_close):
+        attempt = attempt_function(_NoDB(), campaign_id=uuid.uuid4(), user_id=USER, environment_key=LAPTOP,
+                                   interaction_key=uuid.uuid4())
+        assert (attempt.status, attempt.reason, attempt.session_id) == ("failed", "AssertionError", None)
+
+
+def test_no_mutation_precedes_a_savepoint():
+    """Audit R1 : Session.begin_nested() vide d'abord les changements en
+    attente (quel que soit autoflush) ; une mutation ORM faite avant lui
+    serait écrite HORS du SAVEPOINT. Toute affectation d'attribut des
+    services de sessions et de cohorte se trouve donc soit dans une fonction
+    imbriquée transmise à l'écrivain (_write / _flush_or_conflict), soit
+    lexicalement dans un bloc « with db.begin_nested() »."""
+    import ast
+
+    from core.product_analytics import cohort as ch
+
+    def offenders(node, protected=False):
+        found = []
+        for child in ast.iter_child_nodes(node):
+            inside = protected or isinstance(child, ast.FunctionDef) or (
+                isinstance(child, ast.With) and any(
+                    isinstance(item.context_expr, ast.Call) and getattr(item.context_expr.func, "attr", None)
+                    == "begin_nested" for item in child.items))
+            if (isinstance(child, (ast.Assign, ast.AugAssign)) and not inside
+                    and any(isinstance(t, ast.Attribute) for t in (
+                        child.targets if isinstance(child, ast.Assign) else [child.target]))):
+                found.append(child.lineno)
+            found += offenders(child, inside)
+        return found
+
+    for module, writer in ((ps, "_write"), (ch, "_flush_or_conflict")):
+        tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+        mutating = 0
+        for function in [n for n in tree.body if isinstance(n, ast.FunctionDef)]:
+            assert offenders(function) == [], (module.__name__, function.name)
+            if any(isinstance(n, ast.FunctionDef) for n in ast.walk(function) if n is not function):
+                mutating += 1
+                assert [n for n in ast.walk(function) if isinstance(n, ast.Call)
+                        and getattr(n.func, "id", None) == writer], (module.__name__, function.name)
+        assert mutating >= 2, module.__name__
 
 
 # --------------------------------------------------------------------------
@@ -208,28 +257,128 @@ def test_pg_activity_just_before_expiry_extends_the_visit(engine, Sessions, cloc
     assert row["last_activity_at"] == clock.now and row["idle_expires_at"] == clock.now + THIRTY_MINUTES
 
 
-def test_pg_replays_are_idempotent(engine, Sessions, clock):
+def _writes_of(statements):
+    return [s for s in statements if s.startswith(("INSERT", "UPDATE", "DELETE"))]
+
+
+def _replay(Sessions, engine, campaign_id, key, **kwargs):
+    """Rejoue `key` ; vérifie qu'AUCUNE écriture n'a lieu ; renvoie la visite."""
+    with Sessions() as session, _Statements(engine) as statements:
+        touch = _touch(session, campaign_id, key=key, **kwargs)
+        result = (touch.session.id, touch.outcome)
+        session.commit()
+    assert _writes_of(statements) == [], statements
+    return result
+
+
+def _interactions(engine):
+    return _rows(engine, "product_activity_session_interactions", "recorded_at, interaction_key")
+
+
+def test_pg_old_replay_before_and_after_expiry_never_creates_or_extends_a_visit(engine, Sessions, clock):
+    """Scénario de l'audit : 09:00 A (ouverture), 09:05 B, 09:10 C ; rejeux
+    de B à 09:20 (visite vivante) puis à 09:41 (visite expirée)."""
     campaign_id = _participant(Sessions, clock)
-    opening, later = uuid.uuid4(), uuid.uuid4()
-    first = _committed_touch(Sessions, campaign_id, key=opening)
-    clock.advance(minutes=3)
-    _committed_touch(Sessions, campaign_id, key=later)
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    start = clock.now
+    visit = _committed_touch(Sessions, campaign_id, key=a)[0]
+    clock.now = start + timedelta(minutes=5)
+    assert _committed_touch(Sessions, campaign_id, key=b)[:2] == (visit, "continued")
+    clock.now = start + timedelta(minutes=10)
+    assert _committed_touch(Sessions, campaign_id, key=c)[:2] == (visit, "continued")
     before = _sessions(engine)
-    clock.advance(minutes=1)
-    for key in (opening, later):  # rejeu de l'ouverture, rejeu de la dernière interaction
-        with Sessions() as session, _Statements(engine) as statements:
-            touch = _touch(session, campaign_id, key=key)
-            assert (touch.session.id, touch.outcome) == (first[0], "replayed")
-            session.commit()
-        assert not [s for s in statements if s.startswith(("INSERT", "UPDATE", "DELETE"))]
-    assert _sessions(engine) == before
-    clock.advance(hours=2)  # après finalisation : le rejeu de l'ouverture n'ouvre aucune nouvelle visite
+    assert before[0]["idle_expires_at"] == start + timedelta(minutes=40)
+    for at in (timedelta(minutes=20), timedelta(minutes=41), timedelta(hours=5)):
+        clock.now = start + at
+        for key in (b, a, c):  # rejeu ancien, rejeu de l'ouverture, rejeu de la dernière interaction
+            assert _replay(Sessions, engine, campaign_id, key) == (visit, "replayed")
+        assert _sessions(engine) == before  # ni prolongée, ni finalisée, ni rouverte
+    assert [r["interaction_key"] for r in _interactions(engine)] == [a, b, c]
+    assert {r["session_id"] for r in _interactions(engine)} == {visit}
+    # Une interaction réellement NOUVELLE après l'expiration ouvre bien une nouvelle visite.
+    fresh = _committed_touch(Sessions, campaign_id)
+    assert fresh[1] == "opened" and fresh[2] == visit
+    clock.advance(minutes=1)  # rejeu de B après la nouvelle ouverture : toujours la visite d'origine
+    assert _replay(Sessions, engine, campaign_id, b) == (visit, "replayed")
+    assert _committed_touch(Sessions, campaign_id)[:2] == (fresh[0], "continued")
+
+
+def test_pg_replays_after_finalization_and_across_environments(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    a, b = uuid.uuid4(), uuid.uuid4()
+    visit = _committed_touch(Sessions, campaign_id, key=a)[0]
+    clock.advance(minutes=3)
+    _committed_touch(Sessions, campaign_id, key=b)
+    clock.advance(hours=2)
     _committed(Sessions, lambda s: ps.finalize_idle_sessions(s, campaign_id=campaign_id))
-    assert _committed_touch(Sessions, campaign_id, key=opening)[:2] == (first[0], "replayed")
+    for key in (a, b):
+        assert _replay(Sessions, engine, campaign_id, key) == (visit, "replayed")
     assert len(_sessions(engine)) == 1
-    with Sessions() as session:  # même clé d'ouverture dans un autre environnement : conflit
-        with pytest.raises(ActivitySessionConflict):
-            _touch(session, campaign_id, key=opening, env=PHONE)
+    for key in (a, b):  # même clé dans un autre environnement : conflit, rien d'écrit
+        with Sessions() as session:
+            with pytest.raises(ActivitySessionConflict):
+                _touch(session, campaign_id, key=key, env=PHONE)
+    assert len(_sessions(engine)) == 1 and len(_interactions(engine)) == 2
+
+
+def test_pg_a_replay_after_j_plus_12_creates_nothing(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    j0 = clock.now
+    clock.now = j0 + TWELVE_DAYS - timedelta(minutes=5)
+    key = uuid.uuid4()
+    visit = _committed_touch(Sessions, campaign_id, key=key)[0]
+    clock.now = j0 + TWELVE_DAYS + timedelta(minutes=10)
+    assert _replay(Sessions, engine, campaign_id, key) == (visit, "replayed")
+    with Sessions() as session:  # une interaction NOUVELLE reste refusée
+        with pytest.raises(ActivitySessionRefused):
+            _touch(session, campaign_id)
+    assert len(_sessions(engine)) == 1
+
+
+@pytest.mark.parametrize("release", ["commit", "rollback"])
+def test_pg_concurrent_replays_of_one_key_are_accepted_once(engine, Sessions, clock, release):
+    campaign_id = _participant(Sessions, clock)
+    visit = _committed_touch(Sessions, campaign_id)[0]
+    clock.advance(minutes=29)  # la clé K prolongerait la visite ; ses rejeux concurrents ne doivent rien ajouter
+    key = uuid.uuid4()
+    holder, waiter = Sessions(), Sessions()
+
+    def replay(session):
+        touch = _touch(session, campaign_id, key=key)
+        return touch.session.id, touch.outcome
+
+    try:
+        assert replay(holder) == (visit, "continued")
+        clock.advance(seconds=10)
+        result, error = _run_blocked(engine, holder, waiter, replay, release=release)
+    finally:
+        holder.close()
+        waiter.close()
+    assert error is None
+    [row] = _sessions(engine)
+    if release == "commit":  # le perdant voit la clé acceptée : rejeu, aucune prolongation supplémentaire
+        assert result == (visit, "replayed") and row["last_activity_at"] == clock.now - timedelta(seconds=10)
+    else:  # le gagnant est annulé : la clé est acceptée UNE fois, par le perdant
+        assert result == (visit, "continued") and row["last_activity_at"] == clock.now
+    assert [r["interaction_key"] for r in _interactions(engine)][1:] == [key]
+
+
+def test_pg_concurrent_replays_of_an_old_key_write_nothing(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    old = uuid.uuid4()
+    visit = _committed_touch(Sessions, campaign_id, key=old)[0]
+    clock.advance(minutes=45)
+    before = (_sessions(engine), _interactions(engine))
+    holder, waiter = Sessions(), Sessions()
+    try:
+        assert _touch(holder, campaign_id, key=old).outcome == "replayed"  # détient les verrous consultatifs
+        result, error = _run_blocked(engine, holder, waiter,
+                                     lambda s: (_touch(s, campaign_id, key=old).outcome))
+    finally:
+        holder.close()
+        waiter.close()
+    assert (result, error) == ("replayed", None)
+    assert (_sessions(engine), _interactions(engine)) == before and before[0][0]["id"] == visit
 
 
 @pytest.mark.parametrize("release", ["commit", "rollback"])
@@ -344,6 +493,138 @@ def test_pg_brutal_browser_close_is_finalized_without_any_event(engine, Sessions
         phone[0]]
 
 
+def _close(session, campaign_id, *, user=USER, env=LAPTOP, key=None):
+    return ps.close_activity_session(session, campaign_id=campaign_id, user_id=user, environment_key=env,
+                                     interaction_key=key or uuid.uuid4())
+
+
+def _committed_close(Sessions, campaign_id, **kwargs):
+    def action(session):
+        result = _close(session, campaign_id, **kwargs)
+        return result.outcome, result.session.id if result.session is not None else None
+    return _committed(Sessions, action)
+
+
+def test_pg_voluntary_logout_ends_the_visit_before_thirty_minutes_without_inventing_anything(
+        engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    participation_before = _rows(engine, "product_campaign_participants")
+    laptop = _committed_touch(Sessions, campaign_id, env=LAPTOP)[0]
+    phone = _committed_touch(Sessions, campaign_id, env=PHONE)[0]
+    clock.advance(minutes=4)
+    _committed_touch(Sessions, campaign_id, env=LAPTOP)
+    last = clock.now
+    clock.advance(minutes=6)  # 6 minutes d'inactivité seulement : bien avant l'expiration
+    assert _committed_close(Sessions, campaign_id, env=LAPTOP) == ("closed", laptop)
+    rows = {r["id"]: r for r in _sessions(engine)}
+    assert (rows[laptop]["finalized_at"], rows[laptop]["end_reason"]) == (clock.now, "logout")
+    assert rows[laptop]["last_activity_at"] == last and rows[laptop]["idle_expires_at"] == last + THIRTY_MINUTES
+    assert rows[laptop]["finalized_at"] < rows[laptop]["idle_expires_at"]
+    assert (rows[phone]["finalized_at"], rows[phone]["end_reason"]) == (None, None)  # autre appareil intact
+    assert _rows(engine, "product_campaign_participants") == participation_before  # J0 et fenêtre inchangés
+    assert _count(engine, "product_activity_events") == 0
+    clock.advance(minutes=1)  # nouvelle connexion dans le même environnement : nouvelle visite
+    again = _committed_touch(Sessions, campaign_id, env=LAPTOP)
+    assert again[1] == "opened" and again[0] != laptop and again[2] is None
+
+
+def test_pg_logout_replay_is_idempotent_and_never_closes_a_later_visit(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    first = _committed_touch(Sessions, campaign_id)[0]
+    logout, orphan = uuid.uuid4(), uuid.uuid4()
+    clock.advance(minutes=2)
+    assert _committed_close(Sessions, campaign_id, key=logout) == ("closed", first)
+    clock.advance(minutes=1)
+    assert _committed_close(Sessions, campaign_id, key=orphan) == ("no_open_session", None)  # clé inscrite
+    clock.advance(minutes=1)
+    later = _committed_touch(Sessions, campaign_id)[0]
+    before = (_sessions(engine), _interactions(engine))
+    clock.advance(minutes=1)
+    for key, expected in ((logout, ("replayed", first)), (orphan, ("replayed", None))):
+        with Sessions() as session, _Statements(engine) as statements:
+            result = _close(session, campaign_id, key=key)
+            assert (result.outcome, result.session.id if result.session else None) == expected
+            session.commit()
+        assert _writes_of(statements) == []
+    assert (_sessions(engine), _interactions(engine)) == before
+    assert {r["id"]: r["finalized_at"] for r in _sessions(engine)}[later] is None  # la visite suivante reste ouverte
+    # Une clé de déconnexion n'est jamais une activité, et inversement.
+    with Sessions() as session:
+        with pytest.raises(ActivitySessionConflict):
+            _touch(session, campaign_id, key=logout)
+    activity = [r for r in _interactions(engine) if r["interaction_kind"] == "activity"][0]["interaction_key"]
+    with Sessions() as session:
+        with pytest.raises(ActivitySessionConflict):
+            _close(session, campaign_id, key=activity)
+
+
+def test_pg_logout_of_an_already_expired_visit_records_inactivity(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    visit = _committed_touch(Sessions, campaign_id)[0]
+    last = clock.now
+    clock.now = last + THIRTY_MINUTES  # la visite est close par inactivité, pas par la déconnexion
+    assert _committed_close(Sessions, campaign_id) == ("expired", visit)
+    [row] = _sessions(engine)
+    assert (row["end_reason"], row["finalized_at"], row["last_activity_at"]) == ("inactivity", clock.now, last)
+
+
+def test_pg_logout_after_j_plus_12_or_closure_is_bookkeeping_only(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    j0 = clock.now
+    clock.now = j0 + TWELVE_DAYS - timedelta(minutes=2)
+    visit = _committed_touch(Sessions, campaign_id)[0]
+    clock.now = j0 + TWELVE_DAYS + timedelta(minutes=5)
+    _committed(Sessions, lambda s: pc.close_campaign(s, campaign_id=campaign_id))
+    assert _committed_close(Sessions, campaign_id) == ("closed", visit)
+    [row] = _sessions(engine)
+    assert row["last_activity_at"] == j0 + TWELVE_DAYS - timedelta(minutes=2)  # aucune activité après J+12
+    with Sessions() as session:
+        with pytest.raises(ActivitySessionRefused) as refused:
+            _close(session, campaign_id, user=OTHER_USER)
+    assert refused.value.reason == "not_participant"
+
+
+@pytest.mark.parametrize("first", ["interaction", "logout"])
+def test_pg_concurrent_logout_and_interaction_are_serialized(engine, Sessions, clock, first):
+    campaign_id = _participant(Sessions, clock)
+    visit = _committed_touch(Sessions, campaign_id)[0]
+    clock.advance(minutes=10)
+    holder, waiter = Sessions(), Sessions()
+    ops = {"interaction": lambda s: _touch(s, campaign_id).outcome, "logout": lambda s: _close(s, campaign_id).outcome}
+    second = "logout" if first == "interaction" else "interaction"
+    try:
+        assert ops[first](holder) == ("continued" if first == "interaction" else "closed")
+        held_at = clock.now
+        clock.advance(seconds=30)
+        result, error = _run_blocked(engine, holder, waiter, ops[second])
+    finally:
+        holder.close()
+        waiter.close()
+    assert error is None
+    rows = _sessions(engine)
+    original = next(r for r in rows if r["id"] == visit)
+    assert (original["end_reason"], original["finalized_at"]) == ("logout", held_at if first == "logout"
+                                                                  else clock.now)
+    if first == "interaction":  # la déconnexion voit la prolongation validée, sans la déplacer
+        assert result == "closed" and original["last_activity_at"] == held_at and len(rows) == 1
+    else:  # l'interaction arrive après la déconnexion : nouvelle visite, l'ancienne reste close
+        assert result == "opened" and len(rows) == 2 and original["last_activity_at"] == held_at - timedelta(
+            minutes=10)
+
+
+def test_pg_non_blocking_logout_reports_refusals(engine, Sessions, clock):
+    campaign_id = _participant(Sessions, clock)
+    visit = _committed_touch(Sessions, campaign_id)[0]
+    with Sessions() as session:
+        closed = ps.attempt_session_close(session, campaign_id=campaign_id, user_id=USER, environment_key=LAPTOP,
+                                          interaction_key=uuid.uuid4())
+        outsider = ps.attempt_session_close(session, campaign_id=campaign_id, user_id=OTHER_USER,
+                                            environment_key=LAPTOP, interaction_key=uuid.uuid4())
+        session.commit()
+    assert (closed.status, closed.session_id) == ("closed", visit)
+    assert (outsider.status, outsider.reason) == ("refused", "not_participant")
+
+
 def test_pg_sessions_never_read_f2_sessions(engine, Sessions, clock):
     campaign_id = _participant(Sessions, clock)
     with Sessions() as session, _Statements(engine) as statements:
@@ -354,32 +635,33 @@ def test_pg_sessions_never_read_f2_sessions(engine, Sessions, clock):
         session.commit()
     assert statements and not [s for s in statements if "oryx_session" in s or "auth_" in s]
     writes = [s for s in statements if s.startswith(("INSERT", "UPDATE", "DELETE"))]
-    assert writes and all("product_activity_sessions" in s.split()[1:3] for s in writes), writes
+    assert writes and all(s.split()[2 if s.startswith("INSERT") else 1].startswith("product_activity_session")
+                          for s in writes), writes
 
 
 def test_pg_sql_constraints_of_activity_sessions(engine, Sessions, clock):
     campaign_id = _participant(Sessions, clock)
     _committed_touch(Sessions, campaign_id)
     [row] = _sessions(engine)
-    insert = ("INSERT INTO product_activity_sessions (id, campaign_id, user_id, environment_digest, "
-              "opening_interaction_key, last_interaction_key, opened_at, last_activity_at, idle_expires_at, "
-              "finalized_at) VALUES (gen_random_uuid(), :c, :u, :d, gen_random_uuid(), gen_random_uuid(), :o, :l, "
-              ":i, :f)")
+    insert = ("INSERT INTO product_activity_sessions (id, campaign_id, user_id, environment_digest, opened_at, "
+              "last_activity_at, idle_expires_at, finalized_at, end_reason) VALUES (gen_random_uuid(), :c, :u, :d, "
+              ":o, :l, :i, :f, :r)")
     base = {"c": campaign_id, "u": USER, "d": ps.environment_digest(PHONE), "o": clock.now, "l": clock.now,
-            "i": clock.now + THIRTY_MINUTES, "f": None}
+            "i": clock.now + THIRTY_MINUTES, "f": None, "r": None}
     with engine.connect() as conn:
         _rejects(conn, "ck_product_activity_sessions_idle_expiry", insert,
                  **{**base, "i": clock.now + timedelta(hours=8)})  # pas de durée F2 ni d'expiration libre
         _rejects(conn, "ck_product_activity_sessions_activity", insert,
                  **{**base, "l": clock.now - timedelta(minutes=1), "i": clock.now + timedelta(minutes=29)})
-        _rejects(conn, "ck_product_activity_sessions_finalized", insert, **{**base, "f": clock.now})
+        _rejects(conn, "ck_product_activity_sessions_finalized", insert,
+                 **{**base, "f": clock.now, "r": "inactivity"})  # inactivité avant 30 min
+        _rejects(conn, "ck_product_activity_sessions_finalized", insert,
+                 **{**base, "f": clock.now + THIRTY_MINUTES, "r": "logout"})  # « déconnexion » après expiration
+        _rejects(conn, "ck_product_activity_sessions_end", insert, **{**base, "f": clock.now})
         _rejects(conn, "ck_product_activity_sessions_environment_digest", insert, **{**base, "d": str(PHONE)})
         _rejects(conn, "uq_product_activity_sessions_open_environment", insert, **{**base, "d": row[
             "environment_digest"]})
         _rejects(conn, "product_activity_sessions_participant_fkey", insert, **{**base, "u": OTHER_USER})
-        _rejects(conn, "uq_product_activity_sessions_opening_key", insert.replace(
-            "gen_random_uuid(), gen_random_uuid(), :o", ":k, gen_random_uuid(), :o"),
-            **{**base, "k": row["opening_interaction_key"], "f": clock.now + THIRTY_MINUTES})
         conn.rollback()
 
 

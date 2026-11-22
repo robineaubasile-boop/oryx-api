@@ -4,7 +4,8 @@ Paquet isolé, posé sur le socle PostgreSQL des migrations
 0022_product_analytics_v1 (tables product_campaigns,
 product_campaign_participants, product_activity_events) et
 0023_analytics_cohort_sessions (product_campaign_cohorts,
-product_cohort_seats, product_activity_sessions) :
+product_cohort_seats, product_activity_sessions,
+product_activity_session_interactions) :
 
 - common.py      : erreurs, vocabulaires fermés, registre des politiques,
                    validation structurelle, horloge serveur ;
@@ -26,8 +27,9 @@ product_cohort_seats, product_activity_sessions) :
                    bloquant ;
 - sessions.py    : lot 2B-1 — sessions d'activité produit (30 minutes
                    d'inactivité, horloge serveur, environnements distincts,
-                   rejeu, finalisation sans événement inventé), distinctes
-                   des sessions F2.
+                   registre des clés d'interaction : tout rejeu idempotent,
+                   clôture volontaire, finalisation sans événement
+                   inventé), distinctes des sessions F2.
 
 DORMANCE : aucun module applicatif n'importe ce paquet (api.py, routes,
 workers, scripts restent inchangés ; tests/test_product_analytics_dormancy.py).
