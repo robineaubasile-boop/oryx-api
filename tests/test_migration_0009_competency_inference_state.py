@@ -71,6 +71,7 @@ from tests.test_migration_0004_drop_company_analyses import (
     V0T08_FILES,
     V0T08_0022,
     V0T08_0023,
+    V0T08_0024,
     PR4_0019,
     PR4_FILES,
     PR7_0020,
@@ -424,12 +425,12 @@ def test_revision_chain_is_exactly_0001_to_0009():
     T6-A. Seules 0010 (R1-B), 0011 (R1-C1), 0012 (R1-C2) et 0013 (R1-C4),
     testées à part, ont été ajoutées depuis : 0013 est la tête."""
     script = _script_directory()
-    assert script.get_heads() == [V0T08_0023]
+    assert script.get_heads() == [V0T08_0024]
     assert script.get_revision(R1D1).down_revision == R1C4
     assert script.get_bases() == [BASELINE]
 
     revisions = {rev.revision: rev for rev in script.walk_revisions()}
-    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020, PR9B1_0021, V0T08_0022, V0T08_0023}
+    assert set(revisions) == {BASELINE, T1A, T1B1, T1C2, T2A, T3A, T4A, T5A, T6A, R1B, R1C1, R1C2, R1C4, R1D1} | PR1_REVISIONS | PR2_REVISIONS | {PR4_0019, PR7_0020, PR9B1_0021, V0T08_0022, V0T08_0023, V0T08_0024}
     assert revisions[R1C4].down_revision == R1C2
     assert revisions[R1C2].down_revision == R1C1
     assert revisions[R1C1].down_revision == R1B

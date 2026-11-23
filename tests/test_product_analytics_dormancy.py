@@ -10,8 +10,11 @@ existent mais ne sont raccordés à rien.
   (auth_f2*, authz_f2*, f2_runtime), ni route_policy (F-02A), ni moteurs
   pédagogiques, ni réseau, ni threads, ni planificateur, ni lecture
   d'environnement ;
-- lot 2B-1 : seule la migration 0023_analytics_cohort_sessions est ajoutée
-  (tête, 23 fichiers), 0022 inchangée ; cohort.py est le SEUL module qui
+- lot 2B-1 : seule la migration 0023_analytics_cohort_sessions est ajoutée,
+  0022 inchangée ; lot 2B-2 bloc A : seule la migration
+  0024_product_activity_proofs est ajoutée (tête, 24 fichiers), 0022 et
+  0023 inchangées, aucun module ajouté au paquet (aucun service ne lit ni
+  n'écrit les deux nouvelles tables) ; cohort.py est le SEUL module qui
   lit des tables F2, uniquement via les modèles Invitation et
   AuthOperation de core.models (aucun module F2 importé, aucune écriture :
   tests/test_product_analytics_cohort.py) ;
@@ -38,6 +41,10 @@ MIGRATION_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_ses
 # sha256 de 0023 telle que proposée par le lot 2B-1 : toute retouche
 # ultérieure doit être explicite (mise à jour de cette empreinte).
 MIGRATION_0023_SHA256 = "896c33583892f8037eeb1bb3fd4af00548a8557e9548fca4070e76ca8a8fcb52"
+MIGRATION_0024 = REPO_ROOT / "alembic" / "versions" / "0024_product_activity_proofs.py"
+# Tables du lot 2B-2 bloc A : aucun module du paquet ne les mentionne.
+PROOF_TABLES = ("product_activity_proof_registry", "product_activity_event_attributions")
+PROOF_MODELS = ("ProductActivityProofRegistry", "ProductActivityEventAttribution")
 ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc",
                    "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",
@@ -100,13 +107,35 @@ def test_no_application_module_imports_the_package():
                 assert "product_analytics" not in text and "record_event" not in text, path
 
 
-def test_only_migration_0023_added_and_0022_unchanged():
+def test_only_migrations_0023_and_0024_added_and_0022_0023_unchanged():
     script = _script_directory()
-    assert script.get_heads() == ["0023_analytics_cohort_sessions"]
+    assert script.get_heads() == ["0024_product_activity_proofs"]
+    assert script.get_revision("0024_product_activity_proofs").down_revision == "0023_analytics_cohort_sessions"
     assert script.get_revision("0023_analytics_cohort_sessions").down_revision == "0022_product_analytics_v1"
-    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 23
+    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 24
+    assert MIGRATION_0024.is_file()
     assert hashlib.sha256(MIGRATION_0022.read_bytes()).hexdigest() == MIGRATION_0022_SHA256
     assert hashlib.sha256(MIGRATION_0023.read_bytes()).hexdigest() == MIGRATION_0023_SHA256
+
+
+def test_no_service_touches_the_2b2_proof_tables():
+    """Bloc A : tables et modèles seulement. Aucun module du paquet (ni
+    aucun autre module applicatif hors core/models.py et la migration 0024)
+    ne mentionne le registre des preuves ni les attributions."""
+    for name in MODULES:
+        source = (PACKAGE / name).read_text(encoding="utf-8")
+        for marker in PROOF_TABLES + PROOF_MODELS:
+            assert marker not in source, (name, marker)
+    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION_0024}
+    offenders = []
+    for path in sorted(REPO_ROOT.rglob("*.py")):
+        parts = path.relative_to(REPO_ROOT).parts
+        if parts[0] in ("tests", ".git") or "node_modules" in parts or path in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if any(marker in text for marker in PROOF_TABLES + PROOF_MODELS):
+            offenders.append(path.relative_to(REPO_ROOT).as_posix())
+    assert offenders == []
 
 
 def test_only_cohort_reads_f2_tables_and_only_the_canonical_invitation_proof():

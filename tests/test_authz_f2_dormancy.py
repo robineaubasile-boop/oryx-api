@@ -36,9 +36,13 @@ d'autorisation (core/authz_f2) ni la route personnelle (core/authz_f2_http) :
   (0022_product_analytics_v1), hors de la frontière F2 ; aucune
   route ni collecte (tests/test_migration_0022_product_analytics_v1.py) ;
 - V0-T08 Lot 2B-1 : une seule migration nouvelle, additive
-  (0023_analytics_cohort_sessions, tête), hors de la frontière F2 (tables
+  (0023_analytics_cohort_sessions), hors de la frontière F2 (tables
   F2 seulement référencées par FK, jamais modifiées) ; aucune route ni
-  collecte (tests/test_migration_0023_analytics_cohort_sessions.py).
+  collecte (tests/test_migration_0023_analytics_cohort_sessions.py) ;
+- V0-T08 Lot 2B-2 bloc A : une seule migration nouvelle, additive
+  (0024_product_activity_proofs, tête), qui ne référence aucune table F2
+  (seulement des tables analytiques) ; aucune route ni collecte
+  (tests/test_migration_0024_product_activity_proofs.py).
 
 Les garanties historiques (routes publiques exactes, middlewares, imports
 interdits, chargement dynamique, réseau au démarrage, variables F2 valides
@@ -61,8 +65,8 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 
 AUTHZ = REPO_ROOT / "core" / "authz_f2"
 AUTHZ_HTTP = REPO_ROOT / "core" / "authz_f2_http"
-HEAD = "0023_analytics_cohort_sessions"  # V0-T08 Lot 2B-1 (analytics produit dormant)
-HEAD_FILE = "0023_analytics_cohort_sessions.py"
+HEAD = "0024_product_activity_proofs"  # V0-T08 Lot 2B-2 bloc A (analytics produit dormant)
+HEAD_FILE = "0024_product_activity_proofs.py"
 
 # Matrice fermée : module -> imports core.* exacts.
 IMPORT_MATRIX = {
@@ -457,18 +461,21 @@ def test_importing_the_boundary_opens_nothing():
     assert out.stdout.strip() == "False False False False"
 
 
-def test_only_the_additive_0021_0022_and_0023_migrations_and_no_new_production_dependency():
+def test_only_the_additive_0021_to_0024_migrations_and_no_new_production_dependency():
     """R1 PR 7 a ajouté 0020_position_revision ; R1 PR 9-B1 a ajouté
     0021_decryptage_reservations ; V0-T08 Lot 1 n'ajoute que
     0022_product_analytics_v1 ; V0-T08 Lot 2B-1 n'ajoute que
-    0023_analytics_cohort_sessions (tête) ; aucune dépendance de production."""
+    0023_analytics_cohort_sessions ; V0-T08 Lot 2B-2 bloc A n'ajoute que
+    0024_product_activity_proofs (tête) ; aucune dépendance de production."""
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
     assert script.get_revision("0020_position_revision").down_revision == "0019_f2_http_admission"
     assert script.get_revision("0021_decryptage_reservations").down_revision == "0020_position_revision"
     assert script.get_revision("0022_product_analytics_v1").down_revision == "0021_decryptage_reservations"
-    assert script.get_revision(HEAD).down_revision == "0022_product_analytics_v1"
+    assert script.get_revision("0023_analytics_cohort_sessions").down_revision == "0022_product_analytics_v1"
+    assert script.get_revision(HEAD).down_revision == "0023_analytics_cohort_sessions"
     assert script.get_heads() == [HEAD]
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 23 and versions[-3:] == ["0021_decryptage_turn_reservations.py",
-                                                     "0022_product_analytics_v1.py", HEAD_FILE]
+    assert len(versions) == 24 and versions[-4:] == ["0021_decryptage_turn_reservations.py",
+                                                     "0022_product_analytics_v1.py",
+                                                     "0023_analytics_cohort_sessions.py", HEAD_FILE]
     assert production_requirements() == MAIN_REQUIREMENTS

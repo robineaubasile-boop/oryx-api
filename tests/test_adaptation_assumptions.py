@@ -999,7 +999,7 @@ def test_98_99_not_wired_to_api_nor_web_chat():
 
 def test_100_101_no_migration_no_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0023_analytics_cohort_sessions.py" and len(versions) == 23
+    assert versions[-1] == "0024_product_activity_proofs.py" and len(versions) == 24
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     assert "Assumption" not in models and "assumption" not in models
     tokens = _code_tokens(_source())

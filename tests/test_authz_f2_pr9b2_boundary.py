@@ -288,5 +288,5 @@ def test_importing_b2_opens_nothing_and_loads_no_network_client(database_url):
 
 def test_no_new_migration():
     script = ScriptDirectory.from_config(Config(str(REPO_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["0023_analytics_cohort_sessions"]  # V0-T08 Lots 1 et 2B-1 : seules migrations ajoutées depuis
-    assert len(list((REPO_ROOT / "alembic" / "versions").glob("*.py"))) == 23
+    assert script.get_heads() == ["0024_product_activity_proofs"]  # V0-T08 Lots 1, 2B-1 et 2B-2 : seules migrations ajoutées depuis
+    assert len(list((REPO_ROOT / "alembic" / "versions").glob("*.py"))) == 24
