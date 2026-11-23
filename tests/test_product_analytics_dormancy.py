@@ -60,6 +60,10 @@ ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "
                    "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",
                    "core.product_analytics.retention", "core.product_analytics.participation"}
+# V0-T08 Lot 2B-2 bloc B, audit PR #253 (nominatif) : proofs.py émet l'origine
+# d'une opération via le service 2B-1 (sessions) et garde les origines émises
+# en références faibles (weakref) ; aucun autre module n'en bénéficie.
+EXTRA_IMPORTS = {"proofs.py": {"weakref", "core.product_analytics.sessions"}}
 # Modèles F2 lisibles par le paquet (lot 2B-1, cohort.py seulement) : preuve
 # canonique invitation -> utilisateur. Aucun autre modèle F2.
 F2_MODELS = {"Invitation", "AuthOperation", "AuthIdentity", "AuthPreauthCandidate", "AuthOtpRequest",
@@ -91,7 +95,9 @@ def test_package_is_exactly_the_expected_modules():
 def test_package_imports_only_the_allowed_modules():
     for name in MODULES:
         imported = _imports(PACKAGE / name)
-        assert imported <= ALLOWED_IMPORTS, (name, imported - ALLOWED_IMPORTS)
+        allowed = ALLOWED_IMPORTS | EXTRA_IMPORTS.get(name, set())
+        assert imported <= allowed, (name, imported - allowed)
+        assert EXTRA_IMPORTS.get(name, set()) <= imported, name  # exception exacte, jamais élargie en silence
         source = (PACKAGE / name).read_text(encoding="utf-8")
         for marker in ("os.environ", "getenv", "__main__", "Thread", "asyncio", "schedule", "socket", "requests",
                        "httpx", "anthropic", "APIRouter", "FastAPI", "route_policy", "authz_f2", "auth_f2",

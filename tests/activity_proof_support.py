@@ -4,8 +4,11 @@ preuves d'utilisation significative).
 Campagnes, participations, visites et interactions sont produites par les
 VRAIS services 2A / 2B-1 (aucune ligne fabriquée, sauf scénarios explicites
 d'écrivain hors service) ; chaque étape est committée dans sa propre
-transaction, comme le ferait le futur raccordement.
+transaction, comme le ferait le futur raccordement. Les origines sont ÉMISES
+par proofs.open_origin pour une opération donnée ; bind() (test seulement)
+ne sert qu'à exercer la relecture sous verrou sur des origines altérées.
 """
+import dataclasses
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -96,18 +99,35 @@ def close(engine, campaign_id, user_id, *, environment=LAPTOP, key=None) -> uuid
 
 
 def observe(engine, campaign_id, user_id, visit_id, interaction_key) -> proofs.OriginSnapshot:
+    """Observation SEULE (read_origin) : jamais acceptée comme origine."""
     return committed(engine, lambda db: proofs.read_origin(db, campaign_id=campaign_id, user_id=user_id,
                                                            visit_id=visit_id, interaction_key=interaction_key))
 
 
-def origin_of(engine, user_id, *, environment=LAPTOP, campaign_id=None) -> proofs.OriginSnapshot:
-    campaign_id = campaign_id or open_wave(engine, user_id)
-    visit_id, key = touch(engine, campaign_id, user_id, environment=environment)
-    return observe(engine, campaign_id, user_id, visit_id, key)
-
-
 def operation(user_id, kind=CREATE, *, operation_id=None, new_effect=True) -> proofs.CommittedOperation:
     return proofs.CommittedOperation(user_id, kind, operation_id or uuid.uuid4(), new_effect)
+
+
+def open_origin(engine, op, *, campaign_id, environment=LAPTOP) -> proofs.OriginSnapshot:
+    """Origine ÉMISE par le service pour `op` (vrai chemin, transaction
+    committée)."""
+    return committed(engine, lambda db: proofs.open_origin(db, campaign_id=campaign_id, environment_key=environment,
+                                                           operation=op))
+
+
+def opened(engine, user_id, kind=CREATE, *, environment=LAPTOP, campaign_id=None, operation_id=None) -> tuple:
+    """(origine émise, opération) : campagne ouverte au besoin."""
+    campaign_id = campaign_id or open_wave(engine, user_id)
+    op = operation(user_id, kind, operation_id=operation_id)
+    return open_origin(engine, op, campaign_id=campaign_id, environment=environment), op
+
+
+def bind(origin, op) -> proofs.OriginSnapshot:
+    """TEST SEULEMENT : lie une origine observée (ou altérée) à `op` sans
+    passer par open_origin, pour exercer la défense en profondeur (relecture
+    sous verrou de register_pending) sur des origines qu'open_origin ne
+    produit jamais."""
+    return proofs._issue(dataclasses.replace(origin, operation_kind=None, operation_id=None), op)
 
 
 def register(engine, origin, op):

@@ -9,21 +9,27 @@ PRODUCTION, contre un VRAI PostgreSQL (16 et 18 en CI).
    no-op, rejeux, refus, ROLLBACK, COMMIT refusé ou incertain, absence
    d'attestation : rien n'est certifié ; premier ACK Décrypter certifié, ACK
    rejoué non certifiable ;
-3. origine : autre propriétaire, interaction créée PENDANT l'opération,
-   appareils multiples, opérations concurrentes ;
+3. origine (audit PR #253) : l'appelant ne désigne aucune origine ;
+   opération de l'appareil B jamais attribuée à A ; interaction ancienne de
+   la même visite jamais réutilisée ; interaction acceptée PENDANT
+   l'opération jamais l'origine ; propriétaire = principal ; visite clôturée
+   avant ou pendant ; après J+12 ; rejeux depuis un second appareil ;
+   opérations concurrentes ;
 4. non-blocage : base analytics indisponible après le COMMIT F2, délai de
-   verrou, violation de contrainte, échec de l'inscription, échec de la
-   certification, erreur imprévue, COMMIT analytics incertain (dans les deux
-   sens) : résultat F2 identique (même objet), un seul appel F2, reçu
+   verrou, violation de contrainte, échec de l'émission de l'origine, de
+   l'inscription ou de la certification, erreur imprévue, COMMIT analytics
+   incertain (émission, inscription, certification, règlement) : résultat F2 identique (même objet), un seul appel F2, reçu
    inchangé, aucune preuve faussement certifiée, journaux sans identifiant.
 """
 import ast
+import inspect
 import json
 import logging
 import re
 import subprocess
 import sys
 import uuid
+from datetime import timedelta
 
 import pytest
 import sqlalchemy as sa
@@ -44,19 +50,23 @@ from core.authz_f2.runner import (
     AuthorizationOutcome,
     AuthorizedTransactionRunner,
 )
-from core.product_analytics import proofs
+from core.product_analytics import common, proofs
+from core.product_analytics import sessions as ps
 from tests.activity_proof_support import (
     CREATE,
     DELETE,
-    LAPTOP,
-    PHONE,
+    TWELVE_DAYS,
     UPDATE,
     Background,
     Holder,
     analytics_engine,
+    close,
+    committed,
     definitive_rows,
+    observe,
     open_wave,
     registry,
+    rows,
     touch,
     utc,
 )
@@ -186,8 +196,27 @@ def test_the_real_api_never_loads_the_bridge_whatever_the_environment():
 
 def test_a_foreign_runner_is_refused_before_anything_runs():
     with pytest.raises(TypeError):
-        bridge.run_with_proof_certification(object(), None, _create(), analytics_engine=None, campaign_id=None,
-                                            user_id=None, visit_id=None, interaction_key=None)
+        bridge.run_with_proof_certification(object(), None, _create(), analytics_engine=None, campaign_id=None)
+
+
+def test_the_caller_can_designate_no_user_visit_interaction_or_environment(monkeypatch):
+    """Audit PR #253 : la seule entrée analytics est la campagne de mesure ;
+    toute tentative de désigner une origine échoue AVANT F2 (aucun appel)."""
+    assert list(inspect.signature(bridge.run_with_proof_certification).parameters) == [
+        "runner", "credential", "command", "analytics_engine", "campaign_id"]
+    calls = []
+    monkeypatch.setattr(AuthorizedTransactionRunner, "_run_attested", lambda *a: calls.append(a))
+    runner = AuthorizedTransactionRunner.__new__(AuthorizedTransactionRunner)
+    for designation in ({"user_id": USER_A}, {"visit_id": uuid.uuid4()}, {"interaction_key": uuid.uuid4()},
+                        {"environment_key": uuid.uuid4()}):
+        with pytest.raises(TypeError):
+            bridge.run_with_proof_certification(runner, None, _create(), analytics_engine=None, campaign_id=None,
+                                                **designation)
+    assert calls == []
+    # Le registre n'accepte que l'origine émise : la frontière n'en construit aucune elle-même.
+    text = BRIDGE.read_text(encoding="utf-8")
+    assert "OriginSnapshot(" not in text and "read_origin" not in text and "_issue" not in text
+    assert "proofs._" not in text and "interaction_key" not in text and "visit_id" not in text
 
 
 # --------------------------------------------------------------------------
@@ -244,16 +273,15 @@ def spy(monkeypatch):
     return F2Spy(monkeypatch)
 
 
-def origin_keys(analytics, user_id=USER_A, *, environment=LAPTOP, campaign_id=None) -> dict:
-    campaign_id = campaign_id or open_wave(analytics, user_id)
-    visit_id, key = touch(analytics, campaign_id, user_id, environment=environment)
-    return {"campaign_id": campaign_id, "user_id": user_id, "visit_id": visit_id, "interaction_key": key}
+def wave(analytics, user_id=USER_A) -> uuid.UUID:
+    """Campagne active, `user_id` inscrit (J0 maintenant) ; aucune visite."""
+    return open_wave(analytics, user_id)
 
 
-def run(env, analytics, issued, command, origin, *, hook=None, runner=None) -> bridge.CertifiedRun:
+def run(env, analytics, issued, command, campaign_id, *, hook=None, runner=None) -> bridge.CertifiedRun:
     runner = runner or env.runner(hook=hook or IDLE)
     return bridge.run_with_proof_certification(runner, issued.credential(), command, analytics_engine=analytics,
-                                               **origin)
+                                               campaign_id=campaign_id)
 
 
 def exact(spy, result, status=AUTHORIZED):
@@ -271,13 +299,33 @@ def no_identifier_logged(caplog):
                                 message), message
 
 
-def certified_row(analytics, kind, operation_id, origin):
-    [row] = registry(analytics, origin["user_id"])
-    assert (row["status"], row["source_operation_kind"], row["source_operation_id"]) == ("certified", kind,
-                                                                                         operation_id)
-    assert (row["campaign_id"], row["visit_id"], row["interaction_key"]) == (
-        origin["campaign_id"], origin["visit_id"], origin["interaction_key"])
+def interactions(analytics, user_id=USER_A) -> list:
+    return rows(analytics, "SELECT * FROM product_activity_session_interactions WHERE user_id = :u "
+                           "ORDER BY recorded_at, interaction_key", u=user_id)
+
+
+def visits(analytics, user_id=USER_A) -> list:
+    return rows(analytics, "SELECT * FROM product_activity_sessions WHERE user_id = :u ORDER BY opened_at, id",
+                u=user_id)
+
+
+def f2_touch(analytics, campaign_id, issued, *, user_id=USER_A) -> tuple:
+    """Interaction 'activity' antérieure, acceptée dans l'environnement de la
+    session F2 `issued` (même source que la frontière)."""
+    return touch(analytics, campaign_id, user_id, environment=issued.session_id)
+
+
+def certified_row(analytics, kind, operation_id, issued, campaign_id, *, before=()):
+    """La preuve certifiée de `operation_id` : origine = interaction NOUVELLE
+    (absente de `before`), 'activity', de l'environnement de la session F2
+    qui a exécuté l'opération, dans la visite que 2B-1 lui a attribuée."""
+    [row] = [r for r in registry(analytics) if r["source_operation_id"] == operation_id]
+    assert (row["status"], row["source_operation_kind"], row["campaign_id"]) == ("certified", kind, campaign_id)
     assert row["resolved_at"] is None and row["recorded_event_id"] is None and row["purge_after_at"] is None
+    [origin] = [i for i in interactions(analytics, row["user_id"]) if i["interaction_key"] == row["interaction_key"]]
+    assert row["interaction_key"] not in {i["interaction_key"] for i in before}
+    assert (origin["session_id"], origin["interaction_kind"], origin["environment_digest"]) == (
+        row["visit_id"], "activity", ps.environment_digest(issued.session_id))
     return row
 
 
@@ -286,12 +334,14 @@ def certified_row(analytics, kind, operation_id, origin):
 # --------------------------------------------------------------------------
 
 def test_an_effective_creation_is_certified_after_the_f2_commit(env, analytics, alice, spy, caplog):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     command = create_command()
-    result = exact(spy, run(env, analytics, alice, command, origin))
+    assert interactions(analytics) == []
+    result = exact(spy, run(env, analytics, alice, command, campaign))
     assert result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
-    row = certified_row(analytics, CREATE, command.operation_id, origin)
-    assert (row["event_type"], row["surface"]) == ("portfolio_used", "portfolio")
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+    assert (row["event_type"], row["surface"], row["user_id"]) == ("portfolio_used", "portfolio", USER_A)
+    assert len(interactions(analytics)) == 1 and len(visits(analytics)) == 1  # émise par CET appel
     [receipt] = env.receipts()
     # Certification strictement après le COMMIT F2 (horloge PostgreSQL, jamais T_authorization).
     assert utc(row["created_at"]) > utc(receipt["created_at"]) and row["certified_at"] > row["created_at"]
@@ -300,61 +350,65 @@ def test_an_effective_creation_is_certified_after_the_f2_commit(env, analytics, 
 
 
 def test_an_effective_update_and_a_deletion_are_certified(env, analytics, alice):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     position = env.insert_position(quantity=4.0)
     update = replace_command(position, 0, quantity="5")
-    assert run(env, analytics, alice, update, origin).proof.state == proofs.CERTIFIED
-    origin2 = origin_keys(analytics, campaign_id=origin["campaign_id"])
+    assert run(env, analytics, alice, update, campaign).proof.state == proofs.CERTIFIED
     delete = delete_command(position, 1)
-    assert run(env, analytics, alice, delete, origin2).proof.state == proofs.CERTIFIED
+    assert run(env, analytics, alice, delete, campaign).proof.state == proofs.CERTIFIED
     kinds = {(r["source_operation_kind"], r["source_operation_id"], r["status"]) for r in registry(analytics, USER_A)}
     assert kinds == {(UPDATE, update.operation_id, "certified"), (DELETE, delete.operation_id, "certified")}
+    first = certified_row(analytics, UPDATE, update.operation_id, alice, campaign)
+    second = certified_row(analytics, DELETE, delete.operation_id, alice, campaign)
+    # Une interaction par opération, dans la même visite (prolongée).
+    assert first["interaction_key"] != second["interaction_key"] and first["visit_id"] == second["visit_id"]
 
 
 def test_a_noop_update_is_never_certifiable(env, analytics, alice, spy):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     position = env.insert_position(quantity=4.5, purchase_price=100.0, target_percent=10.0)
-    result = exact(spy, run(env, analytics, alice, replace_command(position, 0), origin))
+    result = exact(spy, run(env, analytics, alice, replace_command(position, 0), campaign))
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NO_NEW_EFFECT) and registry(analytics) == []
+    assert interactions(analytics) == [] and visits(analytics) == []  # aucune interaction émise
 
 
 @pytest.mark.parametrize("make", ["create", "update", "noop", "delete"])
 def test_a_receipt_replay_is_never_a_new_use(env, analytics, alice, make):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     if make == "create":
         command = create_command()
     else:
         position = env.insert_position(quantity=4.5, purchase_price=100.0, target_percent=10.0)
         command = {"update": replace_command(position, 0, quantity="5"), "noop": replace_command(position, 0),
                    "delete": delete_command(position, 0)}[make]
-    first = run(env, analytics, alice, command, origin)
-    before = registry(analytics)
-    origin2 = origin_keys(analytics, campaign_id=origin["campaign_id"])
-    again = run(env, analytics, alice, command, origin2)
+    first = run(env, analytics, alice, command, campaign)
+    before, seen, opened_visits = registry(analytics), interactions(analytics), visits(analytics)
+    again = run(env, analytics, alice, command, campaign)
     assert again.outcome.value == first.outcome.value and again.outcome.value.body == first.outcome.value.body
     assert again.proof == bridge.ProofReport(proofs.ABSENT, proofs.NO_NEW_EFFECT)
     assert registry(analytics) == before  # aucune écriture, aucune réattribution
+    assert interactions(analytics) == seen and visits(analytics) == opened_visits  # ni interaction ni prolongation
 
 
 def test_f2_refusals_certify_nothing(env, analytics, alice):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     position = env.insert_position(revision=3)
     bob = env.confirmed(BOB, USER_B)
     theirs = env.insert_position(user_id=USER_B)
     done = create_command(quantity="4")
-    assert run(env, analytics, alice, done, origin).proof.state == proofs.CERTIFIED
-    before = registry(analytics)
+    assert run(env, analytics, alice, done, campaign).proof.state == proofs.CERTIFIED
+    before, seen = registry(analytics), interactions(analytics)
     cases = [(replace_command(position, 2, quantity="9"), REVISION_CONFLICT),
              (create_command(done.operation_id, quantity="7"), IDEMPOTENCY_CONFLICT),
              (delete_command(theirs, 0), NOT_FOUND)]
     for command, status in cases:
-        result = run(env, analytics, alice, command, origin_keys(analytics, campaign_id=origin["campaign_id"]))
+        result = run(env, analytics, alice, command, campaign)
         assert result.outcome == AuthorizationOutcome(status)
         assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED)
     env.service.revoke_session(alice.session_id, "security")
-    result = run(env, analytics, alice, create_command(), origin)
+    result = run(env, analytics, alice, create_command(), campaign)
     assert result.outcome == AuthorizationOutcome(SESSION_INVALID) and result.proof.reason == proofs.SOURCE_UNVERIFIED
-    assert registry(analytics) == before and bob is not None
+    assert registry(analytics) == before and interactions(analytics) == seen and bob is not None
 
 
 @pytest.mark.parametrize("point", ["position_written", "receipt_written", "executed"])
@@ -362,21 +416,23 @@ def test_an_f2_rollback_certifies_nothing(env, analytics, alice, point):
     def fail(at):
         if at == point:
             raise RuntimeError("panne avant COMMIT (simulée)")
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics), hook=fail)
+    result = run(env, analytics, alice, create_command(), wave(analytics), hook=fail)
     assert result.outcome == AuthorizationOutcome(UNAVAILABLE) and env.receipts() == []
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED) and registry(analytics) == []
+    assert interactions(analytics) == []
 
 
 def test_a_refused_f2_commit_certifies_nothing(env, analytics, alice):
     def refuse_commit(conn):
         raise OSError("COMMIT refusé")
+    campaign = wave(analytics)
     sa.event.listen(env.engine, "commit", refuse_commit)
     try:
-        result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         sa.event.remove(env.engine, "commit", refuse_commit)
     assert result.outcome == AuthorizationOutcome(UNAVAILABLE)
-    assert result.proof.reason == proofs.SOURCE_UNVERIFIED and registry(analytics) == []
+    assert result.proof.reason == proofs.SOURCE_UNVERIFIED and registry(analytics) == [] and interactions(analytics) == []
 
 
 def test_an_uncertain_f2_commit_certifies_nothing_even_though_the_receipt_exists(env, analytics, alice):
@@ -392,12 +448,12 @@ def test_an_uncertain_f2_commit_certifies_nothing_even_though_the_receipt_exists
         if statement.startswith("INSERT INTO portfolio_write_idempotency"):
             conn.info["receipt"] = True
 
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     command = create_command()
     sa.event.listen(env.engine, "before_cursor_execute", mark)
     sa.event.listen(env.engine, "commit", commit_then_lose_connection)
     try:
-        result = run(env, analytics, alice, command, origin)
+        result = run(env, analytics, alice, command, campaign)
     finally:
         sa.event.remove(env.engine, "commit", commit_then_lose_connection)
         sa.event.remove(env.engine, "before_cursor_execute", mark)
@@ -406,87 +462,164 @@ def test_an_uncertain_f2_commit_certifies_nothing_even_though_the_receipt_exists
     assert len(env.receipts()) == 1  # committé malgré l'erreur : la statistique est perdue, jamais présumée
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED) and registry(analytics) == []
     # Le retry est un rejeu : il ne rattrape jamais la statistique perdue.
-    again = run(env, analytics, alice, command, origin_keys(analytics, campaign_id=origin["campaign_id"]))
+    again = run(env, analytics, alice, command, campaign)
     assert again.outcome.status == AUTHORIZED and again.proof.reason == proofs.NO_NEW_EFFECT
-    assert registry(analytics) == []
+    assert registry(analytics) == [] and interactions(analytics) == []
 
 
 @pytest.mark.parametrize("fault", ["binding", "foreign_object"])
 def test_a_dropped_attestation_certifies_nothing_while_f2_succeeds(env, analytics, alice, monkeypatch, fault):
     inject_fault(monkeypatch, fault)
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+    result = run(env, analytics, alice, create_command(), wave(analytics))
     assert result.outcome.status == AUTHORIZED and len(env.receipts()) == 1
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED) and registry(analytics) == []
+    assert interactions(analytics) == []
 
 
 def test_an_authorized_command_without_attestation_certifies_nothing(env, analytics, alice):
-    result = run(env, analytics, alice, c.ListPositions(), origin_keys(analytics))
+    result = run(env, analytics, alice, c.ListPositions(), wave(analytics))
     assert result.outcome.status == AUTHORIZED
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED) and registry(analytics) == []
+    assert interactions(analytics) == []
 
 
 # --------------------------------------------------------------------------
-# 4. Origine
+# 4. Origine : liaison causale interaction -> opération (audit PR #253)
 # --------------------------------------------------------------------------
 
-def test_an_origin_of_another_user_is_an_owner_conflict(env, analytics, alice):
-    env.confirmed(BOB, USER_B)
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics, USER_B))
-    assert result.outcome.status == AUTHORIZED
-    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.OWNER_CONFLICT) and registry(analytics) == []
+def test_an_operation_from_device_b_is_never_attributed_to_device_a(env, analytics):
+    """Contre-épreuve de l'audit : même utilisateur, même campagne ; appareil
+    A (visite A, interaction A acceptée), appareil B (visite B, interaction
+    B acceptée) ; nouvelle opération effective via la session F2 de B. Avant
+    correction (d77ac81), fournir l'interaction A certifiait sur A. Désormais
+    l'origine est une interaction NOUVELLE de l'environnement de B, et A
+    reste intact."""
+    device_a, device_b = env.confirmed(), env.confirmed("alice2@example.com", USER_A)
+    campaign = wave(analytics)
+    visit_a, key_a = f2_touch(analytics, campaign, device_a)
+    visit_b, key_b = f2_touch(analytics, campaign, device_b)
+    assert visit_a != visit_b
+    before_a = [v for v in visits(analytics) if v["id"] == visit_a]
+    before = interactions(analytics)
+    command = create_command()
+    result = run(env, analytics, device_b, command, campaign)
+    assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
+    row = certified_row(analytics, CREATE, command.operation_id, device_b, campaign, before=before)
+    assert row["visit_id"] == visit_b and row["interaction_key"] not in (key_a, key_b)
+    assert [v for v in visits(analytics) if v["id"] == visit_a] == before_a  # visite A ni prolongée ni touchée
+    assert [i for i in interactions(analytics) if i["session_id"] == visit_a] == [
+        i for i in before if i["session_id"] == visit_a]
+    # Même en s'adressant directement au registre, l'interaction A (observée) n'est pas une origine.
+    op = proofs.CommittedOperation(USER_A, CREATE, uuid.uuid4(), True)
+    observed_a = observe(analytics, campaign, USER_A, visit_a, key_a)
+    assert committed(analytics, lambda db: proofs.register_pending(db, origin=observed_a, operation=op)) == \
+        proofs.ProofDecision(proofs.ABSENT, proofs.ORIGIN_UNVERIFIED)
+    assert len(registry(analytics)) == 1
+
+
+def test_an_old_valid_interaction_of_the_same_visit_is_never_the_origin(env, analytics, alice):
+    """Contre-épreuve de l'audit : interactions anciennes acceptées de la
+    MÊME visite, sans lien avec la requête : jamais l'origine ; l'opération
+    a sa propre interaction, dans la même visite (prolongée)."""
+    campaign = wave(analytics)
+    visit, old_key = f2_touch(analytics, campaign, alice)
+    _, older_key = f2_touch(analytics, campaign, alice)
+    before = interactions(analytics)
+    command = create_command()
+    assert run(env, analytics, alice, command, campaign).proof.state == proofs.CERTIFIED
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign, before=before)
+    assert row["visit_id"] == visit and row["interaction_key"] not in (old_key, older_key)
+    assert len(interactions(analytics)) == len(before) + 1
 
 
 def test_an_interaction_accepted_during_the_operation_is_never_its_origin(env, analytics, alice):
-    """La clé n'est pas encore acceptée quand F2 commence ; elle l'est (et
-    committée) pendant la transaction métier : aucune justification
-    rétroactive."""
-    origin = origin_keys(analytics)
+    """Une interaction acceptée PENDANT la transaction métier, dans le même
+    environnement, n'est pas l'origine : celle-ci est émise après le COMMIT,
+    pour cette opération seulement."""
+    campaign = wave(analytics)
     late_key = uuid.uuid4()
 
     def accept_during_f2(point):
         if point == "executed":
-            touch(analytics, origin["campaign_id"], USER_A, key=late_key)
-    result = run(env, analytics, alice, create_command(), {**origin, "interaction_key": late_key},
-                 hook=accept_during_f2)
+            touch(analytics, campaign, USER_A, environment=alice.session_id, key=late_key)
+    command = create_command()
+    result = run(env, analytics, alice, command, campaign, hook=accept_during_f2)
+    assert result.outcome.status == AUTHORIZED and result.proof.state == proofs.CERTIFIED
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+    assert row["interaction_key"] != late_key
+    assert late_key in {i["interaction_key"] for i in interactions(analytics)}  # elle existe, sans être l'origine
+
+
+def test_the_owner_is_the_principal_never_a_participant_chosen_by_the_caller(env, analytics, alice):
+    bob = env.confirmed(BOB, USER_B)
+    theirs = wave(analytics, USER_B)  # campagne où seul B participe
+    f2_touch(analytics, theirs, bob, user_id=USER_B)
+    before = (interactions(analytics, USER_B), visits(analytics, USER_B))
+    result = run(env, analytics, alice, create_command(), theirs)
     assert result.outcome.status == AUTHORIZED
-    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.ORIGIN_UNVERIFIED) and registry(analytics) == []
-    with analytics.connect() as conn:  # l'interaction existe bien désormais : seule la causalité la disqualifie
-        assert conn.execute(sa.text("SELECT count(*) FROM product_activity_session_interactions "
-                                    "WHERE interaction_key = :k"), {"k": late_key}).scalar_one() == 1
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NOT_AUTHORIZED) and registry(analytics) == []
+    assert (interactions(analytics, USER_B), visits(analytics, USER_B)) == before and interactions(analytics) == []
 
 
-def test_an_unknown_or_close_interaction_is_never_an_origin(env, analytics, alice):
-    origin = origin_keys(analytics)
-    for keys in ({**origin, "interaction_key": uuid.uuid4()}, {**origin, "visit_id": str(origin["visit_id"])}):
-        result = run(env, analytics, alice, create_command(), keys)
-        assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.ABSENT,
-                                                                                          proofs.ORIGIN_UNVERIFIED)
-    assert registry(analytics) == []
+def test_a_closed_visit_stays_historical_and_the_operation_opens_its_own(env, analytics, alice):
+    campaign = wave(analytics)
+    visit, key = f2_touch(analytics, campaign, alice)
+    close(analytics, campaign, USER_A, environment=alice.session_id)  # déconnexion : visite finalisée
+    [closed] = visits(analytics)
+    assert closed["end_reason"] == "logout"
+    command = create_command()
+    assert run(env, analytics, alice, command, campaign).proof.state == proofs.CERTIFIED
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+    assert row["visit_id"] != visit and [v for v in visits(analytics) if v["id"] == visit] == [closed]
+
+
+def test_a_visit_closed_between_registration_and_certification_keeps_the_proof(env, analytics, alice, monkeypatch):
+    """Une clôture ultérieure (déconnexion) n'invalide pas une interaction
+    historiquement valide."""
+    campaign = wave(analytics)
+    real = proofs.certify_pending
+
+    def close_then_certify(db, **kwargs):
+        close(analytics, campaign, USER_A, environment=alice.session_id)  # autre transaction, committée
+        return real(db, **kwargs)
+    monkeypatch.setattr(proofs, "certify_pending", close_then_certify)
+    command = create_command()
+    assert run(env, analytics, alice, command, campaign).proof == bridge.ProofReport(proofs.CERTIFIED, None)
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+    [visit] = visits(analytics)
+    assert visit["id"] == row["visit_id"] and visit["end_reason"] == "logout"
+
+
+def test_an_operation_after_j_plus_12_emits_no_origin(env, analytics, alice, spy, monkeypatch):
+    campaign = wave(analytics)
+    later = common.utcnow() + TWELVE_DAYS + timedelta(microseconds=1)
+    monkeypatch.setattr(common, "utcnow", lambda: later)  # horloge analytics seulement : F2 inchangé
+    result = exact(spy, run(env, analytics, alice, create_command(), campaign))
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.WINDOW_EXPIRED)
+    assert registry(analytics) == [] and interactions(analytics) == [] and len(env.receipts()) == 1
 
 
 def test_a_replay_from_a_second_device_never_reattributes_the_certified_operation(env, analytics, alice):
-    laptop = origin_keys(analytics, environment=LAPTOP)
-    phone = origin_keys(analytics, environment=PHONE, campaign_id=laptop["campaign_id"])
-    assert laptop["visit_id"] != phone["visit_id"]
+    campaign = wave(analytics)
     command = create_command()
-    assert run(env, analytics, alice, command, laptop).proof.state == proofs.CERTIFIED
-    row = certified_row(analytics, CREATE, command.operation_id, laptop)
+    assert run(env, analytics, alice, command, campaign).proof.state == proofs.CERTIFIED
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
     phone_session = env.confirmed("alice2@example.com", USER_A)  # second appareil, seconde session F2
-    again = run(env, analytics, phone_session, command, phone)
+    seen = interactions(analytics)
+    again = run(env, analytics, phone_session, command, campaign)
     assert again.outcome.status == AUTHORIZED and again.proof.reason == proofs.NO_NEW_EFFECT
-    assert registry(analytics) == [row]
+    assert registry(analytics) == [row] and interactions(analytics) == seen
 
 
 def test_concurrent_identical_operations_from_two_devices_are_certified_once(env, analytics):
     sessions = env.confirmed(), env.confirmed("alice2@example.com", USER_A)
-    laptop = origin_keys(analytics, environment=LAPTOP)
-    phone = origin_keys(analytics, environment=PHONE, campaign_id=laptop["campaign_id"])
+    campaign = wave(analytics)
     command = create_command()
     pause = Pause("executed")
-    holder = Background(lambda: run(env, analytics, sessions[0], command, laptop, hook=pause))
+    holder = Background(lambda: run(env, analytics, sessions[0], command, campaign, hook=pause))
     holder.start()
     assert pause.reached.wait(10)
-    contender = Background(lambda: run(env, analytics, sessions[1], command, phone))
+    contender = Background(lambda: run(env, analytics, sessions[1], command, campaign))
     contender.start()
     try:
         wait_until(lambda: env.waiting_on_lock() == 1, message="le second n'attend pas")
@@ -494,7 +627,8 @@ def test_concurrent_identical_operations_from_two_devices_are_certified_once(env
         pause.release.set()
     won, other = holder.outcome(), contender.outcome()
     assert (won.proof.state, other.proof.reason) == (proofs.CERTIFIED, proofs.NO_NEW_EFFECT)
-    certified_row(analytics, CREATE, command.operation_id, laptop)
+    certified_row(analytics, CREATE, command.operation_id, sessions[0], campaign)
+    assert len(interactions(analytics)) == 1  # aucune interaction pour le rejeu
 
 
 # --------------------------------------------------------------------------
@@ -512,19 +646,20 @@ def decryptage(pg_url, schema, analytics):  # noqa: F811
 def test_the_first_ack_is_certified_and_a_replayed_ack_is_not(decryptage, analytics):
     alice = decryptage.confirmed()
     done = decryptage.finalized(alice)
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     runner = decryptage.b1_runner(decryptage_keys=None, hook=IDLE)
     first = bridge.run_with_proof_certification(runner, alice.credential(), done.ack(), analytics_engine=analytics,
-                                                **origin)
+                                                campaign_id=campaign)
     assert first.outcome.status == AUTHORIZED and first.outcome.value.delivery_status == "delivered"
     assert first.proof == bridge.ProofReport(proofs.CERTIFIED, None)
-    row = certified_row(analytics, "decryptage_delivery_ack", done.assistant_turn_id, origin)
+    row = certified_row(analytics, "decryptage_delivery_ack", done.assistant_turn_id, alice, campaign)
     assert (row["event_type"], row["surface"]) == ("decrypter_used", "decrypter")
+    seen = interactions(analytics)
     replay = bridge.run_with_proof_certification(runner, alice.credential(), done.ack(), analytics_engine=analytics,
-                                                 **origin_keys(analytics, campaign_id=origin["campaign_id"]))
+                                                 campaign_id=campaign)
     assert replay.outcome.value == first.outcome.value
     assert replay.proof == bridge.ProofReport(proofs.ABSENT, proofs.NO_NEW_EFFECT)
-    assert registry(analytics) == [row]
+    assert registry(analytics) == [row] and interactions(analytics) == seen
 
 
 # --------------------------------------------------------------------------
@@ -542,6 +677,7 @@ def _unchanged_f2(env, spy, result):
 
 def test_an_analytics_database_down_after_the_f2_commit_changes_nothing(env, analytics, alice, monkeypatch, caplog):
     down = []
+    campaign = wave(analytics)
 
     def refuse(dialect, conn_rec, cargs, cparams):
         if down:
@@ -549,44 +685,50 @@ def test_an_analytics_database_down_after_the_f2_commit_changes_nothing(env, ana
     sa.event.listen(analytics, "do_connect", refuse)
     spy = _after_commit(monkeypatch, lambda: down.append(True))
     try:
-        result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         sa.event.remove(analytics, "do_connect", refuse)
     _unchanged_f2(env, spy, result)
-    assert result.proof == bridge.ProofReport(bridge.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
-    assert registry(analytics) == []
+    # Aucune origine émise : le registre n'a pas été touché (état certain).
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    assert registry(analytics) == [] and interactions(analytics) == []
     no_identifier_logged(caplog)
 
 
-def test_an_analytics_database_down_before_f2_never_blocks_the_operation(env, analytics, alice, spy):
-    origin = origin_keys(analytics)
+def test_an_unusable_analytics_engine_never_blocks_the_operation(env, analytics, alice, spy):
+    campaign = wave(analytics)
     broken = sa.create_engine("postgresql+psycopg2://postgres:postgres@127.0.0.1:1/oryx_none_test",
                               poolclass=sa.pool.NullPool)
     result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
-                                                 analytics_engine=broken, **origin)
+                                                 analytics_engine=broken, campaign_id=campaign)
     _unchanged_f2(env, spy, result)
     assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
     result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
-                                                 analytics_engine=None, **origin)  # moteur inutilisable
+                                                 analytics_engine=None, campaign_id=campaign)  # moteur inutilisable
     assert result.outcome.status == AUTHORIZED and result.proof.reason == proofs.TECHNICAL_UNCERTAINTY
+    result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
+                                                 analytics_engine=analytics, campaign_id="pas-un-uuid")
+    assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.ABSENT,
+                                                                                       proofs.ORIGIN_UNVERIFIED)
+    assert registry(analytics) == [] and interactions(analytics) == []
 
 
 def test_a_lock_timeout_in_analytics_changes_nothing(env, analytics, alice, spy):
-    origin = origin_keys(analytics)
+    campaign = wave(analytics)
     holder = Holder(analytics, sql="SELECT 1 FROM product_campaign_participants WHERE campaign_id = :c FOR UPDATE",
-                    c=origin["campaign_id"])
+                    c=campaign)
     try:
-        result = run(env, analytics, alice, create_command(), origin)
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         holder.rollback()
     _unchanged_f2(env, spy, result)
-    assert result.proof == bridge.ProofReport(bridge.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
-    assert registry(analytics) == []
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    assert registry(analytics) == [] and interactions(analytics) == []
 
 
 def test_a_constraint_violation_in_analytics_changes_nothing(env, analytics, alice, spy, monkeypatch):
     monkeypatch.setitem(proofs.OPERATION_RULES, CREATE, ("portfolio_used", "decrypter"))  # CHECK 0024 violé
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+    result = run(env, analytics, alice, create_command(), wave(analytics))
     _unchanged_f2(env, spy, result)
     assert result.proof == bridge.ProofReport(bridge.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
     assert registry(analytics) == []
@@ -598,7 +740,7 @@ def _boom(*args, **kwargs):
 
 def test_a_failed_pending_registration_changes_nothing(env, analytics, alice, spy, monkeypatch):
     monkeypatch.setattr(proofs, "register_pending", _boom)
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+    result = run(env, analytics, alice, create_command(), wave(analytics))
     _unchanged_f2(env, spy, result)
     assert result.proof == bridge.ProofReport(bridge.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
     assert registry(analytics) == []
@@ -607,7 +749,7 @@ def test_a_failed_pending_registration_changes_nothing(env, analytics, alice, sp
 def test_a_failed_certification_leaves_an_indeterminate_proof_never_a_certified_one(env, analytics, alice, spy,
                                                                                    monkeypatch):
     monkeypatch.setattr(proofs, "certify_pending", _boom)
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+    result = run(env, analytics, alice, create_command(), wave(analytics))
     _unchanged_f2(env, spy, result)
     assert result.proof == bridge.ProofReport(proofs.INDETERMINATE, proofs.TECHNICAL_UNCERTAINTY)
     [row] = registry(analytics)
@@ -615,10 +757,11 @@ def test_a_failed_certification_leaves_an_indeterminate_proof_never_a_certified_
                                                                               "technical_uncertainty")
 
 
-@pytest.mark.parametrize("target", ["read_origin", "_certify", "_committed_operation", "_log"])
+@pytest.mark.parametrize("target", ["read_origin", "open_origin", "_open_origin", "_certify", "_committed_operation",
+                                    "_log"])
 def test_an_unexpected_analytics_error_changes_nothing(env, analytics, alice, spy, monkeypatch, target):
-    monkeypatch.setattr(proofs if target == "read_origin" else bridge, target, _boom)
-    result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+    monkeypatch.setattr(proofs if target in ("read_origin", "open_origin") else bridge, target, _boom)
+    result = run(env, analytics, alice, create_command(), wave(analytics))
     _unchanged_f2(env, spy, result)
     if target == "_log":
         assert result.proof.state == proofs.CERTIFIED
@@ -648,13 +791,30 @@ def _uncertain_commit(analytics, statement_prefix, *, really_commit):
                           sa.event.remove(analytics, "before_cursor_execute", mark))
 
 
+@pytest.mark.parametrize("really_commit", [True, False])
+def test_an_uncertain_origin_commit_is_never_used(env, analytics, alice, spy, really_commit):
+    """COMMIT de l'émission de l'origine incertain : aucune inscription,
+    même si l'interaction a réellement été committée."""
+    campaign = wave(analytics)
+    seen, remove = _uncertain_commit(analytics, "INSERT INTO product_activity_session_interactions",
+                                     really_commit=really_commit)
+    try:
+        result = run(env, analytics, alice, create_command(), campaign)
+    finally:
+        remove()
+    _unchanged_f2(env, spy, result)
+    assert seen == ["lost"] and result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    assert registry(analytics) == [] and len(interactions(analytics)) == (1 if really_commit else 0)
+
+
 @pytest.mark.parametrize("really_commit, state, status", [(True, proofs.CERTIFIED, "certified"),
                                                           (False, proofs.INDETERMINATE, "indeterminate")])
 def test_an_uncertain_certification_commit_is_settled_by_rereading_the_same_proof(env, analytics, alice, spy,
                                                                                   really_commit, state, status):
+    campaign = wave(analytics)
     seen, remove = _uncertain_commit(analytics, "UPDATE product_activity_proof_registry", really_commit=really_commit)
     try:
-        result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         remove()
     _unchanged_f2(env, spy, result)
@@ -668,10 +828,11 @@ def test_an_uncertain_certification_commit_is_settled_by_rereading_the_same_proo
     (False, bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY))])
 def test_an_uncertain_registration_commit_never_creates_a_proof_by_itself(env, analytics, alice, spy,
                                                                           really_commit, report):
+    campaign = wave(analytics)
     seen, remove = _uncertain_commit(analytics, "INSERT INTO product_activity_proof_registry",
                                      really_commit=really_commit)
     try:
-        result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         remove()
     _unchanged_f2(env, spy, result)
@@ -680,10 +841,11 @@ def test_an_uncertain_registration_commit_never_creates_a_proof_by_itself(env, a
 
 
 def test_an_uncertain_settlement_claims_nothing(env, analytics, alice, spy, monkeypatch):
+    campaign = wave(analytics)
     monkeypatch.setattr(proofs, "certify_pending", _boom)
     seen, remove = _uncertain_commit(analytics, "UPDATE product_activity_proof_registry", really_commit=False)
     try:
-        result = run(env, analytics, alice, create_command(), origin_keys(analytics))
+        result = run(env, analytics, alice, create_command(), campaign)
     finally:
         remove()
     _unchanged_f2(env, spy, result)
@@ -694,7 +856,7 @@ def test_an_uncertain_settlement_claims_nothing(env, analytics, alice, spy, monk
 def test_the_f2_response_bytes_are_those_of_run(env, analytics, alice):
     a, b = create_command(), create_command()
     historical = env.runner(hook=IDLE).run(alice.credential(), a)
-    measured = run(env, analytics, alice, b, origin_keys(analytics))
+    measured = run(env, analytics, alice, b, wave(analytics))
     assert type(measured.outcome) is AuthorizationOutcome and measured.outcome.status == historical.status
     assert measured.outcome.value.status == historical.value.status and measured.outcome.principal == \
         historical.principal

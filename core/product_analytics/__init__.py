@@ -30,7 +30,9 @@ product_activity_session_interactions) :
                    registre des clés d'interaction : tout rejeu idempotent,
                    clôture volontaire, finalisation sans événement
                    inventé), distinctes des sessions F2 ;
-- proofs.py      : lot 2B-2 bloc B — registre provisoire des preuves
+- proofs.py      : lot 2B-2 bloc B — émission de l'origine d'une opération
+                   (interaction 2B-1 NOUVELLE, clé serveur, liée à cette seule
+                   opération), registre provisoire des preuves
                    d'utilisation significative (pending idempotent) et
                    certification contrôlée pending -> certified après le
                    COMMIT de l'opération métier (horloge PostgreSQL lue après

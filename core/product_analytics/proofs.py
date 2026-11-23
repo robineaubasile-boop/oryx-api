@@ -5,26 +5,46 @@ Table product_activity_proof_registry (migration 0024, inchangée). Ce
 module ne connaît AUCUN module de la frontière d'autorisation : il reçoit
 d'un appelant unique (la frontière privée hors du paquet, seul importateur
 autorisé, sans appelant de production) une opération métier DÉJÀ établie
-après un COMMIT confirmé (CommittedOperation) et une origine DÉJÀ observée
-avant l'exécution de cette opération (OriginSnapshot). Il ne décide jamais
-qu'une opération a réussi : il refuse d'enregistrer ou de certifier tout ce
-qui n'est pas un effet métier NOUVEAU, appartenant au propriétaire de
-l'origine, rattaché à une interaction 'activity' acceptée pendant la
-fenêtre, et certifié avant les échéances.
+après un COMMIT confirmé (CommittedOperation) et la clé de l'environnement
+qui l'a exécutée. Il ne décide jamais qu'une opération a réussi : il refuse
+d'enregistrer ou de certifier tout ce qui n'est pas un effet métier NOUVEAU,
+rattaché à l'interaction 'activity' émise POUR CETTE opération, acceptée
+pendant la fenêtre, et certifié avant les échéances.
+
+Liaison causale interaction -> opération (audit de la PR #253) : l'origine
+n'est JAMAIS désignée par l'appelant. open_origin l'émet lui-même pour une
+opération établie : clé d'interaction générée ici (uuid4, jamais reçue),
+propriétaire = celui de l'opération, visite déterminée par le service 2B-1
+(touch_activity_session) dans l'environnement fourni. Le OriginSnapshot
+rendu est une CAPACITÉ : il porte l'identité de l'opération pour laquelle il
+a été émis (operation_kind, operation_id) et seul CET objet, enregistré à
+l'émission, est accepté par register_pending (comparaison d'identité ; une
+copie, un dataclasses.replace, un snapshot reconstruit ou lu par
+read_origin, ou une origine émise pour une autre opération sont refusés,
+origin_unverified, avant tout accès à la base). Une interaction ancienne,
+d'un autre appareil ou de la même visite ne peut donc jamais devenir
+l'origine d'une nouvelle opération ; une interaction n'est l'origine que
+d'une seule opération.
 
 Fonctions (la transaction appartient à l'appelant : flush seulement, jamais
 commit() ni rollback() ; toute écriture dans un SAVEPOINT) :
 
-- read_origin : lecture SANS verrou ni écriture, avant l'opération métier ;
-  participation, visite et interaction 'activity' de la visite, acceptée
-  dans [window_start_at, window_end_at), à partir de activated_at et avant
-  close_by_at. Rend un OriginSnapshot (instant d'acceptation compris) ou
+- open_origin : émission de l'origine d'une opération établie à effet
+  nouveau (voir ci-dessus) ; touch_activity_session puis relecture
+  read_origin dans la même transaction. ProofRefused (motif fermé, rien
+  d'écrit) hors observation (not_authorized / window_expired) ; rejeu ou
+  no-op : no_new_effect, sans aucun accès à la base.
+- read_origin : lecture SANS verrou ni écriture d'une interaction
+  'activity' de la visite, acceptée dans [window_start_at, window_end_at),
+  à partir de activated_at et avant close_by_at. Rend un OriginSnapshot NON
+  émis (observation seulement : jamais accepté par register_pending) ou
   lève ProofRefused (motif fermé).
 - register_pending : inscription IDEMPOTENTE de la preuve pending
   (created_at = horloge PostgreSQL lue après les verrous). Rien n'est écrit
-  sans effet nouveau, sans propriétaire identique, sans origine identique au
-  snapshot, sans autorisation (participation enrolled, campagne active) ou
-  après window_end_at / close_by_at. Une preuve existante de la même
+  sans effet nouveau, sans propriétaire identique, sans origine ÉMISE pour
+  cette opération et identique en base au snapshot, sans autorisation
+  (participation enrolled, campagne active) ou après window_end_at /
+  close_by_at. Une preuve existante de la même
   opération est rendue telle quelle si son identité est EXACTEMENT celle
   demandée ; sinon conflit, sans aucune écriture ni réattribution.
 - certify_pending : transition contrôlée pending -> certified
@@ -41,6 +61,10 @@ commit() ni rollback() ; toute écriture dans un SAVEPOINT) :
 
 Aucun événement définitif ni aucune attribution définitive n'est écrit ici
 (bloc C) ; aucune suppression (lot 2C).
+
+open_origin prend les verrous de touch_activity_session (ordre 2B-1 :
+environnement et clé, participation, campagne, visite), dans sa propre
+transaction ; register_pending, certify_pending et settle suivent :
 
 Ordre global des verrous (identique aux services 2A / 2B-1, rang preuve
 ajouté en dernier) :
@@ -64,7 +88,9 @@ not_authorized ; indeterminate pour technical_uncertainty.
 finalization_expired relève du bloc C (fenêtre de finalisation) et n'est
 jamais écrit ici.
 """
+import dataclasses
 import uuid
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -78,8 +104,14 @@ from core.models import (
     ProductCampaign,
     ProductCampaignParticipant,
 )
-from core.product_analytics import campaigns, common
-from core.product_analytics.common import ACTIVE, ENROLLED, InvalidProductAnalyticsInput, ProductAnalyticsError
+from core.product_analytics import campaigns, common, sessions
+from core.product_analytics.common import (
+    ACTIVE,
+    ENROLLED,
+    ActivitySessionRefused,
+    InvalidProductAnalyticsInput,
+    ProductAnalyticsError,
+)
 
 # --------------------------------------------------------------------------
 # Vocabulaires fermés (identiques aux CHECK de la migration 0024)
@@ -130,8 +162,8 @@ PROOF_LOCK_KIND = "activity_proof"
 
 
 class ProofRefused(ProductAnalyticsError):
-    """Origine non admissible (read_origin) : rien n'est lu au-delà, rien
-    n'est écrit. reason : RESOLUTION_REASONS."""
+    """Origine non admissible (open_origin, read_origin) : rien n'est lu
+    au-delà, rien n'est écrit. reason : RESOLUTION_REASONS."""
 
     def __init__(self, message: str, *, reason: str):
         super().__init__(message)
@@ -142,15 +174,19 @@ class ProofRefused(ProductAnalyticsError):
 # Contrats internes (valeurs fermées, sans contenu utilisateur)
 # --------------------------------------------------------------------------
 
-@dataclass(frozen=True, slots=True, repr=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
 class OriginSnapshot:
-    """Interaction 'activity' déjà acceptée, observée AVANT l'opération
-    métier (read_origin). recorded_at : instant d'acceptation serveur."""
+    """Interaction 'activity' acceptée. recorded_at : instant d'acceptation
+    serveur. operation_kind / operation_id : identité de l'opération pour
+    laquelle open_origin l'a émise (None : simple observation, read_origin).
+    Seul l'objet émis lui-même vaut origine (voir l'en-tête)."""
     campaign_id: uuid.UUID
     user_id: str
     visit_id: uuid.UUID
     interaction_key: uuid.UUID
     recorded_at: datetime
+    operation_kind: str | None = None
+    operation_id: uuid.UUID | None = None
 
     def __repr__(self) -> str:
         return "OriginSnapshot(<private>)"
@@ -212,6 +248,10 @@ def _require_origin(origin) -> OriginSnapshot:
     common.require_uuid(origin.visit_id, "visit_id")
     common.require_uuid(origin.interaction_key, "interaction_key")
     common.require_aware(origin.recorded_at, "recorded_at")
+    if origin.operation_kind is not None or origin.operation_id is not None:
+        common.require_choice(origin.operation_kind, OPERATION_KINDS, "operation_kind")
+        if type(origin.operation_id) is not uuid.UUID:
+            raise InvalidProductAnalyticsInput("operation_id : uuid.UUID requis")
     return origin
 
 
@@ -225,6 +265,27 @@ def _require_operation(operation) -> CommittedOperation:
     if type(operation.new_effect) is not bool:
         raise InvalidProductAnalyticsInput("new_effect : booléen exact requis")
     return operation
+
+
+# Origines émises par open_origin, encore référencées par leur appelant :
+# clé d'interaction -> L'OBJET émis (références faibles : une origine
+# abandonnée disparaît avec son dernier détenteur). Jamais persisté.
+_ISSUED: "weakref.WeakValueDictionary[uuid.UUID, OriginSnapshot]" = weakref.WeakValueDictionary()
+
+
+def _issue(observed: OriginSnapshot, operation: CommittedOperation) -> OriginSnapshot:
+    """Lie une interaction observée à l'opération pour laquelle elle vient
+    d'être acceptée et enregistre l'objet émis (seul accepté ensuite)."""
+    issued = dataclasses.replace(observed, operation_kind=operation.operation_kind,
+                                 operation_id=operation.operation_id)
+    _ISSUED[issued.interaction_key] = issued
+    return issued
+
+
+def _issued_for(origin: OriginSnapshot, operation: CommittedOperation) -> bool:
+    """L'origine est-elle EXACTEMENT l'objet émis pour CETTE opération ?"""
+    return (_ISSUED.get(origin.interaction_key) is origin
+            and (origin.operation_kind, origin.operation_id) == (operation.operation_kind, operation.operation_id))
 
 
 def proof_lock_key(operation: CommittedOperation) -> int:
@@ -301,6 +362,43 @@ def read_origin(db, *, campaign_id: uuid.UUID, user_id: str, visit_id: uuid.UUID
                           interaction.recorded_at.astimezone(timezone.utc))
 
 
+# Refus 2B-1 (SESSION_REFUSAL_REASONS) -> motif fermé du registre.
+SESSION_REFUSALS = {
+    "not_participant": NOT_AUTHORIZED,
+    "participation_inactive": NOT_AUTHORIZED,
+    "campaign_not_active": NOT_AUTHORIZED,
+    "before_observation": NOT_AUTHORIZED,
+    "campaign_closed": WINDOW_EXPIRED,
+    "observation_ended": WINDOW_EXPIRED,
+}
+
+
+def open_origin(db, *, campaign_id: uuid.UUID, environment_key: uuid.UUID,
+                operation: CommittedOperation) -> OriginSnapshot:
+    """Émet l'origine de `operation` (voir l'en-tête) : interaction
+    'activity' NOUVELLE (clé générée ici) du propriétaire de l'opération,
+    visite déterminée par le service 2B-1 dans `environment_key`. Rend
+    l'OriginSnapshot émis, lié à l'opération, ou lève ProofRefused (rien
+    d'écrit). Flush sans commit."""
+    operation = _require_operation(operation)
+    common.require_uuid(campaign_id, "campaign_id")
+    common.require_uuid(environment_key, "environment_key")
+    if not operation.new_effect:
+        raise ProofRefused("aucun effet nouveau", reason=NO_NEW_EFFECT)  # rejeu, no-op : aucune interaction
+    interaction_key = uuid.uuid4()  # jamais fournie par l'appelant
+    try:
+        touched = sessions.touch_activity_session(db, campaign_id=campaign_id, user_id=operation.owner_user_id,
+                                                  environment_key=environment_key, interaction_key=interaction_key)
+    except ActivitySessionRefused as refused:
+        raise ProofRefused("interaction hors observation",
+                           reason=SESSION_REFUSALS.get(refused.reason, ORIGIN_UNVERIFIED)) from None
+    if touched.outcome not in (sessions.OPENED, sessions.CONTINUED):
+        raise ProofRefused("interaction non nouvelle", reason=ORIGIN_UNVERIFIED)  # clé neuve : jamais un rejeu
+    observed = read_origin(db, campaign_id=campaign_id, user_id=operation.owner_user_id,
+                           visit_id=touched.session.id, interaction_key=interaction_key)
+    return _issue(observed, operation)
+
+
 def _identity(origin: OriginSnapshot, operation: CommittedOperation) -> dict:
     event_type, surface = OPERATION_RULES[operation.operation_kind]
     return {"campaign_id": origin.campaign_id, "user_id": operation.owner_user_id, "visit_id": origin.visit_id,
@@ -373,6 +471,8 @@ def register_pending(db, *, origin: OriginSnapshot, operation: CommittedOperatio
         return _absent(NO_NEW_EFFECT)  # rejeu ou no-op : aucune trace, aucune lecture
     if operation.owner_user_id != origin.user_id:
         return _absent(OWNER_CONFLICT)
+    if not _issued_for(origin, operation):
+        return _absent(ORIGIN_UNVERIFIED)  # origine non émise pour CETTE opération : aucune lecture
     participation, campaign = _lock_scope(db, origin, operation)
     problem, _ = _origin_problem(db, campaign_id=origin.campaign_id, user_id=origin.user_id,
                                  visit_id=origin.visit_id, interaction_key=origin.interaction_key,

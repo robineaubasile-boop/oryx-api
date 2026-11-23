@@ -10,18 +10,17 @@ worker, ni script ; tests/test_activity_proof_bridge.py) ; aucune variable
 d'activation.
 
 run_with_proof_certification(runner, credential, command, *,
-analytics_engine, campaign_id, user_id, visit_id, interaction_key) :
+analytics_engine, campaign_id) :
 
-  1. Origine AVANT F2 (transaction analytics courte, lecture seule) :
-     proofs.read_origin observe l'interaction 'activity' DÉJÀ acceptée et
-     committée (2B-1) désignée par l'appelant. Absente, d'un autre type,
-     d'une autre visite ou hors observation : aucune preuve possible. Une
-     interaction créée pendant ou après l'opération n'est donc jamais une
-     origine (aucune justification rétroactive).
-  2. F2 : UN SEUL appel à runner._run_attested(credential, command), sans
+L'appelant ne désigne NI utilisateur, NI visite, NI interaction, NI
+environnement (audit de la PR #253 : liaison causale interaction ->
+opération). Seule la campagne de mesure (configuration serveur) est reçue.
+
+  1. F2 : UN SEUL appel à runner._run_attested(credential, command), sans
      rien capturer ni modifier : son outcome est rendu TEL QUEL (même objet),
-     ses exceptions sont celles de run(). Aucune réexécution, jamais.
-  3. Après le retour de F2 (donc après son COMMIT confirmé, seul cas où une
+     ses exceptions sont celles de run(). Aucune réexécution, jamais. Aucune
+     écriture ni lecture analytics avant F2.
+  2. Après le retour de F2 (donc après son COMMIT confirmé, seul cas où une
      attestation existe), tout le reste est NON BLOQUANT (toute exception est
      absorbée ici, après le COMMIT métier, jamais dans F2) :
      a. opération établie seulement si : outcome AUTHORIZED, principal
@@ -29,12 +28,21 @@ analytics_engine, campaign_id, user_id, visit_id, interaction_key) :
         principal (propriétaire), à la commande exécutée (nature canonique et
         identifiant canonique : _CERTIFIABLE_COMMANDS) et de qualification
         admise ; new_effect lu sur l'attestation (rejeux et no-op : jamais
-        certifiables) ; propriétaire de l'origine = principal ;
-     b. transaction analytics 1 : proofs.register_pending ;
-     c. transaction analytics 2 : proofs.certify_pending (certified_at =
+        certifiables, aucune écriture analytics, aucune interaction) ;
+     b. transaction analytics 1 : proofs.open_origin émet l'origine de CETTE
+        opération : interaction 'activity' NOUVELLE (clé générée par le
+        service), propriétaire = principal.user_id, environnement = la
+        session F2 AUTHENTIFIÉE qui a exécuté l'opération
+        (principal.session_id, source serveur de environment_key choisie par
+        ce raccordement : contrat 2B-1), visite déterminée par le service
+        2B-1. Une interaction ancienne, d'un autre appareil ou d'une autre
+        session ne peut donc jamais être l'origine ;
+     c. transaction analytics 2 : proofs.register_pending (seule l'origine
+        émise en b, liée à cette opération, est acceptée) ;
+     d. transaction analytics 3 : proofs.certify_pending (certified_at =
         horloge PostgreSQL lue après les verrous, après le COMMIT F2 et après
-        la transaction 1) ;
-     d. certification en échec ou COMMIT analytics incertain : transaction 3,
+        les transactions 1 et 2) ;
+     e. certification en échec ou COMMIT analytics incertain : transaction 4,
         proofs.settle (relecture sous verrou de la MÊME preuve : certified
         constatée, pending -> indeterminate) ; si elle échoue aussi, l'issue
         reste inconnue (UNKNOWN) et rien n'est prétendu.
@@ -157,8 +165,27 @@ def _report(decision) -> ProofReport:
     return ProofReport(decision.state, decision.reason)
 
 
+def _open_origin(engine, campaign_id, environment_key, operation) -> tuple:
+    """(OriginSnapshot émis, None) ou (None, motif fermé) ; ne lève jamais.
+    Panne ou COMMIT incertain : aucune origine n'est présumée (le registre
+    n'a pas été touché)."""
+    def open_(db):
+        try:
+            return proofs.open_origin(db, campaign_id=campaign_id, environment_key=environment_key,
+                                      operation=operation), None
+        except proofs.ProofRefused as refused:
+            return None, refused.reason
+        except proofs.InvalidProductAnalyticsInput:
+            return None, proofs.ORIGIN_UNVERIFIED
+
+    status, value = _transaction(engine, open_)
+    if status != _COMMITTED:
+        return None, proofs.TECHNICAL_UNCERTAINTY
+    return value
+
+
 def _certify(engine, origin, operation) -> ProofReport:
-    """Transactions analytics 1 à 3 (voir l'en-tête)."""
+    """Transactions analytics 2 à 4 (voir l'en-tête)."""
     status, registered = _transaction(engine, lambda db: proofs.register_pending(db, origin=origin,
                                                                                  operation=operation))
     if status == _FAILED:
@@ -186,30 +213,10 @@ def _log(report: ProofReport) -> None:
     logger.log(level, "activity_proof state=%s reason=%s", report.state, report.reason)
 
 
-def _observe_origin(engine, campaign_id, user_id, visit_id, interaction_key) -> tuple:
-    """(OriginSnapshot, None) ou (None, motif fermé) ; ne lève jamais. Une
-    panne vaut technical_uncertainty : aucune origine n'est présumée."""
-    def observe(db):
-        try:
-            return proofs.read_origin(db, campaign_id=campaign_id, user_id=user_id, visit_id=visit_id,
-                                      interaction_key=interaction_key), None
-        except proofs.ProofRefused as refused:
-            return None, refused.reason
-        except proofs.InvalidProductAnalyticsInput:
-            return None, proofs.ORIGIN_UNVERIFIED
-
-    status, value = _transaction(engine, observe)
-    if status != _COMMITTED:
-        return None, proofs.TECHNICAL_UNCERTAINTY
-    return value
-
-
-def run_with_proof_certification(runner, credential, command, *, analytics_engine, campaign_id, user_id, visit_id,
-                                 interaction_key) -> CertifiedRun:
+def run_with_proof_certification(runner, credential, command, *, analytics_engine, campaign_id) -> CertifiedRun:
     """Opération F2 inchangée, puis mesure non bloquante (voir l'en-tête)."""
     if type(runner) is not AuthorizedTransactionRunner:
         raise TypeError("AuthorizedTransactionRunner attendu")
-    origin, origin_reason = _observe_origin(analytics_engine, campaign_id, user_id, visit_id, interaction_key)
 
     attested = runner._run_attested(credential, command)  # UN SEUL appel F2 ; jamais rejoué
 
@@ -219,12 +226,13 @@ def run_with_proof_certification(runner, credential, command, *, analytics_engin
             report = ProofReport(proofs.ABSENT, reason)
         elif not operation.new_effect:
             report = ProofReport(proofs.ABSENT, proofs.NO_NEW_EFFECT)  # rejeu, no-op : rien n'est écrit
-        elif origin is None:
-            report = ProofReport(proofs.ABSENT, origin_reason)
-        elif operation.owner_user_id != origin.user_id:
-            report = ProofReport(proofs.ABSENT, proofs.OWNER_CONFLICT)
         else:
-            report = _certify(analytics_engine, origin, operation)
+            # Environnement = session F2 authentifiée qui a exécuté l'opération
+            # (principal vérifié par _committed_operation) ; jamais l'appelant.
+            origin, origin_reason = _open_origin(analytics_engine, campaign_id,
+                                                 attested.outcome.principal.session_id, operation)
+            report = (ProofReport(proofs.ABSENT, origin_reason) if origin is None
+                      else _certify(analytics_engine, origin, operation))
     except Exception:  # noqa: BLE001 — la mesure ne fait jamais échouer l'opération
         report = ProofReport(UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
     try:

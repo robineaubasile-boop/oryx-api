@@ -4,9 +4,12 @@ preuves (core/product_analytics/proofs.py), contre un VRAI PostgreSQL (16 et
 
 1. sans base : vocabulaires identiques à 0024, natures certifiables (jamais
    assistant_delivery), refus avant tout accès à la base ;
-2. origine : bonne origine, autre utilisateur, autre campagne, interaction
-   d'une autre visite, 'close', inconnue, visite clôturée, origine déplacée,
-   écrivain hors service (avant J0, après J+12) ;
+2. origine : émission par open_origin (clé générée par le service, visite
+   déterminée par 2B-1, liée à UNE opération), capacité (copie, observation,
+   interaction ancienne, autre opération : refusées avant toute lecture),
+   bonne origine, autre utilisateur, autre campagne, interaction d'une autre
+   visite, 'close', inconnue, visite clôturée, origine déplacée, écrivain
+   hors service (avant J0, après J+12) ;
 3. états : pending exact, pending -> certified exact, idempotence, double
    certification, rejets terminaux (retrait, clôture, annulation), règlement
    indeterminate, aucune résurrection, conservation de 168 heures exactes ;
@@ -53,10 +56,12 @@ from tests.activity_proof_support import (
     close,
     committed,
     definitive_rows,
+    bind,
     observe,
+    open_origin,
     open_wave,
+    opened,
     operation,
-    origin_of,
     proof_row,
     register,
     registry,
@@ -126,6 +131,9 @@ def test_no_new_effect_and_owner_conflict_are_refused_before_any_database_access
                                   new_effect=True)},
     {"origin": SimpleNamespace(**dataclasses.asdict(_snapshot()))},
     {"origin": _snapshot(recorded_at=datetime(2026, 11, 23))},
+    {"origin": _snapshot(operation_kind="portfolio_write", operation_id=uuid.uuid4())},
+    {"origin": _snapshot(operation_kind=CREATE, operation_id=str(uuid.uuid4()))},
+    {"origin": _snapshot(operation_kind=None, operation_id=uuid.uuid4())},
 ])
 def test_out_of_contract_inputs_are_refused_before_any_database_access(bad):
     kwargs = {"origin": _snapshot(), "operation": operation(USER_A), **bad}
@@ -137,7 +145,7 @@ def test_out_of_contract_inputs_are_refused_before_any_database_access(bad):
 
 def test_contracts_carry_no_user_content_and_never_print_identifiers():
     assert [f.name for f in dataclasses.fields(proofs.OriginSnapshot)] == [
-        "campaign_id", "user_id", "visit_id", "interaction_key", "recorded_at"]
+        "campaign_id", "user_id", "visit_id", "interaction_key", "recorded_at", "operation_kind", "operation_id"]
     assert [f.name for f in dataclasses.fields(proofs.CommittedOperation)] == [
         "owner_user_id", "operation_kind", "operation_id", "new_effect"]
     origin, op = _snapshot(), operation(USER_A)
@@ -205,8 +213,7 @@ def clock(monkeypatch):
 
 
 def _pending(db, user=USER_A, kind=CREATE, **kwargs):
-    origin = origin_of(db, user, **kwargs)
-    op = operation(user, kind)
+    origin, op = opened(db, user, kind, **kwargs)
     decision = register(db, origin, op)
     assert decision.state == proofs.PENDING and decision.written
     return origin, op, decision
@@ -228,6 +235,7 @@ def test_the_right_owner_campaign_visit_and_interaction_give_an_exact_snapshot(d
     origin = observe(db, campaign, USER_A, visit, key)
     [interaction] = [r for r in _interactions(db) if r["interaction_key"] == key]
     assert origin == proofs.OriginSnapshot(campaign, USER_A, visit, key, utc(interaction["recorded_at"]))
+    assert (origin.operation_kind, origin.operation_id) == (None, None)  # observation : jamais une origine émise
 
 
 def _interactions(db):
@@ -264,18 +272,118 @@ def test_foreign_or_unknown_origins_are_refused(db):
 
 def test_a_visit_closed_later_keeps_its_historically_valid_interaction(db):
     campaign = open_wave(db, USER_A)
-    visit, key = touch(db, campaign, USER_A)
-    origin = observe(db, campaign, USER_A, visit, key)
-    close(db, campaign, USER_A)  # déconnexion : visite finalisée ('logout')
-    assert committed(db, lambda s: s.get(ps.ProductActivitySession, visit)).finalized_at is not None
-    assert observe(db, campaign, USER_A, visit, key) == origin
     op = operation(USER_A)
+    origin = open_origin(db, op, campaign_id=campaign)
+    close(db, campaign, USER_A)  # déconnexion : visite finalisée ('logout') APRÈS l'émission
+    assert committed(db, lambda s: s.get(ps.ProductActivitySession, origin.visit_id)).finalized_at is not None
+    assert observe(db, campaign, USER_A, origin.visit_id, origin.interaction_key) == dataclasses.replace(
+        origin, operation_kind=None, operation_id=None)
     pending = register(db, origin, op)
     assert certify(db, origin, op, pending.proof_id).state == proofs.CERTIFIED
+    # Clôturée AVANT l'opération : l'émission ouvre une nouvelle visite, l'ancienne reste intacte.
+    closed_visit = origin.visit_id
+    before = committed(db, lambda s: _session_columns(s, closed_visit))
+    later, op2 = opened(db, USER_A, campaign_id=campaign)
+    assert later.visit_id != closed_visit and committed(db, lambda s: _session_columns(s, closed_visit)) == before
+    assert certify(db, later, op2, register(db, later, op2).proof_id).state == proofs.CERTIFIED
+
+
+def _session_columns(session, visit_id):
+    visit = session.get(ps.ProductActivitySession, visit_id)
+    return (visit.opened_at, visit.last_activity_at, visit.idle_expires_at, visit.finalized_at, visit.end_reason)
+
+
+# --------------------------------------------------------------------------
+# 3 bis. Émission de l'origine et capacité (audit PR #253)
+# --------------------------------------------------------------------------
+
+def test_open_origin_emits_a_new_interaction_bound_to_the_operation(db, clock):
+    campaign = open_wave(db, USER_A)
+    visit, old_key = touch(db, campaign, USER_A)  # visite déjà ouverte dans cet environnement
+    op = operation(USER_A, UPDATE)
+    accepted_at = clock.advance(seconds=5)
+    origin = open_origin(db, op, campaign_id=campaign)
+    assert origin.visit_id == visit and origin.interaction_key != old_key  # visite prolongée, clé NEUVE
+    assert (origin.operation_kind, origin.operation_id) == (UPDATE, op.operation_id)
+    assert (origin.campaign_id, origin.user_id, origin.recorded_at) == (campaign, USER_A, accepted_at)
+    [row] = [r for r in _interactions(db) if r["interaction_key"] == origin.interaction_key]
+    assert (row["session_id"], row["interaction_kind"], row["environment_digest"]) == (
+        visit, "activity", ps.environment_digest(LAPTOP))
+    assert committed(db, lambda s: s.get(ps.ProductActivitySession, visit)).last_activity_at == accepted_at
+    # Deux émissions pour deux opérations : deux interactions distinctes.
+    other = open_origin(db, operation(USER_A), campaign_id=campaign)
+    assert other.interaction_key not in (origin.interaction_key, old_key) and other.visit_id == visit
+    # Un autre environnement : une autre visite.
+    phone = open_origin(db, operation(USER_A), campaign_id=campaign, environment=PHONE)
+    assert phone.visit_id != visit
+
+
+def test_open_origin_writes_nothing_for_a_replay_or_outside_the_observation(db, clock):
+    with pytest.raises(proofs.ProofRefused) as caught:
+        proofs.open_origin(_NoDB(), campaign_id=uuid.uuid4(), environment_key=LAPTOP,
+                           operation=operation(USER_A, new_effect=False))
+    assert caught.value.reason == proofs.NO_NEW_EFFECT  # aucune lecture, aucune interaction
+    campaign = open_wave(db, USER_A)
+    start, end = _window(db, SimpleNamespace(campaign_id=campaign, user_id=USER_A))
+    before = (_interactions(db), _sessions(db))
+    cases = ((USER_B, end - MICRO, proofs.NOT_AUTHORIZED),  # aucune participation
+             (USER_A, end, proofs.WINDOW_EXPIRED), (USER_A, end + MICRO, proofs.WINDOW_EXPIRED))
+    for user, instant, reason in cases:
+        clock.set(instant)
+        with pytest.raises(proofs.ProofRefused) as caught:
+            open_origin(db, operation(user), campaign_id=campaign)
+        assert caught.value.reason == reason
+    clock.set(start + timedelta(seconds=1))
+    _withdraw(db, SimpleNamespace(campaign_id=campaign, user_id=USER_A))
+    with pytest.raises(proofs.ProofRefused) as caught:
+        open_origin(db, operation(USER_A), campaign_id=campaign)
+    assert caught.value.reason == proofs.NOT_AUTHORIZED
+    assert (_interactions(db), _sessions(db)) == before and registry(db) == []  # rien d'écrit
+
+
+def _sessions(db):
+    with db.connect() as conn:
+        return [dict(r) for r in conn.execute(sa.text("SELECT * FROM product_activity_sessions ORDER BY id"))
+                .mappings()]
+
+
+def test_only_the_emitted_origin_of_this_operation_is_ever_registered(db):
+    """Capacité : ni une observation de la MÊME interaction, ni une copie
+    exacte, ni une interaction ancienne valide de la même visite, ni celle
+    d'un autre appareil, ni l'origine émise pour une autre opération ;
+    refus avant tout accès à la base (_NoDB), aucune écriture."""
+    campaign = open_wave(db, USER_A)
+    old_visit, old_key = touch(db, campaign, USER_A)  # ancienne interaction valide, même visite
+    phone_visit, phone_key = touch(db, campaign, USER_A, environment=PHONE)  # autre appareil
+    op, other_op = operation(USER_A), operation(USER_A)
+    origin = open_origin(db, op, campaign_id=campaign)
+    foreign = open_origin(db, other_op, campaign_id=campaign)
+    assert origin.visit_id == old_visit
+    attempts = (observe(db, campaign, USER_A, origin.visit_id, origin.interaction_key),
+                dataclasses.replace(origin),  # copie exacte : égale, mais pas l'objet émis
+                dataclasses.replace(origin, interaction_key=old_key),
+                dataclasses.replace(observe(db, campaign, USER_A, old_visit, old_key), operation_kind=CREATE,
+                                    operation_id=op.operation_id),
+                dataclasses.replace(observe(db, campaign, USER_A, phone_visit, phone_key), operation_kind=CREATE,
+                                    operation_id=op.operation_id),
+                foreign)  # émise pour une autre opération
+    assert attempts[1] == origin and attempts[1] is not origin
+    for attempt in attempts:
+        assert proofs.register_pending(_NoDB(), origin=attempt, operation=op) == proofs.ProofDecision(
+            proofs.ABSENT, proofs.ORIGIN_UNVERIFIED)
+    assert registry(db) == []
+    # L'origine émise pour other_op ne vaut pas pour op, et réciproquement.
+    assert proofs.register_pending(_NoDB(), origin=origin, operation=other_op).reason == proofs.ORIGIN_UNVERIFIED
+    pending = register(db, origin, op)
+    [row] = registry(db)
+    assert pending.state == proofs.PENDING and (row["visit_id"], row["interaction_key"]) == (
+        origin.visit_id, origin.interaction_key)
+    assert register(db, foreign, other_op).state == proofs.PENDING  # chacune sa propre interaction
+    assert len({r["interaction_key"] for r in registry(db)}) == 2
 
 
 def test_a_moved_or_altered_origin_is_never_registered(db):
-    origin = origin_of(db, USER_A)
+    origin, _ = opened(db, USER_A)
     other_visit, other_key = touch(db, origin.campaign_id, USER_A, environment=PHONE)
     for moved, reason in ((dataclasses.replace(origin, recorded_at=origin.recorded_at + MICRO),
                            proofs.ORIGIN_UNVERIFIED),
@@ -283,7 +391,10 @@ def test_a_moved_or_altered_origin_is_never_registered(db):
                           (dataclasses.replace(origin, interaction_key=other_key), proofs.VISIT_CONFLICT),
                           (dataclasses.replace(origin, user_id=USER_B), proofs.NOT_AUTHORIZED)):
         op = operation(moved.user_id)
-        assert register(db, moved, op) == proofs.ProofDecision(proofs.ABSENT, reason)
+        # Non émise : refusée avant toute lecture ; même liée de force (bind),
+        # la relecture sous verrou la refuse.
+        assert proofs.register_pending(_NoDB(), origin=moved, operation=op).reason == proofs.ORIGIN_UNVERIFIED
+        assert register(db, bind(moved, op), op) == proofs.ProofDecision(proofs.ABSENT, reason)
     assert registry(db) == []
 
 
@@ -303,7 +414,7 @@ def _forged_interaction(db, origin, recorded_at) -> uuid.UUID:
 
 
 def test_an_interaction_outside_the_observation_is_never_an_origin(db):
-    origin = origin_of(db, USER_A)
+    origin, _ = opened(db, USER_A)
     participation = committed(db, lambda s: s.get(pp.ProductCampaignParticipant, (origin.campaign_id, USER_A)))
     for recorded_at in (participation.window_start_at - MICRO, participation.window_end_at,
                         participation.window_end_at + MICRO):
@@ -311,7 +422,9 @@ def test_an_interaction_outside_the_observation_is_never_an_origin(db):
         _refused(db, proofs.ORIGIN_UNVERIFIED, campaign_id=origin.campaign_id, user_id=USER_A,
                  visit_id=origin.visit_id, interaction_key=key)
         forged = dataclasses.replace(origin, interaction_key=key, recorded_at=recorded_at)
-        assert register(db, forged, operation(USER_A)).reason == proofs.ORIGIN_UNVERIFIED
+        op = operation(USER_A)
+        assert proofs.register_pending(_NoDB(), origin=forged, operation=op).reason == proofs.ORIGIN_UNVERIFIED
+        assert register(db, bind(forged, op), op).reason == proofs.ORIGIN_UNVERIFIED
     assert registry(db) == []
 
 
@@ -324,8 +437,7 @@ def test_an_interaction_outside_the_observation_is_never_an_origin(db):
                                                        (DELETE, "portfolio_used", "portfolio"),
                                                        (ACK, "decrypter_used", "decrypter")])
 def test_pending_then_certified_rows_are_exact(db, clock, kind, event_type, surface):
-    origin = origin_of(db, USER_A)
-    op = operation(USER_A, kind)
+    origin, op = opened(db, USER_A, kind)
     created = clock.advance(seconds=1)
     pending = register(db, origin, op)
     [row] = registry(db)
@@ -445,19 +557,17 @@ def _window(db, origin):
 
 
 def test_an_interaction_at_j0_is_registered_and_certified_at_j0(db, clock):
-    origin = origin_of(db, USER_A)  # J0, interaction et inscription au même instant serveur
+    origin, op = opened(db, USER_A)  # J0, interaction et inscription au même instant serveur
     start, end = _window(db, origin)
     assert origin.recorded_at == start and end - start == TWELVE_DAYS
-    op = operation(USER_A)
     pending = register(db, origin, op)
     assert certify(db, origin, op, pending.proof_id).certified_at == start
 
 
 @pytest.mark.parametrize("offset, certified", [(-MICRO, True), (timedelta(0), False), (MICRO, False)])
 def test_certification_is_admitted_strictly_before_j_plus_12(db, clock, offset, certified):
-    origin = origin_of(db, USER_A)
+    origin, op = opened(db, USER_A)
     _, end = _window(db, origin)
-    op = operation(USER_A)
     pending = register(db, origin, op)
     clock.set(end + offset)
     decision = certify(db, origin, op, pending.proof_id)
@@ -472,10 +582,10 @@ def test_certification_is_admitted_strictly_before_j_plus_12(db, clock, offset, 
 
 @pytest.mark.parametrize("offset, registered", [(-MICRO, True), (timedelta(0), False), (MICRO, False)])
 def test_registration_is_admitted_strictly_before_j_plus_12(db, clock, offset, registered):
-    origin = origin_of(db, USER_A)
+    origin, op = opened(db, USER_A)
     _, end = _window(db, origin)
     clock.set(end + offset)
-    decision = register(db, origin, operation(USER_A))
+    decision = register(db, origin, op)
     if registered:
         assert decision.state == proofs.PENDING and utc(proof_row(db, decision.proof_id)["created_at"]) == end - MICRO
     else:
@@ -493,9 +603,8 @@ def test_the_postgresql_clock_is_read_after_a_lock_wait_that_crosses_j_plus_12(d
                                                   window_end_at=now + timedelta(seconds=3),
                                                   authorization_recorded_at=now, notice_version=NOTICE))
     _sleep_until(now + timedelta(milliseconds=300))
-    visit, key = touch(db, campaign, USER_A)
-    origin = observe(db, campaign, USER_A, visit, key)
     op = operation(USER_A)
+    origin = open_origin(db, op, campaign_id=campaign)
     pending = register(db, origin, op)
     holder = Holder(db, sql="SELECT 1 FROM product_campaign_participants WHERE campaign_id = :c FOR UPDATE",
                     c=campaign)
@@ -541,32 +650,38 @@ def _wait(predicate, message, timeout=10.0):
 # 6. Appareils multiples et contraintes SQL (dernière défense)
 # --------------------------------------------------------------------------
 
-def test_the_same_operation_from_a_second_device_is_never_reattributed(db):
+def _two_devices(db, op):
+    """Deux origines ÉMISES pour la même opération depuis deux environnements
+    (défense en profondeur : la frontière n'en émet qu'une par opération)."""
     campaign = open_wave(db, USER_A)
-    laptop = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=LAPTOP))
-    phone = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=PHONE))
-    assert laptop.visit_id != phone.visit_id
+    laptop = open_origin(db, op, campaign_id=campaign, environment=LAPTOP)
+    phone = open_origin(db, op, campaign_id=campaign, environment=PHONE)
+    return campaign, laptop, phone
+
+
+def test_the_same_operation_from_a_second_device_is_never_reattributed(db):
     op = operation(USER_A)
+    campaign, laptop, phone = _two_devices(db, op)
+    assert laptop.visit_id != phone.visit_id
     pending = register(db, laptop, op)
     certified = certify(db, laptop, op, pending.proof_id)
     row = proof_row(db, pending.proof_id)
     assert register(db, phone, op) == proofs.ProofDecision(proofs.ABSENT, proofs.VISIT_CONFLICT)
     assert certify(db, phone, op, pending.proof_id) == proofs.ProofDecision(proofs.ABSENT, proofs.VISIT_CONFLICT)
     assert settle(db, phone, op, pending.proof_id) == proofs.ProofDecision(proofs.ABSENT, proofs.VISIT_CONFLICT)
-    other_campaign = origin_of(db, USER_A)
+    other_campaign = open_origin(db, op, campaign_id=open_wave(db, USER_A))
     assert register(db, other_campaign, op).reason == proofs.OPERATION_CONFLICT
     assert proof_row(db, pending.proof_id) == row and utc(row["certified_at"]) == certified.certified_at
     # Deux utilisateurs : même identifiant d'opération, deux identités canoniques distinctes.
-    bob = origin_of(db, USER_B)
-    theirs = register(db, bob, operation(USER_B, operation_id=op.operation_id))
+    bob_op = operation(USER_B, operation_id=op.operation_id)
+    bob = open_origin(db, bob_op, campaign_id=open_wave(db, USER_B))
+    theirs = register(db, bob, bob_op)
     assert theirs.state == proofs.PENDING and len(registry(db)) == 2
 
 
 def test_the_0024_constraints_remain_the_last_line_of_defense(db):
-    campaign = open_wave(db, USER_A)
-    laptop = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=LAPTOP))
-    phone = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=PHONE))
     op = operation(USER_A)
+    campaign, laptop, phone = _two_devices(db, op)
     register(db, laptop, op)
     close_key = close(db, campaign, USER_A, environment=PHONE)
     insert = (f"INSERT INTO {REGISTRY} (id, campaign_id, user_id, visit_id, interaction_key, interaction_kind, "
@@ -603,7 +718,7 @@ def _contended(db, holder_action, contender_action, *, expected_waiting=1):
 
 
 def test_concurrent_registrations_of_one_identity_create_one_pending_proof(db):
-    origin, op = origin_of(db, USER_A), operation(USER_A)
+    origin, op = opened(db, USER_A)
     won, lost = _contended(db, lambda s: proofs.register_pending(s, origin=origin, operation=op),
                            lambda: register(db, origin, op))
     assert won.state == proofs.PENDING and won.written
@@ -620,10 +735,8 @@ def test_concurrent_certifications_certify_once(db):
 
 
 def test_concurrent_registrations_from_two_visits_keep_the_first_origin(db):
-    campaign = open_wave(db, USER_A)
-    laptop = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=LAPTOP))
-    phone = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=PHONE))
     op = operation(USER_A)
+    _, laptop, phone = _two_devices(db, op)
     won, lost = _contended(db, lambda s: proofs.register_pending(s, origin=laptop, operation=op),
                            lambda: register(db, phone, op))
     assert won.state == proofs.PENDING and lost == proofs.ProofDecision(proofs.ABSENT, proofs.VISIT_CONFLICT)
@@ -669,16 +782,16 @@ def test_a_visit_finalized_concurrently_never_invalidates_the_proof(db, clock):
     assert len(holder.value) == 1 and committed(db, lambda s: s.get(ps.ProductActivitySession,
                                                                     origin.visit_id)).finalized_at is not None
     # Une inscription pendant la finalisation attend la clé de la visite (FK), puis réussit.
-    origin2 = observe(db, origin.campaign_id, USER_A, *touch(db, origin.campaign_id, USER_A))
-    clock.advance(minutes=31)
     op2 = operation(USER_A)
+    origin2 = open_origin(db, op2, campaign_id=origin.campaign_id)
+    clock.advance(minutes=31)
     _, late = _contended(db, lambda s: ps.finalize_idle_sessions(s, campaign_id=origin.campaign_id),
                          lambda: register(db, origin2, op2))
     assert late.state == proofs.PENDING
 
 
 def test_a_failed_registration_or_certification_leaves_nothing_and_the_retry_is_clean(db, monkeypatch):
-    origin, op = origin_of(db, USER_A), operation(USER_A)
+    origin, op = opened(db, USER_A)
     real = proofs.server_clock
 
     def failing(session):
@@ -711,10 +824,8 @@ def _outside_writer(db, origin, op):
 def test_a_savepoint_keeps_the_callers_transaction_usable_after_a_lost_race(db, monkeypatch):
     """Écrivain hors service committé entre la lecture et l'INSERT : la
     UNIQUE de 0024 refuse, la preuve gagnante est relue et jamais écrasée."""
-    campaign = open_wave(db, USER_A)
-    laptop = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=LAPTOP))
-    phone = observe(db, campaign, USER_A, *touch(db, campaign, USER_A, environment=PHONE))
     op = operation(USER_A)
+    _, laptop, phone = _two_devices(db, op)
     real = proofs._proof_for_update
     calls = []
 
