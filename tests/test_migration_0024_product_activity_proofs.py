@@ -342,10 +342,17 @@ DORMANCY_MARKERS = (REGISTRY, ATTRIBUTIONS, "ProductActivityProof", "ProductActi
                     "uq_product_activity_events_attribution_identity", "recorded_event_id")
 
 
+# V0-T08 Lot 2B-2 bloc B : seul service autorisé à connaître le registre.
+PROOF_SERVICE = PACKAGE / "proofs.py"
+PROOF_SERVICE_MARKERS = [REGISTRY, "ProductActivityProof", "recorded_event_id"]
+
+
 def test_dormancy_no_production_module_knows_the_new_tables():
     """Seuls core/models.py (déclaration) et la migration 0024 mentionnent
     les nouvelles tables : aucun service (core/product_analytics/ compris),
-    aucune route, aucun worker, aucun frontend. Les nouveaux modèles ne
+    aucune route, aucun worker, aucun frontend. Bloc B (nominatif) :
+    core/product_analytics/proofs.py connaît le registre, jamais les
+    attributions. Les nouveaux modèles ne
     réfèrent qu'à des tables analytiques (aucune table F2)."""
     allowed = {REPO_ROOT / "core" / "models.py", MIGRATION}
     offenders = []
@@ -354,6 +361,11 @@ def test_dormancy_no_production_module_knows_the_new_tables():
         if relative[0] in ("tests", ".git") or "node_modules" in relative or path in allowed:
             continue
         source = path.read_text(encoding="utf-8")
+        if path == PROOF_SERVICE:
+            # V0-T08 2B-2 bloc B (nominatif) : le service du registre ne connaît
+            # QUE le registre ; ni attribution, ni table d'événements, ni UNIQUE.
+            assert [m for m in DORMANCY_MARKERS if m in source] == PROOF_SERVICE_MARKERS
+            continue
         if any(marker in source for marker in DORMANCY_MARKERS):
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
     assert offenders == []
@@ -362,8 +374,8 @@ def test_dormancy_no_production_module_knows_the_new_tables():
             if path.is_file() and path.suffix in (".html", ".js", ".mjs", ".css", ".json"):
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 assert not any(marker in text for marker in DORMANCY_MARKERS[:4]), path
-    assert not [p for p in PACKAGE.glob("*.py") if any(marker in p.read_text(encoding="utf-8")
-                                                      for marker in DORMANCY_MARKERS)]
+    assert not [p for p in PACKAGE.glob("*.py") if p != PROOF_SERVICE and any(
+        marker in p.read_text(encoding="utf-8") for marker in DORMANCY_MARKERS)]
     for name in V0T08_0024_TABLES:
         targets = {e.column.table.name for fk in Base.metadata.tables[name].foreign_key_constraints
                    for e in fk.elements}

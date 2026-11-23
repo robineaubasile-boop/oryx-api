@@ -19,7 +19,12 @@ core/product_analytics/ existent mais ne sont raccordés à rien.
   lit des tables F2, uniquement via les modèles Invitation et
   AuthOperation de core.models (aucun module F2 importé, aucune écriture :
   tests/test_product_analytics_cohort.py) ;
-- frontend : aucune référence au paquet ni aux services.
+- frontend : aucune référence au paquet ni aux services ;
+- lot 2B-2 bloc B : un seul module ajouté au paquet (proofs.py, registre et
+  certification des preuves) ; UNIQUE exception nominative hors du paquet,
+  core/_activity_proof_bridge.py, qui n'importe que proofs et n'a aucun
+  appelant (tests/test_activity_proof_bridge.py) ; aucun autre module du
+  paquet n'importe proofs.
 """
 import ast
 import hashlib
@@ -32,8 +37,13 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_direc
 
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 PACKAGE_MODULE = "core.product_analytics"
-MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "participation.py", "retention.py",
-           "sessions.py")
+MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "participation.py", "proofs.py",
+           "retention.py", "sessions.py")
+# V0-T08 Lot 2B-2 bloc B (nominatif) : UNIQUE module hors du paquet autorisé à
+# l'importer, et seulement le registre des preuves ; lui-même sans appelant
+# (tests/test_activity_proof_bridge.py).
+PROOF_BRIDGE = "core/_activity_proof_bridge.py"
+PROOF_BRIDGE_IMPORTS = {"core.product_analytics", "core.product_analytics.proofs"}
 MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1.py"
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
@@ -97,6 +107,12 @@ def test_no_application_module_imports_the_package():
             continue
         imported = _imports(path)
         text = path.read_text(encoding="utf-8")
+        if path.relative_to(REPO_ROOT).as_posix() == PROOF_BRIDGE:
+            # Exception nominative : imports analytics EXACTS (registre des
+            # preuves seulement), aucun chargement dynamique.
+            assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == PROOF_BRIDGE_IMPORTS, imported
+            assert "import_module" not in text and "__import__" not in text
+            continue
         if any(i == PACKAGE_MODULE or i.startswith(PACKAGE_MODULE + ".") for i in imported) or \
                 "product_analytics." in text or "import_module" in text and "product_analytics" in text:
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
@@ -106,6 +122,12 @@ def test_no_application_module_imports_the_package():
             if path.is_file() and path.suffix in (".html", ".js", ".mjs", ".css", ".json"):
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 assert "product_analytics" not in text and "record_event" not in text, path
+
+
+def test_only_the_bridge_imports_the_proof_registry_service():
+    for name in MODULES:
+        assert "core.product_analytics.proofs" not in _imports(PACKAGE / name), name
+        assert "import proofs" not in (PACKAGE / name).read_text(encoding="utf-8"), name
 
 
 def test_only_migration_0024_added_and_0022_0023_unchanged():
