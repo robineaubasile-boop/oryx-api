@@ -38,6 +38,7 @@ from core import decryptage_cognitive_runtime as dcr
 from core.authz_f2 import _adapters
 from core.authz_f2 import _bridge_contracts as contracts
 from core.authz_f2 import _decryptage_orm_bridge as bridge
+from core.authz_f2 import attestations as att
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2.principal import AuthorizedContext, AuthorizedPrincipal
@@ -700,8 +701,12 @@ def test_the_adapter_checks_the_bridge_result_against_the_admitted_delivery(env,
     original = bridge._execute
 
     def substituted(conn, ctx, operation, probe):
-        result = original(conn, ctx, operation, probe)
-        return bridge.DeliveryAcknowledged(uuid.uuid4(), result.delivery_status, result.response_action)
+        # V0-T08 2B-2 PR 0 : la vue du chemin attesté arrive enveloppée de son
+        # attestation interne ; c'est la vue NUE qui est substituée, l'adaptateur
+        # doit toujours la refuser.
+        result, attestation = att.unwrap(original(conn, ctx, operation, probe))
+        return att.attach(bridge.DeliveryAcknowledged(uuid.uuid4(), result.delivery_status, result.response_action),
+                          attestation)
 
     monkeypatch.setattr(bridge, "_execute", substituted)
     refused(env, alice, done.ack(), UNAVAILABLE)  # capture ET statut annulés

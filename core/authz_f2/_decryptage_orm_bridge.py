@@ -78,6 +78,16 @@ pending / awaiting_delivery ou delivered / captured, AVANT la provenance
 transitive et la capture ; capture V2 exigée après l'ACK. Le chemin
 historique (sonde) garde ses comportements V1 / V2 / legacy.
 
+V0-T08 2B-2 PR 0 (attestations internes, dormantes) : sur le SEUL chemin
+attesté, le statut de la livraison est observé sous SON verrou FOR UPDATE
+(lock_owned_delivery, populate_existing : dernière version committée après
+l'attente), APRÈS les contrôles d'attestation et AVANT toute mutation :
+pending = premier ACK effectué par CETTE transaction, delivered = rejeu. La
+vue DeliveryAcknowledged est construite à l'identique (trois champs) puis
+enveloppée avec cette attestation (core.authz_f2.attestations, fabrique
+totale : jamais une cause d'échec) ; le chemin historique rend toujours la
+vue nue. Aucun verrou, aucune lecture, aucune écriture supplémentaire.
+
 R1 PR 9-C1-B — capacités et contrats communs (F-01) : ce module n'importe
 plus core/authz_f2/_adapters.py (exceptions, sentinelles et contrats dans
 core/authz_f2/_bridge_contracts.py). Chaque opération reçoit une capacité
@@ -126,6 +136,7 @@ from core import assistant_delivery as ad
 from core import decryptage_cognitive_runtime as dcr
 from core import decryptage_progress as dp
 from core.authz_f2 import _bridge_contracts as contracts
+from core.authz_f2 import attestations as att
 from core.authz_f2 import commands as c
 from core.authz_f2 import decryptage_candidate as dcand
 from core.authz_f2 import decryptage_context as dc
@@ -468,6 +479,11 @@ def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement, probe):
         return contracts.ABSENT  # absente, étrangère ou autre conversation : indiscernables, aucun verrou
     if attested:
         _require_attested_canonical(db, delivery, probe)
+    # PR 0 : statut OBSERVÉ sous le verrou FOR UPDATE de la livraison, avant
+    # toute mutation (couple pending / awaiting_delivery ou delivered /
+    # captured déjà exigé sur le chemin attesté) : pending = cette transaction
+    # effectue la transition ; delivered = rejeu. Lecture d'attribut seule.
+    first_ack = delivery.status == ad.PENDING
     _require_owned_provenance(db, delivery, user_id)
     link = dcr.capture_delivered_response(db, delivery=delivery)
     delivery = ad.acknowledge_locked_delivery(db, delivery=delivery, user_id=user_id)
@@ -475,6 +491,9 @@ def _acknowledge(db, user_id: str, operation: DeliveryAcknowledgement, probe):
     if attested and (link is None or link.capture_version != COGNITIVE_RUNTIME_V2
                      or link.capture_state != dcr.CAPTURED or link.response_action not in RESPONSE_ACTIONS):
         raise AckProvenanceIncoherent("ACK attesté sans capture V2")
+    if attested:  # vue IDENTIQUE, enveloppée de l'attestation interne (fabrique totale)
+        return att.attach(DeliveryAcknowledged(delivery.id, delivery.status, link.response_action),
+                          att.delivery_ack(user_id, delivery.id, first=first_ack))
     return DeliveryAcknowledged(delivery.id, delivery.status, link.response_action if link is not None else None)
 
 
