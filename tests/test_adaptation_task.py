@@ -676,7 +676,7 @@ def test_19_not_wired_to_api_web_nor_orchestration():
 
 def test_19_no_migration_no_db_model():
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert versions[-1] == "0023_analytics_cohort_sessions.py" and len(versions) == 23
+    assert versions[-1] == "0024_product_activity_proofs.py" and len(versions) == 24
     models = (REPO_ROOT / "core" / "models.py").read_text(encoding="utf-8")
     for word in ("TaskProfile", "task_profile", "explicit_intent", "cognitive_operations", "task_characteristics"):
         assert word not in models, word

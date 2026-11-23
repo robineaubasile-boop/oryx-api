@@ -219,5 +219,6 @@ def test_the_package_reads_no_configuration_and_starts_nothing():
 def test_no_migration_and_no_production_dependency():
     assert production_requirements() == MAIN_REQUIREMENTS
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(versions) == 23
-    assert versions[-2:] == ["0022_product_analytics_v1.py", "0023_analytics_cohort_sessions.py"]  # V0-T08 Lots 1 et 2B-1
+    assert len(versions) == 24
+    assert versions[-3:] == ["0022_product_analytics_v1.py", "0023_analytics_cohort_sessions.py",
+                             "0024_product_activity_proofs.py"]  # V0-T08 Lots 1, 2B-1 et 2B-2 bloc A
