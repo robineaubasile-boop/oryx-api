@@ -188,10 +188,14 @@ V0T08_0022 = "0022_product_analytics_v1"
 V0T08_0022_FILE = "0022_product_analytics_v1.py"
 # V0-T08 Lot 2B-1 (0023, testée à part) : cohorte, places et sessions
 # d'activité dormantes et leurs index (aucune table existante modifiée).
-# Tête.
 V0T08_0023 = "0023_analytics_cohort_sessions"
 V0T08_0023_FILE = "0023_analytics_cohort_sessions.py"
-V0T08_FILES = [V0T08_0022_FILE, V0T08_0023_FILE]
+# V0-T08 Lot 2B-2 bloc A (0024, testée à part) : registre provisoire des
+# preuves et attributions définitives dormants, leurs index, et trois UNIQUE
+# composites ajoutées à des tables 0022 / 0023 existantes. Tête.
+V0T08_0024 = "0024_product_activity_proofs"
+V0T08_0024_FILE = "0024_product_activity_proofs.py"
+V0T08_FILES = [V0T08_0022_FILE, V0T08_0023_FILE, V0T08_0024_FILE]
 V0T08_0022_TABLES = ("product_campaigns", "product_campaign_participants", "product_activity_events")
 V0T08_0022_INDEXES = {
     "ix_product_campaign_participants_user_window", "ix_product_activity_events_user_occurred",
@@ -202,8 +206,26 @@ V0T08_0022_INDEXES = {
 V0T08_0023_TABLES = ("product_campaign_cohorts", "product_cohort_seats", "product_activity_sessions",
                      "product_activity_session_interactions")
 V0T08_0023_INDEXES = {"uq_product_activity_sessions_open_environment", "ix_product_activity_sessions_open_idle_expiry"}
-V0T08_TABLES = set(V0T08_0022_TABLES) | set(V0T08_0023_TABLES)
-HEAD = V0T08_0023
+V0T08_0024_TABLES = ("product_activity_event_attributions", "product_activity_proof_registry")
+V0T08_0024_INDEXES = {
+    "ix_product_activity_event_attributions_visit", "ix_product_activity_proof_registry_campaign_status",
+    "ix_product_activity_proof_registry_visit", "ix_product_activity_proof_registry_recorded_event",
+    "ix_product_activity_proof_registry_purge_after_at",
+}
+# UNIQUE composites ajoutées par 0024 à des tables EXISTANTES : nom ->
+# (table, colonnes, révision qui crée la table : 8 = 0022, 9 = 0023). Avant
+# cette révision, la contrainte arrive avec la table (add_table).
+V0T08_0024_EXISTING_UNIQUES = {
+    "uq_product_activity_events_attribution_identity": (
+        "product_activity_events", ["id", "user_id", "visit_id", "event_type", "surface", "source_operation_kind",
+                                    "source_operation_id"], 8),
+    "uq_product_activity_sessions_owner": ("product_activity_sessions", ["id", "campaign_id", "user_id"], 9),
+    "uq_product_activity_session_interactions_origin": (
+        "product_activity_session_interactions", ["campaign_id", "user_id", "interaction_key", "session_id",
+                                                  "interaction_kind"], 9),
+}
+V0T08_TABLES = set(V0T08_0022_TABLES) | set(V0T08_0023_TABLES) | set(V0T08_0024_TABLES)
+HEAD = V0T08_0024
 # Tables de T6-A (0009) : inférence de l'état C1-C12 du Niveau 6.
 T6A_TABLES = {"competency_inference_runs", "competency_stage_claims",
               "competency_inference_tensions", "competency_inference_tension_capabilities",
@@ -436,13 +458,14 @@ def _indexes(engine, table) -> list:
 def _pr1_revisions_applied(engine) -> int:
     """Nombre de révisions R1 PR 1 (0015, 0016, 0017), R1 PR 2 (0018),
     R1 PR 4 (0019), R1 PR 7 (0020), R1 PR 9-B1 (0021), V0-T08 Lot 1
-    (0022) puis V0-T08 Lot 2B-1 (0023) présentes en base."""
+    (0022), V0-T08 Lot 2B-1 (0023) puis V0-T08 Lot 2B-2 bloc A (0024)
+    présentes en base."""
     with engine.connect() as conn:
         if conn.execute(sa.text("SELECT to_regclass('public.alembic_version')")).scalar() is None:
             return 0
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
     return {PR1_0015: 1, PR1_0016: 2, PR1_0017: 3, PR2_0018: 4, PR4_0019: 5, PR7_0020: 6, PR9B1_0021: 7,
-            V0T08_0022: 8, V0T08_0023: 9}.get(version, 0)
+            V0T08_0022: 8, V0T08_0023: 9, V0T08_0024: 10}.get(version, 0)
 
 
 def _without_pr1_changes(diff, applied: int) -> list:
@@ -452,7 +475,9 @@ def _without_pr1_changes(diff, applied: int) -> list:
     colonne et index de 0018, puis colonne de 0019, puis
     portfolio_positions.position_revision de 0020, puis table et UNIQUE
     composite de 0021, puis tables et index de 0022, puis tables et index
-    de 0023), et échoue si l'un d'eux manque ou si un écart
+    de 0023, puis tables, index et UNIQUE composites de 0024 — chacune de
+    ces UNIQUE seulement si sa table existe déjà, sinon elle arrive avec la
+    table), et échoue si l'un d'eux manque ou si un écart
     apparaît alors que sa révision est appliquée. Retourne le reste. Avant
     0017, les colonnes blocked_until et http_action arrivent avec la table
     auth_abuse_events (add_table) ; avant 0010, l'UNIQUE composite de 0021
@@ -483,6 +508,10 @@ def _without_pr1_changes(diff, applied: int) -> list:
         expected += [("add_table", t) for t in V0T08_0022_TABLES] + [("add_index", i) for i in V0T08_0022_INDEXES]
     if applied < 9:
         expected += [("add_table", t) for t in V0T08_0023_TABLES] + [("add_index", i) for i in V0T08_0023_INDEXES]
+    if applied < 10:
+        expected += [("add_table", t) for t in V0T08_0024_TABLES] + [("add_index", i) for i in V0T08_0024_INDEXES]
+        expected += [("add_constraint", name) for name, (_, _, created) in V0T08_0024_EXISTING_UNIQUES.items()
+                     if applied >= created]
     found, rest = [], []
     for d in diff:
         key = None
@@ -501,12 +530,18 @@ def _without_pr1_changes(diff, applied: int) -> list:
               and d[1].name == PR9B1_0021_OWNER_UNIQUE and d[1].table.name == "conversation_identities"
               and [col.name for col in d[1].columns] == ["conversation_key", "user_id"]):
             key = ("add_constraint", PR9B1_0021_OWNER_UNIQUE)
+        elif (isinstance(d, tuple) and d[0] == "add_constraint" and isinstance(d[1], sa.UniqueConstraint)
+              and d[1].name in V0T08_0024_EXISTING_UNIQUES
+              and (d[1].table.name, [col.name for col in d[1].columns])
+              == V0T08_0024_EXISTING_UNIQUES[d[1].name][:2]):
+            key = ("add_constraint", d[1].name)
         elif isinstance(d, tuple) and d[0] == "add_table" and d[1].name in (
                 PR1_0016_TABLES + PR1_0017_TABLES + PR2_0018_TABLES + PR9B1_0021_TABLES + V0T08_0022_TABLES
-                + V0T08_0023_TABLES):
+                + V0T08_0023_TABLES + V0T08_0024_TABLES):
             key = ("add_table", d[1].name)
         elif isinstance(d, tuple) and d[0] == "add_index" and d[1].name in (
-                PR1_0017_INDEXES | PR2_0018_INDEXES | V0T08_0022_INDEXES | V0T08_0023_INDEXES):
+                PR1_0017_INDEXES | PR2_0018_INDEXES | V0T08_0022_INDEXES | V0T08_0023_INDEXES
+                | V0T08_0024_INDEXES):
             key = ("add_index", d[1].name)
         if key:
             found.append(key)
@@ -518,8 +553,8 @@ def _without_pr1_changes(diff, applied: int) -> list:
 
 def _compare_metadata(engine) -> list:
     """compare_metadata(base, Base.metadata), sans les écarts R1 PR 1,
-    R1 PR 2, R1 PR 4, R1 PR 7, R1 PR 9-B1, V0-T08 Lot 1 et V0-T08 Lot 2B-1 des révisions 0015 à 0023 pas
-    encore appliquées (retirés
+    R1 PR 2, R1 PR 4, R1 PR 7, R1 PR 9-B1, V0-T08 Lot 1, V0-T08 Lot 2B-1 et V0-T08 Lot 2B-2 bloc A des
+    révisions 0015 à 0024 pas encore appliquées (retirés
     exactement par _without_pr1_changes). À la tête, aucun écart n'est
     retiré."""
     return _without_pr1_changes(_raw_compare_metadata(engine), _pr1_revisions_applied(engine))

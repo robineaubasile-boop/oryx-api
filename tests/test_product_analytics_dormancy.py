@@ -1,5 +1,5 @@
-"""Dormance de V0-T08 Lots 2A et 2B-1 : les services core/product_analytics/
-existent mais ne sont raccordés à rien.
+"""Dormance de V0-T08 Lots 2A, 2B-1 et 2B-2 (bloc A) : les services
+core/product_analytics/ existent mais ne sont raccordés à rien.
 
 - aucun module applicatif (api.py, core/, scripts/, alembic/, ci/,
   diagnostics/, test.py) n'importe le paquet ; le vrai api:app, importé
@@ -10,8 +10,12 @@ existent mais ne sont raccordés à rien.
   (auth_f2*, authz_f2*, f2_runtime), ni route_policy (F-02A), ni moteurs
   pédagogiques, ni réseau, ni threads, ni planificateur, ni lecture
   d'environnement ;
-- lot 2B-1 : seule la migration 0023_analytics_cohort_sessions est ajoutée
-  (tête, 23 fichiers), 0022 inchangée ; cohort.py est le SEUL module qui
+- lot 2B-1 : seule la migration 0023_analytics_cohort_sessions a été
+  ajoutée, 0022 inchangée ; lot 2B-2 bloc A : seule la migration
+  0024_product_activity_proofs est ajoutée (tête, 24 fichiers), 0022 et
+  0023 inchangées, aucun module du paquet ajouté ni modifié (aucun service
+  du registre de preuves : tests/test_migration_0024_product_activity_proofs.py) ;
+  cohort.py est le SEUL module qui
   lit des tables F2, uniquement via les modèles Invitation et
   AuthOperation de core.models (aucun module F2 importé, aucune écriture :
   tests/test_product_analytics_cohort.py) ;
@@ -38,6 +42,10 @@ MIGRATION_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_ses
 # sha256 de 0023 telle que proposée par le lot 2B-1 : toute retouche
 # ultérieure doit être explicite (mise à jour de cette empreinte).
 MIGRATION_0023_SHA256 = "896c33583892f8037eeb1bb3fd4af00548a8557e9548fca4070e76ca8a8fcb52"
+MIGRATION_0024 = REPO_ROOT / "alembic" / "versions" / "0024_product_activity_proofs.py"
+# sha256 de 0024 telle que proposée par le lot 2B-2 bloc A : toute retouche
+# ultérieure doit être explicite (mise à jour de cette empreinte).
+MIGRATION_0024_SHA256 = "e585a348e1165358da3ca7b784c2ff1ac87a9dbef8504ec1f5e09de55e84017c"
 ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc",
                    "core.models",
                    "core.product_analytics", "core.product_analytics.common", "core.product_analytics.campaigns",
@@ -100,13 +108,15 @@ def test_no_application_module_imports_the_package():
                 assert "product_analytics" not in text and "record_event" not in text, path
 
 
-def test_only_migration_0023_added_and_0022_unchanged():
+def test_only_migration_0024_added_and_0022_0023_unchanged():
     script = _script_directory()
-    assert script.get_heads() == ["0023_analytics_cohort_sessions"]
+    assert script.get_heads() == ["0024_product_activity_proofs"]
+    assert script.get_revision("0024_product_activity_proofs").down_revision == "0023_analytics_cohort_sessions"
     assert script.get_revision("0023_analytics_cohort_sessions").down_revision == "0022_product_analytics_v1"
-    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 23
+    assert len(list((REPO_ROOT / "alembic" / "versions").glob("[0-9][0-9][0-9][0-9]_*.py"))) == 24
     assert hashlib.sha256(MIGRATION_0022.read_bytes()).hexdigest() == MIGRATION_0022_SHA256
     assert hashlib.sha256(MIGRATION_0023.read_bytes()).hexdigest() == MIGRATION_0023_SHA256
+    assert hashlib.sha256(MIGRATION_0024.read_bytes()).hexdigest() == MIGRATION_0024_SHA256
 
 
 def test_only_cohort_reads_f2_tables_and_only_the_canonical_invitation_proof():

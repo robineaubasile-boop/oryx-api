@@ -250,6 +250,9 @@ def test_model_does_not_touch_historical_tables():
         # V0-T08 Lot 2B-1 (0023, testée à part) : cohorte et sessions d'activité dormantes.
         "product_campaign_cohorts", "product_cohort_seats", "product_activity_sessions",
         "product_activity_session_interactions",
+        # V0-T08 Lot 2B-2 bloc A (0024, testée à part) : registre provisoire
+        # des preuves et attributions définitives dormants.
+        "product_activity_event_attributions", "product_activity_proof_registry",
     }
     # analysis_facts, user_statements et investment_theses reçoivent
     # analysis_session_id en T1-B1 (0003, testé à part) ; les autres tables

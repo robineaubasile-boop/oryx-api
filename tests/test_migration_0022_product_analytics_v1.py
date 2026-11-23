@@ -1,8 +1,8 @@
 """Tests de V0-T08 Lot 1 : migration 0022_product_analytics_v1 (socle
 PostgreSQL DORMANT de l'analytics produit) et modèles correspondants.
 
-1. Sans base : maillon 0021 -> 0022 (parent de 0023, V0-T08 Lot 2B-1,
-   testée à part), identifiant <= 32 caractères, fichiers 0001 à 0021 inchangés, SQL offline (upgrade : trois
+1. Sans base : maillon 0021 -> 0022 (parent de 0023, V0-T08 Lot 2B-1, puis
+   de 0024, V0-T08 Lot 2B-2 bloc A, testées à part), identifiant <= 32 caractères, fichiers 0001 à 0021 inchangés, SQL offline (upgrade : trois
    CREATE TABLE et leurs index, rien d'autre ; downgrade : délais, verrou
    déterministe des trois tables, garde DO évaluée à l'exécution, retrait
    sans CASCADE), modèles alignés sur la migration (colonnes, types,
@@ -63,6 +63,10 @@ from tests.test_migration_0004_drop_company_analyses import (
     V0T08_0022,
     V0T08_0023,
     V0T08_0023_TABLES,
+    V0T08_0024,
+    V0T08_0024_EXISTING_UNIQUES,
+    V0T08_0024_FILE,
+    V0T08_0024_TABLES,
     V0T08_0022_FILE,
     V0T08_0022_INDEXES,
     V0T08_0022_TABLES,
@@ -181,9 +185,11 @@ def _m0022():
 
 def test_revision_links_0022_to_0021_and_is_the_parent_of_0023():
     """0022 était la tête de V0-T08 Lot 1 ; le lot 2B-1 ajoute 0023 au-dessus,
-    sans modifier ce fichier (tests/test_migration_0023_analytics_cohort_sessions.py)."""
+    puis le lot 2B-2 bloc A ajoute 0024, sans modifier ce fichier
+    (tests/test_migration_0023_analytics_cohort_sessions.py,
+    tests/test_migration_0024_product_activity_proofs.py)."""
     script = _script_directory()
-    assert script.get_heads() == [V0T08_0023]
+    assert script.get_heads() == [V0T08_0024]
     assert script.get_revision(V0T08_0023).down_revision == V0T08_0022
     revision = script.get_revision(V0T08_0022)
     assert revision.down_revision == PR9B1_0021
@@ -191,7 +197,8 @@ def test_revision_links_0022_to_0021_and_is_the_parent_of_0023():
     assert V0T08_0022 == "0022_product_analytics_v1" and len(V0T08_0022) <= 32
     assert V0T08_0022_FILE == f"{V0T08_0022}.py"
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 23 and files[-2] == V0T08_0022_FILE and files[-3] == PR9B1_0021_FILE
+    assert len(files) == 24 and files[-3] == V0T08_0022_FILE and files[-4] == PR9B1_0021_FILE
+    assert files[-1] == V0T08_0024_FILE
     m = _m0022()
     assert (m.revision, m.down_revision, m.branch_labels, m.depends_on) == (V0T08_0022, PR9B1_0021, None, None)
 
@@ -288,8 +295,20 @@ def test_models_match_the_migration():
     assert [c.name for c in tables[EVENTS].primary_key.columns] == ["id"]
     uniques = {(t.name, c.name): [col.name for col in c.columns] for t in tables.values() for c in t.constraints
                if isinstance(c, sa.UniqueConstraint)}
+    # V0-T08 Lot 2B-2 bloc A : le modèle ACTUEL de product_activity_events
+    # porte en plus la UNIQUE composite ajoutée par 0024 (cible de FK des
+    # attributions), absente du catalogue de 0022 ; elle est séparée ici
+    # explicitement et vérifiée contre 0024
+    # (tests/test_migration_0024_product_activity_proofs.py). Le catalogue
+    # réel de 0022 reste exact (test_pg_catalog_is_exact, base en 0022).
+    added_by_0024 = {(table, name): columns for name, (table, columns, _) in V0T08_0024_EXISTING_UNIQUES.items()
+                     if table in V0T08_0022_TABLES}
+    assert added_by_0024 == {(EVENTS, "uq_product_activity_events_attribution_identity"): [
+        "id", "user_id", "visit_id", "event_type", "surface", "source_operation_kind", "source_operation_id"]}
+    assert {key: uniques.pop(key) for key in added_by_0024} == added_by_0024
     assert uniques == {(CAMPAIGNS, m.CAMPAIGN_CODE_UNIQUE): ["code"],
                        (EVENTS, m.EVENT_IDEMPOTENCY_UNIQUE): ["user_id", "idempotency_key"]}
+    assert not any(name in MIGRATION.read_text(encoding="utf-8") for _, name in added_by_0024)
     fks = {fk.name: ([e.parent.name for e in fk.elements], [e.target_fullname for e in fk.elements],
                      fk.ondelete, fk.onupdate, fk.deferrable)
            for t in tables.values() for fk in t.foreign_key_constraints}
@@ -336,9 +355,11 @@ def test_no_forbidden_or_sensitive_field_in_the_analytics_tables():
             parts = name.split("_")
             for marker in FORBIDDEN_FIELD_MARKERS:
                 assert marker not in parts and not name.startswith(marker), (table_name, name)
-    # V0-T08 Lot 2B-1 : les trois tables de 0023 sont vérifiées à part
-    # (tests/test_migration_0023_analytics_cohort_sessions.py).
-    assert {t for t in Base.metadata.tables if t.startswith("product_")} == ANALYTICS | set(V0T08_0023_TABLES)
+    # V0-T08 Lot 2B-1 : les tables de 0023 sont vérifiées à part
+    # (tests/test_migration_0023_analytics_cohort_sessions.py) ; lot 2B-2
+    # bloc A : celles de 0024 aussi (tests/test_migration_0024_product_activity_proofs.py).
+    assert {t for t in Base.metadata.tables if t.startswith("product_")} == (
+        ANALYTICS | set(V0T08_0023_TABLES) | set(V0T08_0024_TABLES))
 
 
 # --------------------------------------------------------------------------
@@ -368,7 +389,7 @@ def _code_strings_and_names(path) -> set:
 
 
 def test_no_production_module_references_the_analytics_tables():
-    """Seuls core/models.py (déclaration), les migrations 0022 et 0023 et,
+    """Seuls core/models.py (déclaration), les migrations 0022, 0023 et 0024 et,
     depuis V0-T08 Lot 2A, les services dormants core/product_analytics/ mentionnent
     les tables : aucune route, aucun worker ni rapport ne les lit ou ne les
     écrit. Que rien n'importe ces services est vérifié par
@@ -377,8 +398,11 @@ def test_no_production_module_references_the_analytics_tables():
     # V0-T08 Lot 2B-1 : la migration 0023 référence product_campaigns et
     # product_campaign_participants par FK (testée à part).
     migration_0023 = REPO_ROOT / "alembic" / "versions" / "0023_analytics_cohort_sessions.py"
-    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, migration_0023, *services.glob("*.py")}
-    assert len(allowed) == 3 + 8
+    # V0-T08 Lot 2B-2 bloc A : la migration 0024 ajoute une UNIQUE à
+    # product_activity_events et y réfère par FK (testée à part).
+    migration_0024 = REPO_ROOT / "alembic" / "versions" / V0T08_0024_FILE
+    allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, migration_0023, migration_0024, *services.glob("*.py")}
+    assert len(allowed) == 4 + 8
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*.py")):
         relative = path.relative_to(REPO_ROOT).parts

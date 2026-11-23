@@ -2855,6 +2855,12 @@ class ProductActivityEvent(Base):
             name="ck_product_activity_events_retention_scopes"),
         ForeignKeyConstraint(["user_id"], ["users.id"], name="product_activity_events_user_id_fkey"),
         UniqueConstraint("user_id", "idempotency_key", name="uq_product_activity_events_user_idempotency_key"),
+        # V0-T08 Lot 2B-2 (migration 0024_product_activity_proofs) : cible de
+        # la FK composite des attributions définitives (concordance
+        # propriétaire, visite, type, surface et opération canonique).
+        # Contient la clé primaire : aucun conflit possible.
+        UniqueConstraint("id", "user_id", "visit_id", "event_type", "surface", "source_operation_kind",
+                         "source_operation_id", name="uq_product_activity_events_attribution_identity"),
         Index("ix_product_activity_events_user_occurred", "user_id", text("occurred_at DESC"), text("id DESC")),
         Index("ix_product_activity_events_user_visit", "user_id", "visit_id"),
         Index("ix_product_activity_events_next_scope_expires_at", "next_scope_expires_at"),
@@ -3027,6 +3033,10 @@ class ProductActivitySession(Base):
                              name="product_activity_sessions_participant_fkey"),
         UniqueConstraint("id", "campaign_id", "user_id", "environment_digest",
                          name="uq_product_activity_sessions_identity"),
+        # V0-T08 Lot 2B-2 (migration 0024_product_activity_proofs) : cible des
+        # FK composites (visit_id, campaign_id, user_id) des preuves et des
+        # attributions. Contient la clé primaire : aucun conflit possible.
+        UniqueConstraint("id", "campaign_id", "user_id", name="uq_product_activity_sessions_owner"),
         Index("uq_product_activity_sessions_open_environment", "campaign_id", "user_id", "environment_digest",
               unique=True, postgresql_where=text("finalized_at IS NULL")),
         Index("ix_product_activity_sessions_open_idle_expiry", "campaign_id", "idle_expires_at",
@@ -3069,6 +3079,11 @@ class ProductActivitySessionInteraction(Base):
                              ["product_activity_sessions.id", "product_activity_sessions.campaign_id",
                               "product_activity_sessions.user_id", "product_activity_sessions.environment_digest"],
                              name="product_activity_session_interactions_session_fkey"),
+        # V0-T08 Lot 2B-2 (migration 0024_product_activity_proofs) : cible des
+        # FK composites des preuves et des attributions (clé acceptée de
+        # CETTE visite et de CE type). Contient la clé primaire.
+        UniqueConstraint("campaign_id", "user_id", "interaction_key", "session_id", "interaction_kind",
+                         name="uq_product_activity_session_interactions_origin"),
     )
 
     campaign_id = Column(Uuid, primary_key=True)
@@ -3078,3 +3093,183 @@ class ProductActivitySessionInteraction(Base):
     environment_digest = Column(String(64), nullable=False)
     session_id = Column(Uuid, nullable=True)
     recorded_at = Column(DateTime(timezone=True), nullable=False)
+
+
+# --------------------------------------------------------------------------
+# V0-T08 Lot 2B-2, bloc A (migration 0024_product_activity_proofs) : registre
+# provisoire des preuves d'utilisation significative et attributions
+# définitives des événements — DORMANTS. Aucun service, aucune route, aucun
+# worker ne les lit ni ne les écrit dans ce bloc. Les expressions des CHECK
+# sont celles de la migration (concordance testée).
+# --------------------------------------------------------------------------
+
+_PROOF_OPERATION_CHECK = (
+    "(event_type = 'education_used' AND surface = 'education' AND source_operation_kind = 'assistant_delivery') "
+    "OR (event_type = 'coach_used' AND surface = 'coach' AND source_operation_kind = 'assistant_delivery') "
+    "OR (event_type = 'decrypter_used' AND surface = 'decrypter' "
+    "AND source_operation_kind = 'decryptage_delivery_ack') "
+    "OR (event_type = 'portfolio_used' AND surface = 'portfolio' AND source_operation_kind IN "
+    "('portfolio_position_create', 'portfolio_position_update', 'portfolio_position_delete'))"
+)
+
+
+class ProductActivityEventAttribution(Base):
+    """Attribution définitive d'un événement significatif (V0-T08 Lot 2B-2,
+    migration 0024_product_activity_proofs) — DORMANTE.
+
+    Rattache l'événement à sa participation, sa visite, son interaction
+    'activity' acceptée et son opération métier canonique, par FK composites
+    (aucune FK simple) ; concordance avec l'événement (propriétaire, visite,
+    type, surface, opération) par FK composite vers
+    uq_product_activity_events_attribution_identity. Une seule attribution
+    par événement (PK) et par opération canonique (user_id,
+    source_operation_kind, source_operation_id). Ne dépend pas du registre
+    provisoire ; se conserve avec l'événement associé (aucune politique
+    propre, aucune cascade). Ne prouve PAS la réussite métier : source,
+    outcome, livraison et instant admissible relèvent des services B/C."""
+    __tablename__ = "product_activity_event_attributions"
+    __table_args__ = (
+        CheckConstraint("interaction_kind = 'activity'",
+                        name="ck_product_activity_event_attributions_interaction_kind"),
+        CheckConstraint(_PROOF_OPERATION_CHECK, name="ck_product_activity_event_attributions_operation"),
+        ForeignKeyConstraint(["campaign_id", "user_id"],
+                             ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
+                             name="product_activity_event_attributions_participant_fkey"),
+        ForeignKeyConstraint(["visit_id", "campaign_id", "user_id"],
+                             ["product_activity_sessions.id", "product_activity_sessions.campaign_id",
+                              "product_activity_sessions.user_id"],
+                             name="product_activity_event_attributions_session_fkey"),
+        ForeignKeyConstraint(["campaign_id", "user_id", "interaction_key", "visit_id", "interaction_kind"],
+                             ["product_activity_session_interactions.campaign_id",
+                              "product_activity_session_interactions.user_id",
+                              "product_activity_session_interactions.interaction_key",
+                              "product_activity_session_interactions.session_id",
+                              "product_activity_session_interactions.interaction_kind"],
+                             name="product_activity_event_attributions_interaction_fkey"),
+        ForeignKeyConstraint(["event_id", "user_id", "visit_id", "event_type", "surface", "source_operation_kind",
+                              "source_operation_id"],
+                             ["product_activity_events.id", "product_activity_events.user_id",
+                              "product_activity_events.visit_id", "product_activity_events.event_type",
+                              "product_activity_events.surface", "product_activity_events.source_operation_kind",
+                              "product_activity_events.source_operation_id"],
+                             name="product_activity_event_attributions_event_fkey"),
+        UniqueConstraint("user_id", "source_operation_kind", "source_operation_id",
+                         name="uq_product_activity_event_attributions_source_operation"),
+        UniqueConstraint("event_id", "campaign_id", "user_id", "visit_id", "interaction_key", "event_type", "surface",
+                         "source_operation_kind", "source_operation_id",
+                         name="uq_product_activity_event_attributions_proof_identity"),
+        Index("ix_product_activity_event_attributions_visit", "campaign_id", "user_id", "visit_id"),
+    )
+
+    event_id = Column(Uuid, primary_key=True)
+    campaign_id = Column(Uuid, nullable=False)
+    user_id = Column(String, nullable=False)
+    visit_id = Column(Uuid, nullable=False)
+    interaction_key = Column(Uuid, nullable=False)
+    interaction_kind = Column(String(16), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    surface = Column(String(32), nullable=False)
+    source_operation_kind = Column(String(64), nullable=False)
+    source_operation_id = Column(Uuid, nullable=False)
+    certified_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class ProductActivityProof(Base):
+    """Preuve PROVISOIRE d'une utilisation significative (V0-T08 Lot 2B-2,
+    migration 0024_product_activity_proofs) — DORMANTE.
+
+    Pas un journal statistique : une ligne provisoire ne signifie jamais que
+    l'opération a réussi. États fermés pending / certified / recorded /
+    rejected / indeterminate ; formes de ligne imposées en base (les
+    transitions relèvent des services B/C) ; motifs de résolution fermés et
+    techniques. Rattachement à la participation, à la visite et à
+    l'interaction 'activity' acceptée par FK composites ; recorded_event_id
+    (nullable) rattaché par FK composite à l'attribution CONCORDANTE
+    (campagne, utilisateur, visite, interaction, type, surface, opération).
+    Une seule preuve par opération canonique tant qu'elle est conservée.
+    Conservation : purge_after_at = resolved_at + 168 heures absolues pour
+    une preuve résolue, NULL sinon ; aucune purge automatique (lot 2C)."""
+    __tablename__ = "product_activity_proof_registry"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'certified', 'recorded', 'rejected', 'indeterminate')",
+                        name="ck_product_activity_proof_registry_status"),
+        CheckConstraint("interaction_kind = 'activity'", name="ck_product_activity_proof_registry_interaction_kind"),
+        CheckConstraint(_PROOF_OPERATION_CHECK, name="ck_product_activity_proof_registry_operation"),
+        CheckConstraint(
+            "resolution_reason IS NULL OR resolution_reason IN ('no_new_effect', 'source_unverified', "
+            "'origin_unverified', 'owner_conflict', 'visit_conflict', 'operation_conflict', 'window_expired', "
+            "'finalization_expired', 'not_authorized', 'technical_uncertainty')",
+            name="ck_product_activity_proof_registry_resolution_reason"),
+        CheckConstraint(
+            "(status = 'pending' AND certified_at IS NULL AND resolved_at IS NULL AND recorded_event_id IS NULL "
+            "AND resolution_reason IS NULL) "
+            "OR (status = 'certified' AND certified_at IS NOT NULL AND resolved_at IS NULL "
+            "AND recorded_event_id IS NULL AND resolution_reason IS NULL) "
+            "OR (status = 'recorded' AND certified_at IS NOT NULL AND resolved_at IS NOT NULL "
+            "AND recorded_event_id IS NOT NULL AND resolution_reason IS NULL) "
+            "OR (status IN ('rejected', 'indeterminate') AND resolved_at IS NOT NULL AND recorded_event_id IS NULL "
+            "AND resolution_reason IS NOT NULL)",
+            name="ck_product_activity_proof_registry_state"),
+        CheckConstraint(
+            "(certified_at IS NULL OR certified_at >= created_at) "
+            "AND (resolved_at IS NULL OR (resolved_at >= created_at "
+            "AND (certified_at IS NULL OR resolved_at >= certified_at)))",
+            name="ck_product_activity_proof_registry_chronology"),
+        CheckConstraint(
+            "(resolved_at IS NULL AND purge_after_at IS NULL) "
+            "OR (resolved_at IS NOT NULL AND purge_after_at IS NOT NULL "
+            "AND purge_after_at = resolved_at + interval '168 hours')",
+            name="ck_product_activity_proof_registry_purge_after"),
+        ForeignKeyConstraint(["campaign_id", "user_id"],
+                             ["product_campaign_participants.campaign_id", "product_campaign_participants.user_id"],
+                             name="product_activity_proof_registry_participant_fkey"),
+        ForeignKeyConstraint(["visit_id", "campaign_id", "user_id"],
+                             ["product_activity_sessions.id", "product_activity_sessions.campaign_id",
+                              "product_activity_sessions.user_id"],
+                             name="product_activity_proof_registry_session_fkey"),
+        ForeignKeyConstraint(["campaign_id", "user_id", "interaction_key", "visit_id", "interaction_kind"],
+                             ["product_activity_session_interactions.campaign_id",
+                              "product_activity_session_interactions.user_id",
+                              "product_activity_session_interactions.interaction_key",
+                              "product_activity_session_interactions.session_id",
+                              "product_activity_session_interactions.interaction_kind"],
+                             name="product_activity_proof_registry_interaction_fkey"),
+        ForeignKeyConstraint(["recorded_event_id", "campaign_id", "user_id", "visit_id", "interaction_key",
+                              "event_type", "surface", "source_operation_kind", "source_operation_id"],
+                             ["product_activity_event_attributions.event_id",
+                              "product_activity_event_attributions.campaign_id",
+                              "product_activity_event_attributions.user_id",
+                              "product_activity_event_attributions.visit_id",
+                              "product_activity_event_attributions.interaction_key",
+                              "product_activity_event_attributions.event_type",
+                              "product_activity_event_attributions.surface",
+                              "product_activity_event_attributions.source_operation_kind",
+                              "product_activity_event_attributions.source_operation_id"],
+                             name="product_activity_proof_registry_attribution_fkey"),
+        UniqueConstraint("user_id", "source_operation_kind", "source_operation_id",
+                         name="uq_product_activity_proof_registry_source_operation"),
+        Index("ix_product_activity_proof_registry_campaign_status", "campaign_id", "status"),
+        Index("ix_product_activity_proof_registry_visit", "campaign_id", "user_id", "visit_id"),
+        Index("ix_product_activity_proof_registry_recorded_event", "recorded_event_id",
+              postgresql_where=text("recorded_event_id IS NOT NULL")),
+        Index("ix_product_activity_proof_registry_purge_after_at", "purge_after_at",
+              postgresql_where=text("purge_after_at IS NOT NULL")),
+    )
+
+    id = Column(Uuid, primary_key=True)
+    campaign_id = Column(Uuid, nullable=False)
+    user_id = Column(String, nullable=False)
+    visit_id = Column(Uuid, nullable=False)
+    interaction_key = Column(Uuid, nullable=False)
+    interaction_kind = Column(String(16), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    surface = Column(String(32), nullable=False)
+    source_operation_kind = Column(String(64), nullable=False)
+    source_operation_id = Column(Uuid, nullable=False)
+    status = Column(String(24), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    certified_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    recorded_event_id = Column(Uuid, nullable=True)
+    resolution_reason = Column(String(64), nullable=True)
+    purge_after_at = Column(DateTime(timezone=True), nullable=True)
