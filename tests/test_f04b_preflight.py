@@ -24,7 +24,7 @@ from tests.pg_guard import assert_disposable_connection
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT, pg_url  # noqa: F401 — fixture
 
-HEAD = "0023_analytics_cohort_sessions"  # V0-T08 Lot 2B-1
+HEAD = "0024_product_activity_proofs"  # V0-T08 Lot 2B-2 (bloc A)
 
 
 @pytest.fixture(scope="module")

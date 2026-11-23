@@ -39,6 +39,10 @@ from tests.test_migration_0004_drop_company_analyses import (
     V0T08_0023,
     V0T08_0023_INDEXES,
     V0T08_0023_TABLES,
+    V0T08_0024,
+    V0T08_0024_EXISTING_UNIQUES,
+    V0T08_0024_INDEXES,
+    V0T08_0024_TABLES,
     _raw_compare_metadata,
     _without_pr1_changes,
 )
@@ -48,6 +52,10 @@ TABLES = Base.metadata.tables
 OWNER_UNIQUE = next(c for c in TABLES["conversation_identities"].constraints
                     if isinstance(c, sa.UniqueConstraint) and c.name == "uq_conversation_identities_key_owner")
 INDEXES = {i.name: i for t in TABLES.values() for i in t.indexes}
+# V0-T08 Lot 2B-2 bloc A (0024) : UNIQUE composites ajoutées à des tables
+# analytiques existantes (cibles des FK des preuves et attributions).
+UNIQUES_0024 = {c.name: c for t in TABLES.values() for c in t.constraints
+                if isinstance(c, sa.UniqueConstraint) and c.name in V0T08_0024_EXISTING_UNIQUES}
 # Objets inattendus construits HORS de Base.metadata (un Index lié à une
 # colonne de Base.metadata s'attacherait à la vraie table).
 _SHADOW = sa.Table("auth_operations", sa.MetaData(), sa.Column("kind", sa.String()))
@@ -79,6 +87,11 @@ def _expected(applied):
     if applied < 9:  # V0-T08 Lot 2B-1 (0023) : trois tables et leurs index.
         diff += [("add_table", TABLES[t]) for t in V0T08_0023_TABLES] + [("add_index", INDEXES[i])
                                                                         for i in sorted(V0T08_0023_INDEXES)]
+    if applied < 10:  # V0-T08 Lot 2B-2 bloc A (0024) : deux tables, leurs index, UNIQUE des tables existantes.
+        diff += [("add_table", TABLES[t]) for t in V0T08_0024_TABLES] + [("add_index", INDEXES[i])
+                                                                        for i in sorted(V0T08_0024_INDEXES)]
+        diff += [("add_constraint", UNIQUES_0024[name]) for name, (_, _, exists_from)
+                 in sorted(V0T08_0024_EXISTING_UNIQUES.items()) if applied >= exists_from]
     return diff
 
 
@@ -95,12 +108,12 @@ UNEXPECTED = [
 ]
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_only_exact_pending_pr1_changes_are_removed(applied):
     assert _without_pr1_changes(_expected(applied) + UNEXPECTED, applied) == UNEXPECTED
 
 
-@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("applied", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 def test_a_missing_expected_pr1_change_fails(applied):
     expected = _expected(applied)
     for index in range(len(expected)):
@@ -108,7 +121,7 @@ def test_a_missing_expected_pr1_change_fails(applied):
             _without_pr1_changes(expected[:index] + expected[index + 1:], applied)
 
 
-@pytest.mark.parametrize("applied", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("applied", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_a_pr1_change_after_its_revision_fails(applied):
     for leftover in _expected(applied - 1)[: len(_expected(applied - 1)) - len(_expected(applied))]:
         with pytest.raises(AssertionError):
@@ -116,34 +129,75 @@ def test_a_pr1_change_after_its_revision_fails(applied):
 
 
 def test_at_head_nothing_is_removed():
-    assert _without_pr1_changes(UNEXPECTED, 9) == UNEXPECTED
+    """À la tête (0024, rang 10), aucun écart n'est retiré."""
+    assert _without_pr1_changes(UNEXPECTED, 10) == UNEXPECTED
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 9)
+        _without_pr1_changes([("add_table", TABLES["oryx_sessions"])], 10)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["auth_abuse_key_state"])], 9)
+        _without_pr1_changes([("add_table", TABLES["auth_abuse_key_state"])], 10)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.http_action)], 9)
+        _without_pr1_changes([("add_column", None, "auth_abuse_events", TABLES["auth_abuse_events"].c.http_action)], 10)
     with pytest.raises(AssertionError):
         _without_pr1_changes([("add_column", None, "portfolio_positions",
-                               TABLES["portfolio_positions"].c.position_revision)], 9)
+                               TABLES["portfolio_positions"].c.position_revision)], 10)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_table", TABLES["decryptage_turn_reservations"])], 9)
+        _without_pr1_changes([("add_table", TABLES["decryptage_turn_reservations"])], 10)
     with pytest.raises(AssertionError):
-        _without_pr1_changes([("add_constraint", OWNER_UNIQUE)], 9)
+        _without_pr1_changes([("add_constraint", OWNER_UNIQUE)], 10)
     # V0-T08 Lot 1 : une fois 0022 appliquée, ni ses tables ni ses index ne sont masqués.
     for table in V0T08_0022_TABLES:
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_table", TABLES[table])], 9)
+            _without_pr1_changes([("add_table", TABLES[table])], 10)
     for index in sorted(V0T08_0022_INDEXES):
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_index", INDEXES[index])], 9)
-    # V0-T08 Lot 2B-1 : à la tête (0023), ni ses tables ni ses index ne sont masqués.
+            _without_pr1_changes([("add_index", INDEXES[index])], 10)
+    # V0-T08 Lot 2B-1 : une fois 0023 appliquée, ni ses tables ni ses index ne sont masqués.
     for table in V0T08_0023_TABLES:
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_table", TABLES[table])], 9)
+            _without_pr1_changes([("add_table", TABLES[table])], 10)
     for index in sorted(V0T08_0023_INDEXES):
         with pytest.raises(AssertionError):
-            _without_pr1_changes([("add_index", INDEXES[index])], 9)
+            _without_pr1_changes([("add_index", INDEXES[index])], 10)
+    # V0-T08 Lot 2B-2 bloc A : à la tête (0024), ni ses tables, ni ses index,
+    # ni ses UNIQUE composites sur les tables existantes ne sont masqués.
+    for table in V0T08_0024_TABLES:
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([("add_table", TABLES[table])], 10)
+    for index in sorted(V0T08_0024_INDEXES):
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([("add_index", INDEXES[index])], 10)
+    for unique in UNIQUES_0024.values():
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([("add_constraint", unique)], 10)
+
+
+def test_the_0024_uniques_are_removed_only_when_pending_exact_and_their_table_exists():
+    """Avant 0024, chaque UNIQUE composite de 0024 n'est retirée que si sa
+    table existe déjà (sinon elle arrive avec la table) et seulement sous
+    son nom, sa table et ses colonnes exacts."""
+    assert sorted(UNIQUES_0024) == sorted(V0T08_0024_EXISTING_UNIQUES)
+    assert _without_pr1_changes(_expected(9), 9) == []
+    events_unique = UNIQUES_0024["uq_product_activity_events_attribution"]
+    sessions_unique = UNIQUES_0024["uq_product_activity_sessions_owner"]
+    # Avant 0023 : la table des sessions n'existe pas, sa contrainte ne peut apparaître seule.
+    with pytest.raises(AssertionError):
+        _without_pr1_changes(_expected(8) + [("add_constraint", sessions_unique)], 8)
+    # Avant 0022 : idem pour la table des événements.
+    with pytest.raises(AssertionError):
+        _without_pr1_changes(_expected(7) + [("add_constraint", events_unique)], 7)
+    shadow = sa.Table("product_activity_sessions", sa.MetaData(), sa.Column("id", sa.Uuid()),
+                      sa.Column("campaign_id", sa.Uuid()), sa.Column("environment_digest", sa.String()))
+    wrong_columns = sa.UniqueConstraint(shadow.c.id, shadow.c.campaign_id, shadow.c.environment_digest,
+                                        name="uq_product_activity_sessions_owner")
+    shadow_other = sa.Table("product_activity_events", sa.MetaData(), sa.Column("id", sa.Uuid()),
+                            sa.Column("campaign_id", sa.Uuid()), sa.Column("user_id", sa.String()))
+    wrong_table = sa.UniqueConstraint(shadow_other.c.id, shadow_other.c.campaign_id, shadow_other.c.user_id,
+                                      name="uq_product_activity_sessions_owner")
+    for impostor in (wrong_columns, wrong_table):
+        with pytest.raises(AssertionError):
+            _without_pr1_changes([d for d in _expected(9) if not (d[0] == "add_constraint" and d[1].name ==
+                                                                  sessions_unique.name)]
+                                 + [("add_constraint", impostor)], 9)
 
 
 def test_blocked_until_is_removed_only_as_a_pending_0018_column():
@@ -218,7 +272,7 @@ def test_pg_premature_pr1_object_is_never_hidden(pg_url, pg_engine):  # noqa: F8
 
 
 @pytest.mark.parametrize("revision", [PR1_0015, PR1_0016, PR1_0017, PR2_0018, PR4_0019, PR7_0020, PR9B1_0021,
-                                      V0T08_0022, V0T08_0023])
+                                      V0T08_0022, V0T08_0023, V0T08_0024])
 def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine, revision):  # noqa: F811
     _reset_schema(pg_engine)
     _run_alembic(pg_url, "upgrade", revision)
@@ -233,6 +287,7 @@ def test_pg_missing_pr1_object_after_its_revision_is_reported(pg_url, pg_engine,
         PR9B1_0021: "DROP TABLE decryptage_turn_reservations",
         V0T08_0022: "DROP INDEX ix_product_activity_events_purge_after_at",
         V0T08_0023: "DROP INDEX ix_product_activity_sessions_open_idle_expiry",
+        V0T08_0024: "DROP INDEX ix_product_activity_proof_registry_visit",
     }[revision]
     with pg_engine.begin() as conn:
         conn.execute(sa.text(statement))

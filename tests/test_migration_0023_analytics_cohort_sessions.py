@@ -2,13 +2,17 @@
 (cohorte, places et sessions d'activité DORMANTES) et modèles
 correspondants.
 
-1. Sans base : maillon 0022 -> 0023 (tête unique), identifiant <= 32
+1. Sans base : maillon 0022 -> 0023 (parent de 0024, V0-T08 Lot 2B-2
+   bloc A, testée à part), identifiant <= 32
    caractères, fichiers 0001 à 0022 inchangés, SQL offline (upgrade : quatre
    CREATE TABLE et deux index, rien d'autre ; downgrade : délais, verrou
    déterministe, garde DO évaluée à l'exécution, retrait sans CASCADE),
    modèles alignés sur la migration (colonnes, types, nullabilité, CHECK,
-   UNIQUE, FK, index), aucun champ personnel (ni e-mail, ni nom, ni token).
-2. PostgreSQL réel (base jetable) : montée 0022 -> 0023 sur données
+   UNIQUE, FK, index ; les seules UNIQUE des modèles absentes de 0023 sont
+   exactement celles qu'ajoute 0024), aucun champ personnel (ni e-mail, ni
+   nom, ni token).
+2. PostgreSQL réel (base jetable, montée jusqu'à 0023 exactement : 0024 est
+   testée à part) : montée 0022 -> 0023 sur données
    historiques et analytiques 0022 conservées à l'identique, aucune ligne
    créée, aucune table existante modifiée (F2 comprise), catalogue exact,
    aucun trigger / fonction / ENUM / extension ; chaque CHECK, FK et UNIQUE
@@ -44,6 +48,8 @@ from tests.test_migration_0004_drop_company_analyses import (
     V0T08_0023_FILE,
     V0T08_0023_INDEXES,
     V0T08_0023_TABLES,
+    V0T08_0024,
+    V0T08_0024_FILE,
     _compare_metadata,
     _data,
     _statements,
@@ -85,20 +91,32 @@ def _m0023():
     return module
 
 
+def _m0024():
+    spec = importlib.util.spec_from_file_location("m0024_from_0023", MIGRATION.parent / V0T08_0024_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 # --------------------------------------------------------------------------
 # 1. Sans base
 # --------------------------------------------------------------------------
 
-def test_revision_links_0023_to_0022_and_is_the_single_head():
+def test_revision_links_0023_to_0022_and_is_the_parent_of_0024():
+    """0023 était la tête de V0-T08 Lot 2B-1 ; le lot 2B-2 bloc A ajoute 0024
+    au-dessus, sans modifier ce fichier
+    (tests/test_migration_0024_product_activity_proofs.py)."""
     script = _script_directory()
-    assert script.get_heads() == [V0T08_0023]
+    assert script.get_heads() == [V0T08_0024]
+    assert script.get_revision(V0T08_0024).down_revision == V0T08_0023
     revision = script.get_revision(V0T08_0023)
     assert revision.down_revision == V0T08_0022
     assert not revision.branch_labels and not revision.dependencies
     assert V0T08_0023 == "0023_analytics_cohort_sessions" and len(V0T08_0023) <= 32
     assert V0T08_0023_FILE == f"{V0T08_0023}.py"
     files = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
-    assert len(files) == 23 and files[-1] == V0T08_0023_FILE and files[-2] == V0T08_0022_FILE
+    assert len(files) == 24 and files[-1] == V0T08_0024_FILE and files[-2] == V0T08_0023_FILE
+    assert files[-3] == V0T08_0022_FILE
     m = _m0023()
     assert (m.revision, m.down_revision, m.branch_labels, m.depends_on) == (V0T08_0023, V0T08_0022, None, None)
 
@@ -192,10 +210,21 @@ def test_models_match_the_migration():
     assert [c.name for c in tables[INTERACTIONS].primary_key.columns] == ["campaign_id", "user_id", "interaction_key"]
     uniques = {c.name: [col.name for col in c.columns] for t in tables.values() for c in t.constraints
                if isinstance(c, sa.UniqueConstraint)}
+    # Différence de révision EXPLICITE : les modèles courants des sessions et
+    # des interactions portent en plus les seules UNIQUE composites ajoutées
+    # par 0024 (cibles des FK des preuves et attributions), avec exactement
+    # les colonnes de 0024 ; le catalogue de 0023 reste vérifié tel quel.
+    added_by_0024 = {name: list(columns) for name, table, columns in _m0024().EXISTING_TABLE_UNIQUES
+                     if table in V0T08_0023_TABLES}
+    assert added_by_0024 == {
+        "uq_product_activity_sessions_owner": ["id", "campaign_id", "user_id"],
+        "uq_product_activity_session_interactions_origin": ["campaign_id", "user_id", "interaction_key",
+                                                            "session_id", "interaction_kind"]}
     assert uniques == {m.SEAT_NUMBER_UNIQUE: ["campaign_id", "seat_number"],
                        m.SEAT_INVITATION_UNIQUE: ["campaign_id", "invitation_id"],
                        m.SEAT_USER_UNIQUE: ["campaign_id", "user_id"],
-                       m.SESSION_IDENTITY_UNIQUE: ["id", "campaign_id", "user_id", "environment_digest"]}
+                       m.SESSION_IDENTITY_UNIQUE: ["id", "campaign_id", "user_id", "environment_digest"],
+                       **added_by_0024}
     fks = {fk.name: ([e.parent.name for e in fk.elements], [e.target_fullname for e in fk.elements],
                      fk.ondelete, fk.onupdate, fk.deferrable)
            for t in tables.values() for fk in t.foreign_key_constraints}
@@ -298,7 +327,7 @@ def test_pg_upgrade_0022_to_0023_keeps_every_row_then_exact_downgrade(pg_url, pg
     assert _version(pg_engine) == V0T08_0022 and _tables(pg_engine) == tables
     assert _snapshot(pg_engine, tables) == schema_0022 and _catalog(pg_engine, tables) == catalog_0022
     assert _data(pg_engine, tables - {"alembic_version"}) == data_0022
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0023)
     assert _version(pg_engine) == V0T08_0023 and _compare_metadata(pg_engine) == []
 
 
@@ -351,7 +380,7 @@ def _seat_params(campaign, proof, **overrides):
 ])
 def test_pg_every_seat_check_and_binding_fk_is_exercised(pg_url, pg_engine, constraint, overrides):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0023)
     with pg_engine.connect() as conn:
         seeded = _seed_campaign_and_cohort(conn)
         proof = _f2_activation(conn)
@@ -379,7 +408,7 @@ def _seed_campaign_and_cohort(conn, *, seat_count=5, admission=None) -> uuid.UUI
 
 def test_pg_cohort_checks_and_foreign_keys(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0023)
     with pg_engine.connect() as conn:
         _rejects(conn, "ck_product_campaign_cohorts_seat_count", lambda: _seed_campaign_and_cohort(conn, seat_count=4))
         _rejects(conn, "ck_product_campaign_cohorts_seat_count", lambda: _seed_campaign_and_cohort(conn, seat_count=6))
@@ -430,7 +459,7 @@ def test_pg_downgrade_is_refused_when_any_new_table_has_data(pg_url, pg_engine):
     for table in (INTERACTIONS, SESSIONS, SEATS, COHORTS):
         for offline in (False, True):
             _reset_schema(pg_engine)
-            _run_alembic(pg_url, "upgrade", "head")
+            _run_alembic(pg_url, "upgrade", V0T08_0023)
             with pg_engine.begin() as conn:
                 campaign = _seed_campaign_and_cohort(conn)
                 if table in (SEATS, SESSIONS, INTERACTIONS):
@@ -515,7 +544,7 @@ INTERACTION_INSERT = ("INSERT INTO product_activity_session_interactions VALUES 
 ])
 def test_pg_every_session_check_is_exercised(pg_url, pg_engine, constraint, overrides):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0023)
     base = {"id": uuid.uuid4(), "digest": "0" * 64, "opened": BASE_TIME, "last": BASE_TIME,
             "idle": BASE_TIME + timedelta(minutes=30), "finalized": None, "reason": None}
     with pg_engine.connect() as conn:
@@ -535,7 +564,7 @@ def test_pg_every_session_check_is_exercised(pg_url, pg_engine, constraint, over
 
 def test_pg_interaction_registry_constraints(pg_url, pg_engine):  # noqa: F811
     _reset_schema(pg_engine)
-    _run_alembic(pg_url, "upgrade", "head")
+    _run_alembic(pg_url, "upgrade", V0T08_0023)
     with pg_engine.connect() as conn:
         campaign = _seed_campaign_and_cohort(conn)
         _f2_activation(conn)
