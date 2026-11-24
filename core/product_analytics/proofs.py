@@ -34,6 +34,18 @@ commit() ni rollback() ; toute écriture dans un SAVEPOINT) :
   read_origin dans la même transaction. ProofRefused (motif fermé, rien
   d'écrit) hors observation (not_authorized / window_expired) ; rejeu ou
   no-op : no_new_effect, sans aucun accès à la base.
+  Déconnexion (audit PR #253, réserve 2) : l'environnement est la session F2
+  ; sa déconnexion est inscrite par close_activity_session (interaction
+  'close', même sans visite ouverte). Un environnement déconnecté est
+  TERMINAL pour l'émission : open_origin prend D'ABORD les verrous
+  consultatifs exacts de touch / close (environnement et clé, même ordre
+  trié ; touch les reprend sans attente), puis vérifie sous ce verrou
+  qu'aucune clôture n'est inscrite ; sinon not_authorized, rien d'écrit
+  (aucune réouverture ni prolongation). Déconnexion committée avant :
+  vue ; déconnexion concurrente : sérialisée APRÈS l'émission, qu'elle
+  clôt (l'interaction reste historiquement valide). La simple fin d'une
+  visite par inactivité n'est pas une déconnexion : une nouvelle visite
+  s'ouvre normalement.
 - read_origin : lecture SANS verrou ni écriture d'une interaction
   'activity' de la visite, acceptée dans [window_start_at, window_end_at),
   à partir de activated_at et avant close_by_at. Rend un OriginSnapshot NON
@@ -373,6 +385,23 @@ SESSION_REFUSALS = {
 }
 
 
+def session_lock_keys(campaign_id, user_id, digest: str, interaction_key) -> tuple:
+    """Clés consultatives EXACTES de touch_activity_session et
+    close_activity_session (2B-1, sessions._lock ; égalité testée)."""
+    return (common.identity_lock_key("activity_session", campaign_id, user_id, digest),
+            common.identity_lock_key("activity_interaction", campaign_id, user_id, interaction_key))
+
+
+def _logged_out(db, campaign_id, user_id, digest: str) -> bool:
+    """Une déconnexion (interaction 'close') est-elle inscrite dans cet
+    environnement ? Lecture après le verrou d'environnement."""
+    return db.execute(select(ProductActivitySessionInteraction.interaction_key).where(
+        ProductActivitySessionInteraction.campaign_id == campaign_id,
+        ProductActivitySessionInteraction.user_id == user_id,
+        ProductActivitySessionInteraction.environment_digest == digest,
+        ProductActivitySessionInteraction.interaction_kind == sessions.CLOSE).limit(1)).first() is not None
+
+
 def open_origin(db, *, campaign_id: uuid.UUID, environment_key: uuid.UUID,
                 operation: CommittedOperation) -> OriginSnapshot:
     """Émet l'origine de `operation` (voir l'en-tête) : interaction
@@ -386,6 +415,12 @@ def open_origin(db, *, campaign_id: uuid.UUID, environment_key: uuid.UUID,
     if not operation.new_effect:
         raise ProofRefused("aucun effet nouveau", reason=NO_NEW_EFFECT)  # rejeu, no-op : aucune interaction
     interaction_key = uuid.uuid4()  # jamais fournie par l'appelant
+    owner, digest = operation.owner_user_id, sessions.environment_digest(environment_key)
+    # Rang 1 de 2B-1 pris ICI (mêmes clés, même ordre trié) : une déconnexion
+    # concurrente du même environnement est sérialisée avec cette émission.
+    common.lock_identities(db, *session_lock_keys(campaign_id, owner, digest, interaction_key))
+    if _logged_out(db, campaign_id, owner, digest):
+        raise ProofRefused("environnement déconnecté", reason=NOT_AUTHORIZED)  # jamais rouvert
     try:
         touched = sessions.touch_activity_session(db, campaign_id=campaign_id, user_id=operation.owner_user_id,
                                                   environment_key=environment_key, interaction_key=interaction_key)

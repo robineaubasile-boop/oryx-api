@@ -280,12 +280,91 @@ def test_a_visit_closed_later_keeps_its_historically_valid_interaction(db):
         origin, operation_kind=None, operation_id=None)
     pending = register(db, origin, op)
     assert certify(db, origin, op, pending.proof_id).state == proofs.CERTIFIED
-    # Clôturée AVANT l'opération : l'émission ouvre une nouvelle visite, l'ancienne reste intacte.
-    closed_visit = origin.visit_id
-    before = committed(db, lambda s: _session_columns(s, closed_visit))
+    # Déconnexion AVANT une émission : l'environnement (session F2) est terminal,
+    # rien n'est rouvert ni prolongé ; l'interaction déjà émise reste valide.
+    before = (_interactions(db), _sessions(db))
+    with pytest.raises(proofs.ProofRefused) as caught:
+        open_origin(db, operation(USER_A), campaign_id=campaign)
+    assert caught.value.reason == proofs.NOT_AUTHORIZED and (_interactions(db), _sessions(db)) == before
+    assert certify(db, origin, op, pending.proof_id).state == proofs.CERTIFIED
+
+
+def test_a_visit_ended_by_inactivity_is_not_a_logout(db, clock):
+    """Fin de visite SANS déconnexion (finalisation après 30 min) : une
+    opération ultérieure du même environnement ouvre une nouvelle visite ;
+    l'ancienne reste intacte."""
+    campaign = open_wave(db, USER_A)
+    first, op = opened(db, USER_A, campaign_id=campaign)
+    clock.advance(minutes=31)
+    assert len(committed(db, lambda s: ps.finalize_idle_sessions(s, campaign_id=campaign))) == 1
+    ended = committed(db, lambda s: _session_columns(s, first.visit_id))
+    assert ended[-1] == "inactivity"
     later, op2 = opened(db, USER_A, campaign_id=campaign)
-    assert later.visit_id != closed_visit and committed(db, lambda s: _session_columns(s, closed_visit)) == before
+    assert later.visit_id != first.visit_id and committed(db, lambda s: _session_columns(s, first.visit_id)) == ended
     assert certify(db, later, op2, register(db, later, op2).proof_id).state == proofs.CERTIFIED
+
+
+def test_a_logout_is_terminal_for_its_environment_only(db):
+    campaign = open_wave(db, USER_A)
+    close(db, campaign, USER_A)  # déconnexion sans visite ouverte : marque inscrite quand même
+    with pytest.raises(proofs.ProofRefused) as caught:
+        open_origin(db, operation(USER_A), campaign_id=campaign)
+    assert caught.value.reason == proofs.NOT_AUTHORIZED and _sessions(db) == []
+    phone, op = opened(db, USER_A, campaign_id=campaign, environment=PHONE)  # autre session F2 : intacte
+    assert register(db, phone, op).state == proofs.PENDING
+
+
+def test_the_emission_takes_exactly_the_2b1_environment_locks(db, monkeypatch):
+    """Même verrou consultatif que touch ET close (sessions._lock), pris en
+    premier, même ordre trié : la déconnexion et l'émission sont sérialisées."""
+    campaign = open_wave(db, USER_A)
+    calls = []
+    real = common.lock_identities
+    monkeypatch.setattr(common, "lock_identities", lambda s, *keys: (calls.append(keys), real(s, *keys))[1])
+    origin = open_origin(db, operation(USER_A), campaign_id=campaign)
+    digest = ps.environment_digest(LAPTOP)
+    expected = proofs.session_lock_keys(campaign, USER_A, digest, origin.interaction_key)
+    assert calls[0] == expected and calls[1] == expected  # émission, puis touch (réentrant, sans attente)
+    calls.clear()
+    key = close(db, campaign, USER_A)
+    assert calls == [proofs.session_lock_keys(campaign, USER_A, digest, key)]
+
+
+def test_a_logout_in_progress_makes_the_emission_wait_then_refuse(db):
+    campaign = open_wave(db, USER_A)
+    visit, _ = touch(db, campaign, USER_A)
+    holder = Holder(db, lambda s: ps.close_activity_session(s, campaign_id=campaign, user_id=USER_A,
+                                                            environment_key=LAPTOP, interaction_key=uuid.uuid4()))
+    contender = Background(lambda: open_origin(db, operation(USER_A), campaign_id=campaign))
+    contender.start()
+    try:
+        _wait(lambda: waiting(db) == 1, "l'émission n'attend pas la déconnexion")
+    finally:
+        holder.commit()
+    with pytest.raises(proofs.ProofRefused) as caught:
+        contender.outcome()
+    assert caught.value.reason == proofs.NOT_AUTHORIZED
+    [only] = _sessions(db)
+    assert (only["id"], only["end_reason"]) == (visit, "logout")  # aucune réouverture
+    assert [i["interaction_kind"] for i in _interactions(db)].count("activity") == 1
+
+
+def test_an_emission_in_progress_makes_the_logout_wait_then_close_it(db):
+    campaign = open_wave(db, USER_A)
+    op = operation(USER_A)
+    holder = Holder(db, lambda s: proofs.open_origin(s, campaign_id=campaign, environment_key=LAPTOP, operation=op))
+    origin = holder.value
+    contender = Background(lambda: close(db, campaign, USER_A))
+    contender.start()
+    try:
+        _wait(lambda: waiting(db) == 1, "la déconnexion n'attend pas l'émission")
+    finally:
+        holder.commit()
+    contender.outcome()
+    [visit] = _sessions(db)
+    assert (visit["id"], visit["end_reason"]) == (origin.visit_id, "logout")  # l'émission est close par la déconnexion
+    pending = register(db, origin, op)  # interaction émise avant : historiquement valide
+    assert certify(db, origin, op, pending.proof_id).state == proofs.CERTIFIED
 
 
 def _session_columns(session, visit_id):

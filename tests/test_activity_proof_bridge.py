@@ -12,8 +12,11 @@ PRODUCTION, contre un VRAI PostgreSQL (16 et 18 en CI).
 3. origine (audit PR #253) : l'appelant ne désigne aucune origine ;
    opération de l'appareil B jamais attribuée à A ; interaction ancienne de
    la même visite jamais réutilisée ; interaction acceptée PENDANT
-   l'opération jamais l'origine ; propriétaire = principal ; visite clôturée
-   avant ou pendant ; après J+12 ; rejeux depuis un second appareil ;
+   l'opération jamais l'origine ; propriétaire = principal ; déconnexion
+   concurrente (révocation F2 + clôture 2B-1) avant l'émission : aucune
+   réouverture ; déconnexion pendant l'émission : sérialisée, visite émise
+   close ; révocation F2 seule (limite documentée) ; fin par inactivité ;
+   visite close entre inscription et certification ; après J+12 ; rejeux depuis un second appareil ;
    opérations concurrentes ;
 4. non-blocage : base analytics indisponible après le COMMIT F2, délai de
    verrou, violation de contrainte, échec de l'émission de l'origine, de
@@ -28,6 +31,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import timedelta
 
@@ -69,6 +73,7 @@ from tests.activity_proof_support import (
     rows,
     touch,
     utc,
+    waiting,
 )
 from tests.authz_f2_support import BOB, USER_A, USER_B, AuthzEnv, create_command, delete_command, replace_command
 from tests.f2_support import prepare_schema
@@ -561,16 +566,102 @@ def test_the_owner_is_the_principal_never_a_participant_chosen_by_the_caller(env
     assert (interactions(analytics, USER_B), visits(analytics, USER_B)) == before and interactions(analytics) == []
 
 
-def test_a_closed_visit_stays_historical_and_the_operation_opens_its_own(env, analytics, alice):
+def logout(env, analytics, campaign, issued, *, analytics_close=True):
+    """Déconnexion telle que le futur raccordement la réalise : révocation
+    EFFECTIVE de la session F2 (service F2 réel, motif 'logout'), puis
+    inscription 2B-1 de la déconnexion dans l'environnement de cette session
+    (contrat non bloquant attempt_session_close)."""
+    assert env.service.revoke_session(issued.session_id, "logout") is True
+    if analytics_close:
+        attempt = committed(analytics, lambda db: ps.attempt_session_close(
+            db, campaign_id=campaign, user_id=USER_A, environment_key=issued.session_id,
+            interaction_key=uuid.uuid4()))
+        assert attempt.status in (ps.CLOSED, ps.NO_OPEN_SESSION), attempt
+
+
+def activities(analytics) -> list:
+    return [i for i in interactions(analytics) if i["interaction_kind"] == "activity"]
+
+
+def test_a_concurrent_logout_before_the_emission_reopens_nothing(env, analytics, alice, monkeypatch):
+    """Réserve 2 de l'audit : opération F2 committée, puis déconnexion
+    effective (révocation F2 + clôture 2B-1) AVANT l'émission. Sur ea07056,
+    une nouvelle visite était ouverte après la déconnexion et certifiée.
+    Désormais : aucune réouverture, aucune prolongation, résultat F2
+    inchangé, aucun rejeu F2."""
     campaign = wave(analytics)
-    visit, key = f2_touch(analytics, campaign, alice)
-    close(analytics, campaign, USER_A, environment=alice.session_id)  # déconnexion : visite finalisée
+    visit, _ = f2_touch(analytics, campaign, alice)
+    spy = _after_commit(monkeypatch, lambda: logout(env, analytics, campaign, alice))
+    result = run(env, analytics, alice, create_command(), campaign)
+    _unchanged_f2(env, spy, result)
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NOT_AUTHORIZED) and registry(analytics) == []
     [closed] = visits(analytics)
-    assert closed["end_reason"] == "logout"
+    assert (closed["id"], closed["end_reason"]) == (visit, "logout")
+    assert len(activities(analytics)) == 1  # seule l'interaction d'avant la déconnexion
+    assert env.service.authenticate_session(alice.credential()) is None  # révocation F2 effective
+
+
+def test_a_logout_waiting_on_the_emission_closes_the_emitted_visit(env, analytics, alice, monkeypatch):
+    """Ordre inverse : l'émission tient le verrou d'environnement ; la
+    déconnexion 2B-1 concurrente l'attend, puis clôt la visite émise.
+    L'interaction émise avant la déconnexion reste historiquement valide et
+    la preuve est certifiée."""
+    campaign = wave(analytics)
+    inside, release = threading.Event(), threading.Event()
+    real = proofs.read_origin
+
+    def paused(db, **kwargs):  # après touch_activity_session, dans la transaction d'émission
+        inside.set()
+        assert release.wait(20)
+        return real(db, **kwargs)
+    monkeypatch.setattr(proofs, "read_origin", paused)
+    command = create_command()
+    measured = Background(lambda: run(env, analytics, alice, command, campaign))
+    measured.start()
+    assert inside.wait(20)
+    disconnect = Background(lambda: logout(env, analytics, campaign, alice))
+    disconnect.start()
+    try:
+        wait_until(lambda: waiting(analytics) == 1, message="la déconnexion n'attend pas l'émission")
+    finally:
+        release.set()
+    disconnect.outcome()
+    result = measured.outcome()
+    assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
+    row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+    [visit] = visits(analytics)
+    assert (visit["id"], visit["end_reason"]) == (row["visit_id"], "logout")
+
+
+def test_a_revocation_without_the_2b1_logout_is_the_documented_residual(env, analytics, alice, monkeypatch):
+    """Distinction exigée : la révocation F2 SEULE n'est pas visible de
+    l'analytics (aucune lecture des tables F2). La visite est prolongée par
+    l'émission puis sera finalisée par la clôture 2B-1 ou l'inactivité.
+    Limite documentée (§ 5.4) ; F2 inchangé."""
+    campaign = wave(analytics)
+    visit, _ = f2_touch(analytics, campaign, alice)
+    spy = _after_commit(monkeypatch, lambda: logout(env, analytics, campaign, alice, analytics_close=False))
+    result = run(env, analytics, alice, create_command(), campaign)
+    _unchanged_f2(env, spy, result)
+    assert result.proof.state == proofs.CERTIFIED
+    [extended] = visits(analytics)
+    assert extended["id"] == visit and extended["finalized_at"] is None
+    close(analytics, campaign, USER_A, environment=alice.session_id)  # clôture 2B-1 tardive : visite close
+    assert visits(analytics)[0]["end_reason"] == "logout"
+
+
+def test_an_inactivity_ended_visit_is_not_a_logout(env, analytics, alice, monkeypatch):
+    campaign = wave(analytics)
+    visit, _ = f2_touch(analytics, campaign, alice)
+    later = common.utcnow() + timedelta(minutes=31)
+    with monkeypatch.context() as patch:  # finalisation seulement, à +31 min
+        patch.setattr(common, "utcnow", lambda: later)
+        assert len(committed(analytics, lambda db: ps.finalize_idle_sessions(db, campaign_id=campaign))) == 1
     command = create_command()
     assert run(env, analytics, alice, command, campaign).proof.state == proofs.CERTIFIED
     row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
-    assert row["visit_id"] != visit and [v for v in visits(analytics) if v["id"] == visit] == [closed]
+    ended = [v for v in visits(analytics) if v["id"] == visit]
+    assert row["visit_id"] != visit and ended[0]["end_reason"] == "inactivity"
 
 
 def test_a_visit_closed_between_registration_and_certification_keeps_the_proof(env, analytics, alice, monkeypatch):

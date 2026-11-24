@@ -36,7 +36,9 @@ opération). Seule la campagne de mesure (configuration serveur) est reçue.
         (principal.session_id, source serveur de environment_key choisie par
         ce raccordement : contrat 2B-1), visite déterminée par le service
         2B-1. Une interaction ancienne, d'un autre appareil ou d'une autre
-        session ne peut donc jamais être l'origine ;
+        session ne peut donc jamais être l'origine ; un environnement dont la
+        déconnexion 2B-1 est inscrite n'est jamais rouvert (vérification
+        sous le verrou d'environnement de 2B-1 : absent / not_authorized) ;
      c. transaction analytics 2 : proofs.register_pending (seule l'origine
         émise en b, liée à cette opération, est acceptée) ;
      d. transaction analytics 3 : proofs.certify_pending (certified_at =
