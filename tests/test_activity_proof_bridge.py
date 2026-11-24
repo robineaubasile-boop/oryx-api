@@ -15,7 +15,11 @@ PRODUCTION, contre un VRAI PostgreSQL (16 et 18 en CI).
    l'opération jamais l'origine ; propriétaire = principal ; déconnexion
    concurrente (révocation F2 + clôture 2B-1) avant l'émission : aucune
    réouverture ; déconnexion pendant l'émission : sérialisée, visite émise
-   close ; révocation F2 seule (limite documentée) ; fin par inactivité ;
+   close ; révocation F2 seule (logout, admin, security) committée, en
+   cours (attendue puis vue) ou postérieure (attend le COMMIT de
+   l'émission) ; délai et panne de lecture ; session d'un autre utilisateur
+   ou absente ; expiration absolue ; autre session du même utilisateur ;
+   autre base ; fin par inactivité ;
    visite close entre inscription et certification ; après J+12 ; rejeux depuis un second appareil ;
    opérations concurrentes ;
 4. non-blocage : base analytics indisponible après le COMMIT F2, délai de
@@ -33,7 +37,8 @@ import subprocess
 import sys
 import threading
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -235,11 +240,17 @@ def schema(pg_url):  # noqa: F811
     engine.dispose()
 
 
+def _deadlocks(engine) -> int:
+    return rows(engine, "SELECT deadlocks AS n FROM pg_stat_database WHERE datname = current_database()")[0]["n"]
+
+
 @pytest.fixture
 def analytics(pg_url, schema):  # noqa: F811
     engine = analytics_engine(pg_url)
+    before = _deadlocks(engine)
     yield engine
     assert definitive_rows(engine) == (0, 0)  # jamais d'événement ni d'attribution définitive
+    assert _deadlocks(engine) == before, "interblocage PostgreSQL détecté"  # F2 + analytics : aucun cycle
     engine.dispose()
 
 
@@ -601,20 +612,28 @@ def test_a_concurrent_logout_before_the_emission_reopens_nothing(env, analytics,
     assert env.service.authenticate_session(alice.credential()) is None  # révocation F2 effective
 
 
-def test_a_logout_waiting_on_the_emission_closes_the_emitted_visit(env, analytics, alice, monkeypatch):
-    """Ordre inverse : l'émission tient le verrou d'environnement ; la
-    déconnexion 2B-1 concurrente l'attend, puis clôt la visite émise.
-    L'interaction émise avant la déconnexion reste historiquement valide et
-    la preuve est certifiée."""
-    campaign = wave(analytics)
+def _pause_after_the_f2_share(monkeypatch):
+    """Suspend l'émission JUSTE APRÈS la lecture FOR SHARE de la session F2
+    (dernier verrou), avant son COMMIT."""
     inside, release = threading.Event(), threading.Event()
-    real = proofs.read_origin
+    real = bridge._f2_session_problem
 
-    def paused(db, **kwargs):  # après touch_activity_session, dans la transaction d'émission
+    def paused(db, principal):
+        problem = real(db, principal)
         inside.set()
         assert release.wait(20)
-        return real(db, **kwargs)
-    monkeypatch.setattr(proofs, "read_origin", paused)
+        return problem
+    monkeypatch.setattr(bridge, "_f2_session_problem", paused)
+    return inside, release
+
+
+def test_a_logout_waiting_on_the_emission_closes_the_emitted_visit(env, analytics, alice, monkeypatch):
+    """Contre-épreuves 3 et 4 : l'émission tient le verrou partagé de la
+    session F2 ; la révocation (vrai revoke_session, FOR UPDATE) attend son
+    COMMIT, puis la clôture 2B-1 clôt la visite émise. L'interaction émise
+    avant la révocation reste historiquement valide : preuve certifiée."""
+    campaign = wave(analytics)
+    inside, release = _pause_after_the_f2_share(monkeypatch)
     command = create_command()
     measured = Background(lambda: run(env, analytics, alice, command, campaign))
     measured.start()
@@ -622,32 +641,227 @@ def test_a_logout_waiting_on_the_emission_closes_the_emitted_visit(env, analytic
     disconnect = Background(lambda: logout(env, analytics, campaign, alice))
     disconnect.start()
     try:
-        wait_until(lambda: waiting(analytics) == 1, message="la déconnexion n'attend pas l'émission")
+        wait_until(lambda: env.waiting_on_lock() == 1, message="la révocation F2 n'attend pas l'émission")
+        assert disconnect.is_alive()  # revoke_session bloquée sur NOTRE FOR SHARE
     finally:
         release.set()
-    disconnect.outcome()
     result = measured.outcome()
+    disconnect.outcome()
     assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
     row = certified_row(analytics, CREATE, command.operation_id, alice, campaign)
     [visit] = visits(analytics)
     assert (visit["id"], visit["end_reason"]) == (row["visit_id"], "logout")
+    assert env.service.authenticate_session(alice.credential()) is None
 
 
-def test_a_revocation_without_the_2b1_logout_is_the_documented_residual(env, analytics, alice, monkeypatch):
-    """Distinction exigée : la révocation F2 SEULE n'est pas visible de
-    l'analytics (aucune lecture des tables F2). La visite est prolongée par
-    l'émission puis sera finalisée par la clôture 2B-1 ou l'inactivité.
-    Limite documentée (§ 5.4) ; F2 inchangé."""
+@pytest.mark.parametrize("reason", ["logout", "admin", "security"])
+def test_a_committed_revocation_without_the_2b1_logout_is_refused(env, analytics, alice, monkeypatch, reason):
+    """Contre-épreuves 1, 6 et 10 (remplace l'ancienne limite résiduelle) :
+    révocation F2 committée avant l'émission, SANS clôture analytics :
+    aucune interaction, aucune prolongation, aucune certification ; résultat
+    F2 inchangé, un seul appel F2."""
     campaign = wave(analytics)
     visit, _ = f2_touch(analytics, campaign, alice)
-    spy = _after_commit(monkeypatch, lambda: logout(env, analytics, campaign, alice, analytics_close=False))
+    before = (visits(analytics), interactions(analytics))
+    spy = _after_commit(monkeypatch, lambda: env.service.revoke_session(alice.session_id, reason))
     result = run(env, analytics, alice, create_command(), campaign)
     _unchanged_f2(env, spy, result)
-    assert result.proof.state == proofs.CERTIFIED
-    [extended] = visits(analytics)
-    assert extended["id"] == visit and extended["finalized_at"] is None
-    close(analytics, campaign, USER_A, environment=alice.session_id)  # clôture 2B-1 tardive : visite close
-    assert visits(analytics)[0]["end_reason"] == "logout"
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NOT_AUTHORIZED) and registry(analytics) == []
+    assert (visits(analytics), interactions(analytics)) == before  # ni prolongation, ni interaction
+    assert visits(analytics)[0]["id"] == visit and visits(analytics)[0]["finalized_at"] is None
+
+
+def _f2_revocation_in_progress(env, session_id):
+    """Transaction F2 de révocation SUSPENDUE : mêmes instructions que
+    revoke_session (session FOR UPDATE, générations FOR UPDATE, UPDATE
+    status), non committée."""
+    holder = Holder(env.engine, sql="SELECT 1 FROM oryx_sessions WHERE id = :s FOR UPDATE", s=session_id)
+    holder.db.execute(sa.text("SELECT 1 FROM oryx_session_generations WHERE session_id = :s AND status = 'active' "
+                              "FOR UPDATE"), {"s": session_id})
+    holder.db.execute(sa.text("UPDATE oryx_sessions SET status = 'revoked', revoked_at = clock_timestamp(), "
+                              "revocation_reason = 'logout' WHERE id = :s"), {"s": session_id})
+    return holder
+
+
+@pytest.mark.parametrize("revocation", ["committed", "rolled_back"])
+def test_an_emission_waits_for_a_revocation_in_progress_then_sees_it(env, analytics, alice, monkeypatch, revocation):
+    """Contre-épreuve 2 : révocation F2 en cours après le COMMIT métier ;
+    l'émission attend son issue (FOR SHARE derrière FOR UPDATE), puis refuse
+    si elle est committée, certifie si elle est annulée."""
+    campaign = wave(analytics)
+    holders = []
+    spy = _after_commit(monkeypatch, lambda: holders.append(_f2_revocation_in_progress(env, alice.session_id)))
+    command = create_command()
+    measured = Background(lambda: run(env, analytics, alice, command, campaign))
+    measured.start()
+    try:
+        wait_until(lambda: holders and waiting(analytics) == 1, message="l'émission n'attend pas la révocation")
+    finally:
+        wait_until(lambda: holders, message="révocation non démarrée")
+        holders[0].commit() if revocation == "committed" else holders[0].rollback()
+    result = measured.outcome()
+    _unchanged_f2(env, spy, result)
+    if revocation == "committed":
+        assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NOT_AUTHORIZED)
+        assert registry(analytics) == [] and interactions(analytics) == [] and visits(analytics) == []
+    else:
+        assert result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
+        certified_row(analytics, CREATE, command.operation_id, alice, campaign)
+
+
+def test_a_revocation_held_beyond_the_analytics_lock_timeout_loses_only_the_statistic(env, analytics, alice,
+                                                                                      monkeypatch):
+    """Contre-épreuve 9 (délai) : la révocation garde son verrou au-delà du
+    lock_timeout analytics (2 s) : émission annulée, statistique perdue,
+    résultat F2 inchangé ; la révocation n'est pas affectée."""
+    campaign = wave(analytics)
+    holders = []
+    spy = _after_commit(monkeypatch, lambda: holders.append(_f2_revocation_in_progress(env, alice.session_id)))
+    try:
+        result = run(env, analytics, alice, create_command(), campaign)
+    finally:
+        holders[0].commit()
+    _unchanged_f2(env, spy, result)
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    assert registry(analytics) == [] and interactions(analytics) == [] and visits(analytics) == []
+    assert env.service.authenticate_session(alice.credential()) is None
+
+
+def test_a_failed_f2_session_read_loses_only_the_statistic(env, analytics, alice, spy, monkeypatch):
+    """Contre-épreuve 9 (panne de lecture) : émission annulée, rien d'écrit."""
+    monkeypatch.setattr(bridge, "_F2_SESSION_STATUS", sa.text("SELECT * FROM oryx_sessions_absent_table"))
+    result = run(env, analytics, alice, create_command(), wave(analytics))
+    _unchanged_f2(env, spy, result)
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    assert registry(analytics) == [] and interactions(analytics) == [] and visits(analytics) == []
+
+
+def _substituted_principal(monkeypatch, session_id_of):
+    """Sortie attestée RÉELLE dont le principal désigne une autre session
+    (défense en profondeur : F2 ne le produit jamais)."""
+    original = AuthorizedTransactionRunner._run_attested
+    calls = []
+
+    def substituted(runner, credential, command):
+        calls.append(command)
+        out = original(runner, credential, command)
+        principal = out.outcome.principal
+        forged = AuthorizedPrincipal(principal.user_id, session_id_of(), principal.generation_id,
+                                     principal.auth_method)
+        return AttestedOutcome(AuthorizationOutcome(out.outcome.status, out.outcome.value, forged), out.attestation)
+    monkeypatch.setattr(AuthorizedTransactionRunner, "_run_attested", substituted)
+    return calls
+
+
+@pytest.mark.parametrize("case", ["other_user", "absent"])
+def test_a_session_of_another_user_or_an_absent_session_is_refused(env, analytics, alice, monkeypatch, case):
+    """Contre-épreuves 7 et 8."""
+    bob = env.confirmed(BOB, USER_B)
+    campaign = wave(analytics)
+    calls = _substituted_principal(monkeypatch, (lambda: bob.session_id) if case == "other_user" else uuid.uuid4)
+    result = run(env, analytics, alice, create_command(), campaign)
+    assert len(calls) == 1 and result.outcome.status == AUTHORIZED and len(env.receipts()) == 1
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED)
+    assert registry(analytics) == [] and interactions(analytics) == [] and visits(analytics) == []
+    assert env.service.authenticate_session(bob.credential()) is not None  # jamais touchée
+
+
+def test_an_expired_f2_session_is_refused_and_equality_refuses(env, analytics, alice, spy, monkeypatch):
+    """Borne d'expiration absolue : émission refusée dès clock_timestamp() >=
+    absolute_expires_at (lue après le verrou, comme T_authorization)."""
+    campaign = wave(analytics)
+    real = bridge._f2_session_problem
+
+    def at_expiry(db, principal):
+        db.execute(sa.text("SELECT 1"))
+        with env.engine.begin() as conn:  # échéance amenée à l'instant présent (écrivain de test)
+            conn.execute(sa.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(sa.text("UPDATE oryx_sessions SET absolute_expires_at = t.at, "
+                                 "created_at = t.at - interval '15 days' FROM (SELECT clock_timestamp() AS at) t "
+                                 "WHERE id = :s"), {"s": principal.session_id})
+        return real(db, principal)
+    monkeypatch.setattr(bridge, "_f2_session_problem", at_expiry)
+    result = run(env, analytics, alice, create_command(), campaign)
+    _unchanged_f2(env, spy, result)
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.NOT_AUTHORIZED)
+    assert registry(analytics) == [] and interactions(analytics) == [] and visits(analytics) == []
+
+
+class _Rows:
+    """Base factice : rend la ligne de session puis l'horloge PostgreSQL."""
+
+    def __init__(self, row, now):
+        self.answers = [row, now]
+
+    def execute(self, statement, params=None):
+        answer = self.answers.pop(0)
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: answer),
+                               scalar_one=lambda: answer)
+
+
+def test_the_absolute_expiry_bound_is_strict_like_the_runner():
+    principal = AuthorizedPrincipal(USER_A, uuid.uuid4(), uuid.uuid4(), "email_otp")
+    expires = datetime(2026, 12, 9, 12, tzinfo=timezone.utc)
+    active = {"user_id": USER_A, "status": "active", "revoked_at": None, "absolute_expires_at": expires}
+    check = bridge._f2_session_problem
+    assert check(_Rows(active, expires - timedelta(microseconds=1)), principal) is None
+    assert check(_Rows(active, expires), principal) == proofs.NOT_AUTHORIZED  # l'égalité refuse
+    assert check(_Rows(active, expires + timedelta(microseconds=1)), principal) == proofs.NOT_AUTHORIZED
+    revoked = {**active, "status": "revoked", "revoked_at": expires}
+    assert check(_Rows(revoked, None), principal) == proofs.NOT_AUTHORIZED
+    for incoherent in ({**active, "revoked_at": expires}, {**active, "status": "paused"},
+                       {**active, "absolute_expires_at": None}, {**active, "user_id": USER_B}):
+        assert check(_Rows(incoherent, expires - timedelta(days=1)), principal) == proofs.SOURCE_UNVERIFIED
+    assert check(_Rows(None, None), principal) == proofs.SOURCE_UNVERIFIED
+
+
+def test_another_session_of_the_same_user_is_not_affected(env, analytics, monkeypatch):
+    """Contre-épreuve 11 : appareil A révoqué ; l'opération de l'appareil B
+    est certifiée, la visite de A reste intacte."""
+    device_a, device_b = env.confirmed(), env.confirmed("alice2@example.com", USER_A)
+    campaign = wave(analytics)
+    visit_a, _ = f2_touch(analytics, campaign, device_a)
+    assert env.service.revoke_session(device_a.session_id, "security") is True
+    before_a = [v for v in visits(analytics) if v["id"] == visit_a]
+    command = create_command()
+    assert run(env, analytics, device_b, command, campaign).proof == bridge.ProofReport(proofs.CERTIFIED, None)
+    row = certified_row(analytics, CREATE, command.operation_id, device_b, campaign)
+    assert row["visit_id"] != visit_a and [v for v in visits(analytics) if v["id"] == visit_a] == before_a
+
+
+def test_an_analytics_engine_on_another_database_is_refused_before_any_write(env, analytics, alice, spy, pg_url):  # noqa: F811
+    """Même base canonique exigée : sinon le FOR SHARE ne serait pas
+    sérialisé avec la révocation F2."""
+    elsewhere = sa.create_engine(sa.engine.make_url(pg_url).set(database="oryx_elsewhere_test"),
+                                 poolclass=sa.pool.NullPool)
+    result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
+                                                 analytics_engine=elsewhere, campaign_id=wave(analytics))
+    _unchanged_f2(env, spy, result)
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED)
+    assert registry(analytics) == [] and interactions(analytics) == []
+    assert bridge._same_canonical_database(env.runner(), analytics) is True
+
+
+def test_the_bridge_reads_only_the_non_revocation_columns_of_the_f2_session():
+    """Exception nominative : UNE lecture F2, minimale, FOR SHARE ; ni
+    secret, ni empreinte, ni génération, ni écriture."""
+    text = BRIDGE.read_text(encoding="utf-8")
+    statements = re.findall(r'"((?:SELECT|INSERT|UPDATE|DELETE)[^"]*)"\s*"?([^"]*)"?', text)
+    f2 = ["".join(st) for st in statements if "oryx_" in "".join(st)]
+    assert f2 == ["SELECT user_id, status, revoked_at, absolute_expires_at FROM oryx_sessions WHERE id = "
+                  ":session_id FOR SHARE"]
+    tree = ast.parse(text)
+    docstrings = {id(tree.body[0].value)} | {id(n.body[0].value) for n in ast.walk(tree)
+                                             if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.body
+                                             and isinstance(n.body[0], ast.Expr)}
+    code = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings]
+    code += [n.id for n in ast.walk(tree) if isinstance(n, ast.Name)] + [
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+    for forbidden in ("oryx_session_generations", "secret", "hmac", "digest", "auth_identities", "auth_operations",
+                      "INSERT INTO", "UPDATE ", "DELETE FROM", "FOR UPDATE", "revoke_session",
+                      "authenticate_session"):
+        assert not [c for c in code if forbidden in c], forbidden
 
 
 def test_an_inactivity_ended_visit_is_not_a_logout(env, analytics, alice, monkeypatch):
@@ -793,10 +1007,11 @@ def test_an_unusable_analytics_engine_never_blocks_the_operation(env, analytics,
     result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
                                                  analytics_engine=broken, campaign_id=campaign)
     _unchanged_f2(env, spy, result)
-    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.TECHNICAL_UNCERTAINTY)
+    # Autre base que celle de F2 : refusée AVANT toute connexion (base canonique exigée).
+    assert result.proof == bridge.ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED)
     result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
                                                  analytics_engine=None, campaign_id=campaign)  # moteur inutilisable
-    assert result.outcome.status == AUTHORIZED and result.proof.reason == proofs.TECHNICAL_UNCERTAINTY
+    assert result.outcome.status == AUTHORIZED and result.proof.reason == proofs.SOURCE_UNVERIFIED
     result = bridge.run_with_proof_certification(env.runner(hook=IDLE), alice.credential(), create_command(),
                                                  analytics_engine=analytics, campaign_id="pas-un-uuid")
     assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.ABSENT,

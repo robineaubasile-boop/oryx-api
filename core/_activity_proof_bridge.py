@@ -29,6 +29,9 @@ opération). Seule la campagne de mesure (configuration serveur) est reçue.
         identifiant canonique : _CERTIFIABLE_COMMANDS) et de qualification
         admise ; new_effect lu sur l'attestation (rejeux et no-op : jamais
         certifiables, aucune écriture analytics, aucune interaction) ;
+     a bis. base canonique : la frontière exige que le moteur analytics
+        désigne la MÊME base PostgreSQL que le runner F2 (hôte, port, base) ;
+        sinon aucune émission (source_unverified) ;
      b. transaction analytics 1 : proofs.open_origin émet l'origine de CETTE
         opération : interaction 'activity' NOUVELLE (clé générée par le
         service), propriétaire = principal.user_id, environnement = la
@@ -39,6 +42,21 @@ opération). Seule la campagne de mesure (configuration serveur) est reçue.
         session ne peut donc jamais être l'origine ; un environnement dont la
         déconnexion 2B-1 est inscrite n'est jamais rouvert (vérification
         sous le verrou d'environnement de 2B-1 : absent / not_authorized) ;
+        PUIS, dans la MÊME transaction et en DERNIER verrou (arbitrage du
+        fondateur, option A, exception nominative) : lecture minimale de la
+        session F2 canonique (oryx_sessions, id = principal.session_id) FOR
+        SHARE ; propriétaire = principal, statut 'active', non révoquée, et
+        horloge PostgreSQL < absolute_expires_at (lue après le verrou ;
+        l'égalité refuse, comme le runner). Sinon l'émission ENTIÈRE est
+        annulée (ROLLBACK : ni interaction, ni visite, ni prolongation) :
+        révoquée ou expirée -> not_authorized ; absente, d'un autre
+        propriétaire ou incohérente -> source_unverified. Le verrou partagé
+        est gardé jusqu'au COMMIT de l'émission : une révocation F2
+        (revoke_session, FOR UPDATE sur la même ligne) committée avant est
+        vue, une révocation en cours est attendue puis vue, une révocation
+        postérieure attend ce COMMIT (l'interaction émise reste
+        historiquement valide). Contrôle de non-révocation seulement : ni
+        authentification, ni secret, ni génération, ni écriture F2 ;
      c. transaction analytics 2 : proofs.register_pending (seule l'origine
         émise en b, liée à cette opération, est acceptée) ;
      d. transaction analytics 3 : proofs.certify_pending (certified_at =
@@ -79,12 +97,29 @@ _CERTIFIABLE_COMMANDS = MappingProxyType({
     c.DeletePortfolioPosition: (att.PORTFOLIO_DELETE, "operation_id"),
 })
 
+# Lecture minimale de la session F2 canonique (exception nominative,
+# arbitrage du fondateur, option A du § 5.4) : colonnes de non-révocation
+# seulement, jamais secret, empreinte, génération ni écriture. FOR SHARE :
+# sérialisée avec revoke_session (FOR UPDATE sur la même ligne).
+_F2_SESSION_STATUS = sa.text("SELECT user_id, status, revoked_at, absolute_expires_at FROM oryx_sessions "
+                             "WHERE id = :session_id FOR SHARE")
+_F2_ACTIVE, _F2_REVOKED = "active", "revoked"
+
 # Garde-fous de chaque transaction analytics (SET LOCAL).
 ANALYTICS_GUARDS = ("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "SET LOCAL lock_timeout = '2s'",
                     "SET LOCAL statement_timeout = '5s'")
 
 # Issue d'une transaction analytics.
-_COMMITTED, _FAILED, _UNCERTAIN = "committed", "failed", "uncertain"
+_COMMITTED, _FAILED, _UNCERTAIN, _DISCARDED = "committed", "failed", "uncertain", "discarded"
+
+
+class _Discard(Exception):
+    """Levée par un travail analytics pour ANNULER sa transaction (ROLLBACK)
+    en rendant une valeur fermée."""
+
+    def __init__(self, value):
+        super().__init__("transaction analytics annulée")
+        self.value = value
 
 # État rendu quand aucune lecture fiable ne permet de conclure.
 UNKNOWN = "unknown"
@@ -111,8 +146,10 @@ class CertifiedRun:
 
 def _transaction(engine, work):
     """(issue, valeur) d'une transaction analytics DISTINCTE de F2. Jamais
-    d'exception : _FAILED (rien committé), _UNCERTAIN (COMMIT envoyé, issue
-    inconnue ; la valeur est celle calculée avant le COMMIT), _COMMITTED."""
+    d'exception : _FAILED (rien committé), _DISCARDED (annulée par le travail
+    lui-même, rien committé ; valeur de _Discard), _UNCERTAIN (COMMIT envoyé,
+    issue inconnue ; la valeur est celle calculée avant le COMMIT),
+    _COMMITTED."""
     try:
         session = Session(bind=engine, autoflush=False, expire_on_commit=False)
     except Exception:  # noqa: BLE001 — moteur inutilisable
@@ -122,6 +159,12 @@ def _transaction(engine, work):
             for guard in ANALYTICS_GUARDS:
                 session.execute(sa.text(guard))
             value = work(session)
+        except _Discard as discard:  # refus : rien n'est committé (aucun COMMIT envoyé)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001 — connexion perdue : le serveur annule
+                pass
+            return _DISCARDED, discard.value
         except Exception:  # noqa: BLE001 — rien n'est committé
             try:
                 session.rollback()
@@ -167,20 +210,58 @@ def _report(decision) -> ProofReport:
     return ProofReport(decision.state, decision.reason)
 
 
-def _open_origin(engine, campaign_id, environment_key, operation) -> tuple:
+def _same_canonical_database(runner, engine) -> bool:
+    """Le moteur analytics désigne-t-il la MÊME base PostgreSQL que le runner
+    F2 (hôte, port, nom de base) ? Seule condition pour que FOR SHARE et la
+    révocation F2 portent sur la même ligne. Lecture seule de la
+    configuration ; jamais d'exception (doute : non)."""
+    try:
+        f2, analytics = runner._engine.url, engine.url
+        return (f2.database is not None and f2.get_backend_name() == analytics.get_backend_name() == "postgresql"
+                and (f2.host, f2.port, f2.database) == (analytics.host, analytics.port, analytics.database))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _f2_session_problem(db, principal) -> str | None:
+    """Contrôle de non-révocation de la session F2 qui a exécuté
+    l'opération, DANS la transaction d'émission et APRÈS tous ses verrous
+    analytics (voir l'en-tête). None si active ; sinon motif fermé. Le
+    verrou partagé est gardé jusqu'à la fin de la transaction."""
+    row = db.execute(_F2_SESSION_STATUS, {"session_id": str(principal.session_id)}).mappings().one_or_none()
+    if row is None or row["user_id"] != principal.user_id:
+        return proofs.SOURCE_UNVERIFIED  # absente ou d'un autre propriétaire
+    if row["status"] == _F2_REVOKED:
+        return proofs.NOT_AUTHORIZED  # logout, admin ou security : même protection
+    if row["status"] != _F2_ACTIVE or row["revoked_at"] is not None or row["absolute_expires_at"] is None:
+        return proofs.SOURCE_UNVERIFIED  # incohérente
+    now = db.execute(sa.text("SELECT clock_timestamp()")).scalar_one()  # lue APRÈS le verrou
+    if now >= row["absolute_expires_at"]:
+        return proofs.NOT_AUTHORIZED  # expiration absolue atteinte : l'égalité refuse
+    return None
+
+
+def _open_origin(engine, campaign_id, principal, operation) -> tuple:
     """(OriginSnapshot émis, None) ou (None, motif fermé) ; ne lève jamais.
-    Panne ou COMMIT incertain : aucune origine n'est présumée (le registre
-    n'a pas été touché)."""
+    Panne, refus ou COMMIT incertain : aucune origine n'est présumée (le
+    registre n'a pas été touché). Un refus de la session F2 annule TOUTE
+    l'émission."""
     def open_(db):
         try:
-            return proofs.open_origin(db, campaign_id=campaign_id, environment_key=environment_key,
-                                      operation=operation), None
+            origin = proofs.open_origin(db, campaign_id=campaign_id, environment_key=principal.session_id,
+                                        operation=operation)
         except proofs.ProofRefused as refused:
-            return None, refused.reason
+            return None, refused.reason  # rien n'a été écrit
         except proofs.InvalidProductAnalyticsInput:
             return None, proofs.ORIGIN_UNVERIFIED
+        problem = _f2_session_problem(db, principal)  # dernier verrou, gardé jusqu'au COMMIT
+        if problem is not None:
+            raise _Discard((None, problem))  # ROLLBACK : ni interaction, ni visite, ni prolongation
+        return origin, None
 
     status, value = _transaction(engine, open_)
+    if status == _DISCARDED:
+        return value
     if status != _COMMITTED:
         return None, proofs.TECHNICAL_UNCERTAINTY
     return value
@@ -228,11 +309,13 @@ def run_with_proof_certification(runner, credential, command, *, analytics_engin
             report = ProofReport(proofs.ABSENT, reason)
         elif not operation.new_effect:
             report = ProofReport(proofs.ABSENT, proofs.NO_NEW_EFFECT)  # rejeu, no-op : rien n'est écrit
+        elif not _same_canonical_database(runner, analytics_engine):
+            report = ProofReport(proofs.ABSENT, proofs.SOURCE_UNVERIFIED)  # verrou F2 sans portée : rien n'est écrit
         else:
             # Environnement = session F2 authentifiée qui a exécuté l'opération
             # (principal vérifié par _committed_operation) ; jamais l'appelant.
-            origin, origin_reason = _open_origin(analytics_engine, campaign_id,
-                                                 attested.outcome.principal.session_id, operation)
+            origin, origin_reason = _open_origin(analytics_engine, campaign_id, attested.outcome.principal,
+                                                 operation)
             report = (ProofReport(proofs.ABSENT, origin_reason) if origin is None
                       else _certify(analytics_engine, origin, operation))
     except Exception:  # noqa: BLE001 — la mesure ne fait jamais échouer l'opération
