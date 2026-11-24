@@ -987,6 +987,20 @@ def test_a_logout_waits_for_a_finalization_in_progress(db, clock):
     assert recorded.state == fz.RECORDED  # décidée avant la fin de visite, qui attendait son COMMIT
 
 
+def test_a_logout_in_progress_after_j_plus_12_is_waited_for_and_ends_the_margin(db, clock):
+    """La fin de la visite d'origine est lue SOUS verrou (FOR SHARE) : une
+    déconnexion en cours (visite FOR UPDATE, non committée) est attendue puis
+    vue ; la finalisation n'est jamais décidée sur une visite périmée."""
+    proof, end = _last_minute(db, clock, timedelta(minutes=5))
+    clock.set(end + timedelta(minutes=2))  # visite vivante jusqu'à end + 25 min
+    closing, decision = _contended(db, lambda s: ps.close_activity_session(
+        s, campaign_id=proof.campaign_id, user_id=USER_A, environment_key=LAPTOP, interaction_key=uuid.uuid4()),
+        lambda: finalize(db, proof.proof_id))
+    assert closing.outcome == ps.CLOSED
+    assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
+    assert _definitive(db) == (0, 0)
+
+
 def _historical_event(db, **overrides):
     """Événement du contrat 2A (vrai record_event)."""
     kwargs = {"user_id": USER_A, "visit_id": uuid.uuid4(), "idempotency_key": uuid.uuid4(),
