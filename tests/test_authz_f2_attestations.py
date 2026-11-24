@@ -10,7 +10,9 @@ de données.
    portefeuille construisent une attestation ; le runner ne fait que la retirer
    et la lier ; aucune instruction SQL, aucun verrou ajouté ;
 4. dormance : aucun appelant de _run_attested hors des tests, aucune route,
-   aucun analytics importé ou raccordé, aucune migration.
+   aucun analytics importé ou raccordé, aucune migration ; V0-T08 2B-2 PR 2 :
+   seule exception nominative, la frontière privée core/_activity_proof_bridge.py
+   (un appel, marqueurs exacts, elle-même sans appelant).
 """
 import ast
 import dataclasses
@@ -34,6 +36,9 @@ MODULE = AUTHZ / "attestations.py"
 ADAPTERS = AUTHZ / "_adapters.py"
 BRIDGE = AUTHZ / "_decryptage_orm_bridge.py"
 RUNNER = AUTHZ / "runner.py"
+# V0-T08 2B-2 PR 2 : frontière privée F2 -> analytics, hors des deux domaines.
+PROOF_BRIDGE = "core/_activity_proof_bridge.py"
+PROOF_BRIDGE_MARKERS = ["_run_attested", "AttestedOutcome", "BusinessAttestation", "authz_f2 import attestations"]
 OWNER = "user-a"
 OP = uuid.UUID("11111111-1111-4111-8111-111111111111")
 
@@ -274,7 +279,16 @@ def test_nothing_outside_the_boundary_and_the_tests_uses_the_attested_exit():
         relative = path.relative_to(REPO_ROOT)
         if relative.parts[0] in ("tests", "docs") or AUTHZ in path.parents:
             continue
-        if any(m in path.read_text(encoding="utf-8", errors="ignore") for m in markers):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if relative.as_posix() == PROOF_BRIDGE:
+            # V0-T08 2B-2 PR 2 (nominatif) : l'UNIQUE consommateur de la sortie
+            # attestée, marqueurs EXACTS, un seul appel (sans appelant lui-même).
+            assert [m for m in markers if m in text] == PROOF_BRIDGE_MARKERS, relative
+            calls = [n for n in ast.walk(ast.parse(text)) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute) and n.func.attr == "_run_attested"]
+            assert [ast.unparse(n) for n in calls] == ["runner._run_attested(credential, command)"], relative
+            continue
+        if any(m in text for m in markers):
             offenders.append(str(relative))
     assert offenders == []  # ni api.py, ni routes, ni analytics, ni workers, ni scripts
     users = {p.name for p in AUTHZ.glob("*.py") if any(m in p.read_text(encoding="utf-8") for m in markers)}

@@ -29,10 +29,22 @@ product_activity_session_interactions) :
                    d'inactivité, horloge serveur, environnements distincts,
                    registre des clés d'interaction : tout rejeu idempotent,
                    clôture volontaire, finalisation sans événement
-                   inventé), distinctes des sessions F2.
+                   inventé), distinctes des sessions F2 ;
+- proofs.py      : lot 2B-2 bloc B — émission de l'origine d'une opération
+                   (interaction 2B-1 NOUVELLE, clé serveur, liée à cette seule
+                   opération), registre provisoire des preuves
+                   d'utilisation significative (pending idempotent) et
+                   certification contrôlée pending -> certified après le
+                   COMMIT de l'opération métier (horloge PostgreSQL lue après
+                   les verrous, fenêtre [J0, J+12) stricte), rejets et
+                   incertitudes terminaux ; aucun événement ni attribution
+                   définitive (bloc C). Seul importateur : la frontière
+                   privée hors du paquet, elle-même sans appelant.
 
 DORMANCE : aucun module applicatif n'importe ce paquet (api.py, routes,
-workers, scripts restent inchangés ; tests/test_product_analytics_dormancy.py).
+workers, scripts restent inchangés ; tests/test_product_analytics_dormancy.py),
+à l'exception nominative de la frontière privée du bloc B (proofs.py
+seulement), qui n'a elle-même aucun appelant.
 Ce fichier n'importe rien : importer le paquet n'importe aucun service. Les
 services ne font jamais commit() ni rollback() de la transaction de
 l'appelant ; ils ne lisent aucune configuration et n'ouvrent aucune

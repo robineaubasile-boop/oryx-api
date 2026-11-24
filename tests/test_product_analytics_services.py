@@ -421,9 +421,14 @@ def test_services_never_own_the_transaction_and_never_delete():
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     and node.module and node.module.startswith("sqlalchemy") for alias in node.names}
         assert imported <= {"select", "IntegrityError", "func"}, path.name  # ni delete, ni update, ni SQL brut (text)
-        # func ne sert qu'aux verrous consultatifs de transaction (audit R1).
+        # func ne sert qu'aux verrous consultatifs de transaction (audit R1) ;
+        # exception nominative V0-T08 2B-2 PR 2 : proofs.py lit en plus
+        # l'horloge PostgreSQL (certified_at, jamais l'horloge Python).
         functions = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
                      and isinstance(node.value, ast.Name) and node.value.id == "func"}
+        if path.name == "proofs.py":
+            assert functions == {"clock_timestamp"}, path.name  # verrous : via common.lock_identities
+            continue
         assert functions <= {"pg_advisory_xact_lock"}, path.name
     # Un SAVEPOINT par INSERT, rien d'autre.
     for name, expected in (("campaigns.py", 1), ("participation.py", 1), ("events.py", 1)):

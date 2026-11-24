@@ -67,6 +67,10 @@ AUTHZ = REPO_ROOT / "core" / "authz_f2"
 AUTHZ_HTTP = REPO_ROOT / "core" / "authz_f2_http"
 HEAD = "0024_product_activity_proofs"  # V0-T08 Lot 2B-2 bloc A (analytics produit dormant)
 HEAD_FILE = "0024_product_activity_proofs.py"
+# V0-T08 2B-2 PR 2 : unique module hors de la frontière qui consomme sa sortie
+# attestée (tests/test_activity_proof_bridge.py).
+PROOF_BRIDGE = "core/_activity_proof_bridge.py"
+PROOF_BRIDGE_MARKERS = ["authz_f2", "AuthorizedTransactionRunner"]
 
 # Matrice fermée : module -> imports core.* exacts.
 IMPORT_MATRIX = {
@@ -373,6 +377,12 @@ def test_only_tests_and_docs_reference_the_boundary():
             # trousseaux portefeuille / Décrypter dédiés ; jamais le runner,
             # jamais une composition, jamais une route.
             assert [m for m in markers if m in text] == F04B_BOUNDARY_MARKERS[str(relative)], relative
+            continue
+        if str(relative) == PROOF_BRIDGE:
+            # V0-T08 2B-2 PR 2 (nominatif) : frontière privée F2 -> analytics,
+            # sans appelant ; marqueurs EXACTS (runner et sortie attestée),
+            # jamais une route, un trousseau ni une composition.
+            assert [m for m in markers if m in text] == PROOF_BRIDGE_MARKERS, relative
             continue
         if str(relative) in F04C_BOUNDARY_MARKERS:
             # ACT-L1 / F04-C (arbitrage E-1, nominatif) : le point d'entrée dormant

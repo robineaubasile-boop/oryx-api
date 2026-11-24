@@ -277,7 +277,10 @@ def test_no_route_no_activation_no_migration():
         for path in root.rglob("*.py"):
             if any(n in _code_tokens(path.read_text(encoding="utf-8")).split("\n") for n in names[:2]):
                 naming.add(path.relative_to(REPO_ROOT).as_posix())
-    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py", "core/authz_f2_http/decryptage.py"}
+    # V0-T08 2B-2 PR 2 (nominatif) : la frontière privée de certification nomme
+    # la commande d'ACK pour la relier à sa nature attestée ; aucun appelant.
+    assert naming == {"core/authz_f2/commands.py", "core/authz_f2/_adapters.py", "core/authz_f2_http/decryptage.py",
+                      "core/_activity_proof_bridge.py"}
     versions = sorted(p.name for p in (REPO_ROOT / "alembic" / "versions").glob("*.py"))
     assert len(versions) == 24 and versions[-4:] == ["0021_decryptage_turn_reservations.py",
                                                      "0022_product_analytics_v1.py",  # V0-T08 Lot 1
