@@ -35,6 +35,9 @@ sinon (AUTOCOMMIT imposé par le pilote, par exemple), rien n'est lu ni écrit
 et l'issue est UNKNOWN. La validité d'une transaction ne garantit jamais
 celle d'une transaction ultérieure ouverte sur le même moteur (autre
 connexion physique possible) : chacune est vérifiée pour elle-même.
+Ces garde-fous (_require_engine, _require_effective_transaction, _owned) sont
+définis dans core/_activity_transactions.py, extraits SANS changement par la
+PR 2 du lot 2C, qui les réutilise pour sa propre frontière.
 
 Points d'entrée (aucun ne lève, sauf entrée invalide avant toute connexion) :
 
@@ -69,9 +72,13 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy.engine import Engine
-
 from core import _activity_event_finalization as finalization_boundary
+from core._activity_transactions import (  # noqa: F401 — garde-fous extraits (2C PR 2), inchangés
+    _INTRANS,
+    _owned,
+    _require_effective_transaction,
+    _require_engine,
+)
 from core.product_analytics import finalization, proof_lifecycle
 
 logger = logging.getLogger("oryx.activity_proof_lifecycle")
@@ -139,56 +146,6 @@ def _require_proof_id(proof_id) -> uuid.UUID:
     if type(proof_id) is not uuid.UUID:
         raise TypeError("proof_id : uuid.UUID requis")
     return proof_id
-
-
-# Niveau d'isolation et options qui priveraient la frontière d'une transaction
-# autonome capable d'écrire.
-_AUTOCOMMIT = "AUTOCOMMIT"
-_NOT_OWNABLE = "engine : sqlalchemy.Engine PostgreSQL transactionnel requis (ni Connection, ni Session)"
-
-
-def _isolation(level) -> str | None:
-    return None if level is None else str(level).upper().replace("_", " ")
-
-
-def _require_engine(engine) -> Engine:
-    """Refus AVANT toute connexion (examen statique : aucune instruction)."""
-    if not isinstance(engine, Engine):  # Connection, Session, URL, None... : la transaction serait celle d'autrui
-        raise TypeError(_NOT_OWNABLE)
-    dialect, options = engine.dialect, engine.get_execution_options()
-    if dialect.name != "postgresql" or getattr(dialect, "is_async", False):
-        raise TypeError(_NOT_OWNABLE)
-    if _AUTOCOMMIT in (_isolation(options.get("isolation_level")),
-                       _isolation(getattr(dialect, "_on_connect_isolation_level", None))):
-        raise TypeError(_NOT_OWNABLE)  # aucune transaction : verrous relâchés, écritures hors de tout bloc
-    if options.get("postgresql_readonly"):
-        raise TypeError(_NOT_OWNABLE)
-    return engine
-
-
-# libpq PQTRANS_INTRANS : bloc de transaction ouvert et sain, rapporté par le
-# serveur (ReadyForQuery 'T') ; psycopg2 et psycopg exposent la même valeur.
-_INTRANS = 2
-
-
-class _NotOwned(Exception):
-    """La session ne porte pas un bloc de transaction PostgreSQL effectif."""
-
-
-def _require_effective_transaction(db) -> None:
-    status = db.connection().connection.dbapi_connection.info.transaction_status
-    if status != _INTRANS:
-        raise _NotOwned()
-
-
-def _owned(work):
-    """`work` n'est exécuté que dans un bloc de transaction effectif, ouvert
-    par la frontière du bloc C (garde-fous déjà posés) ; sinon exception :
-    rien n'est lu ni écrit, la transaction est annulée (_FAILED)."""
-    def run(db, **kwargs):
-        _require_effective_transaction(db)
-        return work(db, **kwargs)
-    return run
 
 
 # --------------------------------------------------------------------------
