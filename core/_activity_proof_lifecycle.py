@@ -18,6 +18,21 @@ interblocage détecté, panne, COMMIT incertain) ne compromet aucun autre
 candidat ; la sélection est une transaction de lecture courte, terminée
 avant tout traitement (aucun verrou de sélection conservé).
 
+Propriété de la transaction (contrat de la frontière) : chaque point
+d'entrée exige un `sqlalchemy.Engine` PostgreSQL synchrone, jamais en
+AUTOCOMMIT ni en lecture seule, à partir duquel la frontière ouvre ELLE-MÊME
+chaque transaction, la committe et seulement alors annonce une écriture.
+Une `Connection` ou une `Session` de l'appelant (même porteuse d'une
+transaction fraîche), une URL, un moteur d'un autre SGBD ou asynchrone sont
+refusés par TypeError AVANT toute connexion, sans aucune instruction ni
+effet sur la transaction de l'appelant : une écriture faite dans la
+transaction d'autrui ne serait jamais la nôtre (son ROLLBACK l'annulerait
+après l'annonce d'un succès). Défense en profondeur, à l'intérieur de chaque
+transaction (sélection, écriture, relecture), avant tout travail : libpq
+doit rapporter un bloc de transaction PostgreSQL EFFECTIF (INTRANS) après
+les garde-fous du bloc C ; sinon (AUTOCOMMIT imposé par le pilote, par
+exemple), rien n'est lu ni écrit et l'issue est UNKNOWN.
+
 Points d'entrée (aucun ne lève, sauf entrée invalide avant toute connexion) :
 
   recover_certified_proof / expire_pending_proof (engine, *, proof_id) :
@@ -50,6 +65,8 @@ identifiant, aucun propriétaire, aucun contenu, aucun curseur).
 import logging
 import uuid
 from dataclasses import dataclass
+
+from sqlalchemy.engine import Engine
 
 from core import _activity_event_finalization as finalization_boundary
 from core.product_analytics import finalization, proof_lifecycle
@@ -121,6 +138,56 @@ def _require_proof_id(proof_id) -> uuid.UUID:
     return proof_id
 
 
+# Niveau d'isolation et options qui priveraient la frontière d'une transaction
+# autonome capable d'écrire.
+_AUTOCOMMIT = "AUTOCOMMIT"
+_NOT_OWNABLE = "engine : sqlalchemy.Engine PostgreSQL transactionnel requis (ni Connection, ni Session)"
+
+
+def _isolation(level) -> str | None:
+    return None if level is None else str(level).upper().replace("_", " ")
+
+
+def _require_engine(engine) -> Engine:
+    """Refus AVANT toute connexion (examen statique : aucune instruction)."""
+    if not isinstance(engine, Engine):  # Connection, Session, URL, None... : la transaction serait celle d'autrui
+        raise TypeError(_NOT_OWNABLE)
+    dialect, options = engine.dialect, engine.get_execution_options()
+    if dialect.name != "postgresql" or getattr(dialect, "is_async", False):
+        raise TypeError(_NOT_OWNABLE)
+    if _AUTOCOMMIT in (_isolation(options.get("isolation_level")),
+                       _isolation(getattr(dialect, "_on_connect_isolation_level", None))):
+        raise TypeError(_NOT_OWNABLE)  # aucune transaction : verrous relâchés, écritures hors de tout bloc
+    if options.get("postgresql_readonly"):
+        raise TypeError(_NOT_OWNABLE)
+    return engine
+
+
+# libpq PQTRANS_INTRANS : bloc de transaction ouvert et sain, rapporté par le
+# serveur (ReadyForQuery 'T') ; psycopg2 et psycopg exposent la même valeur.
+_INTRANS = 2
+
+
+class _NotOwned(Exception):
+    """La session ne porte pas un bloc de transaction PostgreSQL effectif."""
+
+
+def _require_effective_transaction(db) -> None:
+    status = db.connection().connection.dbapi_connection.info.transaction_status
+    if status != _INTRANS:
+        raise _NotOwned()
+
+
+def _owned(work):
+    """`work` n'est exécuté que dans un bloc de transaction effectif, ouvert
+    par la frontière du bloc C (garde-fous déjà posés) ; sinon exception :
+    rien n'est lu ni écrit, la transaction est annulée (_FAILED)."""
+    def run(db, **kwargs):
+        _require_effective_transaction(db)
+        return work(db, **kwargs)
+    return run
+
+
 # --------------------------------------------------------------------------
 # Récupération et résolution : bloc C, frontière du bloc C
 # --------------------------------------------------------------------------
@@ -154,7 +221,7 @@ def _through_block_c(engine, service, proof_id) -> LifecycleOutcome:
         decision = service(db, proof_id=proof_id)
         captured.append(decision)
         return decision
-    report = finalization_boundary._run(engine, work, proof_id)
+    report = finalization_boundary._run(engine, _owned(work), proof_id)
     return _classify(report, captured[0] if captured else None)
 
 
@@ -162,14 +229,14 @@ def recover_certified_proof(engine, *, proof_id: uuid.UUID) -> LifecycleOutcome:
     """Reprise d'une preuve certified PERSISTÉE par le bloc C, inchangé :
     recorded (événement + attribution + preuve, une transaction), ou
     résolution par ses motifs fermés ; aucun rejeu F2 ni bloc B."""
-    proof_id = _require_proof_id(proof_id)
+    engine, proof_id = _require_engine(engine), _require_proof_id(proof_id)
     return _guarded(lambda: _through_block_c(engine, finalization.finalize_certified_proof, proof_id))
 
 
 def expire_pending_proof(engine, *, proof_id: uuid.UUID) -> LifecycleOutcome:
     """pending -> indeterminate / finalization_expired par le bloc C, à partir
     de son échéance seulement ; avant : aucune écriture."""
-    proof_id = _require_proof_id(proof_id)
+    engine, proof_id = _require_engine(engine), _require_proof_id(proof_id)
     return _guarded(lambda: _through_block_c(engine, finalization.resolve_expired_pending_proof, proof_id))
 
 
@@ -185,14 +252,14 @@ def _from_purge(decision) -> LifecycleOutcome:
 
 def _purge(engine, proof_id) -> LifecycleOutcome:
     status, decision = finalization_boundary._transaction(
-        engine, lambda db: proof_lifecycle.purge_resolved_proof(db, proof_id=proof_id))
+        engine, _owned(lambda db: proof_lifecycle.purge_resolved_proof(db, proof_id=proof_id)))
     if status == finalization_boundary._FAILED:
         return LifecycleOutcome(UNKNOWN, finalization_boundary.UNKNOWN, TECHNICAL_UNCERTAINTY)  # rien de committé
     if status == finalization_boundary._COMMITTED or not decision.written:
         return _from_purge(decision)
     # COMMIT incertain d'une suppression : relecture dans une NOUVELLE transaction.
     status, observed = finalization_boundary._transaction(
-        engine, lambda db: proof_lifecycle.observe_purge(db, proof_id=proof_id))
+        engine, _owned(lambda db: proof_lifecycle.observe_purge(db, proof_id=proof_id)))
     if status == finalization_boundary._FAILED:
         return LifecycleOutcome(UNKNOWN, finalization_boundary.UNKNOWN, TECHNICAL_UNCERTAINTY)
     if observed.outcome == proof_lifecycle.ABSENT:
@@ -202,7 +269,7 @@ def _purge(engine, proof_id) -> LifecycleOutcome:
 
 def purge_proof(engine, *, proof_id: uuid.UUID) -> LifecycleOutcome:
     """Suppression d'une preuve terminale échue, issue établie."""
-    proof_id = _require_proof_id(proof_id)
+    engine, proof_id = _require_engine(engine), _require_proof_id(proof_id)
     outcome = _guarded(lambda: _purge(engine, proof_id))
     _log("activity_proof_purge outcome=%s reason=%s", outcome.outcome, outcome.reason)
     return outcome
@@ -227,10 +294,11 @@ def _log(message: str, *args) -> None:
 
 
 def _page(engine, selection: str, select, process, limit, after) -> PageReport:
-    # Entrée validée AVANT toute connexion (InvalidProductAnalyticsInput).
+    # Entrée validée AVANT toute connexion (TypeError, InvalidProductAnalyticsInput).
+    engine = _require_engine(engine)
     proof_lifecycle._require_limit(limit)
     proof_lifecycle._require_cursor(after, selection)
-    status, page = finalization_boundary._transaction(engine, lambda db: select(db, limit=limit, after=after))
+    status, page = finalization_boundary._transaction(engine, _owned(lambda db: select(db, limit=limit, after=after)))
     counts = dict.fromkeys(OUTCOMES, 0)
     selected = status != finalization_boundary._FAILED  # lecture seule : un COMMIT perdu ne l'invalide pas
     for proof_id in (page.proof_ids if selected else ()):

@@ -163,11 +163,14 @@ def test_the_entry_points_receive_only_bounded_and_typed_inputs():
         assert list(inspect.signature(function).parameters) == ["engine", "proof_id"]
         with pytest.raises(TypeError):
             function(None, proof_id=str(uuid.uuid4()))  # avant toute connexion
+    offline = sa.create_engine("postgresql+psycopg2://nobody@127.0.0.1:1/none", poolclass=sa.pool.NullPool)
     for function in (lb.recover_certified_page, lb.expire_pending_page, lb.purge_resolved_page):
         assert list(inspect.signature(function).parameters) == ["engine", "limit", "after"]
         for bad in (0, 201, True):
             with pytest.raises(InvalidProductAnalyticsInput):
-                function(None, limit=bad)  # avant toute connexion
+                function(offline, limit=bad)  # avant toute connexion
+        with pytest.raises(TypeError):
+            function(None)  # moteur exigé, avant toute connexion
 
 
 def _stored(status, resolved_at, purge_after_at):
@@ -1031,6 +1034,167 @@ def test_an_unreachable_database_is_unknown_and_never_raises(db, clock):
 
 
 # --------------------------------------------------------------------------
+# 6 bis. Propriété de la transaction : la frontière n'annonce que SES COMMIT
+# --------------------------------------------------------------------------
+
+ENTRY_POINTS = (lb.recover_certified_proof, lb.expire_pending_proof, lb.purge_proof,
+                lb.recover_certified_page, lb.expire_pending_page, lb.purge_resolved_page)
+
+
+def _call(function, target, proof_id):
+    if "proof_id" in inspect.signature(function).parameters:
+        return function(target, proof_id=proof_id)
+    return function(target)
+
+
+def _statements(engine):
+    seen = []
+
+    def capture(conn, cursor, statement, *args):
+        seen.append(" ".join(statement.split()))
+    sa.event.listen(engine, "before_cursor_execute", capture)
+    return seen, lambda: sa.event.remove(engine, "before_cursor_execute", capture)
+
+
+def _xid(caller):
+    return caller.execute(sa.text("SELECT txid_current()")).scalar_one()
+
+
+def test_a_purge_handed_a_caller_transaction_is_refused_and_never_announced(db, clock):
+    # Contre-épreuve (avant correction : PURGED annoncé, preuve toujours visible
+    # d'une connexion indépendante, puis restaurée par le ROLLBACK de l'appelant).
+    proof, row = _due_rejected(db, clock)
+    world = _world(db)
+    with db.connect() as conn:
+        outer = conn.begin()  # transaction FRAÎCHE de l'appelant : aucune instruction encore
+        seen, remove = _statements(db)
+        try:
+            with pytest.raises(TypeError):
+                lb.purge_proof(conn, proof_id=proof.proof_id)
+        finally:
+            remove()
+        assert seen == [] and conn.in_transaction() and outer.is_active  # aucune instruction, pas même BEGIN
+        assert proof_row(db, proof.proof_id) == row  # état vu d'une connexion indépendante : intact
+        xid = _xid(conn)
+        assert _xid(conn) == xid  # la transaction de l'appelant reste la sienne, ouverte
+        outer.rollback()
+    assert proof_row(db, proof.proof_id) == row and _world(db) == world  # après le ROLLBACK externe : intact
+    # Un moteur : la frontière ouvre, committe, et seulement alors annonce la suppression.
+    assert lb.purge_proof(db, proof_id=proof.proof_id) == lb.LifecycleOutcome(lb.PURGED, fz.ABSENT, None)
+    assert proof_row(db, proof.proof_id) is None
+
+
+@pytest.mark.parametrize("kind", ["connection", "session"])
+def test_every_entry_point_refuses_a_caller_connection_or_session_without_touching_its_transaction(db, clock, kind):
+    proof, row = _due_rejected(db, clock)
+    world = _world(db)
+    with (db.connect() if kind == "connection" else Session(bind=db)) as caller:
+        for open_transaction in (False, True):
+            xid = _xid(caller) if open_transaction else None
+            for function in ENTRY_POINTS:
+                seen, remove = _statements(db)
+                try:
+                    with pytest.raises(TypeError):
+                        _call(function, caller, proof.proof_id)
+                finally:
+                    remove()
+                assert seen == [], function.__name__
+                assert caller.in_transaction() is open_transaction, function.__name__
+            if open_transaction:
+                assert _xid(caller) == xid  # même transaction, ni committée ni annulée
+        caller.rollback()
+    assert proof_row(db, proof.proof_id) == row and _world(db) == world
+
+
+def test_only_an_engine_able_to_open_its_own_postgresql_transaction_is_accepted(db):
+    url = db.url
+    refused = {
+        "none": None, "url_text": url.render_as_string(hide_password=False), "url": url, "no_db": _NoDB(),
+        "sqlite": sa.create_engine("sqlite://"),
+        "autocommit_engine": sa.create_engine(url, poolclass=sa.pool.NullPool, isolation_level="AUTOCOMMIT"),
+        "autocommit_option": sa.create_engine(url, poolclass=sa.pool.NullPool).execution_options(
+            isolation_level="AUTOCOMMIT"),
+        "read_only": sa.create_engine(url, poolclass=sa.pool.NullPool).execution_options(postgresql_readonly=True),
+    }
+    connections = []
+    for engine in refused.values():
+        if isinstance(engine, sa.Engine):
+            sa.event.listen(engine, "connect", lambda *a: connections.append(a))
+            sa.event.listen(engine, "before_cursor_execute", lambda *a: connections.append(a))
+    proof_id = uuid.uuid4()
+    for engine in refused.values():
+        for function in ENTRY_POINTS:
+            with pytest.raises(TypeError):
+                _call(function, engine, proof_id)  # refus statique, avant toute connexion
+    assert connections == []  # aucune connexion ouverte, aucune instruction
+    # Acceptés : le moteur, y compris porteur d'options compatibles.
+    for engine in (db, db.execution_options(isolation_level="READ COMMITTED"),
+                   sa.create_engine(url.set(port=1), poolclass=sa.pool.NullPool)):
+        assert lb._require_engine(engine) is engine
+
+
+def test_a_driver_level_autocommit_is_detected_inside_the_transaction_and_nothing_is_done(db, clock):
+    # Invisible à l'examen statique (le pilote est mis en AUTOCOMMIT à la
+    # connexion) : chaque transaction vérifie, avant tout travail, que libpq
+    # rapporte un bloc de transaction effectif.
+    proof, row = _due_rejected(db, clock)
+    certified = _certified(db)
+    pending = _pending(db)
+    clock.set(max(_due(db, proof.proof_id),
+                  _participation(db, pending.campaign_id).window_end_at + GRACE) + timedelta(seconds=1))
+    world = _world(db)
+    autocommit = sa.create_engine(db.url, poolclass=sa.pool.NullPool)
+    sa.event.listen(autocommit, "connect", lambda dbapi_connection, record: setattr(
+        dbapi_connection, "autocommit", True))
+    assert lb._require_engine(autocommit) is autocommit
+    seen, remove = _statements(autocommit)
+    try:
+        for function, proof_id in ((lb.purge_proof, proof.proof_id), (lb.recover_certified_proof, certified.proof_id),
+                                   (lb.expire_pending_proof, pending.proof_id)):
+            assert function(autocommit, proof_id=proof_id) == lb.LifecycleOutcome(
+                lb.UNKNOWN, lb.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY), function.__name__
+        for page in (lb.purge_resolved_page, lb.recover_certified_page, lb.expire_pending_page):
+            report = page(autocommit)
+            assert (report.selected, report.examined, report.next_cursor) == (False, 0, None), page.__name__
+    finally:
+        remove()
+    work = [s for s in seen if REGISTRY in s or "pg_advisory" in s or "SAVEPOINT" in s or "DELETE" in s]
+    assert work == []  # ni lecture du registre, ni verrou, ni écriture hors d'un bloc de transaction
+    assert _world(db) == world and proof_row(db, proof.proof_id) == row
+    # Le moteur valide traite les mêmes preuves normalement.
+    assert lb.purge_proof(db, proof_id=proof.proof_id).outcome == lb.PURGED
+    assert lb.expire_pending_proof(db, proof_id=pending.proof_id).outcome == lb.RESOLVED
+    assert lb.recover_certified_proof(db, proof_id=certified.proof_id).outcome in (lb.FINALIZED, lb.RESOLVED)
+
+
+def test_every_transaction_of_a_valid_engine_is_an_effective_postgresql_transaction(db, clock, monkeypatch):
+    statuses = []
+    real = lb._require_effective_transaction
+
+    def spy(session):
+        statuses.append(session.connection().connection.dbapi_connection.info.transaction_status)
+        return real(session)
+    monkeypatch.setattr(lb, "_require_effective_transaction", spy)
+    proof, _ = _due_rejected(db, clock)
+    report = lb.purge_resolved_page(db)
+    assert (report.examined, report.purged) == (1, 1) and statuses == [lb._INTRANS] * 2  # sélection + purge
+    statuses.clear()
+    certified = _certified(db)
+    clock.advance(seconds=1)
+    assert lb.recover_certified_proof(db, proof_id=certified.proof_id).outcome == lb.FINALIZED
+    assert statuses == [lb._INTRANS]
+    statuses.clear()
+    _, row = _due_rejected(db, clock)
+    seen, remove = _lose_commit(db, f"DELETE FROM {REGISTRY}", really_commit=False)
+    try:
+        assert lb.purge_proof(db, proof_id=row["id"]).outcome == lb.STILL_PRESENT
+    finally:
+        remove()
+    assert seen == ["lost"] and statuses == [lb._INTRANS] * 2  # suppression + relecture, chacune la sienne
+    assert lb._INTRANS == 2  # libpq PQTRANS_INTRANS
+
+
+# --------------------------------------------------------------------------
 # 7. Pages : décisions reprises sous verrou, aucune famine
 # --------------------------------------------------------------------------
 
@@ -1131,9 +1295,12 @@ def test_the_service_and_the_boundary_import_exactly_their_side_and_know_no_defi
     tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
     assert {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "core.models"
             for a in n.names} == {"ProductActivityProof", "ProductCampaign", "ProductCampaignParticipant"}
-    assert _imports(BOUNDARY) == {"logging", "uuid", "dataclasses", "core", "core._activity_event_finalization",
-                                  "core.product_analytics", "core.product_analytics.finalization",
-                                  "core.product_analytics.proof_lifecycle"}
+    assert _imports(BOUNDARY) == {"logging", "uuid", "dataclasses", "sqlalchemy.engine", "core",
+                                  "core._activity_event_finalization", "core.product_analytics",
+                                  "core.product_analytics.finalization", "core.product_analytics.proof_lifecycle"}
+    boundary_tree = ast.parse(BOUNDARY.read_text(encoding="utf-8"))
+    assert [a.name for n in ast.walk(boundary_tree) if isinstance(n, ast.ImportFrom)
+            and n.module.startswith("sqlalchemy") for a in n.names] == ["Engine"]  # type seul, pour le refus
     service, boundary = SERVICE.read_text(encoding="utf-8"), BOUNDARY.read_text(encoding="utf-8")
     for source in (service, boundary):
         for forbidden in ("authz_f2", "auth_f2", "f2_runtime", "_activity_proof_bridge", "oryx_sessions",
@@ -1152,7 +1319,8 @@ def test_the_service_and_the_boundary_import_exactly_their_side_and_know_no_defi
     assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             and n.func.id == "delete"].__len__() == 1
     # La frontière ne contient aucun SQL et ne réécrit pas le bloc C : elle réutilise sa transaction.
-    assert "sqlalchemy" not in boundary and "sa.text" not in boundary and "DELETE" not in boundary
+    assert "import sqlalchemy" not in boundary and "sa." not in boundary and "text(" not in boundary
+    assert "DELETE" not in boundary and "SELECT" not in boundary and "execute(" not in boundary
     assert "finalization_boundary._run(" in boundary and "finalization_boundary._transaction(" in boundary
 
 
