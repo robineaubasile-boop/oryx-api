@@ -798,6 +798,24 @@ def test_the_final_clock_inside_the_savepoint_decides_whether_the_writes_are_kep
     assert utc(row["resolved_at"]) == final and _definitive(db) == (0, 0)  # jamais antidatée
 
 
+@pytest.mark.parametrize("offset", [timedelta(0), timedelta(hours=1)])
+def test_an_expired_decision_is_taken_before_any_write_and_prevails_over_a_conflict(db, clock, monkeypatch, offset):
+    """Échéance atteinte dès l'horloge de décision : résolution immédiate,
+    AUCUNE écriture tentée (une seule lecture d'horloge), et l'expiration
+    l'emporte sur un occupant existant de l'opération (aucun conflit relu)."""
+    proof, end = _last_minute(db, clock)
+    _historical_event(db, idempotency_key=proof.proof_id)  # occupant : la tentative d'écriture serait un conflit
+    snapshot = _events(db)
+    bound = end + GRACE
+    clocks = _Clocks(bound + offset, bound + offset)
+    monkeypatch.setattr(proofs, "server_clock", clocks)
+    decision = finalize(db, proof.proof_id)
+    assert clocks.calls == 1  # aucune ultime horloge : aucune écriture tentée
+    assert decision == fz.FinalizationDecision(fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED, True, proof.proof_id,
+                                               None, bound + offset)
+    assert _events(db) == snapshot and _attributions(db) == []
+
+
 def test_a_final_clock_behind_the_decision_writes_nothing_and_the_retry_is_clean(db, clock, monkeypatch):
     proof = _certified(db)
     before = proof_row(db, proof.proof_id)
