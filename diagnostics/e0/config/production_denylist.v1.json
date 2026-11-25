@@ -1,0 +1,10 @@
+{
+  "e0": "production-denylist",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "rule": "un hôte est refusé s'il CONTIENT l'un des marqueurs, après passage en minuscules, retrait du point final et décodage punycode des étiquettes (spécification § 3.1)",
+  "host_markers": [
+    {"marker": "oryx-api-production", "source": "F04-A V0.3 § 6.1 : origine pilote candidate https://oryx-api-production.up.railway.app"}
+  ],
+  "founder_additions": []
+}

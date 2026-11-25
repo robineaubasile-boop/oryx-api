@@ -1,0 +1,118 @@
+{
+  "e0": "vectors-attestation",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "generated_by": "générateur indépendant hors dépôt : openssl pkeyutl/pkey/dgst bruts, charges utiles écrites champ par champ ; aucun module e0_*",
+  "openssl": "OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+  "notes": [
+    "clés de signature = graines PUBLIQUES de la RFC 8032 § 7.1 (TEST 2 pour oryx-e0-1a, TEST 3 pour oryx-e0-2) : jamais des clés de campagne",
+    "adresses signées = 192.0.0.9, 192.0.0.10 et 2001:1::1 (blocs IANA spéciaux globally_reachable = true, sans titulaire personnel) : synthétiques",
+    "TEST 1 (message vide) : non signable par openssl pkeyutl -rawin 3.0 ; seule la clé publique est contrôlée côté Python, la signature sera croisée par WebCrypto"
+  ],
+  "domain": "oryx-e0-attestation/v1\\n",
+  "rfc8032": [
+    {
+      "name": "TEST 1",
+      "secret": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      "public": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "",
+      "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "openssl_cli_signable": false
+    },
+    {
+      "name": "TEST 2",
+      "secret": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "public": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "openssl_cli_signable": true
+    },
+    {
+      "name": "TEST 3",
+      "secret": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      "public": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "message": "af82",
+      "signature": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
+      "openssl_cli_signable": true
+    },
+    {
+      "name": "TEST SHA(abc)",
+      "secret": "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42",
+      "public": "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf",
+      "message": "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+      "signature": "dc2a4459e7369633a52b1bf277839a00201009a3efbf3ecb69bea2186c26b58909351fc9ac90b3ecfdfbc7c66431e0303dca179c138ac17ad9bef1177331a704",
+      "openssl_cli_signable": true
+    }
+  ],
+  "attestations": [
+    {
+      "name": "valid_v4_phase2",
+      "fields": {
+        "v": "1",
+        "aud": "oryx-e0-2",
+        "kid": "e0-2-dac073e0123bdea5",
+        "ts": "1763200000000",
+        "nonce": "AAECAwQFBgcICQoLDA0ODw",
+        "ip": "192.0.0.9",
+        "c": "V",
+        "m": "GET",
+        "h": "app.e0-zone.example",
+        "hi": "e0-origin-vector.up.railway.app",
+        "t": "/e0/guarded/q83vEjRWeJCrze8SNFZ4kA"
+      },
+      "payload_ascii": "1:1;9:oryx-e0-2;21:e0-2-dac073e0123bdea5;13:1763200000000;22:AAECAwQFBgcICQoLDA0ODw;9:192.0.0.9;1:V;3:GET;19:app.e0-zone.example;31:e0-origin-vector.up.railway.app;34:/e0/guarded/q83vEjRWeJCrze8SNFZ4kA;",
+      "payload_b64url": "MToxOzk6b3J5eC1lMC0yOzIxOmUwLTItZGFjMDczZTAxMjNiZGVhNTsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7OToxOTIuMC4wLjk7MTpWOzM6R0VUOzE5OmFwcC5lMC16b25lLmV4YW1wbGU7MzE6ZTAtb3JpZ2luLXZlY3Rvci51cC5yYWlsd2F5LmFwcDszNDovZTAvZ3VhcmRlZC9xODN2RWpSV2VKQ3J6ZThTTkZaNGtBOw",
+      "signed_message_sha256": "a933ecc1f3e5b53da98dc1e3179e06631087bc9e028de4c3ee04ec39156d4705",
+      "signature_hex": "342583f8a22908b5189ac9cb8cdda62d0460c847b9e60f094492dae2686c52ef6973bc003f32e7fc7f4a79d5e8e7f79180d5027ebbddcc902e2cfde34588370e",
+      "header": "v1.MToxOzk6b3J5eC1lMC0yOzIxOmUwLTItZGFjMDczZTAxMjNiZGVhNTsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7OToxOTIuMC4wLjk7MTpWOzM6R0VUOzE5OmFwcC5lMC16b25lLmV4YW1wbGU7MzE6ZTAtb3JpZ2luLXZlY3Rvci51cC5yYWlsd2F5LmFwcDszNDovZTAvZ3VhcmRlZC9xODN2RWpSV2VKQ3J6ZThTTkZaNGtBOw.NCWD-KIpCLUYmsnLjN2mLQRgyEe55g8JRJLa4mhsUu9pc7wAPzLn_H9KedXo5_eRgNUCfrvdzJAuLP3jRYg3Dg",
+      "public_key_b64url": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU",
+      "rfc8032_seed": "TEST 3"
+    },
+    {
+      "name": "valid_v6_phase2",
+      "fields": {
+        "v": "1",
+        "aud": "oryx-e0-2",
+        "kid": "e0-2-dac073e0123bdea5",
+        "ts": "1763200000000",
+        "nonce": "AAECAwQFBgcICQoLDA0ODw",
+        "ip": "2001:1::1",
+        "c": "V",
+        "m": "POST",
+        "h": "app.e0-zone.example",
+        "hi": "e0-origin-vector.up.railway.app",
+        "t": "/e0/guarded/AAAAAAAAAAAAAAAAAAAAAA?x=1&x=2"
+      },
+      "payload_ascii": "1:1;9:oryx-e0-2;21:e0-2-dac073e0123bdea5;13:1763200000000;22:AAECAwQFBgcICQoLDA0ODw;9:2001:1::1;1:V;4:POST;19:app.e0-zone.example;31:e0-origin-vector.up.railway.app;42:/e0/guarded/AAAAAAAAAAAAAAAAAAAAAA?x=1&x=2;",
+      "payload_b64url": "MToxOzk6b3J5eC1lMC0yOzIxOmUwLTItZGFjMDczZTAxMjNiZGVhNTsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7OToyMDAxOjE6OjE7MTpWOzQ6UE9TVDsxOTphcHAuZTAtem9uZS5leGFtcGxlOzMxOmUwLW9yaWdpbi12ZWN0b3IudXAucmFpbHdheS5hcHA7NDI6L2UwL2d1YXJkZWQvQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT94PTEmeD0yOw",
+      "signed_message_sha256": "b7664e43e938ec7fcd03aca256b53d39e44163352021dfc845f2d35624fb4162",
+      "signature_hex": "413acab1d3b305e00a17525da49a0b1d24ecdc624ea68263845fc83f6dacf260b0ac5b8d46f90c78ad515d8891c0cf96aa5347072ef61042a00ce30d14cbd402",
+      "header": "v1.MToxOzk6b3J5eC1lMC0yOzIxOmUwLTItZGFjMDczZTAxMjNiZGVhNTsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7OToyMDAxOjE6OjE7MTpWOzQ6UE9TVDsxOTphcHAuZTAtem9uZS5leGFtcGxlOzMxOmUwLW9yaWdpbi12ZWN0b3IudXAucmFpbHdheS5hcHA7NDI6L2UwL2d1YXJkZWQvQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT94PTEmeD0yOw.QTrKsdOzBeAKF1JdpJoLHSTs3GJOpoJjhF_IP22s8mCwrFuNRvkMeK1RXYiRwM-WqlNHBy72EEKgDOMNFMvUAg",
+      "public_key_b64url": "_FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU",
+      "rfc8032_seed": "TEST 3"
+    },
+    {
+      "name": "valid_v4_phase1a",
+      "fields": {
+        "v": "1",
+        "aud": "oryx-e0-1a",
+        "kid": "e0-1a-39f713d0a644253f",
+        "ts": "1763200000000",
+        "nonce": "AAECAwQFBgcICQoLDA0ODw",
+        "ip": "192.0.0.10",
+        "c": "V",
+        "m": "GET",
+        "h": "app.e0-zone.example",
+        "hi": "e0-origin-vector.up.railway.app",
+        "t": "/e0/observe"
+      },
+      "payload_ascii": "1:1;10:oryx-e0-1a;22:e0-1a-39f713d0a644253f;13:1763200000000;22:AAECAwQFBgcICQoLDA0ODw;10:192.0.0.10;1:V;3:GET;19:app.e0-zone.example;31:e0-origin-vector.up.railway.app;11:/e0/observe;",
+      "payload_b64url": "MToxOzEwOm9yeXgtZTAtMWE7MjI6ZTAtMWEtMzlmNzEzZDBhNjQ0MjUzZjsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7MTA6MTkyLjAuMC4xMDsxOlY7MzpHRVQ7MTk6YXBwLmUwLXpvbmUuZXhhbXBsZTszMTplMC1vcmlnaW4tdmVjdG9yLnVwLnJhaWx3YXkuYXBwOzExOi9lMC9vYnNlcnZlOw",
+      "signed_message_sha256": "09c09fffd2e414bf9d67ccf993136185e1e916ae2708402f8a1a175848c0ff10",
+      "signature_hex": "75c596b6795d64205942b89c92e621ebcab67266bca5cd4e50723bd4e16c5bd312bfdad48e4521bb0783ab958eae70f899fc7af26c1d22de3eda879efd243906",
+      "header": "v1.MToxOzEwOm9yeXgtZTAtMWE7MjI6ZTAtMWEtMzlmNzEzZDBhNjQ0MjUzZjsxMzoxNzYzMjAwMDAwMDAwOzIyOkFBRUNBd1FGQmdjSUNRb0xEQTBPRHc7MTA6MTkyLjAuMC4xMDsxOlY7MzpHRVQ7MTk6YXBwLmUwLXpvbmUuZXhhbXBsZTszMTplMC1vcmlnaW4tdmVjdG9yLnVwLnJhaWx3YXkuYXBwOzExOi9lMC9vYnNlcnZlOw.dcWWtnldZCBZQrickuYh68q2cma8pc1OUHI71OFsW9MSv9rUjkUhuweDq5WOrnD4mfx68mwdIt4-2oee_SQ5Bg",
+      "public_key_b64url": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
+      "rfc8032_seed": "TEST 2"
+    }
+  ]
+}

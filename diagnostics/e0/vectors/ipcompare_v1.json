@@ -1,0 +1,277 @@
+{
+  "e0": "vectors-ipcompare",
+  "fmt": 1,
+  "protocol": "E0-V0.1c",
+  "generated_by": "générateur indépendant hors dépôt : openssl mac HMAC brut ; issues attendues écrites à la main",
+  "candidate_ip": "192.0.0.9",
+  "pre_signature": [
+    {
+      "name": "absent",
+      "key_values": [],
+      "mac_values": [],
+      "expected": {
+        "entered": false,
+        "effect": "none",
+        "reason": null
+      }
+    },
+    {
+      "name": "key_only",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_only",
+      "key_values": [],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "key_twice",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_twice",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c",
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "key_uppercase",
+      "key_values": [
+        "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "key_short",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_uppercase",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "BC4F52E4CEE324877AB8269B78D0B801D9E8379E5ABDB10A6DA97776B76A527C"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_space_after_comma",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "7c615e2b7dbb52619921e7706b12ed9016f350da290efbab5c5f0314b30b8916, bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_three",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "7c615e2b7dbb52619921e7706b12ed9016f350da290efbab5c5f0314b30b8916,8632d30d563290cdbd503cbb106db3c11286e672b0f6c2df3e29d40520102380,bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "mac_duplicated_in_list",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c,bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "empty_values",
+      "key_values": [
+        ""
+      ],
+      "mac_values": [
+        ""
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_malformed"
+      }
+    },
+    {
+      "name": "concordant",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "none",
+        "reason": null
+      }
+    },
+    {
+      "name": "concordant_second_of_two",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "7c615e2b7dbb52619921e7706b12ed9016f350da290efbab5c5f0314b30b8916,bc4f52e4cee324877ab8269b78d0b801d9e8379e5abdb10a6da97776b76a527c"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "none",
+        "reason": null
+      }
+    },
+    {
+      "name": "discordant",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "7c615e2b7dbb52619921e7706b12ed9016f350da290efbab5c5f0314b30b8916"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_disagreement"
+      }
+    },
+    {
+      "name": "wrong_domain_post_mac",
+      "key_values": [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      ],
+      "mac_values": [
+        "8632d30d563290cdbd503cbb106db3c11286e672b0f6c2df3e29d40520102380"
+      ],
+      "expected": {
+        "entered": true,
+        "effect": "refuse",
+        "reason": "cmp_disagreement"
+      }
+    }
+  ],
+  "post_signature": [
+    {
+      "name": "same_key_equal",
+      "origin": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "witness": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "expected": "match"
+    },
+    {
+      "name": "same_key_different",
+      "origin": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "witness": {
+        "eng": "8632d30d563290cdbd503cbb106db3c11286e672b0f6c2df3e29d40520102380",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "expected": "mismatch"
+    },
+    {
+      "name": "key_id_divergent",
+      "origin": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "witness": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-0000000000000000"
+      },
+      "expected": "inconclusive"
+    },
+    {
+      "name": "witness_absent",
+      "origin": {
+        "eng": "829491a0c6f62969e30271560f2d59ba7b93ffd0691e6f70a3bb3968fe614da7",
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "witness": {
+        "eng": null,
+        "key_id": "cmp-6416d8bb5c7ef228"
+      },
+      "expected": "inconclusive"
+    }
+  ]
+}
