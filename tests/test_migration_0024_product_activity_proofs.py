@@ -350,6 +350,10 @@ PROOF_SERVICE_MARKERS = [REGISTRY, "ProductActivityProof", "recorded_event_id"]
 FINALIZATION_SERVICE = PACKAGE / "finalization.py"
 FINALIZATION_SERVICE_MARKERS = [REGISTRY, ATTRIBUTIONS, "ProductActivityProof", "ProductActivityEventAttribution",
                                 "recorded_event_id"]
+# V0-T08 Lot 2C PR 1 : sélection bornée et purge du registre ; ne connaît QUE le
+# registre (jamais les attributions, recorded_event_id ni les UNIQUE).
+LIFECYCLE_SERVICE = PACKAGE / "proof_lifecycle.py"
+LIFECYCLE_SERVICE_MARKERS = [REGISTRY, "ProductActivityProof"]
 
 
 def test_dormancy_no_production_module_knows_the_new_tables():
@@ -376,6 +380,10 @@ def test_dormancy_no_production_module_knows_the_new_tables():
             # jamais les UNIQUE cibles des FK (dernière défense, inchangée).
             assert [m for m in DORMANCY_MARKERS if m in source] == FINALIZATION_SERVICE_MARKERS
             continue
+        if path == LIFECYCLE_SERVICE:
+            # V0-T08 2C PR 1 (nominatif) : le registre seul.
+            assert [m for m in DORMANCY_MARKERS if m in source] == LIFECYCLE_SERVICE_MARKERS
+            continue
         if any(marker in source for marker in DORMANCY_MARKERS):
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
     assert offenders == []
@@ -384,7 +392,8 @@ def test_dormancy_no_production_module_knows_the_new_tables():
             if path.is_file() and path.suffix in (".html", ".js", ".mjs", ".css", ".json"):
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 assert not any(marker in text for marker in DORMANCY_MARKERS[:4]), path
-    assert not [p for p in PACKAGE.glob("*.py") if p not in (PROOF_SERVICE, FINALIZATION_SERVICE) and any(
+    assert not [p for p in PACKAGE.glob("*.py") if p not in (PROOF_SERVICE, FINALIZATION_SERVICE,
+                                                             LIFECYCLE_SERVICE) and any(
         marker in p.read_text(encoding="utf-8") for marker in DORMANCY_MARKERS)]
     for name in V0T08_0024_TABLES:
         targets = {e.column.table.name for fk in Base.metadata.tables[name].foreign_key_constraints

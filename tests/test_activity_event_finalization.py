@@ -99,6 +99,9 @@ KINDS = [(CREATE, "portfolio_used", "portfolio"), (UPDATE, "portfolio_used", "po
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 SERVICE = PACKAGE / "finalization.py"
 BOUNDARY = REPO_ROOT / "core" / "_activity_event_finalization.py"
+# V0-T08 Lot 2C PR 1 (nominatif) : la frontière du cycle de vie reprend les
+# preuves par les points d'entrée du bloc C, inchangés ; elle-même sans appelant.
+LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_proof_lifecycle.py"
 
 
 # --------------------------------------------------------------------------
@@ -1513,7 +1516,7 @@ def test_only_the_service_writes_certified_events_and_attributions():
             assert path == PACKAGE / "events.py", relative  # seul constructeur de lignes d'événement
         if "ProductActivityEventAttribution" in constructed:
             assert path == SERVICE, relative  # seul constructeur d'attributions
-        if path not in (SERVICE, BOUNDARY):
+        if path not in (SERVICE, BOUNDARY, LIFECYCLE_BOUNDARY):
             assert "finalize_certified_proof" not in source and "resolve_expired_pending_proof" not in source, relative
             assert ("finalization", "finalize_certified_proof") not in calls
     service_calls = _calls(SERVICE)
