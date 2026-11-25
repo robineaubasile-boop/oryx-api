@@ -30,7 +30,14 @@ core/product_analytics/ existent mais ne sont raccordés à rien.
   proofs (et de events) ; UNIQUE exception nominative supplémentaire hors du
   paquet, core/_activity_event_finalization.py (frontière privée de
   transaction), qui n'importe que finalization et n'a aucun appelant
-  (tests/test_activity_event_finalization_chain.py).
+  (tests/test_activity_event_finalization_chain.py) ;
+- lot 2C PR 1 : un seul module ajouté au paquet (proof_lifecycle.py,
+  sélection bornée et purge du registre provisoire), seul autre importateur
+  de proofs et SEUL importateur de finalization dans le paquet (jamais de
+  events) ; UNIQUE exception nominative supplémentaire hors du paquet,
+  core/_activity_proof_lifecycle.py (frontière privée de transaction), qui
+  n'importe que finalization et proof_lifecycle (plus la frontière du bloc C)
+  et n'a aucun appelant (tests/test_activity_proof_lifecycle.py).
 """
 import ast
 import hashlib
@@ -44,7 +51,7 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_direc
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 PACKAGE_MODULE = "core.product_analytics"
 MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "finalization.py",
-           "participation.py", "proofs.py", "retention.py", "sessions.py")
+           "participation.py", "proof_lifecycle.py", "proofs.py", "retention.py", "sessions.py")
 # V0-T08 Lot 2B-2 bloc B (nominatif) : UNIQUE module hors du paquet autorisé à
 # l'importer, et seulement le registre des preuves ; lui-même sans appelant
 # (tests/test_activity_proof_bridge.py).
@@ -55,6 +62,12 @@ PROOF_BRIDGE_IMPORTS = {"core.product_analytics", "core.product_analytics.proofs
 # appelant (tests/test_activity_event_finalization_chain.py).
 FINALIZATION_BOUNDARY = "core/_activity_event_finalization.py"
 FINALIZATION_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analytics.finalization"}
+# V0-T08 Lot 2C PR 1 (nominatif) : frontière privée du cycle de vie du
+# registre, qui n'importe que la finalisation (bloc C, inchangé) et le cycle de
+# vie ; elle-même sans appelant (tests/test_activity_proof_lifecycle.py).
+LIFECYCLE_BOUNDARY = "core/_activity_proof_lifecycle.py"
+LIFECYCLE_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analytics.finalization",
+                              "core.product_analytics.proof_lifecycle"}
 MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1.py"
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
@@ -77,7 +90,10 @@ ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "
 EXTRA_IMPORTS = {"proofs.py": {"weakref", "core.product_analytics.sessions"},
                  # V0-T08 Lot 2B-2 bloc C (nominatif) : la finalisation relit le
                  # registre (proofs) et écrit par le chemin certifié de events.
-                 "finalization.py": {"core.product_analytics.events", "core.product_analytics.proofs"}}
+                 "finalization.py": {"core.product_analytics.events", "core.product_analytics.proofs"},
+                 # V0-T08 Lot 2C PR 1 (nominatif) : le cycle de vie relit le registre
+                 # (proofs) et reprend les vocabulaires et l'échéance du bloc C.
+                 "proof_lifecycle.py": {"core.product_analytics.finalization", "core.product_analytics.proofs"}}
 # Modèles F2 lisibles par le paquet (lot 2B-1, cohort.py seulement) : preuve
 # canonique invitation -> utilisateur. Aucun autre modèle F2.
 F2_MODELS = {"Invitation", "AuthOperation", "AuthIdentity", "AuthPreauthCandidate", "AuthOtpRequest",
@@ -139,6 +155,12 @@ def test_no_application_module_imports_the_package():
             assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == FINALIZATION_BOUNDARY_IMPORTS, imported
             assert "import_module" not in text and "__import__" not in text
             continue
+        if path.relative_to(REPO_ROOT).as_posix() == LIFECYCLE_BOUNDARY:
+            # Exception nominative (lot 2C PR 1) : imports analytics EXACTS
+            # (finalisation et cycle de vie), aucun chargement dynamique.
+            assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == LIFECYCLE_BOUNDARY_IMPORTS, imported
+            assert "import_module" not in text and "__import__" not in text
+            continue
         if any(i == PACKAGE_MODULE or i.startswith(PACKAGE_MODULE + ".") for i in imported) or \
                 "product_analytics." in text or "import_module" in text and "product_analytics" in text:
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
@@ -152,9 +174,15 @@ def test_no_application_module_imports_the_package():
 
 def test_only_the_bridge_imports_the_proof_registry_service():
     for name in MODULES:
-        if name == "finalization.py":
-            # Exception nominative (bloc C) : relecture des preuves certifiées.
+        # Lot 2C PR 1 : seul le cycle de vie importe la finalisation dans le paquet.
+        if name != "proof_lifecycle.py":
+            assert "core.product_analytics.finalization" not in _imports(PACKAGE / name), name
+        if name in ("finalization.py", "proof_lifecycle.py"):
+            # Exceptions nominatives : relecture des preuves certifiées (bloc C),
+            # sélection et purge du registre (lot 2C PR 1).
             assert "core.product_analytics.proofs" in _imports(PACKAGE / name)
+            if name == "proof_lifecycle.py":
+                assert "core.product_analytics.events" not in _imports(PACKAGE / name)
             continue
         assert "core.product_analytics.proofs" not in _imports(PACKAGE / name), name
         assert "import proofs" not in (PACKAGE / name).read_text(encoding="utf-8"), name

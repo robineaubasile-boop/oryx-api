@@ -112,14 +112,15 @@ def _same_outcome(observed, decision) -> bool:
         decision.proof_id, decision.state, decision.reason, decision.event_id, decision.resolved_at)
 
 
-def _establish(engine, work, proof_id) -> FinalizationReport:
+def _establish(engine, work, proof_id, *, observe=None) -> FinalizationReport:
+    observe = finalization.observe_proof if observe is None else observe
     status, decision = _transaction(engine, lambda db: work(db, proof_id=proof_id))
     if status == _FAILED:
         return FinalizationReport(UNKNOWN, finalization.TECHNICAL_UNCERTAINTY)
     if status == _COMMITTED or not decision.written:
         return _report(decision)
     # COMMIT incertain d'une écriture : relecture dans une NOUVELLE transaction.
-    status, observed = _transaction(engine, lambda db: finalization.observe_proof(db, proof_id=proof_id))
+    status, observed = _transaction(engine, lambda db: observe(db, proof_id=proof_id))
     if status == _FAILED:  # lecture seule : un COMMIT perdu ne l'invalide pas
         return FinalizationReport(UNKNOWN, finalization.TECHNICAL_UNCERTAINTY)
     if _same_outcome(observed, decision):
@@ -134,11 +135,15 @@ def _log(report: FinalizationReport) -> None:
     logger.log(level, "activity_finalization state=%s reason=%s", report.state, report.reason)
 
 
-def _run(engine, work, proof_id) -> FinalizationReport:
+def _run(engine, work, proof_id, *, observe=None) -> FinalizationReport:
+    """`observe` : relecture d'un COMMIT incertain ; None (appelants
+    historiques) = finalization.observe_proof, inchangée. Seule la frontière
+    du lot 2C la passe, pour vérifier que cette relecture est elle-même une
+    transaction effective ; aucune autre logique n'est déléguée."""
     if type(proof_id) is not uuid.UUID:
         raise TypeError("proof_id : uuid.UUID requis")
     try:
-        report = _establish(engine, work, proof_id)
+        report = _establish(engine, work, proof_id, observe=observe)
     except Exception:  # noqa: BLE001 — jamais une exception pour l'appelant
         report = FinalizationReport(UNKNOWN, finalization.TECHNICAL_UNCERTAINTY)
     try:

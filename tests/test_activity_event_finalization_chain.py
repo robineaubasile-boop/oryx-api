@@ -71,6 +71,10 @@ from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 —
 
 BOUNDARY = REPO_ROOT / "core" / "_activity_event_finalization.py"
 SERVICE = REPO_ROOT / "core" / "product_analytics" / "finalization.py"
+# V0-T08 Lot 2C PR 1 (nominatif) : seul module, hors du service et de la
+# frontière, qui les nomme (réutilisation de la transaction et de l'issue
+# établie du bloc C) ; lui-même sans appelant (tests/test_activity_proof_lifecycle.py).
+LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_proof_lifecycle.py"
 IDLE = lambda point: None  # noqa: E731
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 GRACE = timedelta(minutes=30)
@@ -95,7 +99,8 @@ def test_the_boundary_and_the_service_are_dormant_and_import_exactly_their_side(
     # Aucun appelant : aucun module hors des tests et de la documentation ne nomme la frontière ni le service.
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*")):
-        if (not path.is_file() or path in (BOUNDARY, SERVICE) or ".git" in path.parts or "__pycache__" in path.parts
+        if (not path.is_file() or path in (BOUNDARY, SERVICE, LIFECYCLE_BOUNDARY) or ".git" in path.parts
+                or "__pycache__" in path.parts
                 or "node_modules" in path.parts or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh",
                                                                         ".yml", ".yaml", ".toml", ".ini", ".cfg")):
             continue
