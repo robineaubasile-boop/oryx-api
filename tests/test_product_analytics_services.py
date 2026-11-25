@@ -420,6 +420,23 @@ def test_services_never_own_the_transaction_and_never_delete():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     and node.module and node.module.startswith("sqlalchemy") for alias in node.names}
+        if path.name == "proof_lifecycle.py":
+            # Exception nominative V0-T08 2C PR 1 : la purge du registre
+            # provisoire est le SEUL DELETE du paquet — une instruction,
+            # sur ProductActivityProof seul, sous SAVEPOINT ; ni update, ni
+            # SQL brut. Intervalles absolus (make_interval) et échéance
+            # least(...) lus par PostgreSQL ; verrous via common.lock_identities.
+            assert imported == {"Float", "and_", "delete", "func", "literal", "select", "tuple_"}, path.name
+            functions = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                         and isinstance(node.value, ast.Name) and node.value.id == "func"}
+            assert functions == {"make_interval", "least"}, path.name
+            deletes = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "delete"]
+            assert [[ast.unparse(a) for a in node.args] for node in deletes] == [["table"]], path.name
+            assert [ast.unparse(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                    and [ast.unparse(t) for t in node.targets] == ["table"]] == ["ProductActivityProof"], path.name
+            assert _calls(path, {"begin_nested"}) == ["begin_nested"], path.name
+            continue
         assert imported <= {"select", "IntegrityError", "func"}, path.name  # ni delete, ni update, ni SQL brut (text)
         # func ne sert qu'aux verrous consultatifs de transaction (audit R1) ;
         # exception nominative V0-T08 2B-2 PR 2 : proofs.py lit en plus
