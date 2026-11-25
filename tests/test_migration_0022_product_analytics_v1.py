@@ -402,7 +402,7 @@ def test_no_production_module_references_the_analytics_tables():
     # product_activity_events et y réfère par FK (testée à part).
     migration_0024 = REPO_ROOT / "alembic" / "versions" / V0T08_0024_FILE
     allowed = {REPO_ROOT / "core" / "models.py", MIGRATION, migration_0023, migration_0024, *services.glob("*.py")}
-    assert len(allowed) == 4 + 9  # V0-T08 Lot 2B-2 bloc B : + proofs.py
+    assert len(allowed) == 4 + 10  # V0-T08 Lot 2B-2 bloc B : + proofs.py ; bloc C : + finalization.py
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*.py")):
         relative = path.relative_to(REPO_ROOT).parts

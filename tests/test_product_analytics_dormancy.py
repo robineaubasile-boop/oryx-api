@@ -24,7 +24,13 @@ core/product_analytics/ existent mais ne sont raccordés à rien.
   certification des preuves) ; UNIQUE exception nominative hors du paquet,
   core/_activity_proof_bridge.py, qui n'importe que proofs et n'a aucun
   appelant (tests/test_activity_proof_bridge.py) ; aucun autre module du
-  paquet n'importe proofs.
+  paquet n'importe proofs ;
+- lot 2B-2 bloc C : un seul module ajouté au paquet (finalization.py,
+  finalisation atomique des preuves certifiées), SEUL autre importateur de
+  proofs (et de events) ; UNIQUE exception nominative supplémentaire hors du
+  paquet, core/_activity_event_finalization.py (frontière privée de
+  transaction), qui n'importe que finalization et n'a aucun appelant
+  (tests/test_activity_event_finalization_chain.py).
 """
 import ast
 import hashlib
@@ -37,13 +43,18 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_direc
 
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 PACKAGE_MODULE = "core.product_analytics"
-MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "participation.py", "proofs.py",
-           "retention.py", "sessions.py")
+MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "finalization.py",
+           "participation.py", "proofs.py", "retention.py", "sessions.py")
 # V0-T08 Lot 2B-2 bloc B (nominatif) : UNIQUE module hors du paquet autorisé à
 # l'importer, et seulement le registre des preuves ; lui-même sans appelant
 # (tests/test_activity_proof_bridge.py).
 PROOF_BRIDGE = "core/_activity_proof_bridge.py"
 PROOF_BRIDGE_IMPORTS = {"core.product_analytics", "core.product_analytics.proofs"}
+# V0-T08 Lot 2B-2 bloc C (nominatif) : frontière privée de transaction de la
+# finalisation, qui n'importe que le service de finalisation ; elle-même sans
+# appelant (tests/test_activity_event_finalization_chain.py).
+FINALIZATION_BOUNDARY = "core/_activity_event_finalization.py"
+FINALIZATION_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analytics.finalization"}
 MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1.py"
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
@@ -63,7 +74,10 @@ ALLOWED_IMPORTS = {"hashlib", "json", "re", "uuid", "dataclasses", "datetime", "
 # V0-T08 Lot 2B-2 bloc B, audit PR #253 (nominatif) : proofs.py émet l'origine
 # d'une opération via le service 2B-1 (sessions) et garde les origines émises
 # en références faibles (weakref) ; aucun autre module n'en bénéficie.
-EXTRA_IMPORTS = {"proofs.py": {"weakref", "core.product_analytics.sessions"}}
+EXTRA_IMPORTS = {"proofs.py": {"weakref", "core.product_analytics.sessions"},
+                 # V0-T08 Lot 2B-2 bloc C (nominatif) : la finalisation relit le
+                 # registre (proofs) et écrit par le chemin certifié de events.
+                 "finalization.py": {"core.product_analytics.events", "core.product_analytics.proofs"}}
 # Modèles F2 lisibles par le paquet (lot 2B-1, cohort.py seulement) : preuve
 # canonique invitation -> utilisateur. Aucun autre modèle F2.
 F2_MODELS = {"Invitation", "AuthOperation", "AuthIdentity", "AuthPreauthCandidate", "AuthOtpRequest",
@@ -119,6 +133,12 @@ def test_no_application_module_imports_the_package():
             assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == PROOF_BRIDGE_IMPORTS, imported
             assert "import_module" not in text and "__import__" not in text
             continue
+        if path.relative_to(REPO_ROOT).as_posix() == FINALIZATION_BOUNDARY:
+            # Exception nominative (bloc C) : imports analytics EXACTS
+            # (service de finalisation seulement), aucun chargement dynamique.
+            assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == FINALIZATION_BOUNDARY_IMPORTS, imported
+            assert "import_module" not in text and "__import__" not in text
+            continue
         if any(i == PACKAGE_MODULE or i.startswith(PACKAGE_MODULE + ".") for i in imported) or \
                 "product_analytics." in text or "import_module" in text and "product_analytics" in text:
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
@@ -132,8 +152,14 @@ def test_no_application_module_imports_the_package():
 
 def test_only_the_bridge_imports_the_proof_registry_service():
     for name in MODULES:
+        if name == "finalization.py":
+            # Exception nominative (bloc C) : relecture des preuves certifiées.
+            assert "core.product_analytics.proofs" in _imports(PACKAGE / name)
+            continue
         assert "core.product_analytics.proofs" not in _imports(PACKAGE / name), name
         assert "import proofs" not in (PACKAGE / name).read_text(encoding="utf-8"), name
+        # Seule la finalisation importe aussi le service d'événements (chemin certifié).
+        assert "core.product_analytics.events" not in _imports(PACKAGE / name), name
 
 
 def test_only_migration_0024_added_and_0022_0023_unchanged():
