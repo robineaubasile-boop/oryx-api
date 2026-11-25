@@ -636,6 +636,16 @@ def test_out_of_contract_certified_events_are_never_touched_and_are_reported(db,
         assert expire(db, event_id) == lb.EventOutcome(lb.CONFLICT, el.CLASSIFICATION_INCOHERENT)
         assert inspect_one(db, event_id) == lb.EventOutcome(lb.INCONSISTENT, el.CLASSIFICATION_INCOHERENT)
     assert _world(db) == world  # aucune écriture, aucune réparation
+    # Défense en profondeur : même si le contrôle de contrat laissait passer un
+    # certifié à deux finalités dont une seule est échue, aucun retrait partiel.
+    occurred = utc(_event(db, proof.id)["occurred_at"])
+    _shorten(db, proof.id, proof.campaign_id, occurred + timedelta(days=1))
+    clock.set(occurred + timedelta(days=1))
+    world = _world(db)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(el, "_contract_problem", lambda db, locked: None)
+        assert expire(db, proof.id) == lb.EventOutcome(lb.CONFLICT, el.CLASSIFICATION_INCOHERENT)
+    assert _world(db) == world
 
 
 def test_a_historical_event_with_an_attribution_is_out_of_contract(db, clock):
@@ -1005,12 +1015,15 @@ def test_a_dependency_that_appears_after_the_reread_aborts_the_treatment(db, clo
             fired.append(1)
             _restore_proof(db, row)  # écrivain hors service, après L1, avant les verrous de lignes
     sa.event.listen(db, "before_cursor_execute", inject)
+    seen, remove = _statements(db)
     try:
-        world = None
         outcome = expire(db, proof.id)
     finally:
         sa.event.remove(db, "before_cursor_execute", inject)
+        remove()
     assert fired == [1] and outcome == lb.EventOutcome(lb.CONFLICT, el.DEPENDENCY_CHANGED)
+    # Abandon décidé par la relecture L2, AVANT toute écriture (la FK n'est que la défense finale).
+    assert not [s for s in seen if s.startswith(("DELETE", "UPDATE", "SAVEPOINT"))]
     world = _world(db)
     assert proof_row(db, proof.proof_id) is not None and _event(db, proof.id) is not None
     assert _world(db) == world
@@ -1098,8 +1111,13 @@ def test_the_implicit_foreign_key_locks_of_an_outside_writer_are_respected_both_
     # 1. Écrivain hors service : preuve référençante NON committée (FOR KEY SHARE implicite sur l'attribution).
     writer = Holder(db)
     writer.db.execute(insert)
-    assert _contend(db, writer, lambda: expire(db, proof.id)) == lb.EventOutcome(lb.CONFLICT,
-                                                                                  el.DEPENDENCY_CHANGED)
+    seen, remove = _statements(db)
+    try:
+        assert _contend(db, writer, lambda: expire(db, proof.id)) == lb.EventOutcome(lb.CONFLICT,
+                                                                                      el.DEPENDENCY_CHANGED)
+    finally:
+        remove()
+    assert not [s for s in seen if s.startswith(("DELETE", "SAVEPOINT"))]  # vue en L2 : aucune écriture tentée
     with db.begin() as conn:
         conn.execute(sa.text(f"DELETE FROM {REGISTRY} WHERE id = :i"), {"i": proof.proof_id})
     writer = Holder(db)
@@ -1484,10 +1502,14 @@ def test_the_integrity_check_reports_every_anomaly_including_those_invisible_to_
     expired = _historical(db)
     clock.advance(seconds=1)
     invisible = anomalies["invisible"][0]
-    assert invisible not in committed(db, lambda s: el.select_expired_event_candidates(s)).event_ids
+    assert committed(db, lambda s: el.select_expired_event_candidates(s)).event_ids == ()  # rien d'échu en colonnes
     world = _world(db)
     seen, remove = _statements(db)
     try:
+        independent = lb.inspect_events_page(db)  # parcours sans filtre temporel : TOUS les événements
+        assert (independent.examined, independent.inconsistent, independent.valid) == (
+            len(anomalies) + 2, len(anomalies), 2)
+        assert invisible in committed(db, lambda s: el.select_integrity_candidates(s)).event_ids
         for name, (event_id, reason) in anomalies.items():
             assert inspect_one(db, event_id) == lb.EventOutcome(lb.INCONSISTENT, reason), name
         assert inspect_one(db, valid.id) == lb.EventOutcome(lb.VALID)
