@@ -1191,7 +1191,120 @@ def test_every_transaction_of_a_valid_engine_is_an_effective_postgresql_transact
     finally:
         remove()
     assert seen == ["lost"] and statuses == [lb._INTRANS] * 2  # suppression + relecture, chacune la sienne
+    statuses.clear()
+    # COMMIT incertain du bloc C (reprise certified puis résolution pending) :
+    # la relecture observe_proof est, elle aussi, une transaction vérifiée.
+    certified = _certified(db)
+    clock.advance(seconds=1)
+    seen, remove = _lose_commit(db, f"INSERT INTO {EVENTS}", really_commit=True)
+    try:
+        assert lb.recover_certified_proof(db, proof_id=certified.proof_id).outcome == lb.FINALIZED
+    finally:
+        remove()
+    assert seen == ["lost"] and statuses == [lb._INTRANS] * 2  # écriture + relecture du bloc C
+    statuses.clear()
+    pending = _pending(db)
+    clock.set(_participation(db, pending.campaign_id).window_end_at + GRACE + timedelta(seconds=1))
+    seen, remove = _lose_commit(db, f"UPDATE {REGISTRY}", really_commit=True)
+    try:
+        assert lb.expire_pending_proof(db, proof_id=pending.proof_id).outcome == lb.RESOLVED
+    finally:
+        remove()
+    assert seen == ["lost"] and statuses == [lb._INTRANS] * 2
     assert lb._INTRANS == 2  # libpq PQTRANS_INTRANS
+
+
+def _reread_without_transaction(engine, statement_prefix):
+    """L'écriture du bloc C s'exécute dans une transaction effective et son
+    COMMIT a RÉELLEMENT lieu, mais sa confirmation est perdue ; la connexion
+    physique ouverte ensuite sur le MÊME moteur (relecture) est placée en
+    AUTOCOMMIT par le pilote, invisible à toute validation antérieure."""
+    lost, outside = [], []
+
+    def connect(dbapi_connection, record):
+        if lost:
+            dbapi_connection.autocommit = True
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if conn.connection.dbapi_connection.autocommit:
+            outside.append(" ".join(statement.split()))
+        elif statement.startswith(statement_prefix):
+            conn.info["target"] = True
+
+    def lose(conn):
+        if conn.info.pop("target", False) and not lost:
+            lost.append("lost")
+            conn.connection.dbapi_connection.commit()
+            raise OSError("confirmation du COMMIT analytics perdue")
+    sa.event.listen(engine, "connect", connect)
+    sa.event.listen(engine, "before_cursor_execute", capture)
+    sa.event.listen(engine, "commit", lose)
+    return lost, outside, lambda: (sa.event.remove(engine, "commit", lose),
+                                   sa.event.remove(engine, "before_cursor_execute", capture),
+                                   sa.event.remove(engine, "connect", connect))
+
+
+def _recovery_case(db, clock):
+    proof = _certified(db)
+    clock.advance(seconds=1)
+    return proof, f"INSERT INTO {EVENTS}", lb.recover_certified_proof, lb.recover_certified_page, "finalized"
+
+
+def _expiry_case(db, clock):
+    proof = _pending(db)
+    clock.set(_participation(db, proof.campaign_id).window_end_at + GRACE + timedelta(seconds=1))
+    return proof, f"UPDATE {REGISTRY}", lb.expire_pending_proof, lb.expire_pending_page, "resolved"
+
+
+@pytest.mark.parametrize("entry", ["proof", "page"])
+@pytest.mark.parametrize("case", [_recovery_case, _expiry_case], ids=["recovery", "expiry"])
+def test_a_block_c_reread_without_an_effective_transaction_is_unknown_and_never_counted(db, clock, case, entry):
+    # Contre-épreuve (avant correction : la relecture observe_proof s'exécutait
+    # hors de tout bloc de transaction, verrous consultatifs et FOR UPDATE
+    # relâchés à chaque instruction, et l'issue était annoncée finalized /
+    # resolved). La validité de la transaction d'écriture ne garantit jamais
+    # celle d'une transaction ultérieure ouverte sur le même moteur.
+    proof, prefix, single, page, success = case(db, clock)
+    lost, outside, remove = _reread_without_transaction(db, prefix)
+    try:
+        if entry == "proof":
+            assert single(db, proof_id=proof.proof_id) == lb.LifecycleOutcome(
+                lb.UNKNOWN, lb.UNKNOWN, proofs.TECHNICAL_UNCERTAINTY)
+        else:
+            report = page(db)
+            assert report.counters() == {**dict.fromkeys(lb.OUTCOMES, 0), "unknown": 1}  # aucun succès compté
+            assert (report.selected, report.examined, report.next_cursor) == (True, 1, None)
+            assert getattr(report, success) == 0
+    finally:
+        remove()
+    assert lost == ["lost"]
+    # Sur la connexion sans transaction : les seuls garde-fous SET du bloc C ;
+    # ni lecture métier, ni verrou consultatif, ni FOR UPDATE.
+    assert outside == list(fb.ANALYTICS_GUARDS)
+    # L'écriture a réellement été committée : l'issue conservatrice n'invente
+    # rien et ne la double pas.
+    row = proof_row(db, proof.proof_id)
+    assert row["status"] in ("recorded", "rejected", "indeterminate") and len(_events(db)) <= 1
+    assert single(db, proof_id=proof.proof_id).outcome == lb.NOT_ADMISSIBLE  # réexécution explicite : déjà résolue
+    assert proof_row(db, proof.proof_id) == row
+
+
+def test_the_historic_block_c_callers_keep_their_unchecked_reread(db, clock):
+    # Extension interne minimale du bloc C : la relecture est injectable,
+    # par défaut observe_proof INCHANGÉ ; ses appelants historiques ne la
+    # passent pas et gardent strictement leur comportement.
+    assert inspect.signature(fb._run).parameters["observe"].default is None  # = fz.observe_proof, résolue à l'appel
+    assert inspect.signature(fb._establish).parameters["observe"].default is None
+    assert inspect.signature(fb._run).parameters["observe"].kind is inspect.Parameter.KEYWORD_ONLY
+    proof = _certified(db)
+    clock.advance(seconds=1)
+    lost, outside, remove = _reread_without_transaction(db, f"INSERT INTO {EVENTS}")
+    try:
+        report = fb.finalize_in_transaction(db, proof_id=proof.proof_id)
+    finally:
+        remove()
+    assert lost == ["lost"] and report.state == fz.RECORDED  # comportement historique conservé
+    assert any(REGISTRY in s for s in outside)  # relecture historique : aucun contrôle ajouté
 
 
 # --------------------------------------------------------------------------
@@ -1322,6 +1435,7 @@ def test_the_service_and_the_boundary_import_exactly_their_side_and_know_no_defi
     assert "import sqlalchemy" not in boundary and "sa." not in boundary and "text(" not in boundary
     assert "DELETE" not in boundary and "SELECT" not in boundary and "execute(" not in boundary
     assert "finalization_boundary._run(" in boundary and "finalization_boundary._transaction(" in boundary
+    assert "observe=_owned(finalization.observe_proof)" in boundary  # relecture du bloc C contrôlée, elle aussi
 
 
 def test_nothing_calls_the_lifecycle_outside_the_tests_and_the_documentation():

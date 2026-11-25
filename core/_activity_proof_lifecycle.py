@@ -28,10 +28,13 @@ refusés par TypeError AVANT toute connexion, sans aucune instruction ni
 effet sur la transaction de l'appelant : une écriture faite dans la
 transaction d'autrui ne serait jamais la nôtre (son ROLLBACK l'annulerait
 après l'annonce d'un succès). Défense en profondeur, à l'intérieur de chaque
-transaction (sélection, écriture, relecture), avant tout travail : libpq
-doit rapporter un bloc de transaction PostgreSQL EFFECTIF (INTRANS) après
-les garde-fous du bloc C ; sinon (AUTOCOMMIT imposé par le pilote, par
-exemple), rien n'est lu ni écrit et l'issue est UNKNOWN.
+transaction (sélection, écriture, relecture d'un COMMIT incertain de purge
+ou du bloc C), avant tout travail : libpq doit rapporter un bloc de
+transaction PostgreSQL EFFECTIF (INTRANS) après les garde-fous du bloc C ;
+sinon (AUTOCOMMIT imposé par le pilote, par exemple), rien n'est lu ni écrit
+et l'issue est UNKNOWN. La validité d'une transaction ne garantit jamais
+celle d'une transaction ultérieure ouverte sur le même moteur (autre
+connexion physique possible) : chacune est vérifiée pour elle-même.
 
 Points d'entrée (aucun ne lève, sauf entrée invalide avant toute connexion) :
 
@@ -221,7 +224,11 @@ def _through_block_c(engine, service, proof_id) -> LifecycleOutcome:
         decision = service(db, proof_id=proof_id)
         captured.append(decision)
         return decision
-    report = finalization_boundary._run(engine, _owned(work), proof_id)
+    # Écriture ET relecture d'un COMMIT incertain : chacune est une transaction
+    # distincte, éventuellement sur une autre connexion physique du même moteur,
+    # vérifiée pour elle-même (la validité de l'une ne garantit pas l'autre).
+    report = finalization_boundary._run(engine, _owned(work), proof_id,
+                                        observe=_owned(finalization.observe_proof))
     return _classify(report, captured[0] if captured else None)
 
 
