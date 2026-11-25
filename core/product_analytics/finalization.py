@@ -52,6 +52,20 @@ certified_at jamais modifié.
 Chronologie exigée : I.recorded_at <= P.created_at <= P.certified_at <=
 instant de finalisation ; sinon aucun événement.
 
+Instant de décision (R1) : recorded_at de l'événement et resolved_at de la
+preuve = horloge PostgreSQL lue APRÈS tous les verrous explicites. Les
+écritures peuvent encore attendre (index unique tenu par une transaction
+non committée d'un écrivain hors service, contrôle de FK) : une ULTIME
+horloge est lue après les trois écritures, DANS le même SAVEPOINT, avant
+son RELEASE ; la décision n'est conservée que si elle est encore admissible
+à cet instant (strictement avant l'échéance). Sinon le SAVEPOINT est annulé
+(aucun événement, aucune attribution, aucune preuve recorded) et la preuve
+est résolue à l'instant de l'ultime horloge (indeterminate /
+finalization_expired), jamais antidatée ; horloge régressive : aucune
+écriture. Aucun instant de COMMIT n'est garanti (PostgreSQL ne le permet
+pas) : le contrat porte sur la décision admissible après les attentes SQL
+des écritures.
+
 États (finalize_certified_proof) :
 
     pending        jamais enregistrable ; inchangée (sa résolution est
@@ -60,9 +74,10 @@ instant de finalisation ; sinon aucun événement.
                    motif certain -> rejected (source_unverified,
                    visit_conflict, origin_unverified, window_expired,
                    not_authorized, operation_conflict) ;
-                   échéance de finalisation dépassée ou incohérence
-                   chronologique stockée -> indeterminate
-                   (finalization_expired / technical_uncertainty) ;
+                   échéance de finalisation dépassée (avant les écritures
+                   ou à l'ultime horloge) ou incohérence chronologique
+                   stockée -> indeterminate (finalization_expired /
+                   technical_uncertainty) ;
                    horloge régressive ou course SQL perdue : AUCUNE écriture
                    (retry sûr possible, jamais automatique)
     recorded       terminal, idempotent : événement et attribution relus et
@@ -83,24 +98,26 @@ finalité : aucune autre campagne du même utilisateur n'est rattachée.
 Échéance de finalisation (marge réservée aux preuves DÉJÀ certifiées, jamais
 une grâce générique de events.record_event, dont LATE_EVENT_GRACE reste 0) :
 
-    deadline = min(window_end_at + SESSION_FINALIZATION_GRACE, close_by_at,
-                   max(window_end_at, fin de la visite d'origine))
+    deadline = min(window_end_at + SESSION_FINALIZATION_GRACE, close_by_at)
 
-    fin de la visite = idle_expires_at, ou finalized_at d'une déconnexion
-    (logout) antérieure. Contrat 2A (events.py, politique de retard) : la
-    remise après window_end_at n'est admise qu'à la clôture d'une session
-    commencée avant l'échéance, au plus SESSION_FINALIZATION_GRACE après sa
-    dernière activité ; la visite d'origine borne donc la marge. Avant
-    window_end_at, la fin de la visite est sans effet. La décision est prise
-    strictement avant `deadline` ; à la borne exacte ou après : aucune
-    création (indeterminate / finalization_expired). Ni J0, ni la fenêtre, ni
-    close_by_at, ni la visite ne sont modifiés.
+    Arbitrage R1 : la fin de la visite d'origine (inactivité ou
+    déconnexion) ne raccourcit PAS cette échéance. Le bloc B a déjà établi un
+    nouvel effet métier réel, une origine valide (interaction acceptée dans
+    la fenêtre, sur cette visite) et une certification strictement antérieure
+    à window_end_at et close_by_at ; la clôture ultérieure de la visite ne
+    détruit pas cette validité historique. Règle propre aux preuves
+    certifiées : ni grâce générique de events.record_event (LATE_EVENT_GRACE
+    reste 0), ni arbitrage sur de futurs événements de clôture de session.
+    L'identité et la provenance de la visite restent contrôlées. La décision
+    est prise strictement avant `deadline` ; à la borne exacte ou après :
+    aucune création (indeterminate / finalization_expired). Ni J0, ni la
+    fenêtre, ni close_by_at, ni la visite ne sont modifiés.
 
 resolve_expired_pending_proof : pending -> indeterminate /
-finalization_expired seulement à partir de min(window_end_at +
-SESSION_FINALIZATION_GRACE, close_by_at) (aucune certification légitime ne
-peut plus survenir ; une certification en cours est sérialisée par le verrou
-consultatif de la preuve) ; certified_at reste NULL ; avant : inchangée.
+finalization_expired seulement à partir de la même échéance (aucune
+certification légitime ne peut plus survenir ; une certification en cours
+est sérialisée par le verrou consultatif de la preuve) ; certified_at reste
+NULL ; avant : inchangée.
 
 observe_proof : même relecture sous verrous, AUCUNE écriture (confirmation
 de l'issue d'un COMMIT incertain par la frontière privée).
@@ -111,9 +128,11 @@ P.id occupée, opération canonique déjà enregistrée (événement ou
 attribution), même identifiant d'opération enregistré par le chemin 2A
 (assistant_delivery / portfolio_write) -> rejected / operation_conflict
 (visit_conflict si l'occupant porte une autre visite). Course perdue sur une
-UNIQUE (écrivain hors service contournant les verrous consultatifs) :
-SAVEPOINT annulé, AUCUNE écriture, certified / operation_conflict (la
-décision n'est jamais prise sur un état antérieur à l'attente).
+UNIQUE (écrivain hors service contournant les verrous consultatifs, qui
+committe) : SAVEPOINT annulé, AUCUNE écriture, certified /
+operation_conflict (la décision n'est jamais prise sur un état antérieur à
+l'attente). S'il annule, l'INSERT réussit après l'attente : l'ultime
+horloge décide (voir « Instant de décision »).
 
 Ordre global des verrous (aucun cycle ; voir docs/v0_t08_2b2_pr3.md § 5) :
 
@@ -125,7 +144,9 @@ Ordre global des verrous (aucun cycle ; voir docs/v0_t08_2b2_pr3.md § 5) :
        ('event_source_operation' : celles de events.record_event) ;
     2. participation (campaign_id, user_id) FOR SHARE ;
     3. campagne FOR SHARE (campaigns.lock_campaign) ;
-    4. visite d'origine FOR SHARE (fin de visite stable pendant la décision) ;
+    4. visite d'origine FOR SHARE (provenance contrôlée sur une ligne stable ;
+       le contrôle de FK de visite de l'attribution, 0024, n'attend jamais
+       une transition 2B-1, qui prend la visite FOR UPDATE, après l'horloge) ;
     5. interaction : lecture sans verrou (immuable) ;
     6. preuve FOR UPDATE, rechargée ; identité comparée à la lecture 0 ;
     7. événements et attributions : lectures (sérialisées par le rang 1) ;
@@ -135,7 +156,8 @@ Ordre global des verrous (aucun cycle ; voir docs/v0_t08_2b2_pr3.md § 5) :
        prend users FOR UPDATE, attend au plus la fin de cette transaction,
        comme pour l'INSERT de events.record_event) ;
     9. horloge : clock_timestamp() PostgreSQL (proofs.server_clock), APRÈS
-       tous ces verrous.
+       tous ces verrous : instant de décision ;
+   10. écritures, dans UN SAVEPOINT, puis ULTIME horloge avant son RELEASE.
 Aucune transaction ne détient un verrou F2 en attendant un verrou analytics :
 aucun cycle (docs/v0_t08_2b2_pr3.md § 5).
 """
@@ -225,24 +247,12 @@ class _Locked:
 # Échéances
 # --------------------------------------------------------------------------
 
-def pending_deadline(participation, campaign) -> datetime:
-    """Au-delà, aucune certification légitime ne peut survenir et la marge
-    de finalisation est close : une preuve pending peut être résolue."""
+def finalization_deadline(participation, campaign) -> datetime:
+    """Borne STRICTE de la décision de finalisation d'une preuve certifiée
+    (voir l'en-tête) ; au-delà, aucune certification légitime ne peut plus
+    survenir : une preuve pending peut être résolue. La visite d'origine
+    n'intervient pas (arbitrage R1)."""
     return min(participation.window_end_at + FINALIZATION_GRACE, campaign.close_by_at)
-
-
-def visit_end(visit) -> datetime:
-    """Fin de la visite d'origine : expiration d'inactivité, ou instant
-    d'une déconnexion antérieure (une finalisation par inactivité est
-    toujours >= idle_expires_at)."""
-    if visit.finalized_at is None:
-        return visit.idle_expires_at
-    return min(visit.idle_expires_at, visit.finalized_at)
-
-
-def finalization_deadline(participation, campaign, visit) -> datetime:
-    """Borne STRICTE de la décision de finalisation (voir l'en-tête)."""
-    return min(pending_deadline(participation, campaign), max(participation.window_end_at, visit_end(visit)))
 
 
 # --------------------------------------------------------------------------
@@ -451,9 +461,31 @@ def _certification_problem(ctx: _Locked) -> tuple | None:
         return REJECTED, proofs.WINDOW_EXPIRED  # certification hors échéance : jamais admissible
     if participation.participation_status != ENROLLED or campaign.status != ACTIVE:
         return REJECTED, proofs.NOT_AUTHORIZED  # retrait, clôture ou annulation antérieurs à la décision
-    if ctx.now >= finalization_deadline(participation, campaign, visit):
+    if ctx.now >= finalization_deadline(participation, campaign):
         return INDETERMINATE, proofs.FINALIZATION_EXPIRED
     return None
+
+
+def _no_longer_admissible(ctx: _Locked, scope, instant: datetime) -> tuple | None:
+    """La décision prise à ctx.now est-elle encore admissible à l'ultime
+    horloge `instant`, lue après les écritures (qui ont pu attendre) ?
+    (état, motif) sinon. Les autres conditions sont tenues par les verrous
+    (participation, campagne, visite, preuve) et ne peuvent pas changer."""
+    if instant < ctx.now:
+        return CERTIFIED, proofs.TECHNICAL_UNCERTAINTY  # horloge régressive : rien d'écrit
+    if instant >= finalization_deadline(ctx.participation, ctx.campaign):
+        return INDETERMINATE, proofs.FINALIZATION_EXPIRED
+    if scope.expires_at <= instant:
+        return REJECTED, proofs.NOT_AUTHORIZED  # conservation autorisée échue
+    return None
+
+
+class _StaleDecision(Exception):
+    """Levée DANS le SAVEPOINT pour l'annuler entièrement."""
+
+    def __init__(self, problem: tuple, instant: datetime):
+        super().__init__(problem)
+        self.problem, self.instant = problem, instant
 
 
 def _resolve(db, proof, status: str, reason: str, now: datetime) -> FinalizationDecision:
@@ -484,7 +516,8 @@ def _mark_recorded(proof, event_id: uuid.UUID, now: datetime) -> None:
 
 
 def _record(db, ctx: _Locked, request: dict, scope) -> FinalizationDecision:
-    """Les trois écritures dans UN SAVEPOINT (ordre des FK de 0024)."""
+    """Les trois écritures dans UN SAVEPOINT (ordre des FK de 0024), puis
+    l'ultime horloge, dans ce SAVEPOINT, avant son RELEASE."""
     proof, now = ctx.proof, ctx.now
     try:
         with db.begin_nested():
@@ -494,6 +527,15 @@ def _record(db, ctx: _Locked, request: dict, scope) -> FinalizationDecision:
             db.flush()
             _mark_recorded(proof, event.id, now)  # 3. preuve
             db.flush()
+            final = proofs.server_clock(db)  # 4. après toute attente SQL des écritures
+            problem = _no_longer_admissible(ctx, scope, final)
+            if problem is not None:
+                raise _StaleDecision(problem, final)  # les trois écritures sont annulées
+    except _StaleDecision as stale:
+        state, reason = stale.problem
+        if state == CERTIFIED:
+            return FinalizationDecision(CERTIFIED, reason, False, proof.id)
+        return _resolve(db, proof, state, reason, stale.instant)  # instant réel, jamais antidaté
     except IntegrityError as exc:
         if any(common.is_unique_violation(exc, constraint) for constraint in RACE_CONSTRAINTS):
             # Écrivain hors service : les trois écritures sont annulées ;
@@ -547,7 +589,7 @@ def resolve_expired_pending_proof(db, *, proof_id: uuid.UUID) -> FinalizationDec
         return _existing(db, ctx)
     if ctx.participation is None or ctx.campaign is None or now < proof.created_at:
         return _decision(proof, reason=proofs.TECHNICAL_UNCERTAINTY)  # aucune date inventée
-    if now < pending_deadline(ctx.participation, ctx.campaign):
+    if now < finalization_deadline(ctx.participation, ctx.campaign):
         return _decision(proof)  # une certification légitime reste possible : jamais résolue arbitrairement
     return _resolve(db, proof, INDETERMINATE, proofs.FINALIZATION_EXPIRED, now)
 

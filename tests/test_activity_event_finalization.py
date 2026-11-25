@@ -11,8 +11,11 @@ frontière de transaction : tests/test_activity_event_finalization_chain.py.
    rejected / indeterminate terminales, nature non prise en charge, preuve
    certifiée incohérente ;
 3. temps : J0, J+12 - 1 µs, J+12, après J+12, borne - 1 µs, borne, au-delà,
-   close_by_at plus restrictif, déconnexion, horloge régressive, clôture,
-   annulation, retrait, horloge PostgreSQL réelle après une attente ;
+   close_by_at plus restrictif, visite close ou expirée avant J+12 (sans
+   effet sur l'échéance), horloge régressive, clôture, annulation, retrait,
+   horloge PostgreSQL réelle après une attente de verrou ; ultime horloge
+   après les écritures : attente sur l'index unique d'un écrivain hors
+   service qui annule ou committe avant / après la borne ;
 4. atomicité : pannes avant / après chaque écriture et pendant le flush,
    violations SQL réelles, transaction de l'appelant utilisable ;
 5. idempotence et concurrence : finalisations concurrentes, preuves
@@ -60,6 +63,7 @@ from tests.activity_proof_support import (
     LAPTOP,
     NOTICE,
     POLICY,
+    PROOF_APP,
     REGISTRY,
     UPDATE,
     Background,
@@ -226,36 +230,19 @@ def test_the_certified_writer_refuses_to_run_outside_the_callers_savepoint_or_wi
                                   request=request, scope=scope, now=occurred - MICRO)
 
 
-def test_the_finalization_deadline_is_bounded_by_the_window_the_campaign_and_the_visit():
+def test_the_finalization_deadline_is_bounded_by_the_window_and_the_campaign_never_by_the_visit():
     end = datetime(2026, 12, 5, 9, tzinfo=timezone.utc)
     participation = SimpleNamespace(window_end_at=end)
     campaign = SimpleNamespace(close_by_at=end + timedelta(days=10))
-
-    def visit(last, finalized=None):
-        return SimpleNamespace(idle_expires_at=last + GRACE, finalized_at=finalized)
-    # Visite vivante au-delà de J+12 : sa fin borne la marge (<= J+12 + 30 min).
-    assert fz.finalization_deadline(participation, campaign, visit(end - MICRO)) == end - MICRO + GRACE
-    assert fz.finalization_deadline(participation, campaign, visit(end - timedelta(minutes=10))) == end + timedelta(
-        minutes=20)
-    # Visite finie avant J+12 (inactivité ou déconnexion) : aucune marge, J+12 seulement.
-    assert fz.finalization_deadline(participation, campaign, visit(end - timedelta(hours=2))) == end
-    assert fz.finalization_deadline(participation, campaign, visit(end - timedelta(minutes=5),
-                                                                   end - timedelta(minutes=1))) == end
-    # Déconnexion après J+12 : la marge s'arrête à la déconnexion.
-    assert fz.finalization_deadline(participation, campaign, visit(end - timedelta(minutes=5),
-                                                                   end + timedelta(minutes=3))) == end + timedelta(
-        minutes=3)
-    # Finalisation par inactivité tardive : jamais au-delà de idle_expires_at.
-    assert fz.finalization_deadline(participation, campaign, visit(end - timedelta(minutes=5),
-                                                                   end + timedelta(hours=5))) == end + timedelta(
-        minutes=25)
+    assert fz.finalization_deadline(participation, campaign) == end + GRACE
     # close_by_at plus restrictif : aucune marge au-delà.
-    tight = SimpleNamespace(close_by_at=end)
-    assert fz.finalization_deadline(participation, tight, visit(end - MICRO)) == end
-    assert fz.pending_deadline(participation, campaign) == end + GRACE
-    assert fz.pending_deadline(participation, tight) == end
-    # Défense : jamais au-delà de window_end_at + 30 min, même pour une visite incohérente.
-    assert fz.finalization_deadline(participation, campaign, visit(end + timedelta(hours=1))) == end + GRACE
+    assert fz.finalization_deadline(participation, SimpleNamespace(close_by_at=end)) == end
+    assert fz.finalization_deadline(participation, SimpleNamespace(close_by_at=end + timedelta(minutes=7))) == (
+        end + timedelta(minutes=7))
+    # Arbitrage R1 : la visite d'origine n'est pas un paramètre de l'échéance.
+    assert list(inspect.signature(fz.finalization_deadline).parameters) == ["participation", "campaign"]
+    assert not hasattr(fz, "visit_end") and not hasattr(fz, "pending_deadline")
+    assert pe.LATE_EVENT_GRACE == timedelta(0)  # chemin historique : aucune grâce
 
 
 # --------------------------------------------------------------------------
@@ -584,7 +571,7 @@ def test_a_certification_at_j_plus_12_is_refused_and_never_recorded(db, clock):
 
 def test_a_proof_certified_before_j_plus_12_is_recorded_during_the_margin(db, clock):
     proof, end = _last_minute(db, clock, timedelta(minutes=5))
-    finalized_at = clock.set(end + timedelta(minutes=20))  # visite vivante jusqu'à end + 25 min
+    finalized_at = clock.set(end + timedelta(minutes=20))
     decision = finalize(db, proof.proof_id)
     _, event, _ = _recorded_exactly(db, proof, decision, CREATE, "portfolio_used", "portfolio",
                                     finalized_at=finalized_at)
@@ -597,7 +584,9 @@ def test_a_proof_certified_before_j_plus_12_is_recorded_during_the_margin(db, cl
                                               (timedelta(hours=2), False)])
 def test_the_finalization_bound_is_strict(db, clock, offset, recorded):
     proof, end = _last_minute(db, clock)
-    bound = end - MICRO + GRACE  # fin de la visite d'origine : la marge maximale effective
+    bound = end + GRACE
+    # La visite d'origine a expiré par inactivité à end - 1 µs + 30 min, AVANT
+    # bound - 1 µs : sans effet sur l'échéance (arbitrage R1).
     clock.set(bound + offset)
     decision = finalize(db, proof.proof_id)
     if recorded:
@@ -631,29 +620,41 @@ def test_a_close_by_at_tighter_than_the_margin_wins(db, clock, offset, recorded)
     end = _participation(db, campaign).window_end_at
     clock.set(end - timedelta(seconds=10))
     proof = _certified(db, campaign_id=campaign)
-    clock.set(end + offset)  # visite vivante (end + 29 min 50 s) : seule close_by_at borne
+    clock.set(end + offset)  # seule close_by_at borne
     decision = finalize(db, proof.proof_id)
     assert decision.state == (fz.RECORDED if recorded else fz.INDETERMINATE)
     assert _definitive(db) == ((1, 1) if recorded else (0, 0))
 
 
-def test_a_logout_before_j_plus_12_ends_the_margin_but_not_the_window(db, clock):
-    campaign_a, campaign_b = open_wave(db, USER_A), open_wave(db, USER_B)  # même J0
-    end = _participation(db, campaign_a).window_end_at
-    assert _participation(db, campaign_b, USER_B).window_end_at == end
-    clock.set(end - timedelta(minutes=10))
-    proof, other = _certified(db, USER_A, campaign_id=campaign_a), _certified(db, USER_B, campaign_id=campaign_b)
+def test_a_visit_closed_before_j_plus_12_does_not_shorten_the_margin(db, clock):
+    """Arbitrage R1 : déconnexion avant J+12, preuve historiquement valide,
+    finalisation après J+12 mais avant la borne : admissible."""
+    proof, end = _last_minute(db, clock, timedelta(minutes=10))
     clock.set(end - timedelta(minutes=5))
-    close(db, campaign_a, USER_A, environment=LAPTOP)  # visites d'origine closes (logout)
-    close(db, campaign_b, USER_B, environment=LAPTOP)
-    # Avant J+12 : la fin de la visite est sans effet.
-    clock.set(end - timedelta(minutes=1))
-    assert finalize(db, other.proof_id).state == fz.RECORDED
-    # Après J+12 : la remise de fin de session est déjà passée.
-    clock.set(end + timedelta(minutes=1))
+    close(db, proof.campaign_id, USER_A, environment=LAPTOP)  # visite d'origine close (logout)
+    finalized_at = clock.set(end + timedelta(minutes=1))
     decision = finalize(db, proof.proof_id)
-    assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
-    assert _definitive(db) == (1, 1)
+    _, event, _ = _recorded_exactly(db, proof, decision, CREATE, "portfolio_used", "portfolio",
+                                    finalized_at=finalized_at)
+    # Aucune réouverture, aucune prolongation de la visite.
+    [visit] = rows(db, "SELECT * FROM product_activity_sessions WHERE id = :v", v=proof.origin.visit_id)
+    assert visit["finalized_at"] is not None and utc(visit["finalized_at"]) == end - timedelta(minutes=5)
+    assert utc(event["occurred_at"]) == end - timedelta(minutes=10)
+
+
+@pytest.mark.parametrize("offset, recorded", [(-MICRO, True), (timedelta(0), False)])
+def test_a_visit_ended_by_inactivity_long_before_j_plus_12_does_not_shorten_the_margin(db, clock, offset,
+                                                                                      recorded):
+    proof, end = _last_minute(db, clock, timedelta(hours=2))  # visite expirée à end - 1 h 30
+    visit_before = rows(db, "SELECT * FROM product_activity_sessions WHERE id = :v", v=proof.origin.visit_id)
+    clock.set(end + GRACE + offset)
+    decision = finalize(db, proof.proof_id)
+    if recorded:
+        _recorded_exactly(db, proof, decision, CREATE, "portfolio_used", "portfolio", finalized_at=end + GRACE - MICRO)
+    else:
+        assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
+        assert _definitive(db) == (0, 0)
+    assert rows(db, "SELECT * FROM product_activity_sessions WHERE id = :v", v=proof.origin.visit_id) == visit_before
 
 
 def test_a_regressive_clock_writes_nothing_and_the_retry_is_clean(db, clock):
@@ -741,7 +742,7 @@ def _finalize_while_participation_is_locked(db, proof, release_at):
 def test_the_postgresql_clock_is_read_after_a_lock_wait_that_crosses_j_plus_12(db):
     """Horloge PostgreSQL RÉELLE : certifiée avant J+12, la finalisation
     attend un verrou pendant que la fenêtre se termine ; elle est décidée
-    APRÈS l'attente (marge de la visite d'origine), jamais antidatée."""
+    APRÈS l'attente (dans la marge), jamais antidatée."""
     campaign, now = _active_campaign_and_window(db, window=timedelta(seconds=3))
     _sleep_until(now + timedelta(milliseconds=300))
     proof = _certified(db, campaign_id=campaign)
@@ -760,6 +761,214 @@ def test_the_postgresql_clock_is_read_after_a_lock_wait_that_crosses_the_finaliz
     decision = _finalize_while_participation_is_locked(db, proof, bound + timedelta(milliseconds=200))
     assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
     assert decision.resolved_at >= bound and _definitive(db) == (0, 0)
+
+
+class _Clocks:
+    """Horloge du bloc C : `first` pour la décision (après les verrous),
+    `final` pour l'ultime lecture (après les écritures)."""
+
+    def __init__(self, first, final):
+        self.values, self.calls = [first, final], 0
+
+    def __call__(self, *args):
+        value = self.values[min(self.calls, 1)]
+        self.calls += 1
+        return value
+
+
+@pytest.mark.parametrize("final_offset, expected", [(-MICRO, "recorded"), (timedelta(0), "expired"),
+                                                    (timedelta(hours=1), "expired")])
+def test_the_final_clock_inside_the_savepoint_decides_whether_the_writes_are_kept(db, clock, monkeypatch,
+                                                                                  final_offset, expected):
+    proof, end = _last_minute(db, clock)
+    bound = end + GRACE
+    first, final = bound - timedelta(seconds=1), bound + final_offset
+    before = proof_row(db, proof.proof_id)
+    clocks = _Clocks(first, final)
+    monkeypatch.setattr(proofs, "server_clock", clocks)
+    decision = finalize(db, proof.proof_id)
+    assert clocks.calls == 2  # décision, puis ultime horloge dans le SAVEPOINT
+    if expected == "recorded":
+        _recorded_exactly(db, proof, decision, CREATE, "portfolio_used", "portfolio", finalized_at=first)
+        return
+    assert decision == fz.FinalizationDecision(fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED, True, proof.proof_id,
+                                               None, final)
+    row = _untouched_certification(db, proof, before)
+    _resolved_exactly(row, "indeterminate", "finalization_expired")
+    assert utc(row["resolved_at"]) == final and _definitive(db) == (0, 0)  # jamais antidatée
+
+
+def test_a_final_clock_behind_the_decision_writes_nothing_and_the_retry_is_clean(db, clock, monkeypatch):
+    proof = _certified(db)
+    before = proof_row(db, proof.proof_id)
+    first = clock.now + timedelta(seconds=1)
+    monkeypatch.setattr(proofs, "server_clock", _Clocks(first, first - MICRO))
+    assert finalize(db, proof.proof_id) == fz.FinalizationDecision(fz.CERTIFIED, proofs.TECHNICAL_UNCERTAINTY,
+                                                                   False, proof.proof_id)
+    assert proof_row(db, proof.proof_id) == before and _definitive(db) == (0, 0)
+    monkeypatch.setattr(proofs, "server_clock", _Clocks(first, first))
+    assert finalize(db, proof.proof_id).state == fz.RECORDED
+
+
+def test_a_retention_expiring_before_the_final_clock_keeps_nothing(db, clock, monkeypatch):
+    proof = _certified(db)
+    occurred = utc(_interaction(db, proof.origin)["recorded_at"])
+    first = clock.now + timedelta(seconds=1)
+    # Instant fictif (défense) : conservation de 90 j échue à l'ultime horloge seulement.
+    monkeypatch.setattr(fz, "finalization_deadline", lambda participation, campaign: occurred + DAYS_90 * 2)
+    monkeypatch.setattr(proofs, "server_clock", _Clocks(first, occurred + DAYS_90))
+    decision = finalize(db, proof.proof_id)
+    assert (decision.state, decision.reason, decision.resolved_at) == (fz.REJECTED, proofs.NOT_AUTHORIZED,
+                                                                       occurred + DAYS_90)
+    assert _definitive(db) == (0, 0)
+
+
+# Attente SQL APRÈS l'horloge initiale : un écrivain hors service (qui
+# contourne les verrous consultatifs) tient, sans committer, l'entrée d'index
+# unique que l'INSERT de la finalisation doit écrire. Horloge PostgreSQL
+# RÉELLE, aucun lock_timeout dans ces sessions de test.
+
+COLLISIONS = ["canonical_identity", "idempotency_key"]
+
+
+def _outside_collision(proof, collision):
+    if collision == "canonical_identity":
+        return {}  # même opération canonique, autre clé d'idempotence
+    return {"idempotency_key": proof.proof_id, "operation_id": uuid.uuid4()}  # même clé, autre opération
+
+
+def _unique_index_waits(db) -> int:
+    """Finalisations qui attendent la fin d'une transaction tierce
+    (transactionid) PENDANT l'INSERT de l'événement : attente sur l'index
+    unique, jamais sur un verrou explicite."""
+    return rows(db, "SELECT count(*) AS n FROM pg_stat_activity WHERE application_name = :a "
+                    "AND wait_event_type = 'Lock' AND wait_event = 'transactionid' AND query LIKE :q",
+                a=PROOF_APP, q=f"INSERT INTO {EVENTS}%")[0]["n"]
+
+
+def _behind_an_outside_insert(db, monkeypatch, proof, collision, *, release_at, outcome, action=None):
+    """La finalisation lit son horloge, puis attend l'index unique ;
+    l'écrivain hors service committe ou annule à `release_at`. Rend
+    (décision, horloges lues avant l'attente, toutes les horloges lues)."""
+    clocks, real = [], proofs.server_clock
+
+    def spy(session):
+        value = real(session)
+        clocks.append(utc(value))
+        return value
+    monkeypatch.setattr(proofs, "server_clock", spy)
+    holder = Holder(db, lambda s: _outside_event(s, proof, **_outside_collision(proof, collision)))
+    contender = Background(action or (lambda: finalize(db, proof.proof_id)))
+    contender.start()
+    try:
+        _wait(lambda: _unique_index_waits(db) == 1, "la finalisation n'attend pas l'index unique")
+        before_wait = list(clocks)
+        _sleep_until(release_at)
+    finally:
+        holder.commit() if outcome == "commit" else holder.rollback()
+    return contender.outcome(), before_wait, clocks
+
+
+def _near_the_bound(db, *, seconds=3):
+    """Preuve certifiée (horloge réelle) ; borne de finalisation = close_by_at
+    = window_end_at, `seconds` après la création de la campagne."""
+    campaign, now = _active_campaign_and_window(db, window=timedelta(seconds=seconds),
+                                                close_by=timedelta(seconds=seconds))
+    _sleep_until(now + timedelta(milliseconds=300))
+    proof = _certified(db, campaign_id=campaign)
+    return proof, now + timedelta(seconds=seconds)
+
+
+def _untouched_certification(db, proof, before):
+    """Aucun rejeu, aucune nouvelle certification, aucune interaction."""
+    row = proof_row(db, proof.proof_id)
+    assert (row["certified_at"], row["created_at"], row["interaction_key"], row["visit_id"]) == (
+        before["certified_at"], before["created_at"], before["interaction_key"], before["visit_id"])
+    assert len(rows(db, f"SELECT id FROM {REGISTRY}")) == 1
+    assert len(rows(db, "SELECT interaction_key FROM product_activity_session_interactions")) == 1
+    return row
+
+
+@pytest.mark.parametrize("collision", COLLISIONS)
+def test_an_outside_insert_rolled_back_after_the_bound_never_lets_a_stale_decision_record(db, monkeypatch,
+                                                                                         collision):
+    """Contre-épreuve R1 : décision initiale admissible, attente sur l'index
+    unique qui franchit close_by_at, ROLLBACK de l'écrivain : l'INSERT
+    réussirait ; l'ultime horloge (dans le SAVEPOINT) annule les trois
+    écritures et la preuve est résolue à l'instant réel, jamais antidatée."""
+    proof, bound = _near_the_bound(db)
+    before = proof_row(db, proof.proof_id)
+    decision, before_wait, clocks = _behind_an_outside_insert(
+        db, monkeypatch, proof, collision, release_at=bound + timedelta(milliseconds=200), outcome="rollback")
+    assert len(before_wait) == 1 and before_wait[0] < bound  # horloge initiale lue AVANT l'attente
+    assert _definitive(db) == (0, 0)
+    assert (decision.state, decision.reason, decision.written, decision.event_id) == (
+        fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED, True, None)
+    assert decision.resolved_at == clocks[-1] >= bound  # instant réel après l'attente
+    row = _untouched_certification(db, proof, before)
+    _resolved_exactly(row, "indeterminate", "finalization_expired")
+    assert utc(row["resolved_at"]) == decision.resolved_at
+
+
+@pytest.mark.parametrize("collision", COLLISIONS)
+def test_an_outside_insert_rolled_back_before_the_bound_lets_the_finalization_record(db, monkeypatch, collision):
+    proof, bound = _near_the_bound(db, seconds=4)
+    before = proof_row(db, proof.proof_id)
+    decision, before_wait, clocks = _behind_an_outside_insert(
+        db, monkeypatch, proof, collision, release_at=bound - timedelta(seconds=2), outcome="rollback")
+    assert decision.state == fz.RECORDED and decision.written
+    # Instant de décision = horloge initiale (après les verrous explicites) ;
+    # l'ultime horloge, après l'attente, est encore strictement avant la borne.
+    assert decision.resolved_at == before_wait[0] < clocks[-1] < bound
+    [event] = _events(db)
+    assert utc(event["recorded_at"]) == decision.resolved_at and _definitive(db) == (1, 1)
+    _untouched_certification(db, proof, before)
+
+
+@pytest.mark.parametrize("collision", COLLISIONS)
+def test_an_outside_insert_committed_during_the_wait_is_a_conflict_and_nothing_is_written(db, monkeypatch,
+                                                                                       collision):
+    proof, bound = _near_the_bound(db, seconds=4)
+    before = proof_row(db, proof.proof_id)
+    decision, _, _ = _behind_an_outside_insert(db, monkeypatch, proof, collision,
+                                               release_at=bound - timedelta(seconds=2), outcome="commit")
+    assert decision == fz.FinalizationDecision(fz.CERTIFIED, proofs.OPERATION_CONFLICT, False, proof.proof_id)
+    assert proof_row(db, proof.proof_id) == before and len(_events(db)) == 1 and _attributions(db) == []
+
+
+def test_the_margin_crossed_during_a_unique_index_wait_never_records(db, monkeypatch):
+    """Même contre-épreuve, borne = window_end_at + marge (close_by_at
+    lointain) : la marge est réduite à 1 s pour l'horloge réelle."""
+    monkeypatch.setattr(fz, "FINALIZATION_GRACE", timedelta(seconds=1))
+    campaign, now = _active_campaign_and_window(db, window=timedelta(seconds=2))
+    _sleep_until(now + timedelta(milliseconds=300))
+    proof = _certified(db, campaign_id=campaign)
+    end = now + timedelta(seconds=2)
+    _sleep_until(end + timedelta(milliseconds=100))  # après J+12, dans la marge : décision initiale admissible
+    decision, before_wait, clocks = _behind_an_outside_insert(
+        db, monkeypatch, proof, "canonical_identity", release_at=end + timedelta(seconds=1, milliseconds=200),
+        outcome="rollback")
+    assert end <= before_wait[0] < end + timedelta(seconds=1) <= clocks[-1]
+    assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
+    assert _definitive(db) == (0, 0)
+
+
+def test_the_callers_transaction_stays_usable_after_a_stale_decision_is_rolled_back(db, monkeypatch):
+    proof, bound = _near_the_bound(db)
+
+    def action():
+        with Session(bind=db, autoflush=False, expire_on_commit=False) as s:
+            decision = fz.finalize_certified_proof(s, proof_id=proof.proof_id)
+            assert s.in_transaction() and not s.in_nested_transaction()
+            seen = s.execute(sa.text(f"SELECT status FROM {REGISTRY} WHERE id = :i"), {"i": proof.proof_id}).scalar()
+            later = fz.finalize_certified_proof(s, proof_id=proof.proof_id)  # même transaction : relecture stable
+            s.commit()
+            return decision, seen, later
+    (decision, seen, later), _, _ = _behind_an_outside_insert(
+        db, monkeypatch, proof, "idempotency_key", release_at=bound + timedelta(milliseconds=200),
+        outcome="rollback", action=action)
+    assert decision.state == seen == later.state == fz.INDETERMINATE and not later.written
+    assert proof_row(db, proof.proof_id)["status"] == "indeterminate" and _definitive(db) == (0, 0)
 
 
 # --------------------------------------------------------------------------
@@ -987,18 +1196,18 @@ def test_a_logout_waits_for_a_finalization_in_progress(db, clock):
     assert recorded.state == fz.RECORDED  # décidée avant la fin de visite, qui attendait son COMMIT
 
 
-def test_a_logout_in_progress_after_j_plus_12_is_waited_for_and_ends_the_margin(db, clock):
-    """La fin de la visite d'origine est lue SOUS verrou (FOR SHARE) : une
-    déconnexion en cours (visite FOR UPDATE, non committée) est attendue puis
-    vue ; la finalisation n'est jamais décidée sur une visite périmée."""
+def test_a_logout_in_progress_after_j_plus_12_is_waited_for_and_does_not_shorten_the_margin(db, clock):
+    """La visite d'origine est lue SOUS verrou (FOR SHARE) : une déconnexion
+    en cours (visite FOR UPDATE, non committée) est attendue AVANT l'horloge
+    (le contrôle de FK de visite de l'attribution n'attendra pas après) ; sa
+    fin ne raccourcit pas l'échéance (arbitrage R1)."""
     proof, end = _last_minute(db, clock, timedelta(minutes=5))
-    clock.set(end + timedelta(minutes=2))  # visite vivante jusqu'à end + 25 min
+    finalized_at = clock.set(end + timedelta(minutes=2))
     closing, decision = _contended(db, lambda s: ps.close_activity_session(
         s, campaign_id=proof.campaign_id, user_id=USER_A, environment_key=LAPTOP, interaction_key=uuid.uuid4()),
         lambda: finalize(db, proof.proof_id))
     assert closing.outcome == ps.CLOSED
-    assert (decision.state, decision.reason) == (fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
-    assert _definitive(db) == (0, 0)
+    _recorded_exactly(db, proof, decision, CREATE, "portfolio_used", "portfolio", finalized_at=finalized_at)
 
 
 def _historical_event(db, **overrides):
@@ -1081,7 +1290,28 @@ def test_the_user_lock_is_taken_before_the_clock(db):
     assert decision.state == fz.RECORDED and decision.resolved_at >= released
 
 
-def _outside_event(conn, proof, *, visit_id=None, idempotency_key=None):
+def test_the_visit_lock_is_taken_before_the_clock(db):
+    """Horloge PostgreSQL RÉELLE : une transition 2B-1 en cours (visite FOR
+    UPDATE) retarde la finalisation AVANT sa décision ; le contrôle de FK de
+    visite de l'attribution n'attend jamais après l'horloge."""
+    proof = _certified(db)
+    holder = Holder(db, sql="SELECT id FROM product_activity_sessions WHERE id = :v FOR UPDATE",
+                    v=proof.origin.visit_id)
+    contender = Background(lambda: finalize(db, proof.proof_id))
+    contender.start()
+    try:
+        _wait(lambda: waiting(db) == 1, "la finalisation n'attend pas le verrou de visite")
+        [query] = [r["query"] for r in rows(db, "SELECT query FROM pg_stat_activity WHERE application_name = :a "
+                                                "AND wait_event_type = 'Lock'", a=PROOF_APP)]
+        assert "product_activity_sessions" in query and "FOR SHARE" in query  # attente du rang 4
+        released = datetime.now(timezone.utc)
+    finally:
+        holder.commit()
+    decision = contender.outcome()
+    assert decision.state == fz.RECORDED and decision.resolved_at >= released
+
+
+def _outside_event(conn, proof, *, visit_id=None, idempotency_key=None, operation_id=None):
     """Événement canonique écrit HORS service (SQL direct, sans verrou
     consultatif) : provenance non établie."""
     now = common.utcnow()
@@ -1093,7 +1323,8 @@ def _outside_event(conn, proof, *, visit_id=None, idempotency_key=None):
         "'succeeded', 'not_applicable', :t, :t, :t, :t, NULL, CAST(:doc AS jsonb), :x, :x, "
         "'product-activity-event-v1')"),
         {"id": uuid.uuid4(), "u": proof.op.owner_user_id, "v": visit_id or proof.origin.visit_id,
-         "k": idempotency_key or uuid.uuid4(), "o": proof.op.operation_kind, "i": proof.op.operation_id, "t": now,
+         "k": idempotency_key or uuid.uuid4(), "o": proof.op.operation_kind, "i": operation_id or proof.op.operation_id,
+         "t": now,
          "x": now + DAYS_90, "doc": '{"version": "retention-scopes-v1", "scopes": [{"kind": "campaign", '
                                     f'"campaign_id": "{proof.campaign_id}", "policy_version": "v0-retention-v1", '
                                     f'"expires_at": "{(now + DAYS_90).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}"}}]}}'})

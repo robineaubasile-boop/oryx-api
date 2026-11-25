@@ -14,7 +14,9 @@ contre un VRAI PostgreSQL (16 et 18 en CI).
    (confirmé par relecture), non effectué (aucun succès annoncé, retry
    explicite propre), impossible à confirmer (unknown), panne avant COMMIT,
    résolution explicite d'une preuve pending expirée, journaux sans
-   identifiant.
+   identifiant ; décision devenue périmée pendant une attente sur l'index
+   unique (horloge réelle, garde-fous de la frontière) : aucun événement,
+   aucun changement du résultat F2, aucun rejeu, aucune certification.
 """
 import ast
 import json
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
@@ -43,7 +46,9 @@ from tests.activity_proof_support import (
     EVENTS,
     REGISTRY,
     UPDATE,
+    Background,
     Clock,
+    Holder,
     analytics_engine,
     open_wave,
     opened,
@@ -53,6 +58,13 @@ from tests.activity_proof_support import (
 )
 from tests.authz_f2_support import BOB, USER_A, USER_B, AuthzEnv, create_command, delete_command, replace_command
 from tests.f2_support import prepare_schema
+from tests.test_activity_event_finalization import (
+    _active_campaign_and_window,
+    _outside_event,
+    _sleep_until,
+    _unique_index_waits,
+    _wait,
+)
 from tests.test_f2_http_dormancy import _clean_env
 from tests.test_migration_0002_analysis_sessions import REPO_ROOT
 from tests.test_migration_0002_analysis_sessions import pg_url  # noqa: F401 — fixture
@@ -474,3 +486,51 @@ def test_an_expired_pending_proof_is_resolved_through_the_boundary(env, analytic
     row = proof_of(analytics, op.operation_id)
     assert (row["status"], row["certified_at"], row["recorded_event_id"]) == ("indeterminate", None, None)
     assert events(analytics) == []
+
+
+def test_a_decision_made_stale_by_a_unique_index_wait_records_nothing_and_changes_no_f2_result(env, analytics,
+                                                                                              alice):
+    """Contre-épreuve R1 sur la chaîne réelle, à travers la frontière
+    (READ COMMITTED, lock_timeout 2 s) : vrai runner F2, vraie certification
+    B, puis un écrivain hors service tient l'identité canonique sans
+    committer ; la finalisation lit son horloge avant close_by_at, attend
+    l'index unique moins que le lock_timeout, l'écrivain annule après
+    close_by_at : aucun événement, preuve résolue à l'instant réel."""
+    campaign, now = _active_campaign_and_window(analytics, window=timedelta(seconds=4),
+                                                close_by=timedelta(seconds=4), user=USER_A)
+    bound = now + timedelta(seconds=4)
+    _sleep_until(now + timedelta(milliseconds=300))
+    command = create_command()
+    result = run(env, analytics, alice, command, campaign)
+    assert result.outcome.status == AUTHORIZED and result.proof == bridge.ProofReport(proofs.CERTIFIED, None)
+    proof = proof_of(analytics, command.operation_id)
+    f2_before = (env.receipts(), rows(env.observer, "SELECT * FROM portfolio_positions WHERE user_id = :u", u=USER_A))
+    analytics_before = rows(analytics, "SELECT * FROM product_activity_session_interactions ORDER BY recorded_at")
+    target = SimpleNamespace(proof_id=proof["id"], campaign_id=campaign, origin=SimpleNamespace(
+        visit_id=proof["visit_id"]), op=SimpleNamespace(owner_user_id=USER_A, operation_kind=CREATE,
+                                                        operation_id=command.operation_id))
+    holder = Holder(analytics, lambda s: _outside_event(s, target))
+    _sleep_until(bound - timedelta(seconds=1))
+    contender = Background(lambda: boundary.finalize_in_transaction(analytics, proof_id=proof["id"]))
+    contender.start()
+    try:
+        _wait(lambda: _unique_index_waits(analytics) == 1, "la finalisation n'attend pas l'index unique")
+        _sleep_until(bound + timedelta(milliseconds=300))
+    finally:
+        holder.rollback()
+    report = contender.outcome()
+    assert report == boundary.FinalizationReport(fz.INDETERMINATE, proofs.FINALIZATION_EXPIRED)
+    assert events(analytics) == [] and attributions(analytics) == []
+    after = proof_of(analytics, command.operation_id)
+    assert (after["status"], after["resolution_reason"], after["recorded_event_id"]) == (
+        "indeterminate", "finalization_expired", None)
+    assert (after["certified_at"], after["created_at"], after["id"]) == (proof["certified_at"], proof["created_at"],
+                                                                         proof["id"])
+    assert utc(after["resolved_at"]) >= bound and after["purge_after_at"] - after["resolved_at"] == timedelta(
+        hours=168)
+    # Aucun rejeu F2, aucun changement de son résultat, aucune certification ni interaction nouvelles.
+    assert (env.receipts(), rows(env.observer, "SELECT * FROM portfolio_positions WHERE user_id = :u",
+                                 u=USER_A)) == f2_before
+    assert len(rows(analytics, f"SELECT id FROM {REGISTRY}")) == 1
+    assert rows(analytics, "SELECT * FROM product_activity_session_interactions ORDER BY recorded_at") == (
+        analytics_before)
