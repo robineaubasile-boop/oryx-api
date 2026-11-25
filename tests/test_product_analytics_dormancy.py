@@ -37,7 +37,16 @@ core/product_analytics/ existent mais ne sont raccordés à rien.
   events) ; UNIQUE exception nominative supplémentaire hors du paquet,
   core/_activity_proof_lifecycle.py (frontière privée de transaction), qui
   n'importe que finalization et proof_lifecycle (plus la frontière du bloc C)
-  et n'a aucun appelant (tests/test_activity_proof_lifecycle.py).
+  et n'a aucun appelant (tests/test_activity_proof_lifecycle.py) ;
+- lot 2C PR 2 : un seul module ajouté au paquet (event_lifecycle.py,
+  expiration des finalités et suppression des événements et attributions),
+  seul autre importateur de events (conventions de verrous de record_event),
+  de finalization (conventions de verrous du bloc C) et de proofs (horloge,
+  statut recorded) ; UNIQUE exception nominative supplémentaire hors du
+  paquet, core/_activity_event_lifecycle.py (frontière privée de
+  transaction), qui n'importe que event_lifecycle (plus la transaction du
+  bloc C et core/_activity_transactions.py, sans import analytics) et n'a
+  aucun appelant (tests/test_activity_event_lifecycle.py).
 """
 import ast
 import hashlib
@@ -50,8 +59,8 @@ from tests.test_migration_0002_analysis_sessions import REPO_ROOT, _script_direc
 
 PACKAGE = REPO_ROOT / "core" / "product_analytics"
 PACKAGE_MODULE = "core.product_analytics"
-MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "events.py", "finalization.py",
-           "participation.py", "proof_lifecycle.py", "proofs.py", "retention.py", "sessions.py")
+MODULES = ("__init__.py", "campaigns.py", "cohort.py", "common.py", "event_lifecycle.py", "events.py",
+           "finalization.py", "participation.py", "proof_lifecycle.py", "proofs.py", "retention.py", "sessions.py")
 # V0-T08 Lot 2B-2 bloc B (nominatif) : UNIQUE module hors du paquet autorisé à
 # l'importer, et seulement le registre des preuves ; lui-même sans appelant
 # (tests/test_activity_proof_bridge.py).
@@ -68,6 +77,11 @@ FINALIZATION_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analyti
 LIFECYCLE_BOUNDARY = "core/_activity_proof_lifecycle.py"
 LIFECYCLE_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analytics.finalization",
                               "core.product_analytics.proof_lifecycle"}
+# V0-T08 Lot 2C PR 2 (nominatif) : frontière privée du cycle de vie des
+# événements, qui n'importe que ce service ; elle-même sans appelant
+# (tests/test_activity_event_lifecycle.py).
+EVENT_LIFECYCLE_BOUNDARY = "core/_activity_event_lifecycle.py"
+EVENT_LIFECYCLE_BOUNDARY_IMPORTS = {"core.product_analytics", "core.product_analytics.event_lifecycle"}
 MIGRATION_0022 = REPO_ROOT / "alembic" / "versions" / "0022_product_analytics_v1.py"
 # sha256 de 0022 telle que fusionnée sur main (PR #247, 47bb843) : le lot 2A
 # ne la modifie pas.
@@ -93,7 +107,12 @@ EXTRA_IMPORTS = {"proofs.py": {"weakref", "core.product_analytics.sessions"},
                  "finalization.py": {"core.product_analytics.events", "core.product_analytics.proofs"},
                  # V0-T08 Lot 2C PR 1 (nominatif) : le cycle de vie relit le registre
                  # (proofs) et reprend les vocabulaires et l'échéance du bloc C.
-                 "proof_lifecycle.py": {"core.product_analytics.finalization", "core.product_analytics.proofs"}}
+                 "proof_lifecycle.py": {"core.product_analytics.finalization", "core.product_analytics.proofs"},
+                 # V0-T08 Lot 2C PR 2 (nominatif) : le cycle de vie des événements
+                 # reprend les conventions de verrous des écrivains (events,
+                 # finalization), l'horloge et les statuts du registre (proofs).
+                 "event_lifecycle.py": {"core.product_analytics.events", "core.product_analytics.finalization",
+                                        "core.product_analytics.proofs"}}
 # Modèles F2 lisibles par le paquet (lot 2B-1, cohort.py seulement) : preuve
 # canonique invitation -> utilisateur. Aucun autre modèle F2.
 F2_MODELS = {"Invitation", "AuthOperation", "AuthIdentity", "AuthPreauthCandidate", "AuthOtpRequest",
@@ -155,6 +174,12 @@ def test_no_application_module_imports_the_package():
             assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == FINALIZATION_BOUNDARY_IMPORTS, imported
             assert "import_module" not in text and "__import__" not in text
             continue
+        if path.relative_to(REPO_ROOT).as_posix() == EVENT_LIFECYCLE_BOUNDARY:
+            # Exception nominative (lot 2C PR 2) : imports analytics EXACTS
+            # (cycle de vie des événements seulement), aucun chargement dynamique.
+            assert {i for i in imported if i.startswith(PACKAGE_MODULE)} == EVENT_LIFECYCLE_BOUNDARY_IMPORTS, imported
+            assert "import_module" not in text and "__import__" not in text
+            continue
         if path.relative_to(REPO_ROOT).as_posix() == LIFECYCLE_BOUNDARY:
             # Exception nominative (lot 2C PR 1) : imports analytics EXACTS
             # (finalisation et cycle de vie), aucun chargement dynamique.
@@ -174,9 +199,15 @@ def test_no_application_module_imports_the_package():
 
 def test_only_the_bridge_imports_the_proof_registry_service():
     for name in MODULES:
-        # Lot 2C PR 1 : seul le cycle de vie importe la finalisation dans le paquet.
-        if name != "proof_lifecycle.py":
+        # Lot 2C PR 1 : seul le cycle de vie importe la finalisation dans le paquet ;
+        # lot 2C PR 2 (nominatif) : et le cycle de vie des événements (clés du bloc C).
+        if name not in ("proof_lifecycle.py", "event_lifecycle.py"):
             assert "core.product_analytics.finalization" not in _imports(PACKAGE / name), name
+        if name == "event_lifecycle.py":
+            # Exception nominative (lot 2C PR 2) : events, finalization et proofs, exactement.
+            assert {"core.product_analytics.events", "core.product_analytics.finalization",
+                    "core.product_analytics.proofs"} <= _imports(PACKAGE / name)
+            continue
         if name in ("finalization.py", "proof_lifecycle.py"):
             # Exceptions nominatives : relecture des preuves certifiées (bloc C),
             # sélection et purge du registre (lot 2C PR 1).

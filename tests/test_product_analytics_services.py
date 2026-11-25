@@ -437,6 +437,28 @@ def test_services_never_own_the_transaction_and_never_delete():
                     and [ast.unparse(t) for t in node.targets] == ["table"]] == ["ProductActivityProof"], path.name
             assert _calls(path, {"begin_nested"}) == ["begin_nested"], path.name
             continue
+        if path.name == "event_lifecycle.py":
+            # Exception nominative V0-T08 2C PR 2 : suppression physique d'un
+            # événement échu, de son attribution et de la preuve recorded qui la
+            # référence (TROIS delete, dans cet ordre, sur ces trois modèles) et
+            # retrait des finalités expirées (UN update, sur ProductActivityEvent) ;
+            # deux SAVEPOINT (un par chemin d'écriture) ; ni SQL brut, ni func
+            # (horloge : proofs.server_clock ; verrous : common.lock_identities).
+            assert imported == {"IntegrityError", "delete", "select", "tuple_", "update"}, path.name
+            assert not [node for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name) and node.value.id == "func"], path.name
+            deletes = [[ast.unparse(a) for a in node.args] for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "delete"]
+            assert sorted(deletes) == [["ProductActivityEvent"], ["attributions"], ["registry"]], path.name
+            assigned = {ast.unparse(t): ast.unparse(node.value) for node in ast.walk(tree)
+                        if isinstance(node, ast.Assign) for t in node.targets}
+            assert (assigned["registry"], assigned["attributions"]) == ("ProductActivityProof",
+                                                                        "ProductActivityEventAttribution")
+            updates = [[ast.unparse(a) for a in node.args] for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "update"]
+            assert updates == [["ProductActivityEvent"]], path.name
+            assert _calls(path, {"begin_nested"}) == ["begin_nested"] * 2, path.name
+            continue
         assert imported <= {"select", "IntegrityError", "func"}, path.name  # ni delete, ni update, ni SQL brut (text)
         # func ne sert qu'aux verrous consultatifs de transaction (audit R1) ;
         # exception nominative V0-T08 2B-2 PR 2 : proofs.py lit en plus
