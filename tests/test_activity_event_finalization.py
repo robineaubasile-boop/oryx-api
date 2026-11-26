@@ -102,6 +102,10 @@ BOUNDARY = REPO_ROOT / "core" / "_activity_event_finalization.py"
 # V0-T08 Lot 2C PR 1 (nominatif) : la frontière du cycle de vie reprend les
 # preuves par les points d'entrée du bloc C, inchangés ; elle-même sans appelant.
 LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_proof_lifecycle.py"
+# V0-T08 Lot 2C PR 2, correctif post-audit (nominatif) : le cycle de vie des
+# événements VÉRIFIE (lecture seule) les champs canoniques d'un événement
+# certifié avec la requête canonique du bloc C ; il ne l'écrit jamais.
+EVENT_LIFECYCLE_SERVICE = PACKAGE / "event_lifecycle.py"
 
 
 # --------------------------------------------------------------------------
@@ -1509,6 +1513,8 @@ def test_only_the_service_writes_certified_events_and_attributions():
         calls = _calls(path)
         # Le chemin certifié n'est appelé que par le service (jamais par la frontière B, F2 ou une route).
         for private in ("_stage_certified_event", "_certified_request", "_certified_lock_keys", "_certified_conflict"):
+            if path == EVENT_LIFECYCLE_SERVICE and private == "_certified_request":
+                continue  # exception nominative ci-dessus : comparaison, jamais écriture
             if path not in (SERVICE, PACKAGE / "events.py"):
                 assert private not in source, (relative, private)
         constructed = _constructed(path)
@@ -1521,6 +1527,10 @@ def test_only_the_service_writes_certified_events_and_attributions():
             assert ("finalization", "finalize_certified_proof") not in calls
     service_calls = _calls(SERVICE)
     assert ("events", "_stage_certified_event") in service_calls and ("events", "record_event") not in service_calls
+    lifecycle_calls = _calls(EVENT_LIFECYCLE_SERVICE)
+    assert ("events", "_certified_request") in lifecycle_calls
+    assert not {call for call in lifecycle_calls if call[0] == "events"} - {("events", "_certified_request"),
+                                                                           ("events", "_identity_locks")}
 
 
 def test_the_service_reads_no_f2_table_and_owns_no_transaction():

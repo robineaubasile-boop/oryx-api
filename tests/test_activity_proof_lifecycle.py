@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from core import _activity_event_finalization as fb
 from core import _activity_proof_lifecycle as lb
+from core import _activity_transactions as tx
 from core.product_analytics import finalization as fz
 from core.product_analytics import participation as pp
 from core.product_analytics import proof_lifecycle as pl
@@ -1169,12 +1170,16 @@ def test_a_driver_level_autocommit_is_detected_inside_the_transaction_and_nothin
 
 def test_every_transaction_of_a_valid_engine_is_an_effective_postgresql_transaction(db, clock, monkeypatch):
     statuses = []
-    real = lb._require_effective_transaction
+    # 2C PR 2 : le contrôle est défini (extraction mécanique) dans
+    # core/_activity_transactions.py, où _owned le résout : c'est là qu'il est
+    # instrumenté ; la frontière en réexporte exactement le même objet.
+    assert lb._require_effective_transaction is tx._require_effective_transaction and lb._owned is tx._owned
+    real = tx._require_effective_transaction
 
     def spy(session):
         statuses.append(session.connection().connection.dbapi_connection.info.transaction_status)
         return real(session)
-    monkeypatch.setattr(lb, "_require_effective_transaction", spy)
+    monkeypatch.setattr(tx, "_require_effective_transaction", spy)
     proof, _ = _due_rejected(db, clock)
     report = lb.purge_resolved_page(db)
     assert (report.examined, report.purged) == (1, 1) and statuses == [lb._INTRANS] * 2  # sélection + purge
@@ -1408,12 +1413,22 @@ def test_the_service_and_the_boundary_import_exactly_their_side_and_know_no_defi
     tree = ast.parse(SERVICE.read_text(encoding="utf-8"))
     assert {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "core.models"
             for a in n.names} == {"ProductActivityProof", "ProductCampaign", "ProductCampaignParticipant"}
-    assert _imports(BOUNDARY) == {"logging", "uuid", "dataclasses", "sqlalchemy.engine", "core",
-                                  "core._activity_event_finalization", "core.product_analytics",
+    # 2C PR 2 (nominatif) : les garde-fous de propriété transactionnelle sont
+    # importés de core/_activity_transactions.py (extraction mécanique) ; le
+    # type Engine du refus statique n'est plus importé ici mais là-bas, seul.
+    assert _imports(BOUNDARY) == {"logging", "uuid", "dataclasses", "core",
+                                  "core._activity_event_finalization", "core._activity_transactions",
+                                  "core.product_analytics",
                                   "core.product_analytics.finalization", "core.product_analytics.proof_lifecycle"}
     boundary_tree = ast.parse(BOUNDARY.read_text(encoding="utf-8"))
     assert [a.name for n in ast.walk(boundary_tree) if isinstance(n, ast.ImportFrom)
-            and n.module.startswith("sqlalchemy") for a in n.names] == ["Engine"]  # type seul, pour le refus
+            and n.module.startswith("sqlalchemy") for a in n.names] == []
+    assert [a.name for n in ast.walk(boundary_tree) if isinstance(n, ast.ImportFrom)
+            and n.module == "core._activity_transactions" for a in n.names] == [
+        "_INTRANS", "_owned", "_require_effective_transaction", "_require_engine"]
+    transactions_tree = ast.parse((REPO_ROOT / "core" / "_activity_transactions.py").read_text(encoding="utf-8"))
+    assert [(n.module, [a.name for a in n.names]) for n in ast.walk(transactions_tree)
+            if isinstance(n, (ast.Import, ast.ImportFrom))] == [("sqlalchemy.engine", ["Engine"])]
     service, boundary = SERVICE.read_text(encoding="utf-8"), BOUNDARY.read_text(encoding="utf-8")
     for source in (service, boundary):
         for forbidden in ("authz_f2", "auth_f2", "f2_runtime", "_activity_proof_bridge", "oryx_sessions",

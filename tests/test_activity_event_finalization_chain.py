@@ -75,6 +75,10 @@ SERVICE = REPO_ROOT / "core" / "product_analytics" / "finalization.py"
 # frontière, qui les nomme (réutilisation de la transaction et de l'issue
 # établie du bloc C) ; lui-même sans appelant (tests/test_activity_proof_lifecycle.py).
 LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_proof_lifecycle.py"
+# V0-T08 Lot 2C PR 2 (nominatif) : la frontière du cycle de vie des événements
+# réutilise la seule transaction analytics du bloc C (_transaction), jamais ses
+# points d'entrée ; elle-même sans appelant (tests/test_activity_event_lifecycle.py).
+EVENT_LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_event_lifecycle.py"
 IDLE = lambda point: None  # noqa: E731
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 GRACE = timedelta(minutes=30)
@@ -99,6 +103,13 @@ def test_the_boundary_and_the_service_are_dormant_and_import_exactly_their_side(
     # Aucun appelant : aucun module hors des tests et de la documentation ne nomme la frontière ni le service.
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*")):
+        if path == EVENT_LIFECYCLE_BOUNDARY:
+            text = path.read_text(encoding="utf-8")
+            assert "from core import _activity_event_finalization as finalization_boundary" in text
+            assert {a.attr for a in ast.walk(ast.parse(text)) if isinstance(a, ast.Attribute)
+                    and isinstance(a.value, ast.Name) and a.value.id == "finalization_boundary"} == {
+                "_transaction", "_COMMITTED", "_FAILED"}  # ni _run, ni les points d'entrée historiques
+            continue
         if (not path.is_file() or path in (BOUNDARY, SERVICE, LIFECYCLE_BOUNDARY) or ".git" in path.parts
                 or "__pycache__" in path.parts
                 or "node_modules" in path.parts or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh",
