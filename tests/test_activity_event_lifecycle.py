@@ -1875,6 +1875,9 @@ def _authorization(db, campaign_id, user=USER_A):
 
 
 B1_CASES = ["delivery", "delivered_at", "updated_at", "recorded_at", "origin"]
+B1_REASONS = {"delivery": el.CERTIFIED_INCOHERENT, "delivered_at": el.CERTIFIED_INCOHERENT,
+              "updated_at": el.CERTIFIED_INCOHERENT, "recorded_at": el.CERTIFIED_INCOHERENT,
+              "origin": el.ORIGIN_INCOHERENT}
 
 
 @pytest.mark.parametrize("purged", [False, True], ids=["proof_present", "proof_purged"])
@@ -1888,7 +1891,7 @@ def test_b1_a_tampered_certified_event_is_never_valid_nor_purged(db, clock, case
         observed = committed(db, lambda s: fz.observe_proof(s, proof_id=proof.proof_id))
         assert (observed.state, observed.reason) == (fz.RECORDED, fz.RECORD_INCOHERENT)
     integrity = inspect_one(db, proof.id)
-    assert integrity.outcome == lb.INCONSISTENT, integrity
+    assert integrity == lb.EventOutcome(lb.INCONSISTENT, B1_REASONS[case]), integrity
     clock.set(_expiry(db, proof.id) + timedelta(days=1))
     world = _world(db)
     outcome = expire(db, proof.id)
@@ -1952,17 +1955,18 @@ def test_b2_an_uncommitted_purge_whose_certified_event_was_altered_is_unknown(db
 
 
 def test_b2_a_change_between_the_reads_of_the_reread_is_unknown_never_a_composite_state(db, clock):
-    """Lecture composite : l'événement change APRÈS sa première lecture par la
-    relecture et AVANT celle de ses dépendances."""
-    proof = _certified_of(db, clock, "portfolio", purged=True)
-    clock.set(_expiry(db, proof.id))
+    """Lecture composite : une preuve référençante est insérée hors service
+    APRÈS la lecture de la liste des preuves par la relecture et AVANT la fin
+    de ses lectures ; la photographie assemblée serait égale à l'état initial
+    (sans preuve) alors que l'état réel a changé : jamais still_present."""
+    proof, row = _after_purged_proof(db, clock)
     fired = []
     seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=False)
 
     def inject(conn, cursor, statement, parameters, context, executemany):
-        if seen and not fired and statement.lstrip().startswith("SELECT") and f"FROM {ATTRIBUTIONS}" in statement:
+        if seen and not fired and f"FROM {ATTRIBUTIONS}" in statement and statement.rstrip().endswith("FOR SHARE"):
             fired.append(1)
-            _outside_set(db, proof.id, outcome="indeterminate")
+            _restore_proof(db, row)  # référence l'attribution (FOR KEY SHARE, compatible avec FOR SHARE)
     sa.event.listen(db, "before_cursor_execute", inject)
     try:
         outcome = expire(db, proof.id)
@@ -1971,6 +1975,38 @@ def test_b2_a_change_between_the_reads_of_the_reread_is_unknown_never_a_composit
         remove()
     assert seen == ["lost"] and fired == [1]
     assert outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY)
+    assert proof_row(db, proof.proof_id) is not None and _event(db, proof.id) is not None
+
+
+def test_an_attribution_switched_to_another_origin_between_the_reads_is_never_validated_against_the_old_one(
+        db, clock):
+    """L'attribution relue en L1 désigne l'interaction verrouillée au rang 6 ;
+    un écrivain hors service la rattache ensuite à une AUTRE interaction
+    'activity' de la même visite (FK respectées) avant son verrou : abandon,
+    jamais une validation contre l'ancienne origine."""
+    from tests.activity_proof_support import touch
+    proof = _certified_event(db, clock)
+    clock.advance(seconds=5)
+    visit, other_key = touch(db, proof.campaign_id, USER_A)  # même environnement, < 30 min : même visite
+    assert visit == proof.origin.visit_id
+    clock.set(utc(proof_row(db, proof.proof_id)["purge_after_at"]))
+    assert committed(db, lambda s: pl.purge_resolved_proof(s, proof_id=proof.proof_id)).outcome == pl.PURGED
+    _shorten(db, proof.id, proof.campaign_id, clock.now)
+    fired = []
+
+    def inject(conn, cursor, statement, parameters, context, executemany):
+        if not fired and f"FROM {INTERACTIONS}" in statement and statement.rstrip().endswith("FOR SHARE"):
+            fired.append(1)
+            _outside(db, f"UPDATE {ATTRIBUTIONS} SET interaction_key = :k WHERE event_id = :e", k=other_key,
+                     e=proof.id)
+    sa.event.listen(db, "before_cursor_execute", inject)
+    try:
+        outcome = expire(db, proof.id)
+    finally:
+        sa.event.remove(db, "before_cursor_execute", inject)
+    assert fired == [1] and outcome == lb.EventOutcome(lb.CONFLICT, el.DEPENDENCY_CHANGED)
+    assert _event(db, proof.id) is not None and _attribution(db, proof.id)["interaction_key"] == other_key
+    assert inspect_one(db, proof.id) == lb.EventOutcome(lb.INCONSISTENT, el.ORIGIN_INCOHERENT)  # puis vu tel quel
 
 
 def test_b1_residual_limit_a_finalization_instant_shifted_within_the_block_c_bounds_after_the_proof_purge(db, clock):
