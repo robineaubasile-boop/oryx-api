@@ -1069,7 +1069,8 @@ def test_the_lock_protocol_is_one_sorted_advisory_batch_then_rows_in_rank_order(
     locks = [s for s in seen if "pg_advisory_xact_lock" in s]
     assert len(locks) == 4
     ranks = [("pg_advisory_xact_lock", None), ("FROM product_campaign_participants", "FOR SHARE"),
-             ("FROM product_campaigns", "FOR SHARE"), (f"FROM {REGISTRY}", "FOR UPDATE"),
+             ("FROM product_campaigns", "FOR SHARE"), (f"FROM {INTERACTIONS}", "FOR SHARE"),
+             (f"FROM {REGISTRY}", "FOR UPDATE"),
              (f"FROM {ATTRIBUTIONS}", "FOR UPDATE"), (f"FROM {EVENTS}", "FOR UPDATE")]
     positions = []
     for marker, mode in ranks:
@@ -1683,7 +1684,7 @@ def _imports(path) -> set:
 
 FORBIDDEN = ("authz_f2", "auth_f2", "f2_runtime", "_activity_proof_bridge", "oryx_sessions", "OryxSession",
              "_run_attested", "os.environ", "getenv", "Thread", "asyncio", "schedule", "socket", "requests", "httpx",
-             "APIRouter", "FastAPI", "import_module", "__import__", "_stage_certified_event", "_certified_request",
+             "APIRouter", "FastAPI", "import_module", "__import__", "_stage_certified_event", "_certified_conflict",
              "certify_pending", "register_pending", "open_origin", "finalize_certified_proof",
              "resolve_expired_pending_proof", "TRUNCATE", "CASCADE", "SET NULL",
              "session_replication_role", "DISABLE TRIGGER", "while True", "sleep", "print(", "tombstone",
@@ -1716,9 +1717,10 @@ def test_the_modules_import_exactly_their_side_and_reach_nothing_else():
                              "withdraw_participant", "close_campaign", "cancel_campaign"}
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
             and n.value.id == "events"} == {"CERTIFIED_OPERATIONS", "CERTIFIED_OUTCOME", "CERTIFIED_ROUTE",
-                                           "_identity_locks"}
+                                           "REQUEST_FIELDS", "_certified_request", "_identity_locks"}
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-            and n.value.id == "finalization"} == {"IDENTITY_FIELDS", "lock_keys"}
+            and n.value.id == "finalization"} == {"IDENTITY_FIELDS", "lock_keys", "finalization_deadline",
+                                                 "_accepted_during_observation"}
     assert len([n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "begin_nested"]) == 2  # UN SAVEPOINT par chemin d'écriture
     boundary = BOUNDARY.read_text(encoding="utf-8")
@@ -1821,3 +1823,236 @@ def test_concurrent_threads_are_never_started_by_the_lifecycle(db, clock):
     lb.inspect_events_page(db)
     assert {t.ident for t in threading.enumerate()} <= before | {threading.get_ident()}
     assert _event(db, event.id) is None
+
+
+# --------------------------------------------------------------------------
+# R. Correctif post-audit (HEAD audité bab86fe) : contre-épreuves B1 et B2
+# --------------------------------------------------------------------------
+
+def _certified_of(db, clock, kind, *, purged):
+    """Événement certifié réel du bloc C (Décrypter ou Portfolio), preuve
+    présente ou déjà purgée par la purge nominale de la PR 1."""
+    from tests.activity_proof_support import ACK, CREATE
+    proof = _certified(db, USER_A, ACK if kind == "decrypter" else CREATE)
+    clock.advance(seconds=1)
+    decision = finalize(db, proof.proof_id)
+    assert decision.state == fz.RECORDED
+    proof.id = decision.event_id
+    if purged:
+        clock.set(utc(proof_row(db, proof.proof_id)["purge_after_at"]))
+        assert committed(db, lambda s: pl.purge_resolved_proof(s, proof_id=proof.proof_id)).outcome == pl.PURGED
+    return proof
+
+
+def _tamper(db, proof, case):
+    """Écrivain HORS SERVICE, toutes contraintes PostgreSQL en place."""
+    event = _event(db, proof.id)
+    if case == "delivery":
+        if event["event_type"] == "decrypter_used":
+            _set(db, proof.id, delivery_status="unconfirmed", delivered_at=None)
+        else:
+            _set(db, proof.id, delivery_status="confirmed", delivered_at=event["occurred_at"])
+    elif case == "delivered_at":
+        delivered = event["occurred_at"] + timedelta(seconds=1)
+        _set(db, proof.id, delivery_status="confirmed", delivered_at=delivered)
+    elif case == "updated_at":
+        _set(db, proof.id, updated_at=event["updated_at"] + timedelta(seconds=1))
+    elif case == "recorded_at":  # finalisation déplacée à l'échéance du bloc C (jamais admissible)
+        deadline = fz.finalization_deadline(*_authorization(db, proof.campaign_id))
+        _set(db, proof.id, recorded_at=deadline, updated_at=deadline)
+    elif case == "origin":  # interaction d'origine : recorded_at ≠ occurred_at de l'événement
+        with db.begin() as conn:
+            conn.execute(sa.text(f"UPDATE {INTERACTIONS} SET recorded_at = recorded_at - interval '1 microsecond' "
+                                 "WHERE interaction_key = :k"), {"k": proof.origin.interaction_key})
+    else:
+        raise AssertionError(case)
+
+
+def _authorization(db, campaign_id, user=USER_A):
+    from core.models import ProductCampaign, ProductCampaignParticipant
+    return committed(db, lambda s: (s.get(ProductCampaignParticipant, (campaign_id, user)),
+                                    s.get(ProductCampaign, campaign_id)))
+
+
+B1_CASES = ["delivery", "delivered_at", "updated_at", "recorded_at", "origin"]
+
+
+@pytest.mark.parametrize("purged", [False, True], ids=["proof_present", "proof_purged"])
+@pytest.mark.parametrize("kind", ["decrypter", "portfolio"])
+@pytest.mark.parametrize("case", B1_CASES)
+def test_b1_a_tampered_certified_event_is_never_valid_nor_purged(db, clock, case, kind, purged):
+    proof = _certified_of(db, clock, kind, purged=purged)
+    assert inspect_one(db, proof.id) == lb.EventOutcome(lb.VALID)  # canonique avant l'altération
+    _tamper(db, proof, case)
+    if not purged:  # le bloC C, lui, refuse déjà de relire cet état comme le sien
+        observed = committed(db, lambda s: fz.observe_proof(s, proof_id=proof.proof_id))
+        assert (observed.state, observed.reason) == (fz.RECORDED, fz.RECORD_INCOHERENT)
+    integrity = inspect_one(db, proof.id)
+    assert integrity.outcome == lb.INCONSISTENT, integrity
+    clock.set(_expiry(db, proof.id) + timedelta(days=1))
+    world = _world(db)
+    outcome = expire(db, proof.id)
+    assert outcome.outcome == lb.CONFLICT and outcome.reason == integrity.reason, outcome
+    assert _world(db) == world  # aucune mutation, aucune réparation
+
+
+@pytest.mark.parametrize("kind", ["decrypter", "portfolio"])
+def test_b1_a_legitimately_shortened_certified_event_stays_valid_and_purgeable(db, clock, kind):
+    for purged in (False, True):
+        proof = _certified_of(db, clock, kind, purged=purged)
+        occurred = utc(_event(db, proof.id)["occurred_at"])
+        _shorten(db, proof.id, proof.campaign_id, occurred + timedelta(days=8))
+        assert inspect_one(db, proof.id) == lb.EventOutcome(lb.VALID)
+        clock.set(occurred + timedelta(days=8))
+        assert expire(db, proof.id) == PURGED
+        assert (_event(db, proof.id), _attribution(db, proof.id), proof_row(db, proof.proof_id)) == (None, None, None)
+
+
+def _outside_set(db, event_id, **values):
+    """Écrivain hors service sur une connexion indépendante (autocommit)."""
+    with db.connect() as conn:
+        conn.execution_options(isolation_level="AUTOCOMMIT").execute(
+            sa.update(ProductActivityEvent.__table__).where(ProductActivityEvent.__table__.c.id == event_id)
+            .values(**values))
+
+
+def test_b2_an_uncommitted_removal_whose_event_was_altered_before_the_reread_is_unknown(db, clock):
+    event = _partial(db, clock)
+    seen, remove = _lose_commit(db, f"UPDATE {EVENTS}", really_commit=False,
+                                between=lambda: _outside_set(db, event.id, outcome="failed"))
+    try:
+        outcome = expire(db, event.id)
+    finally:
+        remove()
+    assert seen == ["lost"] and outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY)
+
+
+def test_b2_a_committed_removal_whose_revised_state_was_altered_is_unknown(db, clock):
+    event = _partial(db, clock)
+    seen, remove = _lose_commit(db, f"UPDATE {EVENTS}", really_commit=True,
+                                between=lambda: _outside_set(db, event.id, delivery_status="pending"))
+    try:
+        outcome = expire(db, event.id)
+    finally:
+        remove()
+    assert seen == ["lost"] and outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY)
+
+
+def test_b2_an_uncommitted_purge_whose_certified_event_was_altered_is_unknown(db, clock):
+    proof = _certified_of(db, clock, "decrypter", purged=True)
+    clock.set(_expiry(db, proof.id))
+    seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=False,
+                                between=lambda: _outside_set(db, proof.id, delivery_status="unconfirmed",
+                                                             delivered_at=None))
+    try:
+        outcome = expire(db, proof.id)
+    finally:
+        remove()
+    assert seen == ["lost"] and outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY)
+
+
+def test_b2_a_change_between_the_reads_of_the_reread_is_unknown_never_a_composite_state(db, clock):
+    """Lecture composite : l'événement change APRÈS sa première lecture par la
+    relecture et AVANT celle de ses dépendances."""
+    proof = _certified_of(db, clock, "portfolio", purged=True)
+    clock.set(_expiry(db, proof.id))
+    fired = []
+    seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=False)
+
+    def inject(conn, cursor, statement, parameters, context, executemany):
+        if seen and not fired and statement.lstrip().startswith("SELECT") and f"FROM {ATTRIBUTIONS}" in statement:
+            fired.append(1)
+            _outside_set(db, proof.id, outcome="indeterminate")
+    sa.event.listen(db, "before_cursor_execute", inject)
+    try:
+        outcome = expire(db, proof.id)
+    finally:
+        sa.event.remove(db, "before_cursor_execute", inject)
+        remove()
+    assert seen == ["lost"] and fired == [1]
+    assert outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY)
+
+
+def test_b1_residual_limit_a_finalization_instant_shifted_within_the_block_c_bounds_after_the_proof_purge(db, clock):
+    """Limite résiduelle (documentée) : l'instant de finalisation n'a d'autre
+    référence canonique que la preuve (resolved_at). Preuve présente : tout
+    décalage est détecté ; preuve purgée : seul un décalage qui sort des bornes
+    du bloc C l'est (test B1 « recorded_at ») ; un décalage qui y reste n'est
+    plus distinguable de l'original."""
+    present = _certified_of(db, clock, "portfolio", purged=False)
+    purged = _certified_of(db, clock, "portfolio", purged=True)
+    for proof in (present, purged):
+        shifted = _event(db, proof.id)["recorded_at"] + timedelta(seconds=1)
+        _set(db, proof.id, recorded_at=shifted, updated_at=shifted)
+    assert inspect_one(db, present.id) == lb.EventOutcome(lb.INCONSISTENT, el.PROOF_INCOHERENT)
+    assert inspect_one(db, purged.id) == lb.EventOutcome(lb.VALID)  # limite caractérisée, non masquée
+
+
+def _outside(db, sql, **params):
+    with db.connect() as conn:
+        conn.execution_options(isolation_level="AUTOCOMMIT").execute(sa.text(sql), params)
+
+
+def test_b2_an_uncommitted_purge_whose_residual_proof_or_origin_was_altered_is_unknown(db, clock):
+    for target in ("proof", "interaction", "attribution"):
+        proof = _shortened_certified(db, clock)
+        if target == "proof":
+            alter = lambda: _outside(db, f"UPDATE {REGISTRY} SET resolved_at = resolved_at + interval '1 second', "  # noqa: E731
+                                         "purge_after_at = purge_after_at + interval '1 second' WHERE id = :i",
+                                     i=proof.proof_id)
+        elif target == "interaction":
+            alter = lambda: _outside(db, f"UPDATE {INTERACTIONS} SET recorded_at = recorded_at - "  # noqa: E731
+                                         "interval '1 microsecond' WHERE interaction_key = :k",
+                                     k=proof.origin.interaction_key)
+        else:
+            alter = lambda: _outside(db, f"UPDATE {ATTRIBUTIONS} SET certified_at = certified_at + "  # noqa: E731
+                                         "interval '1 microsecond' WHERE event_id = :e", e=proof.id)
+        seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=False, between=alter)
+        try:
+            outcome = expire(db, proof.id)
+        finally:
+            remove()
+        assert seen == ["lost"] and outcome == lb.EventOutcome(lb.UNKNOWN, lb.TECHNICAL_UNCERTAINTY), target
+
+
+def test_b2_the_reread_takes_only_the_attempted_keys_then_shared_row_locks_in_rank_order(db, clock):
+    proof = _shortened_certified(db, clock)
+    keys = _keys(db, proof.id)
+    seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=False)
+    statements, stop = _statements(db)
+    try:
+        assert expire(db, proof.id) == lb.EventOutcome(lb.STILL_PRESENT, lb.TECHNICAL_UNCERTAINTY)
+    finally:
+        remove()
+        stop()
+    reread = statements[[i for i, s in enumerate(statements) if s.startswith("DELETE FROM " + EVENTS)][0]:]
+    reread = reread[[i for i, s in enumerate(reread) if "pg_advisory_xact_lock" in s][0]:]
+    locks = [s for s in reread if "pg_advisory_xact_lock" in s]
+    assert len(locks) == len(keys) == 4  # les clés de l'opération tentée, aucune autre
+    assert not [s for s in reread if s.startswith(("DELETE", "UPDATE", "INSERT", "SAVEPOINT"))]
+    assert not [s for s in reread if s.endswith("FOR UPDATE")]
+    shared = [s.split(" FROM ")[1].split(" ")[0] for s in reread if s.endswith("FOR SHARE")]
+    assert shared == [INTERACTIONS, REGISTRY, ATTRIBUTIONS, EVENTS]  # rangs 6 à 9, en partage
+    last_lock = max(i for i, s in enumerate(reread) if "pg_advisory_xact_lock" in s)
+    assert last_lock < min(i for i, s in enumerate(reread) if s.endswith("FOR SHARE"))  # aucune clé tardive
+
+
+def test_b2_the_nominal_reread_outcomes_are_preserved(db, clock):
+    """Contre-épreuve : sans altération, les issues nominales restent celles
+    attendues (still_present, unconfirmed, absent)."""
+    for really_commit, expected in ((False, lb.STILL_PRESENT), (True, lb.UNCONFIRMED)):
+        event = _partial(db, clock)
+        seen, remove = _lose_commit(db, f"UPDATE {EVENTS}", really_commit=really_commit)
+        try:
+            assert expire(db, event.id).outcome == expected
+        finally:
+            remove()
+    proof = _certified_of(db, clock, "decrypter", purged=False)
+    occurred = utc(_event(db, proof.id)["occurred_at"])
+    _shorten(db, proof.id, proof.campaign_id, occurred + timedelta(hours=1))
+    clock.set(occurred + timedelta(hours=1))
+    seen, remove = _lose_commit(db, f"DELETE FROM {EVENTS}", really_commit=True)
+    try:
+        assert expire(db, proof.id) == lb.EventOutcome(lb.ABSENT, lb.UNCONFIRMED_COMMIT)
+    finally:
+        remove()

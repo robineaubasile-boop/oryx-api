@@ -111,6 +111,7 @@ from core.models import (
     ProductActivityEvent,
     ProductActivityEventAttribution,
     ProductActivityProof,
+    ProductActivitySessionInteraction,
     ProductCampaign,
     ProductCampaignParticipant,
 )
@@ -148,6 +149,7 @@ UNKNOWN = "unknown"
 EXPIRY_OUTCOMES = (PRUNED, PURGED, NOT_DUE, ABSENT, CONFLICT, UNKNOWN)
 # Observation et intégrité.
 PRESENT = "present"
+UNSTABLE = "unstable"  # relecture : état ou dépendances changés pendant l'observation
 VALID = "valid"
 INCONSISTENT = "inconsistent"
 INTEGRITY_OUTCOMES = (VALID, INCONSISTENT, ABSENT, UNKNOWN)
@@ -160,10 +162,13 @@ ATTACHMENT_INCOHERENT = "attachment_incoherent"  # campagne, politique, particip
 CLASSIFICATION_INCOHERENT = "classification_incoherent"  # historique / certifié hors contrat
 ATTRIBUTION_INCOHERENT = "attribution_incoherent"
 PROOF_INCOHERENT = "proof_incoherent"
+CERTIFIED_INCOHERENT = "certified_incoherent"  # champs canoniques du bloc C (livraison, dates, nature) altérés
+ORIGIN_INCOHERENT = "origin_incoherent"  # interaction d'origine absente ou discordante (occurred_at, visite)
 CLOCK_INCOHERENT = "clock_incoherent"
 WRITE_UNCONFIRMED = "write_unconfirmed"  # écriture conditionnelle : nombre de lignes inattendu
 REASONS = (IDENTITY_CHANGED, DEPENDENCY_CHANGED, SCHEMA_UNSUPPORTED, RETENTION_INCOHERENT, ATTACHMENT_INCOHERENT,
-           CLASSIFICATION_INCOHERENT, ATTRIBUTION_INCOHERENT, PROOF_INCOHERENT, CLOCK_INCOHERENT, WRITE_UNCONFIRMED)
+           CLASSIFICATION_INCOHERENT, ATTRIBUTION_INCOHERENT, PROOF_INCOHERENT, CERTIFIED_INCOHERENT,
+           ORIGIN_INCOHERENT, CLOCK_INCOHERENT, WRITE_UNCONFIRMED)
 
 IDENTITY_FIELDS = finalization.IDENTITY_FIELDS  # identité commune preuve / attribution (0024)
 # Champs de l'événement repris par l'attribution (FK composite de 0024).
@@ -212,15 +217,14 @@ class EventPage:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class _EventState:
-    """Photographie EN MÉMOIRE de l'événement et de ses dépendances (relecture
-    d'un COMMIT incertain) ; jamais journalisée ni rendue à l'appelant final."""
-    identity: tuple
-    document: object
-    next_scope_expires_at: datetime
-    purge_after_at: datetime
-    updated_at: datetime
+    """Photographie COMPLÈTE, en mémoire, de l'événement (toutes ses colonnes)
+    et de ses dépendances (attribution, preuve référençante, interaction
+    d'origine : toutes leurs colonnes), pour la relecture d'un COMMIT
+    incertain ; jamais journalisée ni rendue à l'appelant final."""
+    event: tuple
     attribution: tuple | None
     proof: tuple | None
+    interaction: tuple | None
 
     def __repr__(self) -> str:
         return "_EventState(<private>)"
@@ -289,7 +293,9 @@ class _Locked:
     event: ProductActivityEvent
     attribution: ProductActivityEventAttribution | None
     proof: ProductActivityProof | None
+    interaction: ProductActivitySessionInteraction | None
     keys: tuple
+    authorizations: dict  # campaign_id -> (participation, campagne), verrouillées en partage aux rangs 4-5
 
 
 # --------------------------------------------------------------------------
@@ -393,6 +399,23 @@ def _referencing_proofs(db, event_id) -> list:
         ProductActivityProof.recorded_event_id == event_id).order_by(ProductActivityProof.id), None)).scalars())
 
 
+def _interaction(db, attribution, *, mode=None):
+    """Interaction d'origine de l'attribution (FK composite de 0024)."""
+    if attribution is None:
+        return None
+    interactions = ProductActivitySessionInteraction
+    return db.execute(_lock_mode(select(interactions).where(
+        interactions.campaign_id == attribution.campaign_id, interactions.user_id == attribution.user_id,
+        interactions.interaction_key == attribution.interaction_key), mode)).scalar_one_or_none()
+
+
+def _row(row) -> tuple | None:
+    """Toutes les colonnes d'une ligne (photographie complète)."""
+    if row is None:
+        return None
+    return tuple((column.key, getattr(row, column.key)) for column in row.__table__.columns)
+
+
 def _proof_by_id(db, proof_id, *, mode):
     return db.execute(_lock_mode(select(ProductActivityProof).where(ProductActivityProof.id == proof_id), mode)
                       ).scalar_one_or_none()
@@ -476,13 +499,20 @@ def _lock(db, event_id: uuid.UUID, *, write: bool):
     campaigns = _dependency_campaigns(event, attribution, proof_rows)
     proof_id = proof_rows[0].id if proof_rows else None
     # 4-5. participations puis campagnes, en partage, ordre déterministe
+    authorizations = {}
     if campaigns:
-        db.execute(_lock_mode(select(ProductCampaignParticipant).where(
+        participations = db.execute(_lock_mode(select(ProductCampaignParticipant).where(
             ProductCampaignParticipant.user_id == event.user_id,
             ProductCampaignParticipant.campaign_id.in_(sorted(campaigns)))
             .order_by(ProductCampaignParticipant.campaign_id), "share")).scalars().all()
-        db.execute(_lock_mode(select(ProductCampaign).where(ProductCampaign.id.in_(sorted(campaigns)))
-                              .order_by(ProductCampaign.id), "share")).scalars().all()
+        locked_campaigns = {c.id: c for c in db.execute(_lock_mode(select(ProductCampaign).where(
+            ProductCampaign.id.in_(sorted(campaigns))).order_by(ProductCampaign.id), "share")).scalars().all()}
+        authorizations = {p.campaign_id: (p, locked_campaigns.get(p.campaign_id)) for p in participations}
+    # 6. interaction d'origine de l'attribution relue en L1, EN PARTAGE (aucun
+    #    service ne la verrouille, la modifie ni la supprime : aucun contact) ;
+    #    visite : aucun verrou.
+    attribution_l1, proof_l1 = _row(attribution), _row(proof_rows[0]) if proof_rows else None
+    interaction = _interaction(db, attribution, mode="share")
     # 7. preuve référençante ; 8. attribution ; 9. événement
     proof = _proof_by_id(db, proof_id, mode=row_mode) if proof_id is not None else None
     locked_attribution = _attribution(db, event_id, mode=row_mode) if attribution is not None else None
@@ -496,18 +526,20 @@ def _lock(db, event_id: uuid.UUID, *, write: bool):
         locked_attribution = _attribution(db, event_id)
         if locked_attribution is not None:
             return DEPENDENCY_CHANGED  # apparue trop tard pour son rang (8 < 9)
-    elif locked_attribution is None:
-        return DEPENDENCY_CHANGED
+    elif _row(locked_attribution) != attribution_l1:
+        return DEPENDENCY_CHANGED  # disparue ou modifiée : l'interaction verrouillée n'est plus la sienne
     final_proofs = _referencing_proofs(db, event_id)
     if any(row.id != proof_id for row in final_proofs):
         return DEPENDENCY_CHANGED  # nouvelle preuve : son rang (7) est passé
     if proof is not None and (not final_proofs or proof.recorded_event_id != event.id):
         proof = None  # disparue (ou détachée) entre les lectures : pas un conflit en soi
+    elif proof is not None and _row(proof) != proof_l1:
+        return DEPENDENCY_CHANGED
     final_proof_rows = [proof] if proof is not None else []
     if (not _required_keys(event, locked_attribution, final_proof_rows) <= keys
             or not _dependency_campaigns(event, locked_attribution, final_proof_rows) <= campaigns):
         return DEPENDENCY_CHANGED
-    return _Locked(event, locked_attribution, proof, tuple(sorted(keys)))
+    return _Locked(event, locked_attribution, proof, interaction, tuple(sorted(keys)), authorizations)
 
 
 # --------------------------------------------------------------------------
@@ -520,7 +552,45 @@ def _scopes(event) -> tuple:
                                                 purge_after_at=event.purge_after_at)
 
 
-def _certified_problem(event, attribution, proof, scopes) -> str | None:
+def _canonical_problem(event, interaction, authorization) -> str | None:
+    """Invariants canoniques du bloc C, indépendants de la conservation (une
+    échéance légitimement raccourcie reste admise) : origine = interaction
+    'activity' de la visite, occurred_at = son instant d'acceptation ; champs
+    de requête EXACTEMENT ceux de events._certified_request (nature, source,
+    outcome, route, livraison, delivered_at, resolved_at) ; recorded_at =
+    updated_at (instant de finalisation, jamais réécrit) ; chronologie
+    occurred_at <= resolved_at <= recorded_at ; bornes du bloc C sur la
+    participation et la campagne de l'attribution : origine acceptée pendant
+    l'observation, certification (resolved_at) strictement avant window_end_at
+    et close_by_at, finalisation (recorded_at) strictement avant
+    finalization.finalization_deadline. Vérifiable aussi après la purge
+    nominale de la preuve."""
+    if (interaction is None or interaction.interaction_kind != proofs.ACTIVITY
+            or interaction.session_id != event.visit_id or interaction.recorded_at != event.occurred_at):
+        return ORIGIN_INCOHERENT
+    try:
+        expected = events._certified_request(
+            user_id=event.user_id, visit_id=event.visit_id, idempotency_key=event.idempotency_key,
+            source_operation_kind=event.source_operation_kind, source_operation_id=event.source_operation_id,
+            occurred_at=interaction.recorded_at, resolved_at=event.resolved_at)
+    except _STRUCTURE_ERRORS:
+        return CERTIFIED_INCOHERENT
+    if any(getattr(event, field) != expected[field] for field in events.REQUEST_FIELDS):
+        return CERTIFIED_INCOHERENT
+    if event.updated_at != event.recorded_at or not event.occurred_at <= event.resolved_at <= event.recorded_at:
+        return CERTIFIED_INCOHERENT
+    participation, campaign = authorization if authorization is not None else (None, None)
+    if participation is None or campaign is None:
+        return ATTACHMENT_INCOHERENT
+    if not finalization._accepted_during_observation(event.occurred_at, participation, campaign):
+        return ORIGIN_INCOHERENT
+    if (event.resolved_at >= participation.window_end_at or event.resolved_at >= campaign.close_by_at
+            or event.recorded_at >= finalization.finalization_deadline(participation, campaign)):
+        return CERTIFIED_INCOHERENT
+    return None
+
+
+def _certified_problem(event, attribution, proof, scopes, interaction, authorizations) -> str | None:
     rule = events.CERTIFIED_OPERATIONS[event.source_operation_kind]
     if ((event.event_type, event.surface) != rule[:2] or event.source != SERVER_BUSINESS
             or event.outcome != events.CERTIFIED_OUTCOME or event.executed_route != events.CERTIFIED_ROUTE):
@@ -532,6 +602,9 @@ def _certified_problem(event, attribution, proof, scopes) -> str | None:
             or attribution.event_id != event.id or scopes[0].campaign_id != attribution.campaign_id
             or attribution.certified_at != event.resolved_at):
         return ATTRIBUTION_INCOHERENT
+    canonical = _canonical_problem(event, interaction, authorizations.get(attribution.campaign_id))
+    if canonical is not None:
+        return canonical
     if proof is not None and (
             proof.status != proofs.RECORDED or proof.id != event.idempotency_key
             or proof.recorded_event_id != event.id
@@ -557,7 +630,7 @@ def _contract_problem(db, locked: _Locked) -> str | None:
     except _STRUCTURE_ERRORS:
         return ATTACHMENT_INCOHERENT
     if _path(event) == CERTIFIED:
-        return _certified_problem(event, attribution, proof, scopes)
+        return _certified_problem(event, attribution, proof, scopes, locked.interaction, locked.authorizations)
     if attribution is not None or proof is not None:
         return CLASSIFICATION_INCOHERENT  # un événement historique n'a jamais d'attribution
     if event.source_operation_kind is not None and event.source_operation_kind not in SOURCE_OPERATION_KINDS:
@@ -576,13 +649,15 @@ def _clock_problem(locked: _Locked, now: datetime) -> bool:
     return any(now < instant for instant in instants)
 
 
-def _state(event, attribution, proof) -> _EventState:
-    return _EventState(
-        _identity(event), event.retention_scopes, event.next_scope_expires_at, event.purge_after_at,
-        event.updated_at,
-        None if attribution is None else (attribution.event_id, attribution.campaign_id,
-                                          attribution.interaction_key, attribution.certified_at),
-        None if proof is None else (proof.id, proof.status, proof.resolved_at, proof.purge_after_at))
+def _state(event, attribution, proof, interaction) -> _EventState:
+    return _EventState(_row(event), _row(attribution), _row(proof), _row(interaction))
+
+
+def _revised(state: _EventState, **values) -> _EventState:
+    """Photographie attendue après le retrait : seules les colonnes écrites
+    changent, toutes les autres sont reprises de l'état initial."""
+    event = tuple((key, values.get(key, value)) for key, value in state.event)
+    return replace(state, event=event)
 
 
 # --------------------------------------------------------------------------
@@ -618,7 +693,7 @@ def _prune(db, locked: _Locked, remaining: tuple, now: datetime) -> EventDecisio
         return EventDecision(CONFLICT, RETENTION_INCOHERENT)
     if purge_after > event.purge_after_at or next_expiry <= event.next_scope_expires_at or next_expiry <= now:
         return EventDecision(CONFLICT, RETENTION_INCOHERENT)  # défense : jamais d'allongement
-    before = _state(event, None, None)
+    before = _state(event, None, None, None)
     statement = (update(ProductActivityEvent)
                  .where(*_same_event(event), ProductActivityEvent.next_scope_expires_at <= now)
                  .values(retention_scopes=document, next_scope_expires_at=next_expiry, purge_after_at=purge_after,
@@ -629,8 +704,8 @@ def _prune(db, locked: _Locked, remaining: tuple, now: datetime) -> EventDecisio
     except _Unconfirmed:
         return EventDecision(CONFLICT, WRITE_UNCONFIRMED)
     db.expunge(event)
-    after = replace(before, document=document, next_scope_expires_at=next_expiry, purge_after_at=purge_after,
-                    updated_at=now)
+    after = _revised(before, retention_scopes=document, next_scope_expires_at=next_expiry, purge_after_at=purge_after,
+                     updated_at=now)
     return EventDecision(PRUNED, None, True, _Attempt(event.id, locked.keys, before, after))
 
 
@@ -638,7 +713,7 @@ def _purge(db, locked: _Locked, now: datetime) -> EventDecision:
     """Suppression atomique : preuve référençante, attribution, événement
     (ordre des FK de 0024), dans UN SAVEPOINT."""
     event, attribution, proof = locked.event, locked.attribution, locked.proof
-    before = _state(event, attribution, proof)
+    before = _state(event, attribution, proof, locked.interaction)
     try:
         with db.begin_nested():
             if proof is not None:
@@ -659,7 +734,7 @@ def _purge(db, locked: _Locked, now: datetime) -> EventDecision:
         return EventDecision(CONFLICT, WRITE_UNCONFIRMED)
     except IntegrityError:
         return EventDecision(CONFLICT, DEPENDENCY_CHANGED)  # référence apparue hors service : rien n'est supprimé
-    for row in (proof, attribution, event):
+    for row in (proof, attribution, event, locked.interaction):
         if row is not None:
             db.expunge(row)
     return EventDecision(PURGED, None, True, _Attempt(event.id, locked.keys, before, None))
@@ -694,13 +769,41 @@ def expire_event_scopes(db, *, event_id: uuid.UUID) -> EventDecision:
     return _prune(db, locked, remaining, now)
 
 
+def _snapshot(db, event_id, *, mode=None):
+    """(événement, attribution, preuves référençantes, interaction), lus dans
+    l'ordre des rangs 6 à 9 lorsqu'ils sont verrouillés."""
+    attribution = _attribution(db, event_id)
+    interaction = _interaction(db, attribution, mode=mode)
+    proof_rows = _referencing_proofs(db, event_id)
+    if mode is not None:
+        proof_rows = [p for p in (_proof_by_id(db, row.id, mode=mode) for row in proof_rows) if p is not None]
+        attribution = _attribution(db, event_id, mode=mode) if attribution is not None else None
+    return _event(db, event_id, mode=mode), attribution, proof_rows, interaction
+
+
 def _observe(db, event_id: uuid.UUID, keys) -> EventObservation:
-    common.lock_identities(db, *keys)  # une transaction encore en cours sur ces identités est attendue
-    event = _event(db, event_id)
-    if event is None:
+    """Relecture STABLE sans écriture : clés fournies d'abord (une transaction
+    encore en cours sur ces identités est attendue), lecture L1, verrous de
+    lignes EN PARTAGE dans l'ordre global (interaction, preuve, attribution,
+    événement : sous-ensemble ordonné des rangs 6 à 9, aucune clé
+    supplémentaire), relecture L2 ; L1 et L2 doivent être identiques et ne
+    réclamer aucune clé non détenue, sinon UNSTABLE."""
+    keys = tuple(keys)
+    common.lock_identities(db, *keys)
+    first_event, attribution, proof_rows, interaction = _snapshot(db, event_id)
+    if first_event is None:
         return EventObservation(ABSENT)
-    attribution, proof_rows = _attribution(db, event_id), _referencing_proofs(db, event_id)
-    return EventObservation(PRESENT, _state(event, attribution, proof_rows[0] if proof_rows else None))
+    if len(proof_rows) > 1 or not _required_keys(first_event, attribution, proof_rows) <= set(keys):
+        return EventObservation(UNSTABLE)
+    # Photographie capturée en valeurs AVANT la relecture (l'ORM rafraîchit les mêmes objets en place).
+    first = _state(first_event, attribution, proof_rows[0] if proof_rows else None, interaction)
+    locked_event, attribution, proof_rows, interaction = _snapshot(db, event_id, mode="share")
+    if locked_event is None or len(proof_rows) > 1:
+        return EventObservation(UNSTABLE)
+    second = _state(locked_event, attribution, proof_rows[0] if proof_rows else None, interaction)
+    if second != first or [row.id for row in _referencing_proofs(db, event_id)] != [row.id for row in proof_rows]:
+        return EventObservation(UNSTABLE)  # changé pendant l'observation : aucune conclusion
+    return EventObservation(PRESENT, second)
 
 
 def observe_event_retention(db, *, event_id: uuid.UUID) -> EventObservation:
@@ -711,7 +814,8 @@ def observe_event_retention(db, *, event_id: uuid.UUID) -> EventObservation:
     if hint is None:
         return EventObservation(ABSENT)
     keys = _required_keys(hint, _attribution(db, event_id), _referencing_proofs(db, event_id))
-    return _observe(db, event_id, sorted(keys))
+    observation = _observe(db, event_id, sorted(keys))
+    return EventObservation(ABSENT) if observation.outcome == ABSENT else observation
 
 
 def _observe_attempt(db, *, attempt: _Attempt) -> EventObservation:

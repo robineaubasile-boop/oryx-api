@@ -176,9 +176,15 @@ def _from_decision(decision) -> EventOutcome:
 
 def _reread(attempt, observation) -> EventOutcome:
     """Issue d'une écriture dont le COMMIT est incertain, d'après une relecture
-    faite APRÈS les clés de l'opération tentée. Jamais pruned ni purged."""
+    STABLE faite APRÈS les clés de l'opération tentée et comparant des
+    photographies COMPLÈTES (événement, attribution, preuve, interaction) :
+    still_present seulement si l'état initial est observé intact, unconfirmed
+    seulement si l'état révisé attendu est observé ; sinon unknown. Jamais
+    pruned ni purged."""
     if observation.outcome == event_lifecycle.ABSENT:
         return EventOutcome(ABSENT, UNCONFIRMED_COMMIT)
+    if observation.outcome != event_lifecycle.PRESENT:
+        return _unknown()  # relecture instable : identités, dépendances ou état changés pendant l'observation
     if attempt.after is not None and observation.state == attempt.after:
         return EventOutcome(UNCONFIRMED, UNCONFIRMED_COMMIT)
     if observation.state == attempt.before:
