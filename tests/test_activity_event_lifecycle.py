@@ -1738,7 +1738,11 @@ def test_nothing_calls_the_event_lifecycle_outside_the_tests_and_the_documentati
     markers = ("event_lifecycle", "_activity_event_lifecycle", "_activity_transactions", "expire_event",
                "inspect_event", "expire_events_page", "inspect_events_page", "select_expired_event_candidates",
                "select_integrity_candidates")
-    allowed = {SERVICE, BOUNDARY, TRANSACTIONS, REPO_ROOT / "core" / "_activity_proof_lifecycle.py"}
+    # V0-T08 2C PR 3 (nominatif) : la frontière du cycle de vie des participations
+    # importe les garde-fous de core/_activity_transactions.py (vérifié ci-dessous).
+    participation_boundary = REPO_ROOT / "core" / "_activity_participation_lifecycle.py"
+    allowed = {SERVICE, BOUNDARY, TRANSACTIONS, REPO_ROOT / "core" / "_activity_proof_lifecycle.py",
+               participation_boundary}
     for path in sorted(REPO_ROOT.rglob("*")):
         if (not path.is_file() or path in allowed or ".git" in path.parts or "__pycache__" in path.parts
                 or "node_modules" in path.parts or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh",
@@ -1752,6 +1756,9 @@ def test_nothing_calls_the_event_lifecycle_outside_the_tests_and_the_documentati
         if any(marker in source for marker in markers):
             offenders.append(str(relative))
     assert offenders == []
+    participation_source = participation_boundary.read_text(encoding="utf-8")
+    assert [m for m in markers if m in participation_source] == ["_activity_transactions"]
+    assert "from core._activity_transactions import _owned, _require_engine" in participation_source
     # La frontière du registre (PR 1) n'importe des garde-fous que les noms extraits.
     proof_boundary = (REPO_ROOT / "core" / "_activity_proof_lifecycle.py").read_text(encoding="utf-8")
     assert "event_lifecycle" not in proof_boundary and "_activity_transactions import (" in proof_boundary
