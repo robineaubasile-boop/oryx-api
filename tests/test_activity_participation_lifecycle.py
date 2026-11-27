@@ -1869,10 +1869,14 @@ def test_pages_of_participations_follow_the_primary_key_and_the_cursor_of_the_se
             db, f"SELECT campaign_id, user_id FROM {PARTICIPANTS} ORDER BY campaign_id, user_id")]
         full = committed(db, lambda s: pl.select_purgeable_participation_candidates(s, limit=200))
         assert list(full.participations) == expected[:200]
+        rest = committed(db, lambda s: pl.select_purgeable_participation_candidates(s, limit=200,
+                                                                                    after=full.next_cursor))
+        assert list(rest.participations) == expected[200:] and rest.next_cursor is None  # curseur strict
         page = lb.purge_participations_page(db, limit=200)
         assert (page.examined, page.purged) == (200, 200) and page.next_cursor == full.next_cursor
         assert (page.next_cursor.campaign_id, page.next_cursor.user_id) == expected[199]
-        assert lb.purge_participations_page(db, limit=200, after=page.next_cursor).purged == 6  # 205 + J0 de USER_A
+        second = lb.purge_participations_page(db, limit=200, after=page.next_cursor)
+        assert (second.examined, second.purged, second.next_cursor) == (6, 6, None)  # 205 + J0 de USER_A
     finally:
         _drop_forged_users(db)
 
