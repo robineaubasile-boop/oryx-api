@@ -95,6 +95,7 @@ de page entière exacte 1..200 (défaut 50) ; curseur strict issu de la SEULE
 photographie de sélection ; jamais OFFSET ; curseurs des deux parcours de
 types distincts (incompatibles).
 """
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -165,19 +166,25 @@ EVENT_SCOPE_REMAINING = "event_scope_remaining"
 RETENTION_INCOHERENT = "retention_incoherent"  # statut / dates de campagne, ou document de finalités illisible
 POLICY_INCOHERENT = "policy_incoherent"  # politique de conservation ou de mesure hors registre
 SESSION_INCOHERENT = "session_incoherent"  # invariants de la visite rompus, ou visite hors contrat
+PARTICIPATION_INCOHERENT = "participation_incoherent"  # invariants universels de la participation rompus
 IDENTITY_CHANGED = "identity_changed"
 DEPENDENCY_CHANGED = "dependency_changed"  # dépendance apparue après son contrôle, ou violation de FK
 CLOCK_INCOHERENT = "clock_incoherent"
 WRITE_UNCONFIRMED = "write_unconfirmed"  # écriture conditionnelle : nombre de lignes inattendu
 REASONS = (RETENTION_EXPIRED, DEADLINE_UNESTABLISHED, PROOF_REMAINING, ATTRIBUTION_REMAINING, EVENT_SCOPE_REMAINING,
-           RETENTION_INCOHERENT, POLICY_INCOHERENT, SESSION_INCOHERENT, IDENTITY_CHANGED, DEPENDENCY_CHANGED,
-           CLOCK_INCOHERENT, WRITE_UNCONFIRMED)
+           RETENTION_INCOHERENT, POLICY_INCOHERENT, SESSION_INCOHERENT, PARTICIPATION_INCOHERENT, IDENTITY_CHANGED,
+           DEPENDENCY_CHANGED, CLOCK_INCOHERENT, WRITE_UNCONFIRMED)
 BLOCKING_REASONS = (PROOF_REMAINING, ATTRIBUTION_REMAINING, EVENT_SCOPE_REMAINING)
 
 SESSION_LOCK_KIND = "activity_session"  # clé de sessions._lock (égalité testée)
 PARTICIPATION_LOCK_KIND = "participation"  # clé de participation._lock_identity_and_read et cohort
 SECONDS_PER_DAY = 86400.0
 _DIGEST_CHARACTERS = frozenset("0123456789abcdef")
+# Lecture tolérante (correctif R5 bis) : seules les deux notations hexadécimales
+# usuelles d'un UUID sont interprétées (8-4-4-4-12 ou 32 chiffres, casse
+# indifférente) ; toute autre notation (accolades, urn:uuid:, espaces) est ambiguë.
+_LENIENT_UUID = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+                           r"|[0-9a-fA-F]{32})$")
 # Anomalies structurelles converties en motif (jamais une exception non maîtrisée).
 _STRUCTURE_ERRORS = (InvalidRetentionScopes, InvalidProductAnalyticsInput, TypeError, ValueError, KeyError,
                      AttributeError)
@@ -571,6 +578,66 @@ def _visit_identity(visit) -> tuple:
     return visit.id, visit.campaign_id, visit.user_id, visit.environment_digest
 
 
+def _participation_problem(participation, campaign) -> str | None:
+    """Invariants UNIVERSELS d'une participation, communs aux deux chemins
+    d'inscription (participation.enroll_participant, inscription générique ;
+    participation.first_eligible_login, première connexion et cohorte) et
+    admis ou non par les CHECK de 0022 (correctif R1 B2). Lecture seule, sans
+    horloge :
+
+    - trace d'autorisation présente (authorization_recorded_at, notice_version
+      au format fermé) ;
+    - authorization_recorded_at <= enrolled_at <= window_start_at <
+      window_end_at (égalités admises : J0 = inscription = début) ;
+    - campagne : created_at <= enrolled_at < close_by_at, window_end_at <=
+      close_by_at ; enrolled_at <= closed_at (l'inscription exige une campagne
+      planned ou active, sérialisée avec la clôture) ;
+    - statut du vocabulaire fermé (aucun statut n'est exigé ni préféré).
+
+    Jamais imposés (contrats propres à la première connexion ou à la cohorte) :
+    durée de douze jours, J0 = enrolled_at = window_start_at, J0 >= activation.
+    Une fenêtre contractuelle dépassant closed_at (clôture anticipée) est
+    légitime."""
+    try:
+        if participation.participation_status not in common.PARTICIPATION_STATUSES:
+            return PARTICIPATION_INCOHERENT
+        notice = participation.notice_version
+        if (participation.authorization_recorded_at is None or type(notice) is not str
+                or not common.NOTICE_VERSION_PATTERN.fullmatch(notice)):
+            return PARTICIPATION_INCOHERENT
+        if not (participation.authorization_recorded_at <= participation.enrolled_at
+                <= participation.window_start_at < participation.window_end_at):
+            return PARTICIPATION_INCOHERENT
+        if not (campaign.created_at <= participation.enrolled_at < campaign.close_by_at
+                and participation.window_end_at <= campaign.close_by_at):
+            return PARTICIPATION_INCOHERENT
+        if campaign.closed_at is not None and participation.enrolled_at > campaign.closed_at:
+            return PARTICIPATION_INCOHERENT
+    except _STRUCTURE_ERRORS:
+        return PARTICIPATION_INCOHERENT
+    return None
+
+
+def _stored_instants(campaign, participation, visit=None) -> tuple:
+    """Instants STOCKÉS qui doivent précéder (ou égaler) l'horloge de décision :
+    création, activation et clôture de la campagne, autorisation et inscription
+    de la participation, ouverture, activité et fin de la visite. Jamais
+    window_start_at / window_end_at ni close_by_at (bornes contractuelles,
+    légitimement futures)."""
+    instants = [campaign.created_at, campaign.activated_at, campaign.closed_at,
+                participation.authorization_recorded_at, participation.enrolled_at]
+    if visit is not None:
+        instants += [visit.opened_at, visit.last_activity_at, visit.finalized_at]
+    return tuple(instant for instant in instants if instant is not None)
+
+
+def _clock_problem(now: datetime, instants) -> bool:
+    """Horloge de décision antérieure à un instant stocké : chronologie stockée
+    ou horloge incohérente ; aucune décision, aucune écriture, jamais
+    d'antidatage (correctif R1 B1)."""
+    return any(now < instant for instant in instants)
+
+
 def _session_problem(visit, participation, campaign) -> str | None:
     """Invariants de la visite (0023 et sessions.py), relus sous verrou :
     empreinte, chronologie, inactivité de 30 minutes, fin cohérente, visite
@@ -593,8 +660,14 @@ def _session_problem(visit, participation, campaign) -> str | None:
         if campaign.activated_at is None:
             return SESSION_INCOHERENT  # visite d'une campagne jamais activée : hors contrat
         if not (campaign.activated_at <= visit.opened_at and participation.window_start_at <= visit.opened_at
+                and participation.enrolled_at <= visit.opened_at
                 and visit.last_activity_at < participation.window_end_at
                 and visit.last_activity_at < campaign.close_by_at):
+            return SESSION_INCOHERENT
+        # Correctif R1 B1 : aucune activité après la clôture effective (touch exige
+        # une campagne active, sérialisé avec la clôture : égalité admise). La
+        # FINALISATION, elle, peut légitimement suivre la clôture.
+        if campaign.closed_at is not None and visit.last_activity_at > campaign.closed_at:
             return SESSION_INCOHERENT
     except _STRUCTURE_ERRORS:
         return SESSION_INCOHERENT
@@ -668,8 +741,11 @@ def finalize_idle_session(db, *, session_id: uuid.UUID) -> SessionDecision:
     deadline, reason = _deadline_or_reason(campaign)
     if deadline is None:
         return SessionDecision(CONFLICT, SESSION_INCOHERENT if reason == DEADLINE_UNESTABLISHED else reason)
+    problem = _participation_problem(participation, campaign)
+    if problem is not None:
+        return SessionDecision(CONFLICT, problem)
     now = proofs.server_clock(db)  # 6. APRÈS tous les verrous : instant de décision
-    if now < visit.last_activity_at or (visit.finalized_at is not None and now < visit.finalized_at):
+    if _clock_problem(now, _stored_instants(campaign, participation, visit)):
         return SessionDecision(UNKNOWN, CLOCK_INCOHERENT)  # jamais d'antidatage ni d'activité inventée
     # 7. décision
     if now >= deadline:
@@ -681,10 +757,12 @@ def finalize_idle_session(db, *, session_id: uuid.UUID) -> SessionDecision:
     return _finalize(db, visit, key, now)  # 8.
 
 
-def _session_observation(db, session_id, campaign_id, user_id, key) -> SessionObservation:
+def _session_observation(db, session_id, campaign_id, user_id, digest, key) -> SessionObservation:
     """Relecture STABLE sans écriture, ordre compatible (rangs 1 à 4, lignes
     EN PARTAGE) : clé fournie, participation, campagne, visite lue (L1) puis
-    verrouillée (L2) ; L1 = L2 exigé, sinon UNSTABLE."""
+    verrouillée (L2) ; L1 = L2 exigé, et l'identité observée (dont
+    environment_digest) doit être celle de la clé détenue, sinon UNSTABLE :
+    jamais de clé supplémentaire (correctif R1, relecture complémentaire)."""
     common.lock_identities(db, key)
     participation = _participation(db, campaign_id, user_id, mode="share")
     if participation is not None:
@@ -696,8 +774,9 @@ def _session_observation(db, session_id, campaign_id, user_id, key) -> SessionOb
     if first != second or participation is None:
         return SessionObservation(UNSTABLE)  # changée pendant l'observation, ou visite sans participation
     values = dict(second)
-    if (values["id"], values["campaign_id"], values["user_id"]) != (session_id, campaign_id, user_id):
-        return SessionObservation(UNSTABLE)
+    if (values["id"], values["campaign_id"], values["user_id"], values["environment_digest"]) != (
+            session_id, campaign_id, user_id, digest) or session_lock_key(campaign_id, user_id, digest) != key:
+        return SessionObservation(UNSTABLE)  # identité exigeant une autre clé que celle détenue
     return SessionObservation(PRESENT, second)
 
 
@@ -708,7 +787,8 @@ def observe_session_finalization(db, *, session_id: uuid.UUID) -> SessionObserva
     if hint is None:
         return SessionObservation(ABSENT)
     _, campaign_id, user_id, digest = _visit_identity(hint)
-    return _session_observation(db, session_id, campaign_id, user_id, session_lock_key(campaign_id, user_id, digest))
+    return _session_observation(db, session_id, campaign_id, user_id, digest,
+                                session_lock_key(campaign_id, user_id, digest))
 
 
 def _observe_session_attempt(db, *, attempt: _SessionAttempt) -> SessionObservation:
@@ -716,7 +796,8 @@ def _observe_session_attempt(db, *, attempt: _SessionAttempt) -> SessionObservat
     l'opération TENTÉE (contexte en mémoire) : aucune clé supplémentaire."""
     if type(attempt) is not _SessionAttempt:
         raise InvalidProductAnalyticsInput("attempt : contexte de finalisation requis")
-    return _session_observation(db, attempt.session_id, attempt.campaign_id, attempt.user_id, attempt.key)
+    return _session_observation(db, attempt.session_id, attempt.campaign_id, attempt.user_id,
+                                dict(attempt.before)["environment_digest"], attempt.key)
 
 
 # --------------------------------------------------------------------------
@@ -729,18 +810,37 @@ def _exists(db, model, campaign_id, user_id) -> bool:
 
 
 def _lenient_campaigns(document) -> set | None:
-    """Identifiants de campagne d'un document HORS CONTRAT dont la structure
-    reste lisible (finalités = objets portant un campaign_id UUID) ; None si
-    elle ne l'est pas (aucune campagne ne peut alors être exclue)."""
+    """Lecture LIMITÉE d'un document refusé par retention.parse_retention_scopes,
+    destinée EXCLUSIVEMENT à établir qu'aucune finalité ne désigne la campagne
+    traitée (correctif R5 bis) ; jamais une validation, une réparation ni
+    l'interprétation d'un schéma inconnu. Rend les campagnes désignées, ou None
+    (ambigu : aucune campagne ne peut être exclue) sauf si :
+
+    - le document a exactement les clés et la version retention-scopes-v1 ;
+    - chaque finalité est un objet aux clés EXACTES du contrat (kind,
+      campaign_id, policy_version, expires_at), de nature connue (kind =
+      'campaign', seule nature du contrat) ;
+    - chaque campaign_id est une chaîne d'une notation hexadécimale usuelle
+      d'UUID (_LENIENT_UUID).
+
+    Les autres valeurs (politique, échéance, ordre, doublons) ne sont pas
+    lues : leurs anomalies relèvent de la PR 2."""
     try:
+        if (not isinstance(document, dict) or set(document) != retention.DOCUMENT_KEYS
+                or document["version"] != retention.RETENTION_SCOPES_VERSION):
+            return None
         items = document["scopes"]
         if not isinstance(items, list) or not items:
             return None
         found = set()
         for item in items:
-            raw = item["campaign_id"] if isinstance(item, dict) else None
-            if not isinstance(raw, str):
-                return None
+            if not isinstance(item, dict) or set(item) != retention.SCOPE_KEYS:
+                return None  # structure ambiguë (clé absente ou supplémentaire)
+            if type(item["kind"]) is not str or item["kind"] != retention.CAMPAIGN_SCOPE:
+                return None  # nature inconnue
+            raw = item["campaign_id"]
+            if type(raw) is not str or not _LENIENT_UUID.fullmatch(raw):
+                return None  # identifiant absent, illisible ou ambigu
             found.add(uuid.UUID(raw))
         return found
     except _STRUCTURE_ERRORS:
@@ -853,7 +953,12 @@ def purge_participation(db, *, campaign_id: uuid.UUID, user_id: str) -> PurgeDec
         return PurgeDecision(NOT_ADMISSIBLE, DEADLINE_UNESTABLISHED)
     if reason is not None:
         return PurgeDecision(CONFLICT, reason)
+    problem = _participation_problem(participation, campaign)
+    if problem is not None:
+        return PurgeDecision(CONFLICT, problem)  # jamais une autre échéance calculée pour contourner
     preliminary = proofs.server_clock(db)  # après les verrous des rangs 1 à 3
+    if _clock_problem(preliminary, _stored_instants(campaign, participation)):
+        return PurgeDecision(UNKNOWN, CLOCK_INCOHERENT)
     if preliminary < deadline:
         return PurgeDecision(NOT_DUE)  # aucun descendant verrouillé
     problem = _dependency_problem(db, campaign_id, user_id)  # 5.

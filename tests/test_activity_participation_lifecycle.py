@@ -1648,9 +1648,9 @@ def test_the_finalization_reread_takes_the_key_of_the_attempt_and_waits_for_it(d
     captured, waited = [], []
     real = pl._session_observation
 
-    def spy(session, session_id, campaign, user, attempt_key):
+    def spy(session, session_id, campaign, user, digest, attempt_key):
         captured.append(attempt_key)
-        return real(session, session_id, campaign, user, attempt_key)
+        return real(session, session_id, campaign, user, digest, attempt_key)
     monkeypatch.setattr(pl, "_session_observation", spy)
 
     def in_flight():
@@ -2126,7 +2126,7 @@ def _imports(path) -> set:
 
 
 def test_the_modules_import_exactly_their_side_and_reach_nothing_else():
-    assert _imports(SERVICE) == {"uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
+    assert _imports(SERVICE) == {"re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
                                  "core.product_analytics", "core.product_analytics.common",
                                  "core.product_analytics.proofs", "core.product_analytics.retention",
                                  "core.product_analytics.sessions"}
@@ -2152,7 +2152,8 @@ def test_the_modules_import_exactly_their_side_and_reach_nothing_else():
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
             and n.value.id == "sessions"} == {"INACTIVITY", "LOGOUT", "END_REASONS"}
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-            and n.value.id == "retention"} == {"parse_retention_scopes"}
+            and n.value.id == "retention"} == {"parse_retention_scopes", "DOCUMENT_KEYS", "RETENTION_SCOPES_VERSION",
+                                              "SCOPE_KEYS", "CAMPAIGN_SCOPE"}  # constantes du contrat (R5 bis)
     assert len([n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "begin_nested"]) == 2  # UN SAVEPOINT par chemin d'écriture
     deletes = [[ast.unparse(a) for a in n.args] for n in ast.walk(tree) if isinstance(n, ast.Call)
@@ -2218,3 +2219,257 @@ def test_the_real_api_never_loads_the_participation_lifecycle_whatever_the_envir
         assert result["loaded"] == []
         baseline = baseline or result["threads"]
         assert result["threads"] == baseline
+
+
+# --------------------------------------------------------------------------
+# R1. Correctif post-audit (HEAD audité 2cf7425) : contre-épreuves
+# --------------------------------------------------------------------------
+
+def _closed_or_cancelled(db, campaign_id, status):
+    (_close_campaign if status == "closed" else _cancel_campaign)(db, campaign_id)
+    return utc(_campaign(db, campaign_id)["closed_at"])
+
+
+@pytest.mark.parametrize("status", ["closed", "cancelled"])
+def test_r1_b1_a_closure_stored_after_the_decision_clock_is_never_finalized(db, clock, status):
+    """Contre-épreuve B1-1 (reproduite sur 2cf7425 : finalized) : activité à
+    9 h, échéance d'inactivité à 9 h 30, horloge PostgreSQL à 10 h, campagne
+    closed / cancelled dont closed_at stocké vaut 11 h."""
+    campaign_id, visit_id = _open_visit(db, clock)
+    clock.advance(minutes=60)
+    _sql(db, f"UPDATE {CAMPAIGNS} SET status = :s, closed_at = :t WHERE id = :c", s=status,
+         t=clock.now + timedelta(hours=1), c=campaign_id)  # admis par les CHECK de 0022
+    before = _visit(db, visit_id)
+    assert finalize_one(db, visit_id) == lb.SessionOutcome(lb.UNKNOWN, pl.CLOCK_INCOHERENT)
+    assert _visit(db, visit_id) == before  # aucune écriture, aucun antidatage
+
+
+@pytest.mark.parametrize("status", ["closed", "cancelled"])
+def test_r1_b1_a_regressive_clock_behind_the_closure_writes_nothing(db, clock, status):
+    """Données cohérentes, horloge PostgreSQL revenue en deçà de closed_at
+    (mais au-delà de l'échéance d'inactivité) : unknown, puis finalisation
+    normale une fois l'horloge revenue."""
+    campaign_id, visit_id = _open_visit(db, clock)
+    clock.advance(hours=2)
+    closed_at = _closed_or_cancelled(db, campaign_id, status)
+    before = _visit(db, visit_id)
+    clock.set(closed_at - MICRO)  # régression : idle_expires_at < horloge < closed_at
+    assert utc(before["idle_expires_at"]) < clock.now
+    assert finalize_one(db, visit_id) == lb.SessionOutcome(lb.UNKNOWN, pl.CLOCK_INCOHERENT)
+    assert _visit(db, visit_id) == before
+    # Parcours B : chronologie stockée postérieure à l'horloge, constatée sans écriture (jamais not_due).
+    assert purge(db, campaign_id) == lb.PurgeOutcome(lb.UNKNOWN, pl.CLOCK_INCOHERENT)
+    clock.set(closed_at + timedelta(hours=1))
+    assert purge(db, campaign_id) == NOT_DUE_B
+    assert finalize_one(db, visit_id) == FINALIZED
+    assert utc(_visit(db, visit_id)["finalized_at"]) == clock.now  # jamais imposée à closed_at
+
+
+@pytest.mark.parametrize("status", ["closed", "cancelled"])
+@pytest.mark.parametrize("offset, expected", [(timedelta(minutes=5), "conflict"), (MICRO, "conflict"),
+                                              (timedelta(0), "finalized"), (-timedelta(minutes=5), "finalized")])
+def test_r1_b1_an_activity_after_the_effective_closure_is_out_of_contract(db, clock, status, offset, expected):
+    """Contre-épreuve B1-2 (reproduite sur 2cf7425 : finalized) : clôture
+    anticipée, last_activity_at postérieur à closed_at (mais avant
+    window_end_at et close_by_at), idle_expires_at conforme, horloge après
+    l'échéance d'inactivité. L'égalité est admise (touch et la clôture sont
+    sérialisés sur la campagne) ; la FINALISATION après la clôture est
+    légitime."""
+    campaign_id, visit_id = _open_visit(db, clock)
+    clock.advance(minutes=10)
+    closed_at = _closed_or_cancelled(db, campaign_id, status)
+    _sql(db, f"UPDATE {SESSIONS} SET last_activity_at = :t, idle_expires_at = :t + interval '30 minutes' "
+             "WHERE id = :i", t=closed_at + offset, i=visit_id)
+    clock.set(closed_at + timedelta(hours=1))
+    before = _visit(db, visit_id)
+    # Couverture : la sélection nominale rend la visite (ouverte, inactive).
+    assert committed(db, lambda s: pl.select_idle_session_candidates(s)).session_ids == (visit_id,)
+    report = lb.finalize_sessions_page(db)
+    if expected == "conflict":
+        assert (report.examined, report.conflict, report.finalized) == (1, 1, 0)
+        assert finalize_one(db, visit_id) == lb.SessionOutcome(lb.CONFLICT, pl.SESSION_INCOHERENT)
+        assert _visit(db, visit_id) == before
+    else:
+        assert (report.examined, report.finalized) == (1, 1)
+        assert utc(_visit(db, visit_id)["finalized_at"]) == clock.now
+
+
+def test_r1_b1_the_deadline_stays_pure_and_the_clock_is_checked_only_in_the_decision_paths():
+    source = inspect.getsource(pl.participation_retention_deadline)
+    assert "server_clock" not in source and "utcnow" not in source and "db" not in inspect.signature(
+        pl.participation_retention_deadline).parameters
+    future = _campaign_value(closed_at=BASE + timedelta(days=29))  # aucune horloge : échéance établie
+    assert pl.participation_retention_deadline(future) == BASE + timedelta(days=29) + HOURS_2160
+    for function in (pl.finalize_idle_session, pl.purge_participation):
+        assert "_clock_problem(" in inspect.getsource(function)
+
+
+PARTICIPATION_ANOMALIES = {
+    # Contre-épreuve principale B2 (reproduite sur 2cf7425 : purged) : fenêtre altérée à J+200.
+    "window_beyond_close_by": "window_end_at = window_start_at + interval '200 days'",
+    "authorization_missing": "authorization_recorded_at = NULL, notice_version = NULL",
+    "notice_missing": "notice_version = NULL",
+    "notice_malformed": "notice_version = 'NOT A VERSION'",
+    "authorization_after_window_start": "authorization_recorded_at = window_start_at + interval '1 day'",
+    "authorization_after_enrollment": "authorization_recorded_at = enrolled_at + interval '1 microsecond'",
+    "enrolled_after_window_start": "enrolled_at = window_start_at + interval '1 second'",
+    "enrolled_before_campaign_creation": "enrolled_at = enrolled_at - interval '400 days', "
+                                         "authorization_recorded_at = authorization_recorded_at - interval '400 days'",
+    "enrolled_after_closure": "enrolled_at = enrolled_at + interval '2 days', "
+                              "window_start_at = window_start_at + interval '2 days', "
+                              "window_end_at = window_end_at + interval '2 days'",
+}
+
+
+@pytest.mark.parametrize("anomaly", sorted(PARTICIPATION_ANOMALIES))
+def test_r1_b2_a_participation_outside_its_universal_invariants_is_never_deleted(db, clock, anomaly):
+    campaign_id = _wave(db)
+    touch(db, campaign_id, USER_A)
+    clock.advance(days=1)
+    _close_campaign(db, campaign_id)  # clôture anticipée (J+1 ; close_by_at à J+30)
+    _sql(db, f"UPDATE {PARTICIPANTS} SET {PARTICIPATION_ANOMALIES[anomaly]} WHERE campaign_id = :c",
+         c=campaign_id)  # admis par les CHECK de 0022
+    deadline = _deadline(db, campaign_id)
+    clock.set(deadline)
+    before = _couple(db, campaign_id)
+    page = committed(db, lambda s: pl.select_purgeable_participation_candidates(s))
+    assert page.participations == ((campaign_id, USER_A),)  # couverture : sélectionnée à l'échéance
+    report = lb.purge_participations_page(db)
+    assert (report.examined, report.conflict, report.purged) == (1, 1, 0)
+    assert purge(db, campaign_id) == lb.PurgeOutcome(lb.CONFLICT, pl.PARTICIPATION_INCOHERENT)
+    assert _couple(db, campaign_id) == before and _deadline(db, campaign_id) == deadline  # aucune autre échéance
+    [visit] = before["sessions"]
+    clock.set(utc(visit["idle_expires_at"]) + timedelta(seconds=1))
+    finalization = finalize_one(db, visit["id"])  # la visite peut elle-même devenir hors fenêtre
+    assert finalization.outcome == lb.CONFLICT and finalization.reason in (pl.PARTICIPATION_INCOHERENT,
+                                                                           pl.SESSION_INCOHERENT)
+    assert _visit(db, visit["id"]) == visit
+
+
+@pytest.mark.parametrize("status", ["enrolled", "withdrawn", "completed"])
+def test_r1_b2_generic_enrollments_and_windows_beyond_an_early_closure_remain_purgeable(db, clock, status):
+    """Contrats des inscriptions GÉNÉRIQUES (enroll_participant) : fenêtre
+    courte, début différé, J0 ≠ inscription, inscription avant l'activation,
+    fenêtre dépassant la clôture anticipée ; aucune discrimination de statut."""
+    now = clock.now
+    campaign_id = committed(db, lambda s: pc.create_campaign(
+        s, code=f"g-{uuid.uuid4().hex[:8]}", name="Vague 0", purpose="Mesure.", close_by_at=now + timedelta(days=30),
+        **POLICY).id)
+    clock.advance(minutes=1)
+    committed(db, lambda s: pp.enroll_participant(
+        s, campaign_id=campaign_id, user_id=USER_A, window_start_at=now + timedelta(hours=3),
+        window_end_at=now + timedelta(days=3), authorization_recorded_at=now, notice_version=NOTICE))
+    clock.advance(minutes=1)
+    committed(db, lambda s: pc.activate_campaign(s, campaign_id=campaign_id))  # après l'inscription générique
+    clock.advance(hours=2)
+    _close_campaign(db, campaign_id)  # avant même le début de la fenêtre contractuelle
+    if status != "enrolled":
+        _sql(db, f"UPDATE {PARTICIPANTS} SET participation_status = :s WHERE campaign_id = :c", s=status,
+             c=campaign_id)
+    participation = _participation(db, campaign_id)
+    assert utc(participation["window_end_at"]) > utc(_campaign(db, campaign_id)["closed_at"])
+    assert participation["window_end_at"] - participation["window_start_at"] != timedelta(days=12)
+    clock.set(_deadline(db, campaign_id))
+    assert purge(db, campaign_id) == _purged(0, 0)
+
+
+def test_r1_b2_the_wave_0_first_login_contract_is_not_imposed_on_generic_enrollments():
+    source = inspect.getsource(pl._participation_problem)
+    assert "OBSERVATION_WINDOWS" not in source and "timedelta" not in source and "activated_at" not in source
+    assert "participation_status ==" not in source and "ENROLLED" not in source
+
+
+R5_FORMS = {
+    # (élément forgé, issue) ; « B » : campagne B de l'utilisateur, « A » : campagne traitée.
+    "canonical_b": ("{scope}", "purged"),
+    "uppercase_b": ('{{**scope, "campaign_id": B.upper()}}', "purged"),
+    "hex32_b": ('{{**scope, "campaign_id": B.replace("-", "")}}', "purged"),
+    "unknown_policy_value_b": ('{{**scope, "policy_version": "v9"}}', "purged"),
+    "malformed_expiry_b": ('{{**scope, "expires_at": "demain"}}', "purged"),
+    "uppercase_a": ('{{**scope, "campaign_id": A.upper()}}', "conflict"),
+    "hex32_a": ('{{**scope, "campaign_id": A.replace("-", "")}}', "conflict"),
+    "braces_b": ('{{**scope, "campaign_id": "{{" + B + "}}"}}', "conflict"),
+    "urn_b": ('{{**scope, "campaign_id": "urn:uuid:" + B}}', "conflict"),
+    "padded_b": ('{{**scope, "campaign_id": " " + B}}', "conflict"),
+    "numeric_id": ('{{**scope, "campaign_id": 7}}', "conflict"),
+    "missing_id": ('{{k: v for k, v in scope.items() if k != "campaign_id"}}', "conflict"),
+    "missing_kind": ('{{k: v for k, v in scope.items() if k != "kind"}}', "conflict"),
+    "unknown_kind": ('{{**scope, "kind": "user"}}', "conflict"),
+    "numeric_kind": ('{{**scope, "kind": 3}}', "conflict"),
+    "extra_target_a": ('{{**scope, "target": A}}', "conflict"),
+    "extra_list_a": ('{{**scope, "campaign_ids": [A]}}', "conflict"),
+    "missing_policy_key": ('{{k: v for k, v in scope.items() if k != "policy_version"}}', "conflict"),
+    "null_item": ("None", "conflict"),
+    "nested_document": ('{{"scopes": [scope]}}', "conflict"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(R5_FORMS))
+def test_r1_r5_the_lenient_reading_only_excludes_the_campaign_when_structure_and_nature_are_identifiable(
+        db, clock, form):
+    a, b, event, document = _b_only_event(db, clock)
+    [scope] = document["scopes"]
+    expression, expected = R5_FORMS[form]
+    item = eval(expression.format(scope="scope").replace("{{", "{").replace("}}", "}"),  # noqa: S307 — test
+                {"scope": scope, "A": str(a), "B": scope["campaign_id"]})
+    _forge_document(db, event.id, {"version": "retention-scopes-v1", "scopes": [item]})  # admis par 0022
+    _expire_campaign(db, clock, a)
+    before = rows(db, f"SELECT *, xmin::text AS xmin FROM {EVENTS}")
+    outcome = purge(db, a)
+    if expected == "purged":
+        assert outcome.outcome == lb.PURGED, outcome
+    else:
+        assert outcome == lb.PurgeOutcome(lb.CONFLICT, pl.RETENTION_INCOHERENT)
+        assert _participation(db, a) is not None
+    assert rows(db, f"SELECT *, xmin::text AS xmin FROM {EVENTS}") == before  # jamais réparé ni supprimé
+    # Non-régression PR 2 : la lecture tolérante ne déclare jamais un document valide.
+    integrity = committed(db, lambda s: el.inspect_event_integrity(s, event_id=event.id))
+    assert integrity == (el.IntegrityDecision(el.VALID) if form == "canonical_b"
+                         else el.IntegrityDecision(el.INCONSISTENT, el.RETENTION_INCOHERENT)), (form, integrity)
+    del b
+
+
+@pytest.mark.parametrize("document", [
+    {"version": "retention-scopes-v1", "scopes": [], "extra": 1},
+    {"version": "retention-scopes-v2", "scopes": [{}]},
+    {"version": "retention-scopes-v1", "scopes": []},
+    {"version": "retention-scopes-v1", "scopes": {"0": {}}},
+    ["retention-scopes-v1"],
+])
+def test_r1_r5_the_outer_document_forms_are_refused_by_the_0022_check(db, clock, document):
+    """Seules les formes des ÉLÉMENTS sont admises par la base : l'enveloppe est
+    imposée par ck_product_activity_events_retention_scopes."""
+    _, _, event, _ = _b_only_event(db, clock)
+    with pytest.raises(sa.exc.IntegrityError, match="ck_product_activity_events_retention_scopes"):
+        _forge_document(db, event.id, document)
+
+
+def test_r1_the_reread_refuses_an_identity_that_would_need_another_key(db, clock, monkeypatch):
+    """Relecture complémentaire : environment_digest modifié entre la lecture
+    indicative et le verrou (visite sans interaction, écrivain hors service) :
+    unstable, jamais present ; aucune clé supplémentaire."""
+    campaign_id = _wave(db)
+    visit_id = uuid.uuid4()
+    _sql(db, f"INSERT INTO {SESSIONS} (id, campaign_id, user_id, environment_digest, opened_at, last_activity_at, "
+             "idle_expires_at) VALUES (:i, :c, :u, :d, :t, :t, :t + interval '30 minutes')", i=visit_id,
+         c=campaign_id, u=USER_A, d="a" * 64, t=clock.now)
+    real, calls = pl._visit, []
+
+    def changing(db_, session_id, *, mode=None):
+        calls.append(mode)
+        if len(calls) == 2:  # après la lecture indicative et la clé
+            _sql(db, f"UPDATE {SESSIONS} SET environment_digest = :d WHERE id = :i", d="b" * 64, i=visit_id)
+        return real(db_, session_id, mode=mode)
+    monkeypatch.setattr(pl, "_visit", changing)
+    seen, remove = _statements(db)
+    try:
+        assert committed(db, lambda s: pl.observe_session_finalization(s, session_id=visit_id)).outcome == pl.UNSTABLE
+    finally:
+        remove()
+    assert len([s for s in seen if "pg_advisory" in s]) == 1  # aucune clé tardive
+    monkeypatch.setattr(pl, "_visit", real)
+    # Relecture d'une tentative : clé et empreinte de l'opération tentée, jamais celles de la ligne relue.
+    visit = committed(db, lambda s: s.get(pl.ProductActivitySession, visit_id))
+    attempt = pl._SessionAttempt(visit_id, campaign_id, USER_A, pl.session_lock_key(campaign_id, USER_A, "a" * 64),
+                                 pl._row(visit), pl._row(visit))
+    assert committed(db, lambda s: pl._observe_session_attempt(s, attempt=attempt)).outcome == pl.UNSTABLE
