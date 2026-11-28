@@ -83,6 +83,10 @@ EVENT_LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_event_lifecycle.py"
 # réutilise, elle aussi, la seule transaction analytics du bloc C ; elle-même sans
 # appelant (tests/test_activity_participation_lifecycle.py).
 PARTICIPATION_LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_participation_lifecycle.py"
+# V0-T08 Lot 2C PR 4 (nominatif) : la frontière du cycle de vie des campagnes
+# réutilise, elle aussi, la seule transaction analytics du bloc C ; elle-même sans
+# appelant (tests/test_activity_campaign_lifecycle.py).
+CAMPAIGN_LIFECYCLE_BOUNDARY = REPO_ROOT / "core" / "_activity_campaign_lifecycle.py"
 IDLE = lambda point: None  # noqa: E731
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 GRACE = timedelta(minutes=30)
@@ -107,7 +111,7 @@ def test_the_boundary_and_the_service_are_dormant_and_import_exactly_their_side(
     # Aucun appelant : aucun module hors des tests et de la documentation ne nomme la frontière ni le service.
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*")):
-        if path in (EVENT_LIFECYCLE_BOUNDARY, PARTICIPATION_LIFECYCLE_BOUNDARY):
+        if path in (EVENT_LIFECYCLE_BOUNDARY, PARTICIPATION_LIFECYCLE_BOUNDARY, CAMPAIGN_LIFECYCLE_BOUNDARY):
             text = path.read_text(encoding="utf-8")
             assert "from core import _activity_event_finalization as finalization_boundary" in text
             assert {a.attr for a in ast.walk(ast.parse(text)) if isinstance(a, ast.Attribute)
