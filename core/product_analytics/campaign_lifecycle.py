@@ -705,6 +705,49 @@ def _origin_problem(proof, interaction, visit, participation, campaign) -> str |
     return None
 
 
+def _semantic_problem(proof, participation, campaign) -> str | None:
+    """Correctif R1 (B2) : chronologie SÉMANTIQUE démontrable des motifs
+    stockés, comparée aux bornes immuables avec la même horloge que la
+    décision d'origine (PostgreSQL contre les bornes contractuelles) :
+
+    - indeterminate / finalization_expired : écrit seulement à partir de
+      finalization.finalization_deadline (égalité comprise : bloc C,
+      _no_longer_admissible, résolution historique des pending et B1 de ce
+      parcours) ;
+    - rejected / window_expired : écrit seulement à partir de
+      min(window_end_at, close_by_at) (certification du bloc B) ou pour une
+      certification déjà au-delà de cette borne (bloc C, refusée plus haut) ;
+    - recorded : finalisé strictement avant l'échéance de finalisation.
+
+    Jamais reconstitué : un motif dépendant d'un ancien état d'autorisation
+    (not_authorized), d'une relecture technique (technical_uncertainty) ou de
+    l'origine (origin_unverified, visit_conflict...)."""
+    if proof.resolved_at is None:
+        return None
+    deadline = finalization.finalization_deadline(participation, campaign)
+    reason = proof.resolution_reason
+    if proof.status == proofs.INDETERMINATE and reason == proofs.FINALIZATION_EXPIRED and proof.resolved_at < deadline:
+        return PROOF_INCOHERENT
+    if (proof.status == proofs.REJECTED and reason == proofs.WINDOW_EXPIRED
+            and proof.resolved_at < min(participation.window_end_at, campaign.close_by_at)):
+        return PROOF_INCOHERENT
+    if proof.status == proofs.RECORDED and proof.resolved_at >= deadline:
+        return PROOF_INCOHERENT
+    return None
+
+
+def _closure_instants(proof) -> tuple:
+    """Correctif R1 (B2) : instants de la preuve qui exigent une campagne ACTIVE
+    au moment de leur écriture (inscription, certification, finalisation
+    recorded : verrous partagés de la campagne, sérialisés avec sa clôture) et
+    doivent donc précéder closed_at. Jamais resolved_at d'une preuve rejected
+    ou indeterminate, légitimement postérieure à la clôture."""
+    instants = [proof.created_at, proof.certified_at]
+    if proof.status == proofs.RECORDED:
+        instants.append(proof.resolved_at)
+    return tuple(i for i in instants if i is not None)
+
+
 def _recorded_problem(db, proof, attribution, event, interaction, participation, campaign) -> str | None:
     """Correction B3 : contrôle canonique COMPLET de la PR 2
     (event_lifecycle._contract_problem, donc _certified_problem et
@@ -802,7 +845,8 @@ def purge_campaign_expired_proof(db, *, proof_id: uuid.UUID) -> ProofPurgeDecisi
     l'échéance commune de conservation (voir l'en-tête). Ordre : 0. L0
     indicative ; 1-2. union des clés, UN appel trié ; 3. L1 ; 4.
     participation ; 5. campagne ; 6. visite ; 7. interaction (FOR SHARE) ;
-    8. preuve FOR UPDATE ; 9. attribution ; 10. événement (FOR SHARE) ; 11.
+    8. preuve FOR UPDATE, comparée aussitôt à L1 (correctif R1) ; 9.
+    attribution ; 10. événement (FOR SHARE, références de L1 seulement) ; 11.
     L2 et validations ; 12. horloge ; 13. décision et écritures."""
     _require_uuid(proof_id, "proof_id")
     hint = _proof_state(db, proof_id)  # 0. L0
@@ -823,14 +867,18 @@ def purge_campaign_expired_proof(db, *, proof_id: uuid.UUID) -> ProofPurgeDecisi
     visit = pl._visit(db, expected.visit_id, mode="share")  # 6.
     interaction = _interaction(db, expected, mode="share")  # 7.
     proof = _proof(db, proof_id, mode="update")  # 8.
-    event_id = proof.recorded_event_id if proof is not None else None
+    # Correctif R1 (B1) : la preuve verrouillée est comparée à L1 AVANT tout verrou
+    # de dépendance ; seules les références établies en L1 sont suivies ensuite.
+    if proof is None:
+        return ProofPurgeDecision(ABSENT)  # disparue sous les verrous
+    if _row(proof) != state.proof:
+        return ProofPurgeDecision(CONFLICT, DEPENDENCY_CHANGED)  # changée après L1 sans les clés : hors service
+    event_id = expected.recorded_event_id  # référence de L1, jamais celle d'une ligne relue
     attribution = _attribution(db, event_id, mode="share") if event_id is not None else None  # 9.
     event = _event(db, event_id, mode="share") if event_id is not None else None  # 10.
     # 11. L2 : relecture finale sous tous les verrous
-    if proof is None:
-        return ProofPurgeDecision(ABSENT)
     if _ProofState(_row(proof), _row(attribution), _row(event)) != state:
-        return ProofPurgeDecision(CONFLICT, DEPENDENCY_CHANGED)  # changée après L1 sans les clés : hors service
+        return ProofPurgeDecision(CONFLICT, DEPENDENCY_CHANGED)
     if participation is None or campaign is None:
         return ProofPurgeDecision(CONFLICT, PROOF_INCOHERENT)  # FK de 0024 : impossible sans écrivain hors service
     deadline, reason = pl._deadline_or_reason(campaign)
@@ -842,12 +890,19 @@ def purge_campaign_expired_proof(db, *, proof_id: uuid.UUID) -> ProofPurgeDecisi
         problem = (pl._participation_problem(participation, campaign) or _shape_problem(proof)
                    or (pl._session_problem(visit, participation, campaign) if visit is not None else PROOF_INCOHERENT)
                    or _origin_problem(proof, interaction, visit, participation, campaign))
+        problem = problem or _semantic_problem(proof, participation, campaign)
         if problem is None and proof.status == proofs.RECORDED:
             problem = _recorded_problem(db, proof, attribution, event, interaction, participation, campaign)
+        # Clôture (Python) antérieure à un instant qui exigeait une campagne active
+        # (PostgreSQL) : corruption ou divergence d'horloges, indiscernables (L15).
+        closed_late = campaign.closed_at is not None and any(
+            instant > campaign.closed_at for instant in _closure_instants(proof))
     except _STRUCTURE_ERRORS:
-        problem = PROOF_INCOHERENT
+        problem, closed_late = PROOF_INCOHERENT, False
     if problem is not None:
         return ProofPurgeDecision(CONFLICT, problem)
+    if closed_late:
+        return ProofPurgeDecision(UNKNOWN, CLOCK_INCOHERENT)
     now = proofs.server_clock(db)  # 12. APRÈS tous les verrous
     if _clock_problem(now, pl._stored_instants(campaign, participation, visit)
                       + _proof_instants(proof, interaction, attribution, event)):
@@ -1012,6 +1067,14 @@ def _cohort_problem(campaign, cohort, seats) -> str | None:
             return COHORT_INCOHERENT
         if not campaign.created_at <= cohort.created_at < cohort.admission_closes_at <= campaign.close_by_at:
             return COHORT_INCOHERENT
+        # Correctif R1 (R1) : contrat historique de calendrier de define_cohort (et
+        # d'activate_cohort_campaign) : close_by_at couvre la dernière admission, la
+        # fenêtre d'observation et la finalisation (common.required_close_by_at, avec
+        # la politique de mesure de la campagne ; le registre n'en compte qu'une, que
+        # revise_campaign_policies ne peut donc pas remplacer par une autre fenêtre).
+        required = common.required_close_by_at(cohort.admission_closes_at, campaign.measurement_policy_version)
+        if required is None or campaign.close_by_at < required:
+            return COHORT_INCOHERENT
         if campaign.activated_at is not None and not cohort.created_at <= campaign.activated_at:
             return COHORT_INCOHERENT  # définition exigée à l'état planned
         numbers = sorted(seat.seat_number for seat in seats)
@@ -1147,6 +1210,10 @@ def _campaign_observation(db, campaign_id) -> Observation:
         return Observation(PRESENT, problem)  # finalité résiduelle ou document ambigu : absence non établie
     if _campaign(db, campaign_id) is not None:
         return Observation(PRESENT)  # réapparue pendant l'observation
+    if budget.exceeded():
+        # Correctif R1 (R2) : budget contrôlé après la DERNIÈRE opération, avant toute
+        # conclusion d'absence complète ; une relecture hors budget n'établit rien.
+        return Observation(UNKNOWN, SCAN_BUDGET_EXCEEDED)
     return Observation(ABSENT)
 
 

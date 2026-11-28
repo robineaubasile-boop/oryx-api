@@ -271,6 +271,8 @@ def _campaign_established(decision, observation) -> Outcome:
         return Outcome(decision.outcome, decision.reason, None, decision.seats, decision.cohorts)
     if observation.outcome == cl.ABSENT:
         return Outcome(ABSENT, UNCONFIRMED_COMMIT)
+    if observation.outcome == cl.UNKNOWN and observation.reason == cl.SCAN_BUDGET_EXCEEDED:
+        return Outcome(UNKNOWN, cl.SCAN_BUDGET_EXCEEDED)  # correctif R1 (R2) : motif propagé, jamais absent
     return _unknown()
 
 
