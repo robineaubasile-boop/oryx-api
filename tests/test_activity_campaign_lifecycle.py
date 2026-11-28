@@ -2068,7 +2068,8 @@ def test_an_absent_campaign_with_a_residual_scope_an_ambiguous_document_or_an_in
             monkeypatch.setattr(cl, "_monotonic", lambda: next(ticks))
     seen, remove = _lose_commit(db, f"DELETE FROM {CAMPAIGNS}", really_commit=True, between=between)
     try:
-        assert purge_campaign(db, a) == cb.Outcome(cb.UNKNOWN, cb.TECHNICAL_UNCERTAINTY)
+        expected = cl.SCAN_BUDGET_EXCEEDED if residue == "interrupted" else cb.TECHNICAL_UNCERTAINTY
+        assert purge_campaign(db, a) == cb.Outcome(cb.UNKNOWN, expected)  # motif du budget propagé (R1, R2)
     finally:
         remove()
     assert seen == ["lost"] and _campaign(db, a) is None
@@ -2460,3 +2461,273 @@ def test_the_termination_takes_only_the_exclusive_campaign_lock(db, clock):
     locks = _locks(seen)
     assert len(locks) == 1 and f"FROM {CAMPAIGNS}" in locks[0] and locks[0].endswith("FOR UPDATE"), locks
     assert [s.split(" SET")[0] for s in seen if s.startswith("UPDATE")] == [f"UPDATE {CAMPAIGNS}"]
+
+
+# --------------------------------------------------------------------------
+# Correctif post-audit R1 (HEAD audité f8f90fb) : contre-épreuves
+# --------------------------------------------------------------------------
+
+def _forge_recorded(db, proof_id):
+    """Écrivain HORS SERVICE (sans clé consultative ni verrou de campagne) :
+    transforme une preuve pending en preuve recorded rattachée à un NOUVEL
+    événement et à une NOUVELLE attribution, dans une transaction committée,
+    toutes contraintes de 0022 et 0024 en place."""
+    [proof] = rows(db, f"SELECT * FROM {REGISTRY} WHERE id = :i", i=proof_id)
+    [interaction] = rows(db, f"SELECT * FROM {INTERACTIONS} WHERE campaign_id = :c AND user_id = :u "
+                             "AND interaction_key = :k", c=proof["campaign_id"], u=proof["user_id"],
+                         k=proof["interaction_key"])
+    event_id, at = uuid.uuid4(), proof["created_at"]
+    expires = utc(interaction["recorded_at"]) + DAYS_90
+    document = {"version": "retention-scopes-v1", "scopes": [{
+        "kind": "campaign", "campaign_id": str(proof["campaign_id"]), "policy_version": "v0-retention-v1",
+        "expires_at": retention.format_instant(expires)}]}
+    with db.begin() as conn:
+        conn.execute(sa.text(f"""
+            INSERT INTO {EVENTS} (id, user_id, visit_id, idempotency_key, event_type, surface, executed_route, source,
+                                  source_operation_kind, source_operation_id, outcome, delivery_status, occurred_at,
+                                  recorded_at, updated_at, resolved_at, delivered_at, retention_scopes,
+                                  next_scope_expires_at, purge_after_at, schema_version)
+            VALUES (:e, :u, :v, :p, :t, :s, 'f2', 'server_business', :k, :o, 'succeeded', 'not_applicable', :occ,
+                    :at, :at, :at, NULL, CAST(:d AS jsonb), :x, :x, 'product-activity-event-v1')"""),
+            {"e": event_id, "u": proof["user_id"], "v": proof["visit_id"], "p": proof["id"], "t": proof["event_type"],
+             "s": proof["surface"], "k": proof["source_operation_kind"], "o": proof["source_operation_id"],
+             "occ": interaction["recorded_at"], "at": at, "d": json.dumps(document), "x": expires})
+        conn.execute(sa.text(f"""
+            INSERT INTO {ATTRIBUTIONS} (event_id, campaign_id, user_id, visit_id, interaction_key, interaction_kind,
+                                        event_type, surface, source_operation_kind, source_operation_id, certified_at)
+            SELECT :e, campaign_id, user_id, visit_id, interaction_key, interaction_kind, event_type, surface,
+                   source_operation_kind, source_operation_id, created_at FROM {REGISTRY} WHERE id = :i"""),
+            {"e": event_id, "i": proof_id})
+        conn.execute(sa.text(f"""
+            UPDATE {REGISTRY} SET status = 'recorded', certified_at = created_at, resolved_at = created_at,
+                   purge_after_at = created_at + interval '168 hours', recorded_event_id = :e WHERE id = :i"""),
+            {"e": event_id, "i": proof_id})
+    return event_id
+
+
+def test_r1_b1_a_dependency_attached_after_l1_is_refused_before_any_lock_on_it(db, clock, monkeypatch):
+    """B1 : la preuve pending relue en L1 devient, hors service et avant son
+    verrou exclusif, recorded et rattachée à un NOUVEL événement : le service
+    refuse dès le verrou de la preuve, sans verrouiller l'attribution ni
+    l'événement nouveaux, sans clé tardive, sans mutation."""
+    proof = _pending(db)
+    _expire(db, clock, proof.campaign_id)
+    held = cl._required_keys(committed(db, lambda s: cl._proof_state(s, proof.proof_id)))  # clés de L0
+    real, forged = pl._participation, {}
+
+    def after_l1(session, campaign_id, user_id, *, mode=None):
+        if not forged:
+            forged["event"] = _forge_recorded(db, proof.proof_id)  # transaction tierce committée
+        return real(session, campaign_id, user_id, mode=mode)
+    monkeypatch.setattr(pl, "_participation", after_l1)
+    seen, remove = _statements(db)
+    try:
+        outcome = purge_proof(db, proof.proof_id)
+    finally:
+        remove()
+    monkeypatch.setattr(pl, "_participation", real)
+    assert outcome == cb.Outcome(cb.CONFLICT, cl.DEPENDENCY_CHANGED)
+    purge_statements = [s for s in seen if "INSERT" not in s and f"UPDATE {REGISTRY}" not in s]
+    locks = [s for s in purge_statements if " FOR " in s]
+    assert not [s for s in locks if f"FROM {ATTRIBUTIONS}" in s or f"FROM {EVENTS}" in s], locks  # aucune
+    assert locks[-1].startswith("SELECT") and f"FROM {REGISTRY}" in locks[-1] and locks[-1].endswith("FOR UPDATE")
+    assert len([s for s in purge_statements if "pg_advisory" in s]) == len(held)  # aucune clé tardive
+    assert not [s for s in purge_statements if s.startswith(("DELETE", "UPDATE"))]
+    row = _proof(db, proof.proof_id)
+    assert (row["status"], row["recorded_event_id"]) == ("recorded", forged["event"])  # état tiers intact
+    assert _count(db, EVENTS) == 1 and _count(db, ATTRIBUTIONS) == 1
+
+
+def _finalization_expired(db, clock):
+    """Preuve pending résolue par le bloc C (indeterminate /
+    finalization_expired) à son échéance de finalisation exacte."""
+    proof = _pending(db)
+    [participation] = rows(db, f"SELECT * FROM {PARTICIPANTS} WHERE campaign_id = :c", c=proof.campaign_id)
+    campaign = _campaign(db, proof.campaign_id)
+    deadline = min(utc(participation["window_end_at"]) + fz.FINALIZATION_GRACE, utc(campaign["close_by_at"]))
+    clock.set(deadline)  # égalité exacte : le bloc C résout
+    assert expire(db, proof.proof_id).state == fz.INDETERMINATE
+    return proof, deadline
+
+
+def test_r1_b2_a_finalization_expired_resolution_before_the_historical_deadline_is_refused(db, clock):
+    proof, deadline = _finalization_expired(db, clock)
+    row = _proof(db, proof.proof_id)
+    assert (row["status"], row["resolution_reason"], utc(row["resolved_at"])) == (
+        "indeterminate", "finalization_expired", deadline)
+    # Altération admise par 0024 : résolution « finalization_expired » à J+2 (avant J+12 + 30 min).
+    early = utc(row["created_at"]) + timedelta(days=2)
+    _sql(db, f"UPDATE {REGISTRY} SET resolved_at = :t, purge_after_at = :t + interval '168 hours' WHERE id = :i",
+         t=early, i=proof.proof_id)
+    _expire(db, clock, proof.campaign_id)
+    before = _proof(db, proof.proof_id)
+    assert purge_proof(db, proof.proof_id) == cb.Outcome(cb.CONFLICT, cl.PROOF_INCOHERENT)
+    assert _proof(db, proof.proof_id) == before
+    # Frontière d'égalité du bloc C : résolue exactement à l'échéance de finalisation, admise.
+    _sql(db, f"UPDATE {REGISTRY} SET resolved_at = :t, purge_after_at = :t + interval '168 hours' WHERE id = :i",
+         t=deadline, i=proof.proof_id)
+    assert purge_proof(db, proof.proof_id) == PURGED
+    for instant in (deadline - MICRO,):
+        assert instant < deadline
+
+
+def test_r1_r1_a_cohort_calendar_incompatible_with_the_historical_definition_contract_is_a_conflict(db, clock, f2):
+    cohort = _cohort_campaign(db, f2, seats=2)
+    _expired_terminal(db, clock, cohort.id)
+    campaign = _campaign(db, cohort.id)
+    required = common.required_close_by_at(utc(campaign["close_by_at"]) - timedelta(days=1),
+                                           campaign["measurement_policy_version"])
+    assert required > utc(campaign["close_by_at"])
+    # Admis par 0023 (admission_closes_at > created_at) et par le contrôle du HEAD audité
+    # (admission_closes_at <= close_by_at), incompatible avec define_cohort / activate_cohort_campaign.
+    _sql(db, f"UPDATE {COHORTS} SET admission_closes_at = :t WHERE campaign_id = :c",
+         t=utc(campaign["close_by_at"]) - timedelta(days=1), c=cohort.id)
+    world = _world(db)
+    assert purge_campaign(db, cohort.id) == cb.Outcome(cb.CONFLICT, cl.COHORT_INCOHERENT)
+    assert _world(db) == world
+
+
+def test_r1_r2_a_budget_crossed_by_the_last_reread_of_an_uncertain_campaign_purge_is_never_an_absence(
+        db, clock, monkeypatch):
+    a = _empty_expired(db, clock)
+    clock.set(_deadline(db, a))
+    ticks = {"now": 0.0}
+    real_campaign = cl._campaign
+    calls = []
+
+    def last_read_is_slow(session, campaign_id, *, mode=None):
+        calls.append(mode)
+        result = real_campaign(session, campaign_id, mode=mode)
+        if mode is None:  # dernière lecture de la relecture (installée après le COMMIT) : franchit le budget
+            ticks["now"] += 11.0
+        return result
+
+    def between():
+        monkeypatch.setattr(cl, "_monotonic", lambda: ticks["now"])
+        monkeypatch.setattr(cl, "_campaign", last_read_is_slow)
+    seen, remove = _lose_commit(db, f"DELETE FROM {CAMPAIGNS}", really_commit=True, between=between)
+    try:
+        outcome = purge_campaign(db, a)
+    finally:
+        remove()
+    assert seen == ["lost"] and _campaign(db, a) is None
+    assert outcome == cb.Outcome(cb.UNKNOWN, cl.SCAN_BUDGET_EXCEEDED)  # jamais absent / unconfirmed_commit
+
+
+def _closed_now(db, clock, campaign_id):
+    clock.advance(hours=1)
+    _close(db, campaign_id)
+    return utc(_campaign(db, campaign_id)["closed_at"])
+
+
+def test_r1_b2_a_window_expired_rejection_before_the_contractual_bound_is_refused(db, clock):
+    proof = _in_state(db, clock, "rejected")  # certification après J+12 : rejected / window_expired
+    row = _proof(db, proof.proof_id)
+    assert (row["status"], row["resolution_reason"]) == ("rejected", "window_expired")
+    _sql(db, f"UPDATE {REGISTRY} SET resolved_at = :t, purge_after_at = :t + interval '168 hours' WHERE id = :i",
+         t=utc(row["created_at"]) + timedelta(days=1), i=proof.proof_id)  # avant window_end_at : impossible
+    _expire(db, clock, proof.campaign_id)
+    before = _proof(db, proof.proof_id)
+    assert purge_proof(db, proof.proof_id) == cb.Outcome(cb.CONFLICT, cl.PROOF_INCOHERENT)
+    assert _proof(db, proof.proof_id) == before
+
+
+@pytest.mark.parametrize("state, column", [("pending", "created_at"), ("certified", "certified_at"),
+                                           ("recorded", "resolved_at")])
+def test_r1_b2_an_inscription_certification_or_finalization_after_the_early_closure_is_never_deleted(
+        db, clock, state, column):
+    """Inscription et certification exigent une campagne active, la
+    finalisation recorded aussi (verrous sérialisés avec la clôture) : un
+    instant postérieur à closed_at est une corruption OU une divergence entre
+    l'horloge Python de la clôture et l'horloge PostgreSQL de la preuve,
+    indiscernables : unknown / clock_incoherent, aucune mutation."""
+    proof = _in_state(db, clock, state)
+    closed_at = _closed_now(db, clock, proof.campaign_id)
+    late = closed_at + timedelta(seconds=1)
+    if column == "created_at":
+        _sql(db, f"UPDATE {REGISTRY} SET created_at = :t WHERE id = :i", t=late, i=proof.proof_id)
+    elif column == "certified_at":
+        _sql(db, f"UPDATE {REGISTRY} SET certified_at = :t WHERE id = :i", t=late, i=proof.proof_id)
+    else:
+        [row] = rows(db, f"SELECT recorded_event_id FROM {REGISTRY} WHERE id = :i", i=proof.proof_id)
+        _sql(db, f"UPDATE {EVENTS} SET recorded_at = :t, updated_at = :t WHERE id = :e", t=late,
+             e=row["recorded_event_id"])
+        _sql(db, f"UPDATE {REGISTRY} SET resolved_at = :t, purge_after_at = :t + interval '168 hours' "
+                 "WHERE id = :i", t=late, i=proof.proof_id)
+    clock.set(_deadline(db, proof.campaign_id))
+    before = _proof(db, proof.proof_id)
+    assert purge_proof(db, proof.proof_id) == cb.Outcome(cb.UNKNOWN, cl.CLOCK_INCOHERENT)
+    assert _proof(db, proof.proof_id) == before
+
+
+def test_r1_b2_legitimate_terminal_resolutions_after_the_closure_stay_purgeable(db, clock):
+    """Aucune surcontrainte : rejected / not_authorized (certification refusée
+    après la clôture), indeterminate / technical_uncertainty (settle tardif)
+    et indeterminate / finalization_expired (bloc C après l'échéance) sont
+    légitimement postérieures à closed_at."""
+    rejected = _pending(db)
+    closed_at = _closed_now(db, clock, rejected.campaign_id)
+    clock.advance(minutes=5)
+    assert certify(db, rejected.origin, rejected.op, rejected.proof_id).state == proofs.REJECTED
+    assert _proof(db, rejected.proof_id)["resolution_reason"] == "not_authorized"
+    late = _pending(db)
+    _closed_now(db, clock, late.campaign_id)
+    clock.advance(days=2)
+    assert settle(db, late.origin, late.op, late.proof_id).state == proofs.INDETERMINATE
+    expired, deadline = _finalization_expired(db, clock)
+    assert utc(_proof(db, rejected.proof_id)["resolved_at"]) > closed_at
+    for proof in (rejected, late, expired):
+        _expire(db, clock, proof.campaign_id)
+    clock.set(max(_deadline(db, p.campaign_id) for p in (rejected, late, expired)))
+    for proof in (rejected, late, expired):
+        assert purge_proof(db, proof.proof_id) == PURGED
+    del deadline
+
+
+def test_r1_r1_the_registry_leaves_a_single_observation_window_so_a_planned_revision_cannot_break_the_calendar():
+    """revise_campaign_policies (planned seulement) valide la politique de mesure
+    contre le registre fermé : une seule politique, une seule fenêtre ;
+    required_close_by_at est donc déterminé pour toute campagne à cohorte. Une
+    extension du registre exigerait de réexaminer cet invariant (documenté)."""
+    assert common.MEASUREMENT_POLICIES == ("v0-measurement-v1",)
+    assert set(common.OBSERVATION_WINDOWS) == set(common.MEASUREMENT_POLICIES)
+    with pytest.raises(InvalidProductAnalyticsInput):
+        common.validate_policy(retention_days=90, retention_policy_version="v0-retention-v1",
+                               measurement_policy_version="v0-measurement-v2")
+
+
+def test_r1_r1_legitimate_cohort_calendars_stay_purgeable(db, clock, f2):
+    """Calendrier minimal exact (close_by_at = admission + 12 j + 30 min) et
+    cohorte incomplète annulée avant activation : jamais bloqués."""
+    exact = _cohort_campaign(db, f2, seats=1, admission=timedelta(days=10),
+                             close_in=timedelta(days=22, minutes=30))
+    [row] = rows(db, f"SELECT admission_closes_at FROM {COHORTS} WHERE campaign_id = :c", c=exact.id)
+    assert utc(_campaign(db, exact.id)["close_by_at"]) >= common.required_close_by_at(
+        utc(row["admission_closes_at"]), "v0-measurement-v1")
+    _expired_terminal(db, clock, exact.id)
+    assert purge_campaign(db, exact.id) == _purged(1, 1)
+
+
+def test_r1_b1_an_event_changed_between_l1_and_its_lock_is_caught_by_the_final_l2(db, clock, monkeypatch):
+    """La comparaison de la preuve au rang 8 ne couvre pas ses dépendances :
+    l'événement référencé, modifié hors service après L1 (finalité raccourcie,
+    document et échéances restant canoniques), est refusé par la validation
+    finale L2, jamais purgé sur une photographie périmée."""
+    proof = _expired_recorded(db, clock)
+    [event] = rows(db, f"SELECT * FROM {EVENTS} WHERE id = :i", i=proof.event_id)
+    shortened = utc(event["next_scope_expires_at"]) - timedelta(days=1)
+    document = event["retention_scopes"]
+    document["scopes"][0]["expires_at"] = retention.format_instant(shortened)
+    real, done = pl._participation, []
+
+    def after_l1(session, campaign_id, user_id, *, mode=None):
+        if not done:
+            done.append(1)
+            _sql(db, f"UPDATE {EVENTS} SET retention_scopes = CAST(:d AS jsonb), next_scope_expires_at = :t, "
+                     "purge_after_at = :t WHERE id = :i", d=json.dumps(document), t=shortened, i=proof.event_id)
+        return real(session, campaign_id, user_id, mode=mode)
+    monkeypatch.setattr(pl, "_participation", after_l1)
+    assert purge_proof(db, proof.proof_id) == cb.Outcome(cb.CONFLICT, cl.DEPENDENCY_CHANGED)
+    monkeypatch.setattr(pl, "_participation", real)
+    assert _proof(db, proof.proof_id) is not None
+    assert purge_proof(db, proof.proof_id) == PURGED  # le même état, relu en L1, est purgeable
