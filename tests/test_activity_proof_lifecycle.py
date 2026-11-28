@@ -1453,6 +1453,11 @@ def test_the_service_and_the_boundary_import_exactly_their_side_and_know_no_defi
     assert "observe=_owned(finalization.observe_proof)" in boundary  # relecture du bloc C contrôlée, elle aussi
 
 
+# V0-T08 Lot 2C PR 3 : service et frontière du cycle de vie des participations.
+PARTICIPATION_LIFECYCLE_MODULES = ("core/product_analytics/participation_lifecycle.py",
+                                   "core/_activity_participation_lifecycle.py")
+
+
 def test_nothing_calls_the_lifecycle_outside_the_tests_and_the_documentation():
     offenders = []
     for path in sorted(REPO_ROOT.rglob("*")):
@@ -1465,6 +1470,10 @@ def test_nothing_calls_the_lifecycle_outside_the_tests_and_the_documentation():
         if relative.parts[0] in ("tests", "docs"):
             continue
         source = path.read_text(encoding="utf-8", errors="ignore")
+        if relative.as_posix() in PARTICIPATION_LIFECYCLE_MODULES:
+            # V0-T08 2C PR 3 (nominatif) : « select_purgeable » n'y figure que dans
+            # select_purgeable_participation_candidates ; aucun autre marqueur.
+            source = source.replace("select_purgeable_participation_candidates", "")
         if any(marker in source for marker in ("_activity_proof_lifecycle", "proof_lifecycle", "purge_resolved",
                                                "purge_proof", "recover_certified", "expire_pending_page",
                                                "select_purgeable", "select_certified_candidates",

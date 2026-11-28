@@ -459,6 +459,32 @@ def test_services_never_own_the_transaction_and_never_delete():
             assert updates == [["ProductActivityEvent"]], path.name
             assert _calls(path, {"begin_nested"}) == ["begin_nested"] * 2, path.name
             continue
+        if path.name == "participation_lifecycle.py":
+            # Exception nominative V0-T08 2C PR 3 : purge atomique d'une
+            # participation échue (TROIS delete, sur les interactions, les visites
+            # puis la participation, du seul couple traité) et finalisation d'une
+            # visite inactive (UN update, sur ProductActivitySession) ; deux
+            # SAVEPOINT (un par chemin d'écriture) ; ni SQL brut. func : intervalle
+            # absolu (make_interval), fin effective indicative (least, coalesce) et
+            # nombre de lignes verrouillées (count) ; horloge : proofs.server_clock ;
+            # verrous : common.lock_identities.
+            assert imported == {"Float", "IntegrityError", "and_", "delete", "exists", "func", "literal", "not_",
+                                "or_", "select", "tuple_", "update"}, path.name
+            functions = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                         and isinstance(node.value, ast.Name) and node.value.id == "func"}
+            assert functions == {"make_interval", "least", "coalesce", "count"}, path.name
+            deletes = [[ast.unparse(a) for a in node.args] for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "delete"]
+            assert deletes == [["i"], ["v"], ["ProductCampaignParticipant"]], path.name
+            assigned = [ast.unparse(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                        and [ast.unparse(t) for t in node.targets] == ["(i, v)"]]
+            assert assigned == ["(ProductActivitySessionInteraction, ProductActivitySession)"], path.name
+            updates = [[ast.unparse(a) for a in node.args] for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == "update"]
+            assert updates == [["table"]], path.name
+            assert "table = ProductActivitySession\n" in path.read_text(encoding="utf-8"), path.name
+            assert _calls(path, {"begin_nested"}) == ["begin_nested"] * 2, path.name
+            continue
         assert imported <= {"select", "IntegrityError", "func"}, path.name  # ni delete, ni update, ni SQL brut (text)
         # func ne sert qu'aux verrous consultatifs de transaction (audit R1) ;
         # exception nominative V0-T08 2B-2 PR 2 : proofs.py lit en plus
