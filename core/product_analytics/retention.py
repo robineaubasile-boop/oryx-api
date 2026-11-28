@@ -192,3 +192,103 @@ def validate_scope_revision(previous_document, revised_document) -> tuple:
         if scope.expires_at > before.expires_at:
             raise RetentionRevisionRefused(f"prolongation rétroactive : campagne {scope.campaign_id}")
     return revised
+
+
+# --------------------------------------------------------------------------
+# Classification d'un document relativement à UNE campagne (correctif R5 bis
+# de la PR 3 du lot 2C, extrait SANS changement sémantique pour être partagé
+# par la purge des participations (PR 3, périmètre d'un utilisateur) et la
+# purge définitive des campagnes (PR 4, périmètre global)). Fonctions PURES :
+# aucune transaction, aucune table, aucune décision de suppression, aucune
+# modification du document ; un document seulement interprétable n'est
+# JAMAIS déclaré canonique.
+# --------------------------------------------------------------------------
+
+REFERENCE_ABSENT = "absent"  # aucune finalité ne désigne la campagne (document canonique ou identifiable)
+REFERENCE_PRESENT = "present"  # document canonique avec une finalité de la campagne, échue ou non
+REFERENCE_INCOHERENT = "incoherent"  # document hors contrat qui la désigne, ou qui ne permet pas de l'exclure
+CAMPAIGN_REFERENCES = (REFERENCE_ABSENT, REFERENCE_PRESENT, REFERENCE_INCOHERENT)
+
+# Lecture tolérante : seules les deux notations hexadécimales usuelles d'un
+# UUID sont interprétées (8-4-4-4-12 ou 32 chiffres, casse indifférente) ;
+# toute autre notation (accolades, urn:uuid:, espaces) est ambiguë.
+_LENIENT_UUID = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+                           r"|[0-9a-fA-F]{32})$")
+# Anomalies structurelles converties en classification (jamais une exception).
+_DOCUMENT_ERRORS = (InvalidRetentionScopes, common.InvalidProductAnalyticsInput, TypeError, ValueError, KeyError,
+                    AttributeError)
+
+
+def lenient_campaigns(document) -> set | None:
+    """Lecture LIMITÉE d'un document refusé par parse_retention_scopes,
+    destinée EXCLUSIVEMENT à établir qu'aucune finalité ne désigne une
+    campagne donnée ; jamais une validation, une réparation ni
+    l'interprétation d'un schéma inconnu. Rend les campagnes désignées, ou
+    None (ambigu : aucune campagne ne peut être exclue) sauf si :
+
+    - le document a exactement les clés et la version retention-scopes-v1 ;
+    - chaque finalité est un objet aux clés EXACTES du contrat (kind,
+      campaign_id, policy_version, expires_at), de nature connue (kind =
+      'campaign', seule nature du contrat) ;
+    - chaque campaign_id est une chaîne d'une notation hexadécimale usuelle
+      d'UUID (_LENIENT_UUID).
+
+    Les autres valeurs (politique, échéance, ordre, doublons) ne sont pas
+    lues : leurs anomalies relèvent du contrôle d'intégrité des événements."""
+    try:
+        if (not isinstance(document, dict) or set(document) != DOCUMENT_KEYS
+                or document["version"] != RETENTION_SCOPES_VERSION):
+            return None
+        items = document["scopes"]
+        if not isinstance(items, list) or not items:
+            return None
+        found = set()
+        for item in items:
+            if not isinstance(item, dict) or set(item) != SCOPE_KEYS:
+                return None  # structure ambiguë (clé absente ou supplémentaire)
+            if type(item["kind"]) is not str or item["kind"] != CAMPAIGN_SCOPE:
+                return None  # nature inconnue
+            raw = item["campaign_id"]
+            if type(raw) is not str or not _LENIENT_UUID.fullmatch(raw):
+                return None  # identifiant absent, illisible ou ambigu
+            found.add(uuid.UUID(raw))
+        return found
+    except _DOCUMENT_ERRORS:
+        return None
+
+
+def campaign_reference(document, campaign_id: uuid.UUID) -> str:
+    """Classification PURE de `document` relativement à `campaign_id` :
+
+    - document conforme (parse_retention_scopes) avec une finalité de la
+      campagne : REFERENCE_PRESENT ;
+    - document conforme sans finalité de la campagne : REFERENCE_ABSENT (une
+      anomalie de rattachement ou d'échéance d'une AUTRE campagne relève du
+      contrôle d'intégrité des événements) ;
+    - document hors contrat dont la structure et la nature restent
+      identifiables (lenient_campaigns) : REFERENCE_INCOHERENT s'il désigne la
+      campagne, REFERENCE_ABSENT sinon ;
+    - structure indéterminable : REFERENCE_INCOHERENT (la campagne ne peut
+      pas être exclue).
+
+    Ordre d'évaluation (lot 2C, PR 4 : coût du contrôle global), sans aucun
+    changement de classification : tout document accepté par
+    parse_retention_scopes l'est aussi par lenient_campaigns, avec les mêmes
+    campagnes (clés, version, nature et notation canonique exigées par la
+    première sont un cas particulier de la seconde). Donc lenient_campaigns
+    rend None => analyse stricte refusée => REFERENCE_INCOHERENT ; la
+    campagne absente de l'ensemble lu => absente de toute finalité stricte =>
+    REFERENCE_ABSENT ; l'analyse stricte (échéances comprises) ne départage
+    que les documents qui désignent la campagne (PRESENT ou INCOHERENT).
+    Équivalence avec la formulation d'origine testée (formes R5 bis, formes
+    d'enveloppe, documents altérés aléatoirement)."""
+    named = lenient_campaigns(document)
+    if named is None:
+        return REFERENCE_INCOHERENT  # structure indéterminable : l'analyse stricte la refuserait aussi
+    if campaign_id not in named:
+        return REFERENCE_ABSENT
+    try:
+        scopes = parse_retention_scopes(document)
+    except _DOCUMENT_ERRORS:
+        return REFERENCE_INCOHERENT  # document hors contrat qui désigne la campagne
+    return REFERENCE_PRESENT if any(scope.campaign_id == campaign_id for scope in scopes) else REFERENCE_ABSENT

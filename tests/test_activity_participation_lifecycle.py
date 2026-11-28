@@ -106,6 +106,7 @@ from tests.test_product_analytics_dormancy import (
 
 SERVICE = REPO_ROOT / "core" / "product_analytics" / "participation_lifecycle.py"
 BOUNDARY = REPO_ROOT / "core" / "_activity_participation_lifecycle.py"
+CAMPAIGN_LIFECYCLE = REPO_ROOT / "core" / "product_analytics" / "campaign_lifecycle.py"  # PR 4 (nominatif)
 PARTICIPANTS = "product_campaign_participants"
 CAMPAIGNS = "product_campaigns"
 SESSIONS = "product_activity_sessions"
@@ -977,7 +978,10 @@ def test_events_of_other_users_never_block_and_the_scan_is_progressive(db, clock
     assert scans and all("WHERE product_activity_events.user_id =" in s for s in scans)  # même utilisateur seulement
     assert pl.EVENT_SCAN_BATCH == 500
     source = inspect.getsource(pl._event_scope_problem)
-    assert "yield_per=EVENT_SCAN_BATCH" in source and "parse_retention_scopes" in source
+    # V0-T08 Lot 2C PR 4 (nominatif) : classification R5 bis extraite vers
+    # retention.campaign_reference, qui applique d'abord parse_retention_scopes.
+    assert "yield_per=EVENT_SCAN_BATCH" in source and "retention.campaign_reference" in source
+    assert "parse_retention_scopes(document)" in inspect.getsource(retention.campaign_reference)
 
 
 # --------------------------------------------------------------------------
@@ -2126,7 +2130,7 @@ def _imports(path) -> set:
 
 
 def test_the_modules_import_exactly_their_side_and_reach_nothing_else():
-    assert _imports(SERVICE) == {"re", "uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
+    assert _imports(SERVICE) == {"uuid", "dataclasses", "datetime", "sqlalchemy", "sqlalchemy.exc", "core.models",
                                  "core.product_analytics", "core.product_analytics.common",
                                  "core.product_analytics.proofs", "core.product_analytics.retention",
                                  "core.product_analytics.sessions"}
@@ -2152,8 +2156,8 @@ def test_the_modules_import_exactly_their_side_and_reach_nothing_else():
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
             and n.value.id == "sessions"} == {"INACTIVITY", "LOGOUT", "END_REASONS"}
     assert {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-            and n.value.id == "retention"} == {"parse_retention_scopes", "DOCUMENT_KEYS", "RETENTION_SCOPES_VERSION",
-                                              "SCOPE_KEYS", "CAMPAIGN_SCOPE"}  # constantes du contrat (R5 bis)
+            and n.value.id == "retention"} == {"campaign_reference", "lenient_campaigns", "REFERENCE_INCOHERENT",
+                                              "REFERENCE_PRESENT"}  # R5 bis extrait (PR 4, nominatif)
     assert len([n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "begin_nested"]) == 2  # UN SAVEPOINT par chemin d'écriture
     deletes = [[ast.unparse(a) for a in n.args] for n in ast.walk(tree) if isinstance(n, ast.Call)
@@ -2186,6 +2190,16 @@ def test_nothing_calls_the_participation_lifecycle_outside_the_tests_and_the_doc
         if relative.parts[0] in ("tests", "docs"):
             continue
         source = path.read_text(encoding="utf-8", errors="ignore")
+        if path == CAMPAIGN_LIFECYCLE:
+            # V0-T08 Lot 2C PR 4 (nominatif) : le service dormant du cycle de vie des campagnes réutilise
+            # l'échéance commune et les contrôles de la PR 3 (import exact, aucun point d'entrée appelé).
+            assert "from core.product_analytics import participation_lifecycle as pl" in source
+            assert not {n.attr for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)
+                        and isinstance(n.value, ast.Name) and n.value.id == "pl"} & {
+                "finalize_idle_session", "purge_participation", "select_idle_session_candidates",
+                "select_purgeable_participation_candidates", "observe_session_finalization",
+                "observe_participation_purge"}
+            continue
         if any(marker in source for marker in markers):
             offenders.append(str(relative))
     assert offenders == []

@@ -1741,8 +1741,12 @@ def test_nothing_calls_the_event_lifecycle_outside_the_tests_and_the_documentati
     # V0-T08 2C PR 3 (nominatif) : la frontière du cycle de vie des participations
     # importe les garde-fous de core/_activity_transactions.py (vérifié ci-dessous).
     participation_boundary = REPO_ROOT / "core" / "_activity_participation_lifecycle.py"
+    # V0-T08 2C PR 4 (nominatif) : la frontière du cycle de vie des campagnes importe les mêmes
+    # garde-fous ; son service réutilise le contrôle canonique de la PR 2 (vérifiés ci-dessous).
+    campaign_boundary = REPO_ROOT / "core" / "_activity_campaign_lifecycle.py"
+    campaign_service = REPO_ROOT / "core" / "product_analytics" / "campaign_lifecycle.py"
     allowed = {SERVICE, BOUNDARY, TRANSACTIONS, REPO_ROOT / "core" / "_activity_proof_lifecycle.py",
-               participation_boundary}
+               participation_boundary, campaign_boundary, campaign_service}
     for path in sorted(REPO_ROOT.rglob("*")):
         if (not path.is_file() or path in allowed or ".git" in path.parts or "__pycache__" in path.parts
                 or "node_modules" in path.parts or path.suffix not in (".py", ".js", ".html", ".ts", ".json", ".sh",
@@ -1759,6 +1763,14 @@ def test_nothing_calls_the_event_lifecycle_outside_the_tests_and_the_documentati
     participation_source = participation_boundary.read_text(encoding="utf-8")
     assert [m for m in markers if m in participation_source] == ["_activity_transactions"]
     assert "from core._activity_transactions import _owned, _require_engine" in participation_source
+    campaign_source = campaign_boundary.read_text(encoding="utf-8")
+    assert [m for m in markers if m in campaign_source] == ["_activity_transactions"]
+    assert "from core._activity_transactions import _owned, _require_engine" in campaign_source
+    service_source = campaign_service.read_text(encoding="utf-8")
+    assert [m for m in markers if m in service_source] == ["event_lifecycle"]  # aucun point d'entrée de la PR 2
+    assert {n.attr for n in ast.walk(ast.parse(service_source)) if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name) and n.value.id == "event_lifecycle"} <= {
+        "_required_keys", "_activity_proof_key", "_path", "CERTIFIED", "_Locked", "_contract_problem"}
     # La frontière du registre (PR 1) n'importe des garde-fous que les noms extraits.
     proof_boundary = (REPO_ROOT / "core" / "_activity_proof_lifecycle.py").read_text(encoding="utf-8")
     assert "event_lifecycle" not in proof_boundary and "_activity_transactions import (" in proof_boundary

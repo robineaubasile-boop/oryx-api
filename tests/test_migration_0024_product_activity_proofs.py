@@ -363,6 +363,13 @@ EVENT_LIFECYCLE_SERVICE_MARKERS = ["ProductActivityProof", "ProductActivityEvent
 # jamais recorded_event_id ni les UNIQUE cibles des FK.
 PARTICIPATION_LIFECYCLE_SERVICE = PACKAGE / "participation_lifecycle.py"
 PARTICIPATION_LIFECYCLE_SERVICE_MARKERS = ["ProductActivityProof", "ProductActivityEventAttribution"]
+# V0-T08 Lot 2C PR 4 : purge exceptionnelle d'une preuve (registre, index
+# indicatif nommé), relecture de l'attribution et de l'événement d'une preuve
+# recorded (recorded_event_id) et constat (EXISTS) des preuves et attributions
+# d'une campagne ; jamais les UNIQUE cibles des FK.
+CAMPAIGN_LIFECYCLE_SERVICE = PACKAGE / "campaign_lifecycle.py"
+CAMPAIGN_LIFECYCLE_SERVICE_MARKERS = [REGISTRY, "ProductActivityProof", "ProductActivityEventAttribution",
+                                      "recorded_event_id"]
 
 
 def test_dormancy_no_production_module_knows_the_new_tables():
@@ -401,6 +408,10 @@ def test_dormancy_no_production_module_knows_the_new_tables():
             # V0-T08 2C PR 3 (nominatif) : modèles du registre et des attributions (EXISTS seulement).
             assert [m for m in DORMANCY_MARKERS if m in source] == PARTICIPATION_LIFECYCLE_SERVICE_MARKERS
             continue
+        if path == CAMPAIGN_LIFECYCLE_SERVICE:
+            # V0-T08 2C PR 4 (nominatif) : registre, attributions et référence recorded_event_id.
+            assert [m for m in DORMANCY_MARKERS if m in source] == CAMPAIGN_LIFECYCLE_SERVICE_MARKERS
+            continue
         if any(marker in source for marker in DORMANCY_MARKERS):
             offenders.append(path.relative_to(REPO_ROOT).as_posix())
     assert offenders == []
@@ -411,7 +422,8 @@ def test_dormancy_no_production_module_knows_the_new_tables():
                 assert not any(marker in text for marker in DORMANCY_MARKERS[:4]), path
     assert not [p for p in PACKAGE.glob("*.py") if p not in (PROOF_SERVICE, FINALIZATION_SERVICE,
                                                              LIFECYCLE_SERVICE, EVENT_LIFECYCLE_SERVICE,
-                                                             PARTICIPATION_LIFECYCLE_SERVICE) and any(
+                                                             PARTICIPATION_LIFECYCLE_SERVICE,
+                                                             CAMPAIGN_LIFECYCLE_SERVICE) and any(
         marker in p.read_text(encoding="utf-8") for marker in DORMANCY_MARKERS)]
     for name in V0T08_0024_TABLES:
         targets = {e.column.table.name for fk in Base.metadata.tables[name].foreign_key_constraints

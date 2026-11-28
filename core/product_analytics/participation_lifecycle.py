@@ -95,7 +95,6 @@ de page entière exacte 1..200 (défaut 50) ; curseur strict issu de la SEULE
 photographie de sélection ; jamais OFFSET ; curseurs des deux parcours de
 types distincts (incompatibles).
 """
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -180,11 +179,6 @@ SESSION_LOCK_KIND = "activity_session"  # clé de sessions._lock (égalité test
 PARTICIPATION_LOCK_KIND = "participation"  # clé de participation._lock_identity_and_read et cohort
 SECONDS_PER_DAY = 86400.0
 _DIGEST_CHARACTERS = frozenset("0123456789abcdef")
-# Lecture tolérante (correctif R5 bis) : seules les deux notations hexadécimales
-# usuelles d'un UUID sont interprétées (8-4-4-4-12 ou 32 chiffres, casse
-# indifférente) ; toute autre notation (accolades, urn:uuid:, espaces) est ambiguë.
-_LENIENT_UUID = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-                           r"|[0-9a-fA-F]{32})$")
 # Anomalies structurelles converties en motif (jamais une exception non maîtrisée).
 _STRUCTURE_ERRORS = (InvalidRetentionScopes, InvalidProductAnalyticsInput, TypeError, ValueError, KeyError,
                      AttributeError)
@@ -809,42 +803,11 @@ def _exists(db, model, campaign_id, user_id) -> bool:
                       ).scalar_one()
 
 
-def _lenient_campaigns(document) -> set | None:
-    """Lecture LIMITÉE d'un document refusé par retention.parse_retention_scopes,
-    destinée EXCLUSIVEMENT à établir qu'aucune finalité ne désigne la campagne
-    traitée (correctif R5 bis) ; jamais une validation, une réparation ni
-    l'interprétation d'un schéma inconnu. Rend les campagnes désignées, ou None
-    (ambigu : aucune campagne ne peut être exclue) sauf si :
-
-    - le document a exactement les clés et la version retention-scopes-v1 ;
-    - chaque finalité est un objet aux clés EXACTES du contrat (kind,
-      campaign_id, policy_version, expires_at), de nature connue (kind =
-      'campaign', seule nature du contrat) ;
-    - chaque campaign_id est une chaîne d'une notation hexadécimale usuelle
-      d'UUID (_LENIENT_UUID).
-
-    Les autres valeurs (politique, échéance, ordre, doublons) ne sont pas
-    lues : leurs anomalies relèvent de la PR 2."""
-    try:
-        if (not isinstance(document, dict) or set(document) != retention.DOCUMENT_KEYS
-                or document["version"] != retention.RETENTION_SCOPES_VERSION):
-            return None
-        items = document["scopes"]
-        if not isinstance(items, list) or not items:
-            return None
-        found = set()
-        for item in items:
-            if not isinstance(item, dict) or set(item) != retention.SCOPE_KEYS:
-                return None  # structure ambiguë (clé absente ou supplémentaire)
-            if type(item["kind"]) is not str or item["kind"] != retention.CAMPAIGN_SCOPE:
-                return None  # nature inconnue
-            raw = item["campaign_id"]
-            if type(raw) is not str or not _LENIENT_UUID.fullmatch(raw):
-                return None  # identifiant absent, illisible ou ambigu
-            found.add(uuid.UUID(raw))
-        return found
-    except _STRUCTURE_ERRORS:
-        return None
+# Correctif R5 bis : lecture tolérante et classification EXTRAITES vers
+# retention.py (lot 2C, PR 4) sans changement sémantique, pour être partagées
+# exactement avec la purge définitive des campagnes ; ce module conserve son
+# périmètre (événements du même utilisateur).
+_lenient_campaigns = retention.lenient_campaigns
 
 
 def _event_scope_problem(db, campaign_id, user_id) -> str | None:
@@ -866,14 +829,10 @@ def _event_scope_problem(db, campaign_id, user_id) -> str | None:
     remaining = False
     with db.execute(statement) as result:  # curseur serveur refermé même sur un retour anticipé
         for document in result.scalars():
-            try:
-                scopes = retention.parse_retention_scopes(document)
-            except _STRUCTURE_ERRORS:
-                named = _lenient_campaigns(document)
-                if named is None or campaign_id in named:
-                    return RETENTION_INCOHERENT
-                continue
-            remaining = remaining or any(scope.campaign_id == campaign_id for scope in scopes)
+            reference = retention.campaign_reference(document, campaign_id)  # parse_retention_scopes, puis R5 bis
+            if reference == retention.REFERENCE_INCOHERENT:
+                return RETENTION_INCOHERENT
+            remaining = remaining or reference == retention.REFERENCE_PRESENT
     return EVENT_SCOPE_REMAINING if remaining else None
 
 
