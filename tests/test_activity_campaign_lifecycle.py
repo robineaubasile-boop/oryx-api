@@ -702,6 +702,22 @@ def test_a_certified_proof_whose_integrity_is_not_established_is_never_resolved_
     assert _count(db, EVENTS) == 0
 
 
+@pytest.mark.parametrize("state", ["pending", "rejected", "indeterminate"])
+def test_an_origin_accepted_after_the_proof_registration_forbids_the_deletion_whatever_the_state(db, clock, state):
+    """Le contrôle universel des rattachements du bloc B protège aussi les
+    preuves que le bloc C ne relit pas (pending, terminales)."""
+    proof = _in_state(db, clock, state)
+    row = _proof(db, proof.proof_id)
+    _sql(db, f"UPDATE {INTERACTIONS} SET recorded_at = :t WHERE interaction_key = :k",
+         t=row["created_at"] + MICRO, k=row["interaction_key"])
+    _sql(db, f"UPDATE {SESSIONS} SET last_activity_at = :t, idle_expires_at = :t + interval '30 minutes' "
+             "WHERE id = :v AND last_activity_at < :t", t=row["created_at"] + MICRO, v=row["visit_id"])
+    _expire(db, clock, proof.campaign_id)
+    before = _proof(db, proof.proof_id)
+    assert purge_proof(db, proof.proof_id) == cb.Outcome(cb.CONFLICT, cl.PROOF_INCOHERENT)
+    assert _proof(db, proof.proof_id) == before
+
+
 def test_the_exceptional_path_never_reaches_an_event_writer(monkeypatch, db, clock):
     proof = _certified(db)
     _expire(db, clock, proof.campaign_id)
@@ -2383,3 +2399,64 @@ def test_the_real_api_never_loads_the_campaign_lifecycle_whatever_the_environmen
                              env=_clean_env(environment), timeout=120)
         assert out.returncode == 0, out.stderr[-2000:]
         assert json.loads(out.stdout.strip().splitlines()[-1])["loaded"] == []
+
+
+# --------------------------------------------------------------------------
+# Ordres de verrouillage (séquence réelle des instructions)
+# --------------------------------------------------------------------------
+
+def _locks(seen):
+    return [s for s in seen if " FOR " in s or "pg_advisory" in s]
+
+
+def test_the_exceptional_purge_takes_its_locks_in_the_frozen_order(db, clock):
+    proof = _expired_recorded(db, clock)
+    seen, remove = _statements(db)
+    try:
+        assert purge_proof(db, proof.proof_id) == PURGED
+    finally:
+        remove()
+    locks = _locks(seen)
+    advisory = [s for s in locks if "pg_advisory" in s]
+    rest = [s for s in locks if "pg_advisory" not in s]
+    assert locks[:len(advisory)] == advisory and len(advisory) >= 4  # L0 puis UN appel trié, avant tout rang
+    expected = [(PARTICIPANTS, "FOR SHARE"), (CAMPAIGNS, "FOR SHARE"), (SESSIONS, "FOR SHARE"),
+                (INTERACTIONS, "FOR SHARE"), (REGISTRY, "FOR UPDATE"), (ATTRIBUTIONS, "FOR SHARE"),
+                (EVENTS, "FOR SHARE")]
+    assert len(rest) == len(expected), rest
+    for statement, (table, mode) in zip(rest, expected):
+        assert f"FROM {table}" in statement and statement.endswith(mode), (statement, table)
+    assert not [s for s in seen if s.startswith(("UPDATE", "INSERT"))]
+    assert [s for s in seen if s.startswith("DELETE")] == [s for s in seen if s.startswith(f"DELETE FROM {REGISTRY}")]
+
+
+def test_the_campaign_purge_locks_campaign_cohort_then_seats_and_never_a_dependency(db, clock, f2):
+    cohort = _cohort_campaign(db, f2, seats=3)
+    _expired_terminal(db, clock, cohort.id)
+    seen, remove = _statements(db)
+    try:
+        assert purge_campaign(db, cohort.id) == _purged(3, 1)
+    finally:
+        remove()
+    locks = _locks(seen)
+    assert len(locks) == 3, locks
+    assert f"FROM {CAMPAIGNS}" in locks[0] and locks[0].endswith("FOR UPDATE")
+    assert f"FROM {COHORTS}" in locks[1] and locks[1].endswith("FOR UPDATE")
+    assert f"FROM {SEATS}" in locks[2] and f"ORDER BY {SEATS}.id FOR UPDATE" in locks[2]  # ordre UUID déterministe
+    deletes = [s.split(" WHERE")[0] for s in seen if s.startswith("DELETE")]
+    assert deletes == [f"DELETE FROM {SEATS}", f"DELETE FROM {COHORTS}", f"DELETE FROM {CAMPAIGNS}"]
+    assert not [s for s in seen if "pg_advisory" in s or s.startswith(("UPDATE", "INSERT"))]
+    assert len([s for s in seen if "retention_scopes" in s and EVENTS in s]) == 2  # deux lectures globales
+
+
+def test_the_termination_takes_only_the_exclusive_campaign_lock(db, clock):
+    campaign_id = _active(db)
+    clock.set(utc(_campaign(db, campaign_id)["close_by_at"]))
+    seen, remove = _statements(db)
+    try:
+        assert terminate(db, campaign_id) == CLOSED
+    finally:
+        remove()
+    locks = _locks(seen)
+    assert len(locks) == 1 and f"FROM {CAMPAIGNS}" in locks[0] and locks[0].endswith("FOR UPDATE"), locks
+    assert [s.split(" SET")[0] for s in seen if s.startswith("UPDATE")] == [f"UPDATE {CAMPAIGNS}"]
